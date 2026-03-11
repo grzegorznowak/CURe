@@ -14,6 +14,8 @@ This is a **follow-up step** in a multipass review. Focus only on the step descr
 
 Read the plan JSON file first and use it for business context and overall framing.
 
+$REVIEW_INTELLIGENCE_GUIDANCE
+
 Safety guardrail:
 - Do not read or write anything under `/workspaces/academy+/projects/*` (even “just to check”).
 - If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree (including `.reviewflow/`).

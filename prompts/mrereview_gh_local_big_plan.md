@@ -6,28 +6,10 @@ argument-hint: [PR_URL="<github pr url>"] [AGENT_DESC="<agent description>"]
 You are maintainer reviewing $PR_URL in a local **isolated sandbox** checkout.
 Your job in this call is to produce a **multipass review plan** for this PR that can be executed in multiple follow-up calls.
 
-# Mandatory business-context gate (ABORT if you can't)
-You must gather business context yourself via `gh` + `jira`. If any required `gh`/`jira` read fails OR if you cannot find at least one Jira key, ABORT (do not continue).
-
-Required:
-1. GitHub PR context via `gh` (networked reads):
-   - `gh pr view "$PR_URL" --comments`
-   - `gh pr diff "$PR_URL"`
-   - `gh pr checks "$PR_URL"`
-   - If `gh pr view --comments` is broken/noisy, you may switch to `gh api` REST calls.
-2. Extract Jira keys from the PR text corpus using the regex: `[A-Z][A-Z0-9]+-[0-9]+`
-3. For each Jira key, fetch ticket details via:
-   - Do not call `jira` directly; always use the sandbox helper `./rf-jira` (it pins config + netrc).
-   - First confirm auth works: `./rf-jira me`
-   - `./rf-jira issue view KEY --plain --comments 10`
-   - If Jira commands return `401 Unauthorized`, retry once (it can be transient). If it still fails, ABORT and instruct the operator to fix Jira auth (e.g. run `jira init`) outside this session. Do not paste tokens.
-4. Extract additional URLs from the human-authored PR/Jira text only and crawl allowlisted URLs only:
-   - Ignore machine-generated metadata URLs (for example `url`, `html_url`, `diff_url`, `patch_url`, `_links`, avatar URLs, and API link fields)
-   - Always use `./rf-fetch-url "<url>"` for URL fetches (do not use `curl`/`wget` directly)
-   - Allowlisted hosts are provided via `REVIEWFLOW_CRAWL_ALLOW_HOSTS` (comma-separated)
-   - Skip GitHub URLs that point to the current PR or another GitHub resource you already read via `gh`
-   - If a URL host is not allowlisted, do not fetch it.
-   - Do not ABORT on URL-only fetch failures after `gh` and Jira succeeded; continue unless the missing URL blocks business context.
+# Mandatory review-intelligence gate (ABORT if you can't)
+Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review plan.
+$REVIEW_INTELLIGENCE_GUIDANCE
+If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:
 - Do not read or write anything under `/workspaces/academy+/projects/*` (even “just to check”).
@@ -65,7 +47,7 @@ The JSON must conform to:
 {
   "abort": false,
   "abort_reason": null,
-  "jira_keys": ["ABC-123"],
+  "ticket_keys": ["ABC-123"],
   "steps": [
     {
       "id": "01",
