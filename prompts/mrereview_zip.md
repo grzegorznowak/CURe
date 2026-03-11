@@ -14,27 +14,52 @@ $ZIP_INPUTS
 
 ## Instructions
 1. Read every input markdown file listed above.
-2. Extract:
+2. Extract, independently for business/product and technical assessments:
+   - verdict direction
    - strengths (keep concise; dedupe)
-   - issues (dedupe; preserve any file:line refs exactly as provided)
+   - in-scope issues (dedupe; preserve any file:line refs exactly as provided)
+   - out-of-scope issues (dedupe; preserve any file:line refs exactly as provided)
+   - technical reusability guidance
 3. Do NOT invent new issues or references that do not appear in the inputs.
 4. If two inputs disagree, prefer the more conservative interpretation and reflect uncertainty explicitly in the issue wording (but still do not invent new evidence).
-5. Do not create, edit, or move any files. Do not use `apply_patch`. Reviewflow will save your final response as the zip artifact.
-
-## Severity and decision rule
-- Critical issues => `REJECT`
-- Major issues (and no Critical) => `REQUEST CHANGES`
-- Only Minor or none => `APPROVE`
+5. The business/product and technical verdicts are independent and may disagree.
+6. For `Business / Product Assessment`, `In Scope` means the currently requested outcome as captured in the input reviews from Jira, the PR description, and clarifying Jira/GitHub discussion.
+7. For `Technical Assessment`, `In Scope` means code paths, behavior, and implementation responsibilities the PR directly changes or owns, as captured in the input reviews.
+8. `Out of Scope` means adjacent debt, follow-on work, or auxiliary improvements outside that section's scope basis.
+9. The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
+10. Out-of-scope issues may still downgrade a verdict when materially important.
+11. Use `- None.` when a scope bucket is empty.
+12. Do not create, edit, or move any files. Do not use `apply_patch`. Reviewflow will save your final response as the zip artifact.
 
 ## Output format
 Return plain markdown exactly in this shape.
 Do not wrap the response in a fenced code block.
 Do not add any prose before or after the review body.
-**Summary**: [one sentence verdict]
-**Strengths**: [2-3 bullets or short sentences]
-**Issues**:
-- **Critical**: ...
-- **Major**: ...
-- **Minor**: ...
-**Reusability**: [specific refactoring opportunities]
-**Decision**: [APPROVE/REQUEST CHANGES/REJECT]
+**Summary**: [one sentence summary]
+
+## Business / Product Assessment
+**Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
+
+### Strengths
+- ...
+
+### In Scope Issues
+- ...
+
+### Out of Scope Issues
+- ...
+
+## Technical Assessment
+**Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
+
+### Strengths
+- ...
+
+### In Scope Issues
+- ...
+
+### Out of Scope Issues
+- ...
+
+### Reusability
+- ...

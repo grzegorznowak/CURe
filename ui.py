@@ -116,6 +116,40 @@ class TailBuffer:
             return list(self._lines[-n:])
 
 
+def _normalize_verdict(raw: object) -> str | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    text = text.strip("[]").strip()
+    text = text.strip("*").strip()
+    if text.startswith("`") and text.endswith("`") and len(text) >= 2:
+        text = text[1:-1].strip()
+    text = " ".join(text.split())
+    upper = text.upper()
+    if upper in {"APPROVE", "REJECT"}:
+        return upper
+    if upper in {"REQUEST CHANGES", "REQUEST_CHANGES"}:
+        return "REQUEST CHANGES"
+    return text or None
+
+
+def _format_verdicts(meta: dict[str, object]) -> str:
+    verdicts = meta.get("verdicts")
+    biz = None
+    tech = None
+    if isinstance(verdicts, dict):
+        biz = _normalize_verdict(verdicts.get("business"))
+        tech = _normalize_verdict(verdicts.get("technical"))
+    if not biz and not tech:
+        legacy = _normalize_verdict(meta.get("decision"))
+        if legacy:
+            biz = legacy
+            tech = legacy
+    if not biz and not tech:
+        return ""
+    return f"biz={biz or '?'} tech={tech or '?'}"
+
+
 class StreamSink:
     """A minimal TextIO-like sink for run_cmd(stream=True, stream_to=...)."""
 
@@ -443,10 +477,10 @@ def build_dashboard_lines(
     active = status_token == "RUN"
     status_display = f"RUN{_spinner_char(now_ts)}" if active else status_token
 
-    decision = str(meta.get("decision") or "").strip()
+    verdicts = _format_verdicts(meta)
     right_bits: list[str] = [status_display]
-    if status_token == "DONE" and decision:
-        right_bits.append(decision)
+    if status_token == "DONE" and verdicts:
+        right_bits.append(verdicts)
     right_bits.extend([phase, elapsed, f"v:{snapshot.verbosity.value}"])
     if no_stream:
         right_bits.append("stream:off")
@@ -533,24 +567,46 @@ def build_dashboard_lines(
     elif base_cache:
         dials.append(("Cache", f"{age}"))
 
-    codex = meta.get("codex")
-    codex = codex if isinstance(codex, dict) else {}
-    cfg = codex.get("config")
-    cfg = cfg if isinstance(cfg, dict) else {}
-    resolved = cfg.get("resolved")
-    resolved = resolved if isinstance(resolved, dict) else {}
-    model = str(resolved.get("model") or "").strip()
-    eff = str(resolved.get("model_reasoning_effort") or "").strip()
-    peff = str(resolved.get("plan_mode_reasoning_effort") or "").strip()
-    if model or eff or peff:
+    llm = meta.get("llm")
+    llm = llm if isinstance(llm, dict) else {}
+    if llm:
+        preset = str(llm.get("preset") or "").strip()
+        provider = str(llm.get("provider") or "").strip()
+        model = str(llm.get("model") or "").strip()
+        eff = str(llm.get("reasoning_effort") or "").strip()
+        peff = str(llm.get("plan_reasoning_effort") or "").strip()
         bits = []
+        if preset:
+            bits.append(preset)
+        if provider:
+            bits.append(f"[{provider}]")
         if model:
             bits.append(model)
         if eff:
             bits.append(f"eff={eff}")
         if peff:
             bits.append(f"plan={peff}")
-        dials.append(("Codex", " ".join(bits)))
+        if bits:
+            dials.append(("LLM", " ".join(bits)))
+    else:
+        codex = meta.get("codex")
+        codex = codex if isinstance(codex, dict) else {}
+        cfg = codex.get("config")
+        cfg = cfg if isinstance(cfg, dict) else {}
+        resolved = cfg.get("resolved")
+        resolved = resolved if isinstance(resolved, dict) else {}
+        model = str(resolved.get("model") or "").strip()
+        eff = str(resolved.get("model_reasoning_effort") or "").strip()
+        peff = str(resolved.get("plan_mode_reasoning_effort") or "").strip()
+        if model or eff or peff:
+            bits = []
+            if model:
+                bits.append(model)
+            if eff:
+                bits.append(f"eff={eff}")
+            if peff:
+                bits.append(f"plan={peff}")
+            dials.append(("Codex", " ".join(bits)))
 
     kind = str(meta.get("kind") or "").strip()
     zip_meta = meta.get("zip")
@@ -567,13 +623,13 @@ def build_dashboard_lines(
                 continue
             session_id = str(item.get("session_id") or "?").strip() or "?"
             item_kind = str(item.get("kind") or "?").strip() or "?"
-            decision = str(item.get("decision") or "?").strip() or "?"
+            item_verdicts = _format_verdicts(item)
             completed = str(item.get("completed_at") or "?").strip() or "?"
             target = str(item.get("target_head_sha") or "").strip()
             target = target[:12] if target else "?"
             path = str(item.get("path") or "?").strip() or "?"
             zip_display_inputs.append(
-                f"- {session_id} [{item_kind}] {decision} {completed} head {target} {path}"
+                f"- {session_id} [{item_kind}] {item_verdicts or 'biz=? tech=?'} {completed} head {target} {path}"
             )
     if kind == "zip" and zip_display_inputs:
         dials.append(("Zip", f"{len(zip_display_inputs)} inputs"))
