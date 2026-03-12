@@ -17,7 +17,7 @@ Read the plan JSON file first and use it for business context and overall framin
 $REVIEW_INTELLIGENCE_GUIDANCE
 
 Safety guardrail:
-- Do not read or write anything under `/workspaces/academy+/projects/*` (even “just to check”).
+- Do not read or write outside the sandbox checkout, except reviewflow scratch space under `$REVIEWFLOW_WORK_DIR`.
 - If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree (including `.reviewflow/`).
 
 # Step execution

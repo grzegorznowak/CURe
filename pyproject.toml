@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewflow"
+version = "0.1.0"
+description = "PR review sandboxes powered by ChunkHound and configurable LLM presets"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+reviewflow = "reviewflow:console_main"
+
+[tool.setuptools]
+py-modules = ["reviewflow", "paths", "run", "meta", "ui"]
+packages = ["prompts"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+prompts = ["*.md"]

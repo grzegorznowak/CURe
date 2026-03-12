@@ -1,49 +1,112 @@
 # Reviewflow (ChunkHound + LLM Presets) — PR Review Sandboxes
 
-Goal: create an isolated checkout of a PR, reuse a cached ChunkHound base index, top up indexing for the PR, then run a review agent against that sandbox — without touching `/workspaces/academy+/projects/*`. Reviews use a **sandbox-scoped ChunkHound MCP server** when the selected transport supports it.
+Goal: create an isolated checkout of a PR, reuse a cached ChunkHound base index, top up indexing for the PR, then run a review agent against that sandbox without touching your source checkout. Reviews use a **sandbox-scoped ChunkHound MCP server** when the selected transport supports it.
 
 Terminology:
 - `CURe` = the codebase-under-review. In practice this is the sandbox checkout plus the surrounding PR, ticket, and supporting context the agent mines to understand that specific change accurately.
 
 ## Prereqs
 - `gh` authenticated (`gh auth login -h github.com`)
-- Any tooling referenced by `/workspaces/.reviewflow.toml` `[review_intelligence].tool_prompt_fragment` must be available and authenticated
-- `/workspaces/.reviewflow.toml` includes a `[chunkhound]` section with an explicit `base_config_path`
+- Any tooling referenced by the active reviewflow config `[review_intelligence].tool_prompt_fragment` must be available and authenticated
+- The active reviewflow config includes a `[chunkhound]` section with an explicit `base_config_path`
 - ChunkHound embedding key available via `CHUNKHOUND_EMBEDDING__API_KEY` (reviewflow will infer it from the configured `[chunkhound].base_config_path` if present)
+
+## Install
+Install reviewflow into the current Python environment:
+```bash
+python3 -m pip install /path/to/reviewflow
+```
+
+Or install reviewflow as a uv-managed CLI tool:
+```bash
+uv tool install /path/to/reviewflow
+```
+
+For a live repo-checkout install while iterating locally:
+```bash
+uv tool install --editable /path/to/reviewflow
+```
+
+After either install method, provision ChunkHound from the published release (default) and then run diagnostics:
+```bash
+reviewflow install
+reviewflow doctor
+reviewflow doctor --json
+```
+
+When `reviewflow` itself is installed via `uv tool`, `reviewflow install` provisions ChunkHound as a `uv` tool too, so `chunkhound` lands in the `uv tool` bin dir and is expected to be runnable from PATH.
+
+Install ChunkHound from the latest upstream `main` instead:
+```bash
+reviewflow install --chunkhound-source git-main
+```
+
+Inspect the executable directory directly if needed:
+```bash
+uv tool dir --bin
+```
+
+## Onboarding a Project
+Treat reviewflow as an external CLI tool for the project environment, not as an in-repo Python dependency.
+
+1. Install `reviewflow` into the environment where engineers will run reviews.
+   - `python3 -m pip install /path/to/reviewflow`
+   - or `uv tool install /path/to/reviewflow`
+2. Provision the review dependencies once in that environment.
+   - `reviewflow install`
+   - `reviewflow doctor`
+3. Create a project-specific reviewflow config file and point reviewflow at it.
+   - `reviewflow --config /path/to/project.reviewflow.toml ...`
+   - or `REVIEWFLOW_CONFIG=/path/to/project.reviewflow.toml`
+   - or use a small wrapper if your team wants a stable workspace-scoped file:
+     `REVIEWFLOW_CONFIG=/workspaces/.reviewflow.toml reviewflow ...`
+4. Put the project defaults into that config file.
+   - `[review_intelligence]`
+   - `[chunkhound].base_config_path`
+   - optional `[paths]`, `[llm]`, `[llm_presets.*]`, `[codex]`, `[multipass]`
+5. Add a thin project wrapper if you want a stable team entrypoint.
+   - `make review-pr ...`
+   - `just review-pr ...`
+   - a shell script that exports `REVIEWFLOW_CONFIG` and calls `reviewflow`
+
+The project itself does not need to import reviewflow. It only needs:
+- the `reviewflow` executable available
+- a project config file
+- the required external tools (`gh`, `jira`, `codex`) installed separately if that workflow uses them
 
 ## Commands
 
 Prime base cache (per repo + base branch):
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py cache prime OWNER/REPO --base develop
+reviewflow cache prime OWNER/REPO --base develop
 ```
 
 Create sandbox + index + review:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py pr https://github.com/OWNER/REPO/pull/123
+reviewflow pr https://github.com/OWNER/REPO/pull/123
 ```
 
 If the PR was already reviewed in this workspace, control how `reviewflow pr` behaves:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py pr https://github.com/OWNER/REPO/pull/123 --if-reviewed prompt|new|list|latest
+reviewflow pr https://github.com/OWNER/REPO/pull/123 --if-reviewed prompt|new|list|latest
 ```
 
 Run a follow-up review on an existing session (writes a new markdown under `<session>/followups/`):
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py followup <session_id>
+reviewflow followup <session_id>
 ```
 
 Pick a past completed review and reopen its saved conversation when the provider supports resume:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py interactive
+reviewflow interactive
 ```
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py interactive https://github.com/OWNER/REPO/pull/123
+reviewflow interactive https://github.com/OWNER/REPO/pull/123
 ```
 
 Synthesize a final “arbiter” review from the latest generated reviews for the PR’s current HEAD SHA:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py zip https://github.com/OWNER/REPO/pull/123
+reviewflow zip https://github.com/OWNER/REPO/pull/123
 ```
 - Writes `<host_session>/zips/zip-<timestamp>.md` under the newest relevant completed session.
 - Prints the output path to stdout on success (and prints the full markdown to stderr if the TUI is enabled).
@@ -52,21 +115,21 @@ python3 /workspaces/reviewflow/reviewflow.py zip https://github.com/OWNER/REPO/p
 
 Skip updating the sandbox to the latest PR head (uses current checkout):
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py followup <session_id> --no-update
+reviewflow followup <session_id> --no-update
 ```
 
 Resume an aborted multipass review (continues from first missing step):
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py resume <session_id>
+reviewflow resume <session_id>
 # Or pass a PR URL:
 # - If a resumable multipass session exists, it will resume that session.
 # - Otherwise it will run a follow-up review against the latest completed session.
-python3 /workspaces/reviewflow/reviewflow.py resume https://github.com/OWNER/REPO/pull/123
+reviewflow resume https://github.com/OWNER/REPO/pull/123
 ```
 
 Select a named preset and override it generically:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py pr https://github.com/OWNER/REPO/pull/123 \
+reviewflow pr https://github.com/OWNER/REPO/pull/123 \
   --llm-preset openrouter-responses \
   --llm-model x-ai/grok-4.1-fast \
   --llm-effort high \
@@ -78,49 +141,59 @@ python3 /workspaces/reviewflow/reviewflow.py pr https://github.com/OWNER/REPO/pu
 
 Deprecated Codex compatibility flags still work:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py pr https://github.com/OWNER/REPO/pull/123 \
+reviewflow pr https://github.com/OWNER/REPO/pull/123 \
   --codex-model gpt-5.3-codex-spark \
   --codex-effort low
 ```
 
 List sandboxes:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py list
+reviewflow list
 ```
 
-Dry-run the storage cutover to the current defaults:
+Show the migration deprecation notice:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py migrate-storage
+reviewflow migrate-storage
 ```
 
-Apply the storage cutover:
+Show the same deprecation notice while tolerating the legacy flag:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py migrate-storage --apply
+reviewflow migrate-storage --apply
 ```
 
 Delete one sandbox:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py clean <session_id>
+reviewflow clean <session_id>
 ```
 
 Delete sessions whose PR is already closed or merged:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py clean closed
+reviewflow clean closed
 ```
 
 Interactive cleanup picker:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py clean
+reviewflow clean
 ```
 
 ## Notes
-- Sandboxes are created under `/workspaces/.reviewflow-sandboxes/` and kept until manually cleaned.
-- `reviewflow migrate-storage --apply` moves legacy sandboxes from `/workspaces/academy+/.tmp/review-sandboxes/` and relocates the main ChunkHound config to `/workspaces/academy+/.chunkhound.json`.
+- By default, reviewflow uses XDG-style paths:
+  - config: `XDG_CONFIG_HOME/reviewflow/reviewflow.toml` or `~/.config/reviewflow/reviewflow.toml`
+  - sandboxes: `XDG_STATE_HOME/reviewflow/sandboxes` or `~/.local/state/reviewflow/sandboxes`
+  - cache: `XDG_CACHE_HOME/reviewflow` or `~/.cache/reviewflow`
+  - Codex base config: `~/.codex/config.toml`
+- Override the active config file with `--config PATH` or `REVIEWFLOW_CONFIG`.
+- Use `--no-config` to ignore the reviewflow TOML entirely while still honoring CLI flags and env overrides.
+- Relative `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` values are ignored; reviewflow falls back to the home-based defaults.
+- Override the reviewflow-owned roots with `--sandbox-root`, `--cache-root`, `REVIEWFLOW_SANDBOX_ROOT`, `REVIEWFLOW_CACHE_ROOT`, or `[paths]`.
+- `reviewflow migrate-storage` is now only a deprecation/removal path. It exits cleanly and performs no filesystem migration.
 - `reviewflow clean` without a session id opens a full-screen TTY cleaner with preset filters (`All`, `Done`, `Error`, `Running`, `Done>24h`, `Done>7d`, `Done>30d`), search, visible-only bulk selection, and delete previews.
 - `reviewflow clean closed` queries GitHub for each PR represented by the stored sessions, shows a live progress bar while resolving PR states, previews the matched closed/merged PR sessions, and deletes them only after TTY confirmation.
 - The interactive cleaner shows all sessions by default, marks risky entries (`running` or newer than 24h), and requires typed `DELETE` before removing any risky selection.
-- Base caches are stored under `/workspaces/.reviewflow-cache/`.
+- Base caches live under the resolved reviewflow cache root.
 - ChunkHound is exposed to the review agent via a sandbox-scoped MCP server (configured per run).
+- `reviewflow doctor` is read-only: it diagnoses tool presence, config paths, `gh` auth, and Jira config, but does not install or authenticate anything.
+- `reviewflow doctor --json` prints the resolved config/sandbox/cache/Codex/ChunkHound paths with their sources (`cli`, `env`, `config`, `default`, or disabled).
 - `reviewflow pr` prints progress to **stderr** (phase markers + streamed tool output by default) and prints the sandbox session path to **stdout** on success.
 - Built-in review artifacts use a dual-axis format: `Summary`, then `Business / Product Assessment` and `Technical Assessment`, each with its own `Verdict`, `Strengths`, `In Scope Issues`, and `Out of Scope Issues`. `Reusability` lives under the technical assessment. There is no merged final decision.
 - `Business / Product Assessment` uses product/ticket scope: Jira is primary, the PR description is secondary, and clarifying Jira/GitHub discussion can expand what counts as `In Scope`.
@@ -145,20 +218,20 @@ python3 /workspaces/reviewflow/reviewflow.py clean
 - Use `--no-stream` to hide tool output tail panes (logs still go to disk).
 - `meta.json` is written early and updated throughout the run so you can watch progress from another terminal.
 - Full logs are written under `<session>/work/logs/` (reviewflow/chunkhound/codex) and their paths are recorded in `meta.json`.
-- Generated review artifacts normalize sandbox-local file refs to portable `path:line` text instead of embedding absolute `/workspaces/...` Markdown file links.
+- Generated review artifacts normalize sandbox-local file refs to portable `path:line` text instead of embedding absolute sandbox-local Markdown file links.
 - Provider-neutral runtime metadata is persisted under `meta.json` in `llm` (`preset`, `transport`, `provider`, resolved model/effort values, runtime overrides, adapter metadata, resume when supported, capabilities`).
 - Legacy Codex sessions are still read from `meta.codex`; new Codex runs keep that metadata as a deprecated compatibility mirror.
 
 ## Prompt profiles (default: `auto`)
 If you don’t pass `--prompt` or `--prompt-file`, reviewflow selects a prompt template by profile:
 - `auto` (default): chooses `normal` vs `big` based on local git diff stats
-- `normal`: `/workspaces/reviewflow/prompts/mrereview_gh_local.md`
+- `normal`: packaged builtin `builtin:mrereview_gh_local.md`
 - `big`: multipass by default (plan -> steps -> synth), using:
-  - `/workspaces/reviewflow/prompts/mrereview_gh_local_big_plan.md`
-  - `/workspaces/reviewflow/prompts/mrereview_gh_local_big_step.md`
-  - `/workspaces/reviewflow/prompts/mrereview_gh_local_big_synth.md`
-  - (single-pass fallback template remains available at `/workspaces/reviewflow/prompts/mrereview_gh_local_big.md`)
-- `default`: `/workspaces/reviewflow/prompts/default.md` (no GH/Jira gate)
+  - `builtin:mrereview_gh_local_big_plan.md`
+  - `builtin:mrereview_gh_local_big_step.md`
+  - `builtin:mrereview_gh_local_big_synth.md`
+  - (single-pass fallback template remains available at `builtin:mrereview_gh_local_big.md`)
+- `default`: `builtin:default.md` (no GH/Jira gate)
 
 Auto thresholds (balanced defaults):
 - Big if `changed_files >= 30` OR `(additions + deletions) >= 1500`
@@ -171,11 +244,11 @@ Extra contributor context placeholder (for custom prompts):
 `--no-index` behavior:
 - `--no-index` is only supported with `--prompt/--prompt-file` or `--no-review`.
 - Built-in prompt profiles (`auto/normal/big/default`) require ChunkHound MCP and will fail fast if `--no-index` is set.
-- Built-in prompt profiles also require `/workspaces/.reviewflow.toml` `[review_intelligence].tool_prompt_fragment`.
+- Built-in prompt profiles also require the active reviewflow config `[review_intelligence].tool_prompt_fragment`.
 
 ## ABORT behavior (mrereview prompts)
 The `mrereview_gh_local*` prompts begin with a mandatory business-context gate:
-- Prompts perform the gate **in-session** using the configured review-intelligence guidance from `/workspaces/.reviewflow.toml`.
+- Prompts perform the gate **in-session** using the configured review-intelligence guidance from the active reviewflow config.
 - If the required configured intelligence gathering fails, or the agent cannot gather enough context to understand the requested outcome, the prompt must ABORT with both assessment verdicts set to `REJECT`.
 
 ## Review-Intelligence Contract
@@ -185,6 +258,11 @@ Built-in prompt profiles compose review-intelligence guidance from two pieces:
 
 Schema:
 ```toml
+[paths]
+# Optional overrides for reviewflow-owned storage.
+sandbox_root = "/absolute/path/to/reviewflow-sandboxes"
+cache_root = "/absolute/path/to/reviewflow-cache"
+
 [review_intelligence]
 tool_prompt_fragment = """
 Preferred review-intelligence tools:
@@ -235,6 +313,9 @@ headers = {}
 request = {}
 
 [codex]
+# Optional: override the base Codex config path used for legacy/default Codex resolution.
+base_config_path = "/absolute/path/to/codex-config.toml"
+
 # Deprecated compatibility defaults for Codex-only runs.
 model = "gpt-5.2"
 model_reasoning_effort = "high"
@@ -252,12 +333,12 @@ Behavior:
 - Tool and source choice is judged by whether it materially improves understanding of the CURe.
 
 ## ChunkHound Config Sourcing
-Reviewflow no longer uses `/workspaces/.chunkhound.review.json` as its active config input. Instead it derives review/session ChunkHound configs from a base config path declared in `/workspaces/.reviewflow.toml`, then applies a narrow reviewflow-owned override layer before pinning the per-run database path.
+Reviewflow derives review/session ChunkHound configs from the explicit `[chunkhound].base_config_path` declared in the active reviewflow config, then applies a narrow reviewflow-owned override layer before pinning the per-run database path.
 
 Schema:
 ```toml
 [chunkhound]
-base_config_path = "/workspaces/academy+/.chunkhound.json"
+base_config_path = "/absolute/path/to/chunkhound-base.json"
 
 [chunkhound.indexing]
 # Optional: when set, each list replaces the corresponding list in the base config.
@@ -275,7 +356,7 @@ Behavior:
 - Reviewflow reads the base ChunkHound JSON from that path, applies the selected overrides above, then writes a session-local `chunkhound.json`.
 - Reviewflow still force-overrides the database provider/path for base caches and session-local DBs.
 - Reviewflow-owned list overrides use replace semantics, not merge semantics.
-- Secrets and provider-specific config stay in the base ChunkHound config file rather than being duplicated into `/workspaces/.reviewflow.toml`.
+- Secrets and provider-specific config stay in the base ChunkHound config file rather than being duplicated into the reviewflow config.
 
 ## LLM preset notes
 - Presets are the main operator surface for `pr`, `followup`, `resume`, and `zip`.
@@ -293,9 +374,8 @@ Behavior:
 - Legacy `[codex]` defaults are mapped to a synthetic `legacy_codex` preset when no named preset is selected.
 
 ## Codex transport notes
-- Codex runs still use base settings parsed from `/workspaces/academy+/.codex/config.toml`, plus optional overrides from `/workspaces/.reviewflow.toml`.
-- Reviewflow’s main ChunkHound config path is `/workspaces/academy+/.chunkhound.json`; the migration command pins its database path back to `/workspaces/.chunkhound/db` during cutover.
-- Review runs disable the project-level ChunkHound MCP server (which indexes `/workspaces`) and inject a sandbox-scoped ChunkHound MCP server for the sandbox repo.
+- Codex runs still use base settings from the resolved Codex config path (`--codex-config`, `REVIEWFLOW_CODEX_CONFIG`, `[codex].base_config_path`, then `~/.codex/config.toml`), plus optional overrides from the active reviewflow config.
+- Review runs disable any non-sandbox ChunkHound MCP server from the base Codex config and inject a sandbox-scoped ChunkHound MCP server for the sandbox repo.
   - Reviewflow materializes a session-local ChunkHound config at `<session>/work/chunkhound/chunkhound.json` (derived from `[chunkhound].base_config_path` plus reviewflow overrides) and pins the session DB location there.
   - Session-local ChunkHound DB lives under `<session>/work/chunkhound/.chunkhound.db` (daemon state also lives under `<session>/work/chunkhound/`).
   - MCP startup timeout is set to 20 seconds for the sandbox server.
@@ -312,15 +392,15 @@ Behavior:
 ## Tests
 Fast local checks (no network):
 ```bash
-/workspaces/reviewflow/selftest.sh
+./selftest.sh
 ```
 
 Optional real Jira-in-Codex acceptance check (networked; requires working Jira auth in this container):
 ```bash
-REVIEWFLOW_ACCEPTANCE_JIRA_KEY=ABAU-985 /workspaces/reviewflow/selftest.sh
+REVIEWFLOW_ACCEPTANCE_JIRA_KEY=ABAU-985 ./selftest.sh
 ```
 
 Or run directly:
 ```bash
-python3 /workspaces/reviewflow/reviewflow.py jira-smoke ABAU-985
+reviewflow jira-smoke ABAU-985
 ```

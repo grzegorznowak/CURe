@@ -15,7 +15,7 @@ Take pre-existing PR and ticket discussion history into account so you do not re
 and so you have the most current understanding of goals and issues.
 
 Safety guardrail:
-- Do not read or write anything under `/workspaces/academy+/projects/*` (even “just to check”).
+- Do not read or write outside the sandbox checkout, except reviewflow scratch space under `$REVIEWFLOW_WORK_DIR`.
 - If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree (including `.reviewflow/`).
 
 If you must ABORT:

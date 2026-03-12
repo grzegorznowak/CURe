@@ -5,9 +5,9 @@ import contextlib
 import fcntl
 import hashlib
 import io
+import importlib.util
 import json
 import os
-import pwd
 import re
 import select
 import secrets
@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
@@ -30,11 +31,14 @@ from urllib.parse import urlparse
 from meta import json_fingerprint, write_json
 from paths import (
     DEFAULT_PATHS,
-    LEGACY_MAIN_CHUNKHOUND_CONFIG,
-    LEGACY_SANDBOX_ROOT,
     ReviewflowPaths,
     base_dir,
+    default_cache_root,
+    default_codex_base_config_path,
+    default_reviewflow_config_path,
+    default_sandbox_root,
     repo_id_for_gh,
+    real_user_home_dir,
     safe_ref_slug,
     seed_dir,
 )
@@ -47,7 +51,12 @@ class ReviewflowError(RuntimeError):
     pass
 
 
-MIGRATED_MAIN_CHUNKHOUND_DB_PATH = Path("/workspaces/.chunkhound/db")
+_DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
+
+
+def _set_disabled_reviewflow_config_path(path: Path | None) -> None:
+    global _DISABLED_REVIEWFLOW_CONFIG_PATH
+    _DISABLED_REVIEWFLOW_CONFIG_PATH = path.resolve(strict=False) if path is not None else None
 
 
 def _utc_now_iso() -> str:
@@ -410,6 +419,9 @@ def sha256_text(text: str) -> str:
 
 
 def load_toml(path: Path) -> dict[str, Any]:
+    disabled = _DISABLED_REVIEWFLOW_CONFIG_PATH
+    if disabled is not None and path.resolve(strict=False) == disabled:
+        return {}
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -465,8 +477,6 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 
     return flags, meta
 
-
-DEFAULT_REVIEWFLOW_CONFIG_PATH = Path("/workspaces/.reviewflow.toml")
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
@@ -474,6 +484,7 @@ HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
+BUILTIN_PROMPT_PACKAGE = "prompts"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
@@ -495,7 +506,7 @@ Preferred review-intelligence tools:
 """
 
 CHUNKHOUND_CONFIG_EXAMPLE = """[chunkhound]
-base_config_path = \"/workspaces/academy+/.chunkhound.json\"
+base_config_path = \"/absolute/path/to/chunkhound-base.json\"
 
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
@@ -507,6 +518,145 @@ per_file_timeout_min_size_kb = 128
 [chunkhound.research]
 algorithm = \"hybrid\"
 """
+
+
+@dataclass(frozen=True)
+class ReviewflowRuntime:
+    config_path: Path
+    config_source: str
+    config_enabled: bool
+    paths: ReviewflowPaths
+    sandbox_root_source: str
+    cache_root_source: str
+    codex_base_config_path: Path
+    codex_base_config_source: str
+
+
+def _resolve_optional_path(raw: object, *, base_dir: Path | None = None) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        anchor = base_dir or Path.cwd()
+        path = anchor / path
+    return path.resolve(strict=False)
+
+
+def _select_path_with_source(
+    *,
+    cli_value: object,
+    env_value: object,
+    config_value: Path | None,
+    default_value: Path,
+    base_dir: Path | None = None,
+) -> tuple[Path, str]:
+    cli_path = _resolve_optional_path(cli_value, base_dir=base_dir)
+    if cli_path is not None:
+        return cli_path, "cli"
+    env_path = _resolve_optional_path(env_value, base_dir=base_dir)
+    if env_path is not None:
+        return env_path, "env"
+    if config_value is not None:
+        return config_value, "config"
+    return default_value.resolve(strict=False), "default"
+
+
+def load_reviewflow_paths_defaults(
+    *, config_path: Path | None = None
+) -> tuple[dict[str, Path | None], dict[str, Any]]:
+    path = config_path or default_reviewflow_config_path()
+    raw = load_toml(path)
+    section = raw.get("paths", {}) if isinstance(raw, dict) else {}
+    section = section if isinstance(section, dict) else {}
+    base_dir = path.parent
+    sandbox_root = _resolve_optional_path(section.get("sandbox_root"), base_dir=base_dir)
+    cache_root = _resolve_optional_path(section.get("cache_root"), base_dir=base_dir)
+    cfg = {"sandbox_root": sandbox_root, "cache_root": cache_root}
+    meta = {
+        "config_path": str(path),
+        "loaded": bool(raw),
+        "paths": {
+            "sandbox_root": str(sandbox_root) if sandbox_root is not None else None,
+            "cache_root": str(cache_root) if cache_root is not None else None,
+        },
+    }
+    return cfg, meta
+
+
+def load_reviewflow_codex_base_config_path(*, config_path: Path | None = None) -> Path | None:
+    path = config_path or default_reviewflow_config_path()
+    raw = load_toml(path)
+    section = raw.get("codex", {}) if isinstance(raw, dict) else {}
+    section = section if isinstance(section, dict) else {}
+    return _resolve_optional_path(section.get("base_config_path"), base_dir=path.parent)
+
+
+def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str, bool]:
+    config_path, config_source = _select_path_with_source(
+        cli_value=getattr(args, "config_path", None),
+        env_value=os.environ.get("REVIEWFLOW_CONFIG"),
+        config_value=None,
+        default_value=default_reviewflow_config_path(),
+    )
+    config_enabled = not bool(getattr(args, "no_config", False))
+    _set_disabled_reviewflow_config_path(None if config_enabled else config_path)
+    return config_path, config_source, config_enabled
+
+
+def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tuple[ReviewflowPaths, str, str]:
+    path_defaults, _ = load_reviewflow_paths_defaults(config_path=config_path)
+    sandbox_root, sandbox_root_source = _select_path_with_source(
+        cli_value=getattr(args, "sandbox_root", None),
+        env_value=os.environ.get("REVIEWFLOW_SANDBOX_ROOT"),
+        config_value=path_defaults.get("sandbox_root"),
+        default_value=default_sandbox_root(),
+    )
+    cache_root, cache_root_source = _select_path_with_source(
+        cli_value=getattr(args, "cache_root", None),
+        env_value=os.environ.get("REVIEWFLOW_CACHE_ROOT"),
+        config_value=path_defaults.get("cache_root"),
+        default_value=default_cache_root(),
+    )
+    return ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root), sandbox_root_source, cache_root_source
+
+
+def resolve_codex_base_config_path(args: argparse.Namespace, *, config_path: Path) -> tuple[Path, str]:
+    return _select_path_with_source(
+        cli_value=getattr(args, "codex_config_path", None),
+        env_value=os.environ.get("REVIEWFLOW_CODEX_CONFIG"),
+        config_value=load_reviewflow_codex_base_config_path(config_path=config_path),
+        default_value=default_codex_base_config_path(),
+    )
+
+
+def resolve_runtime(args: argparse.Namespace) -> ReviewflowRuntime:
+    config_path, config_source, config_enabled = resolve_reviewflow_config_path(args)
+    paths, sandbox_root_source, cache_root_source = resolve_runtime_paths(args, config_path=config_path)
+    codex_base_config_path, codex_base_config_source = resolve_codex_base_config_path(
+        args, config_path=config_path
+    )
+    return ReviewflowRuntime(
+        config_path=config_path,
+        config_source=config_source,
+        config_enabled=config_enabled,
+        paths=paths,
+        sandbox_root_source=sandbox_root_source,
+        cache_root_source=cache_root_source,
+        codex_base_config_path=codex_base_config_path,
+        codex_base_config_source=codex_base_config_source,
+    )
+
+
+def builtin_prompt_id(name: str) -> str:
+    return f"builtin:{name}"
+
+
+def load_builtin_prompt_text(name: str) -> str:
+    try:
+        return resources.files(BUILTIN_PROMPT_PACKAGE).joinpath(name).read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        raise ReviewflowError(f"Missing built-in prompt template: {builtin_prompt_id(name)}") from e
 
 
 def resolve_verbosity(args: argparse.Namespace) -> Verbosity:
@@ -577,7 +727,7 @@ def add_llm_override_args(parser: argparse.ArgumentParser) -> None:
         "--llm-preset",
         dest="llm_preset",
         default=None,
-        help="Select a named review-agent preset from /workspaces/.reviewflow.toml",
+        help="Select a named review-agent preset from the active reviewflow config",
     )
     parser.add_argument(
         "--llm-model",
@@ -630,10 +780,15 @@ def add_llm_override_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def resolve_llm_config_from_args(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+def resolve_llm_config_from_args(
+    args: argparse.Namespace,
+    *,
+    reviewflow_config_path: Path | None = None,
+    base_codex_config_path: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     return resolve_llm_config(
-        base_codex_config_path=Path("/workspaces/academy+/.codex/config.toml"),
-        reviewflow_config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        base_codex_config_path=(base_codex_config_path or default_codex_base_config_path()),
+        reviewflow_config_path=(reviewflow_config_path or default_reviewflow_config_path()),
         cli_preset=getattr(args, "llm_preset", None),
         cli_model=getattr(args, "llm_model", None),
         cli_effort=getattr(args, "llm_effort", None),
@@ -684,7 +839,7 @@ def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict
 def load_reviewflow_multipass_defaults(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load reviewflow-level multipass defaults from `/workspaces/.reviewflow.toml`.
+    """Load reviewflow-level multipass defaults from the active reviewflow config.
 
     Schema:
       [multipass]
@@ -692,7 +847,7 @@ def load_reviewflow_multipass_defaults(
       max_steps = 20
     """
 
-    path = config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH
+    path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
     mp = raw.get("multipass", {}) if isinstance(raw, dict) else {}
     mp = mp if isinstance(mp, dict) else {}
@@ -722,7 +877,7 @@ def load_reviewflow_multipass_defaults(
 def load_reviewflow_codex_defaults(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Load reviewflow-level Codex defaults from `/workspaces/.reviewflow.toml`.
+    """Load reviewflow-level Codex defaults from the active reviewflow config.
 
     Schema:
       [codex]
@@ -731,7 +886,7 @@ def load_reviewflow_codex_defaults(
       plan_mode_reasoning_effort = "..."
     """
 
-    path = config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH
+    path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
     wanted_keys = ("model", "model_reasoning_effort", "plan_mode_reasoning_effort")
 
@@ -949,7 +1104,7 @@ def _merge_builtin_preset(
 def load_reviewflow_llm_config(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH
+    path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
@@ -1300,8 +1455,8 @@ def resolve_codex_flags(
 
     Precedence:
       1) CLI overrides
-      2) reviewflow defaults (/workspaces/.reviewflow.toml [codex])
-      3) base Codex config (/workspaces/academy+/.codex/config.toml)
+      2) reviewflow config defaults ([codex] in the active reviewflow config)
+      3) base Codex config (the resolved Codex base config path)
     """
 
     base_cfg = load_toml(base_config_path)
@@ -1421,7 +1576,7 @@ def _review_intelligence_meta_dict(
 def load_review_intelligence_config(
     *, config_path: Path | None = None, require_tool_prompt_fragment: bool = False
 ) -> tuple[ReviewIntelligenceConfig, dict[str, Any]]:
-    path = config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH
+    path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
     review_intelligence = raw.get("review_intelligence", {}) if isinstance(raw, dict) else {}
     review_intelligence = review_intelligence if isinstance(review_intelligence, dict) else {}
@@ -1478,7 +1633,7 @@ def require_builtin_review_intelligence(
     if cfg.tool_prompt_fragment:
         return
     raise _resolve_review_intelligence_config_error(
-        path=(config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH)
+        path=(config_path or default_reviewflow_config_path())
     )
 def build_codex_exec_cmd(
     *,
@@ -1998,17 +2153,17 @@ def codex_mcp_overrides_for_reviewflow(
     add a sandbox-scoped ChunkHound MCP server.
 
     Notes:
-    - We intentionally disable the project-level `chunk-hound` server (indexes `/workspaces`) so
-      review sessions are scoped to the sandbox repo only.
+    - We intentionally disable any non-sandbox `chunk-hound` server from the base Codex config so
+      review sessions stay scoped to the sandbox repo only.
     - Codex validates MCP transports even if `enabled=false`, so we must supply `command` and `args`.
     - ChunkHound must run in daemon mode (default): do NOT pass `--no-daemon`.
     """
 
     overrides: list[str] = []
 
-    # Disable the existing project-level MCP server (indexes `/workspaces`).
+    # Disable the existing non-sandbox MCP server while leaving Codex with a valid command/args pair.
     overrides.append(f"mcp_servers.chunk-hound.command={toml_string('chunkhound')}")
-    overrides.append(f"mcp_servers.chunk-hound.args={json.dumps(['mcp', '/workspaces'])}")
+    overrides.append(f"mcp_servers.chunk-hound.args={json.dumps(['mcp', str(sandbox_repo_dir)])}")
     overrides.append("mcp_servers.chunk-hound.enabled=false")
     overrides.append("mcp_servers.chunk-hound.tool_timeout_sec=12000")
 
@@ -2037,13 +2192,6 @@ def codex_mcp_overrides_for_reviewflow(
     overrides.append("mcp_servers.chunkhound.startup_timeout_sec=20")
     overrides.append("mcp_servers.chunkhound.tool_timeout_sec=12000")
     return overrides
-
-
-def real_user_home_dir() -> Path:
-    # Avoid relying on $HOME which may be altered inside exec/sandbox environments.
-    return Path(pwd.getpwuid(os.getuid()).pw_dir)
-
-
 class SessionProgress:
     def __init__(self, meta_path: Path, *, quiet: bool) -> None:
         self.meta_path = meta_path
@@ -2562,7 +2710,7 @@ def resolve_resume_target(
         if Path(raw).is_absolute() or ("/" in raw) or ("\\" in raw):
             raise ReviewflowError(
                 "resume expects a session id (folder name) or a PR URL. "
-                f"Tip: run `python3 /workspaces/reviewflow/reviewflow.py list` to find a session id. Got: {raw!r}"
+                f"Tip: run `reviewflow list` to find a session id. Got: {raw!r}"
             )
         return (raw, "resume")
 
@@ -2631,7 +2779,7 @@ def resolve_resume_target(
     if str(from_phase or "auto").strip().lower() != "auto":
         raise ReviewflowError(
             f"No resumable multipass session found for PR {pr.owner}/{pr.repo}#{pr.number}. "
-            "Tip: run `python3 /workspaces/reviewflow/reviewflow.py list` to find a session id."
+            "Tip: run `reviewflow list` to find a session id."
         )
 
     if completed:
@@ -2639,7 +2787,7 @@ def resolve_resume_target(
 
     raise ReviewflowError(
         f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {root}. "
-        "Tip: run `python3 /workspaces/reviewflow/reviewflow.py list`."
+        "Tip: run `reviewflow list`."
     )
 
 
@@ -2887,22 +3035,20 @@ def resolve_prompt_profile(
     )
 
 
-def prompt_template_path_for_profile(profile: str) -> Path:
-    root = Path("/workspaces/reviewflow/prompts")
+def prompt_template_name_for_profile(profile: str) -> str:
     if profile == "normal":
-        return root / "mrereview_gh_local.md"
+        return "mrereview_gh_local.md"
     if profile == "big":
-        return root / "mrereview_gh_local_big.md"
+        return "mrereview_gh_local_big.md"
     if profile == "default":
-        return root / "default.md"
+        return "default.md"
     raise ReviewflowError(f"Unknown prompt profile: {profile}")
 
 
-def followup_prompt_template_path_for_profile(profile: str) -> Path:
-    root = Path("/workspaces/reviewflow/prompts")
+def followup_prompt_template_name_for_profile(profile: str) -> str:
     if profile == "big":
-        return root / "mrereview_gh_local_big_followup.md"
-    return root / "mrereview_gh_local_followup.md"
+        return "mrereview_gh_local_big_followup.md"
+    return "mrereview_gh_local_followup.md"
 
 
 def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, str]:
@@ -3211,12 +3357,11 @@ def persist_review_verdicts_from_markdown(*, meta: dict[str, Any], markdown_path
     return verdicts
 
 
-def multipass_prompt_template_paths() -> dict[str, Path]:
-    root = Path("/workspaces/reviewflow/prompts")
+def multipass_prompt_template_names() -> dict[str, str]:
     return {
-        "plan": root / "mrereview_gh_local_big_plan.md",
-        "step": root / "mrereview_gh_local_big_step.md",
-        "synth": root / "mrereview_gh_local_big_synth.md",
+        "plan": "mrereview_gh_local_big_plan.md",
+        "step": "mrereview_gh_local_big_step.md",
+        "synth": "mrereview_gh_local_big_synth.md",
     }
 
 
@@ -3336,7 +3481,7 @@ def _parse_chunkhound_numeric_override(
 def load_reviewflow_chunkhound_config(
     *, config_path: Path | None = None, require: bool = True
 ) -> tuple[ReviewflowChunkHoundConfig | None, dict[str, Any]]:
-    path = config_path or DEFAULT_REVIEWFLOW_CONFIG_PATH
+    path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
     section = raw.get("chunkhound") if isinstance(raw, dict) else None
 
@@ -3489,12 +3634,11 @@ def load_chunkhound_runtime_config(
     return cfg, meta, resolved
 
 
-def load_main_embedding_api_key(
-    paths: ReviewflowPaths, *, source_config_path: Path | None = None
-) -> str | None:
-    target = source_config_path or paths.main_chunkhound_config
+def load_embedding_api_key_from_config(*, source_config_path: Path | None = None) -> str | None:
+    if source_config_path is None:
+        return None
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
+        raw = json.loads(source_config_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except Exception:
@@ -3509,166 +3653,13 @@ def load_main_embedding_api_key(
     return None
 
 
-def _rewrite_string_path_refs(text: str, *, replacements: list[tuple[str, str]]) -> str:
-    rewritten = text
-    for old, new in replacements:
-        if old and old in rewritten:
-            rewritten = rewritten.replace(old, new)
-    return rewritten
-
-
-def _rewrite_nested_path_refs(value: Any, *, replacements: list[tuple[str, str]]) -> Any:
-    if isinstance(value, str):
-        return _rewrite_string_path_refs(value, replacements=replacements)
-    if isinstance(value, list):
-        return [_rewrite_nested_path_refs(item, replacements=replacements) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _rewrite_nested_path_refs(item, replacements=replacements)
-            for key, item in value.items()
-        }
-    return value
-
-
-def rewrite_session_meta_after_move(*, meta: dict[str, Any], old_session_dir: Path, new_session_dir: Path) -> dict[str, Any]:
-    replacements = [
-        (str(old_session_dir.resolve(strict=False)), str(new_session_dir.resolve(strict=False))),
-        (str(old_session_dir), str(new_session_dir)),
-    ]
-    rewritten = _rewrite_nested_path_refs(meta, replacements=replacements)
-    if not isinstance(rewritten, dict):
-        raise ReviewflowError("Session meta rewrite produced non-dict payload.")
-    return rewritten
-
-
-def migrate_main_chunkhound_config(
-    *,
-    legacy_path: Path,
-    target_path: Path,
-    db_path: Path = MIGRATED_MAIN_CHUNKHOUND_DB_PATH,
-    apply: bool,
-) -> list[str]:
-    actions: list[str] = []
-    source = legacy_path.resolve(strict=False)
-    target = target_path.resolve(strict=False)
-    source_exists = source.is_file()
-    target_exists = target.is_file()
-
-    raw: dict[str, Any] = {}
-    origin = None
-    if target_exists:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ReviewflowError(f"Main ChunkHound config must be a JSON object: {target}")
-        origin = target
-    elif source_exists:
-        raw = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ReviewflowError(f"Main ChunkHound config must be a JSON object: {source}")
-        origin = source
-    else:
-        raise ReviewflowError(
-            f"Neither legacy nor new main ChunkHound config exists:\n- {legacy_path}\n- {target_path}"
-        )
-
-    db = raw.get("database")
-    if not isinstance(db, dict):
-        db = {}
-    db = dict(db)
-    db["provider"] = str(db.get("provider") or "duckdb")
-    db["path"] = str(db_path)
-    raw["database"] = db
-
-    if source_exists and target_exists and source.read_text(encoding="utf-8") != target.read_text(encoding="utf-8"):
-        raise ReviewflowError(
-            f"Both legacy and target main ChunkHound configs exist and differ:\n- {legacy_path}\n- {target_path}"
-        )
-
-    actions.append(f"main config source: {origin}")
-    if source_exists and source != target:
-        actions.append(f"move main config: {legacy_path} -> {target_path}")
-    actions.append(f"pin main database path: {db_path}")
-
-    if not apply:
-        return actions
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    write_json(target, raw)
-    if source_exists and source != target:
-        source.unlink(missing_ok=True)
-    return actions
-
-
-def migrate_reviewflow_sessions(
-    *,
-    legacy_root: Path,
-    target_root: Path,
-    apply: bool,
-) -> list[str]:
-    legacy = legacy_root.resolve(strict=False)
-    target = target_root.resolve(strict=False)
-    if legacy == target:
-        return []
-    entries = sorted(p for p in legacy.iterdir() if p.is_dir()) if legacy.is_dir() else []
-    actions: list[str] = []
-    for entry in entries:
-        dst = target / entry.name
-        actions.append(f"move session: {entry} -> {dst}")
-        if not apply:
-            continue
-        if dst.exists():
-            raise ReviewflowError(f"Target session already exists: {dst}")
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(entry), str(dst))
-        meta_candidates = [dst / "meta.json", *sorted(dst.glob("**/*.meta.json"))]
-        for meta_path in meta_candidates:
-            if not meta_path.is_file():
-                continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                raise ReviewflowError(f"Failed to parse migrated meta.json: {meta_path} ({e})") from e
-            if not isinstance(meta, dict):
-                raise ReviewflowError(f"Migrated meta.json must contain an object: {meta_path}")
-            rewritten = rewrite_session_meta_after_move(meta=meta, old_session_dir=entry, new_session_dir=dst)
-            write_json(meta_path, rewritten)
-    return actions
-
-
 def migrate_storage_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
-    apply = bool(getattr(args, "apply", False))
-    legacy_main = LEGACY_MAIN_CHUNKHOUND_CONFIG
-    legacy_root = LEGACY_SANDBOX_ROOT
-    actions: list[str] = []
-    actions.extend(
-        migrate_main_chunkhound_config(
-            legacy_path=legacy_main,
-            target_path=paths.main_chunkhound_config,
-            apply=apply,
-        )
+    _ = args
+    _ = paths
+    _eprint(
+        "`reviewflow migrate-storage` is deprecated and no longer performs any migration.\n"
+        "Reviewflow now uses generic XDG/home defaults and does not auto-discover legacy workspace paths."
     )
-    actions.extend(
-        migrate_reviewflow_sessions(
-            legacy_root=legacy_root,
-            target_root=paths.sandbox_root,
-            apply=apply,
-        )
-    )
-
-    if not actions:
-        _eprint("No legacy reviewflow storage found to migrate.")
-        return 0
-
-    if not apply:
-        _eprint("Migration dry run:")
-        for line in actions:
-            _eprint(f"- {line}")
-        _eprint("Re-run with `reviewflow migrate-storage --apply` to perform the move.")
-        return 0
-
-    _eprint("Migration complete:")
-    for line in actions:
-        _eprint(f"- {line}")
     return 0
 
 
@@ -3704,9 +3695,7 @@ def materialize_chunkhound_env_config(
     write_json(output_config_path, cfg)
 
 
-def chunkhound_env(
-    paths: ReviewflowPaths, *, source_config_path: Path | None = None
-) -> dict[str, str]:
+def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     if os.environ.get("CHUNKHOUND_EMBEDDING__API_KEY"):
         return env
@@ -3717,16 +3706,16 @@ def chunkhound_env(
         env["CHUNKHOUND_EMBEDDING__API_KEY"] = voyage_key
         return env
 
-    inferred = load_main_embedding_api_key(paths, source_config_path=source_config_path)
+    inferred = load_embedding_api_key_from_config(source_config_path=source_config_path)
     if inferred:
         env["CHUNKHOUND_EMBEDDING__API_KEY"] = inferred
     return env
 
 
-def ensure_review_config(paths: ReviewflowPaths) -> None:
+def ensure_review_config(paths: ReviewflowPaths, *, config_path: Path | None = None) -> None:
     _ = paths
     load_reviewflow_chunkhound_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=(config_path or default_reviewflow_config_path()),
         require=True,
     )
 
@@ -3734,6 +3723,7 @@ def ensure_review_config(paths: ReviewflowPaths) -> None:
 def cache_prime(
     *,
     paths: ReviewflowPaths,
+    config_path: Path | None = None,
     host: str,
     owner: str,
     repo: str,
@@ -3743,9 +3733,10 @@ def cache_prime(
     no_stream: bool = False,
 ) -> dict[str, Any]:
     require_gh_auth(host)
-    ensure_review_config(paths)
+    effective_config_path = config_path or default_reviewflow_config_path()
+    ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require=True,
     )
 
@@ -3795,7 +3786,7 @@ def cache_prime(
             except Exception:
                 need_reindex = True
 
-        env = merged_env(chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path))
+        env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
         index_cmd = [
             "chunkhound",
             "index",
@@ -3875,6 +3866,7 @@ def ttl_expired(indexed_at_iso: str, ttl_hours: int) -> bool:
 def ensure_base_cache(
     *,
     paths: ReviewflowPaths,
+    config_path: Path | None = None,
     pr: PullRequestRef,
     base_ref: str,
     ttl_hours: int,
@@ -3882,12 +3874,14 @@ def ensure_base_cache(
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
+    effective_config_path = config_path or default_reviewflow_config_path()
     base_root = base_dir(paths, pr.host, pr.owner, pr.repo, base_ref)
     meta_path = base_root / "meta.json"
     if refresh or not meta_path.is_file():
         log(f"Base cache refresh: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
         return cache_prime(
             paths=paths,
+            config_path=effective_config_path,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -3900,14 +3894,14 @@ def ensure_base_cache(
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     try:
         _, chunkhound_meta, _ = load_chunkhound_runtime_config(
-            config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+            config_path=effective_config_path,
             require=True,
         )
         cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
     except Exception as e:
         cfg_fp = None
         log(
-            f"Base cache config fingerprint failed: {DEFAULT_REVIEWFLOW_CONFIG_PATH} ({e})",
+            f"Base cache config fingerprint failed: {effective_config_path} ({e})",
             quiet=quiet,
         )
 
@@ -3915,6 +3909,7 @@ def ensure_base_cache(
         log(f"Base cache config changed: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
         return cache_prime(
             paths=paths,
+            config_path=effective_config_path,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -3928,6 +3923,7 @@ def ensure_base_cache(
         log(f"Base cache expired: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
         return cache_prime(
             paths=paths,
+            config_path=effective_config_path,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -4172,8 +4168,16 @@ if __name__ == "__main__":
     return path
 
 
-def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
+def pr_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
     global _ACTIVE_OUTPUT
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
@@ -4193,7 +4197,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
 
     pr = parse_pr_url(args.pr_url)
     require_gh_auth(pr.host)
-    ensure_review_config(paths)
+    ensure_review_config(paths, config_path=effective_config_path)
 
     log(f"PR {pr.owner}/{pr.repo}#{pr.number} ({pr.host})", quiet=quiet)
 
@@ -4276,7 +4280,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require=True,
     )
     materialize_chunkhound_env_config(
@@ -4368,15 +4372,15 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     pr_stats: dict[str, Any] | None = None
     profile_resolved: str | None = None
     profile_reason: str | None = None
-    profile_template_path: Path | None = None
+    profile_template_name: str | None = None
     use_multipass = False
     review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require_tool_prompt_fragment=False,
     )
     progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
     multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH
+        config_path=effective_config_path
     )
     progress.meta["multipass_defaults"] = multipass_defaults_meta
     cli_max_steps = getattr(args, "multipass_max_steps", None)
@@ -4411,6 +4415,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             with phase("ensure_base_cache", progress=progress, quiet=quiet):
                 base_cache_meta = ensure_base_cache(
                     paths=paths,
+                    config_path=effective_config_path,
                     pr=pr,
                     base_ref=base_ref,
                     ttl_hours=int(args.base_ttl_hours),
@@ -4554,16 +4559,16 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                     big_if_files=big_if_files,
                     big_if_lines=big_if_lines,
                 )
-                profile_template_path = prompt_template_path_for_profile(profile_resolved)
+                profile_template_name = prompt_template_name_for_profile(profile_resolved)
                 progress.meta["prompt"] = {
                     "source": "profile",
                     "profile_requested": prompt_profile_requested,
                     "profile_resolved": profile_resolved,
                     "reason": profile_reason,
-                    "template_path": str(profile_template_path),
+                    "template_id": builtin_prompt_id(profile_template_name),
                 }
                 require_builtin_review_intelligence(
-                    review_intelligence_cfg, config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH
+                    review_intelligence_cfg, config_path=effective_config_path
                 )
                 progress.flush()
 
@@ -4630,7 +4635,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                 copy_duckdb_files(base_db_path, chunkhound_db_path)
 
                 env = merged_env(
-                    chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path)
+                    chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
                 )
                 index_cmd = [
                     "chunkhound",
@@ -4670,7 +4675,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
 
         if not args.no_review:
             base_env = merged_env(
-                chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path)
+                chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
             )
             gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
             if gh_cfg:
@@ -4684,7 +4689,11 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
             rf_jira = write_rf_jira(repo_dir=repo_dir)
 
-            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(args)
+            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+                args,
+                reviewflow_config_path=effective_config_path,
+                base_codex_config_path=effective_codex_base_config_path,
+            )
             env = apply_llm_env(base_env, resolved=llm_resolved)
             codex_overrides: list[str] = []
             codex_flags: list[str] = []
@@ -4747,10 +4756,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                 )
 
             if use_multipass:
-                templates = multipass_prompt_template_paths()
-                for k, pth in templates.items():
-                    if not pth.is_file():
-                        raise ReviewflowError(f"Missing multipass prompt template ({k}): {pth}")
+                templates = multipass_prompt_template_names()
 
                 plan_md_path = session_dir / "review.plan.md"
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
@@ -4765,7 +4771,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                 progress.flush()
 
                 with phase("codex_plan", progress=progress, quiet=quiet):
-                    plan_template = templates["plan"].read_text(encoding="utf-8")
+                    plan_template = load_builtin_prompt_text(templates["plan"])
                     plan_prompt = render_prompt(
                         plan_template,
                         base_ref_for_review=base_ref_for_review,
@@ -4785,7 +4791,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                     progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
                         {
                             "kind": "plan",
-                            "template_path": str(templates["plan"]),
+                            "template_id": builtin_prompt_id(templates["plan"]),
                             "output_path": str(plan_md_path),
                             "prompt_chars": len(plan_prompt),
                             "prompt_sha256": sha256_text(plan_prompt),
@@ -4890,7 +4896,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
 
                         with phase(f"codex_step_{idx:02d}", progress=progress, quiet=quiet):
                             log(f"Multipass step {idx:02d}: {step_title}", quiet=quiet)
-                            step_template = templates["step"].read_text(encoding="utf-8")
+                            step_template = load_builtin_prompt_text(templates["step"])
                             step_prompt = render_prompt(
                                 step_template,
                                 base_ref_for_review=base_ref_for_review,
@@ -4917,7 +4923,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                                     "step_id": step_id,
                                     "step_title": step_title,
                                     "output_path": str(out_path),
-                                    "template_path": str(templates["step"]),
+                                    "template_id": builtin_prompt_id(templates["step"]),
                                     "prompt_chars": len(step_prompt),
                                     "prompt_sha256": sha256_text(step_prompt),
                                 }
@@ -4943,7 +4949,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                                     progress.flush()
                             except ReviewflowSubprocessError:
                                 _eprint(
-                                    f"Multipass step failed. To resume: python3 /workspaces/reviewflow/reviewflow.py resume {session_id}"
+                                    f"Multipass step failed. To resume: reviewflow resume {session_id}"
                                 )
                                 raise
 
@@ -4959,7 +4965,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                     progress.flush()
 
                     with phase("codex_synth", progress=progress, quiet=quiet):
-                        synth_template = templates["synth"].read_text(encoding="utf-8")
+                        synth_template = load_builtin_prompt_text(templates["synth"])
                         step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
                         synth_prompt = render_prompt(
                             synth_template,
@@ -4981,7 +4987,7 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                         progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
                             {
                                 "kind": "synth",
-                                "template_path": str(templates["synth"]),
+                                "template_id": builtin_prompt_id(templates["synth"]),
                                 "output_path": str(review_md_path),
                                 "prompt_chars": len(synth_prompt),
                                 "prompt_sha256": sha256_text(synth_prompt),
@@ -5035,24 +5041,22 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                         prompt_info["source"] = "file"
                         prompt_info["template_path"] = str(args.prompt_file)
                     else:
-                        if profile_template_path is None:
+                        if profile_template_name is None:
                             profile_resolved, profile_reason = resolve_prompt_profile(
                                 requested=prompt_profile_requested,
                                 pr_stats=pr_stats if pr_stats and "changed_lines" in pr_stats else None,
                                 big_if_files=big_if_files,
                                 big_if_lines=big_if_lines,
                             )
-                            profile_template_path = prompt_template_path_for_profile(profile_resolved)
-                        if not profile_template_path.is_file():
-                            raise ReviewflowError(f"Missing prompt template: {profile_template_path}")
-                        prompt = profile_template_path.read_text(encoding="utf-8")
+                            profile_template_name = prompt_template_name_for_profile(profile_resolved)
+                        prompt = load_builtin_prompt_text(profile_template_name)
                         prompt_info.update(
                             {
                                 "source": "profile",
                                 "profile_requested": prompt_profile_requested,
                                 "profile_resolved": profile_resolved,
                                 "reason": profile_reason,
-                                "template_path": str(profile_template_path),
+                                "template_id": builtin_prompt_id(profile_template_name),
                             }
                         )
 
@@ -5148,8 +5152,16 @@ def pr_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     return 0
 
 
-def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
+def resume_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
     global _ACTIVE_OUTPUT
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
@@ -5190,7 +5202,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     if not meta_path.is_file():
         raise ReviewflowError(
             f"Session meta.json not found: {meta_path}. "
-            "Tip: run `python3 /workspaces/reviewflow/reviewflow.py list` to find a session id."
+            "Tip: run `reviewflow list` to find a session id."
         )
 
     try:
@@ -5265,9 +5277,9 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
 
     pr = parse_pr_url(pr_url)
     require_gh_auth(pr.host)
-    ensure_review_config(paths)
+    ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require=True,
     )
     # Always refresh the session-local ChunkHound config so it tracks updates
@@ -5329,18 +5341,18 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             raise ReviewflowError("Session meta missing base_ref_for_review.")
 
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
-            config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+            config_path=effective_config_path,
             require_tool_prompt_fragment=False,
         )
         require_builtin_review_intelligence(
-            review_intelligence_cfg, config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH
+            review_intelligence_cfg, config_path=effective_config_path
         )
         progress.meta["chunkhound"] = chunkhound_meta["chunkhound"]
         progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
         progress.flush()
 
         base_env = merged_env(
-            chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path)
+            chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
         )
         gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
         if gh_cfg:
@@ -5354,7 +5366,11 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
         rf_jira = write_rf_jira(repo_dir=repo_dir)
 
-        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(args)
+        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+            args,
+            reviewflow_config_path=effective_config_path,
+            base_codex_config_path=effective_codex_base_config_path,
+        )
         if not bool(((llm_resolved.get("capabilities") or {}).get("supports_resume"))):
             raise ReviewflowError(
                 f"resume is not supported for provider {llm_resolved.get('provider')} in v1. "
@@ -5417,10 +5433,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             else:
                 log("Codex MCP: sandbox ChunkHound disabled (--no-index)", quiet=quiet)
 
-        templates = multipass_prompt_template_paths()
-        for k, pth in templates.items():
-            if not pth.is_file():
-                raise ReviewflowError(f"Missing multipass prompt template ({k}): {pth}")
+        templates = multipass_prompt_template_names()
 
         # If already complete, no-op.
         if from_phase == "auto" and review_md_path.is_file() and str(meta.get("status")) == "done":
@@ -5429,7 +5442,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             return 0
 
         multipass_cfg, _ = load_reviewflow_multipass_defaults(
-            config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH
+            config_path=effective_config_path
         )
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
@@ -5483,7 +5496,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             progress.flush()
             with phase("codex_plan", progress=progress, quiet=quiet):
                 did_work = True
-                plan_template = templates["plan"].read_text(encoding="utf-8")
+                plan_template = load_builtin_prompt_text(templates["plan"])
                 plan_prompt = render_prompt(
                     plan_template,
                     base_ref_for_review=base_ref_for_review,
@@ -5599,7 +5612,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             with phase(f"codex_step_{idx:02d}", progress=progress, quiet=quiet):
                 did_work = True
                 log(f"Multipass step {idx:02d}: {step_title}", quiet=quiet)
-                step_template = templates["step"].read_text(encoding="utf-8")
+                step_template = load_builtin_prompt_text(templates["step"])
                 step_prompt = render_prompt(
                     step_template,
                     base_ref_for_review=base_ref_for_review,
@@ -5656,7 +5669,7 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             progress.flush()
             with phase("codex_synth", progress=progress, quiet=quiet):
                 did_work = True
-                synth_template = templates["synth"].read_text(encoding="utf-8")
+                synth_template = load_builtin_prompt_text(templates["synth"])
                 step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
                 synth_prompt = render_prompt(
                     synth_template,
@@ -5738,8 +5751,16 @@ def resume_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
-def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
+def followup_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
     global _ACTIVE_OUTPUT
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
@@ -5784,7 +5805,7 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         raise ReviewflowError("Session meta missing pr_url.")
     pr = parse_pr_url(pr_url)
     require_gh_auth(pr.host)
-    ensure_review_config(paths)
+    ensure_review_config(paths, config_path=effective_config_path)
 
     work_tmp_dir.mkdir(parents=True, exist_ok=True)
     chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
@@ -5810,7 +5831,7 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             copy_duckdb_files(base_db_path, chunkhound_db_path)
 
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require=True,
     )
     # Always refresh the session-local ChunkHound config so it tracks updates
@@ -5855,11 +5876,11 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             raise ReviewflowError("Session meta missing base_ref.")
 
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
-            config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+            config_path=effective_config_path,
             require_tool_prompt_fragment=False,
         )
         require_builtin_review_intelligence(
-            review_intelligence_cfg, config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH
+            review_intelligence_cfg, config_path=effective_config_path
         )
         meta["chunkhound"] = chunkhound_meta["chunkhound"]
         meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
@@ -5870,7 +5891,7 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             agent_desc = agent_desc_path.read_text(encoding="utf-8")
 
         base_env = merged_env(
-            chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path)
+            chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
         )
         gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
         if gh_cfg:
@@ -5883,7 +5904,11 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             base_env["NETRC"] = str(netrc)
         base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
         rf_jira = write_rf_jira(repo_dir=repo_dir)
-        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(args)
+        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+            args,
+            reviewflow_config_path=effective_config_path,
+            base_codex_config_path=effective_codex_base_config_path,
+        )
         env = apply_llm_env(base_env, resolved=llm_resolved)
         codex_flags: list[str] = []
         codex_meta: dict[str, Any] | None = None
@@ -5969,11 +5994,8 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         profile_resolved = str((prompt_meta or {}).get("profile_resolved") or "").strip().lower()
         if profile_resolved not in {"big", "normal"}:
             profile_resolved = "normal"
-        followup_template_path = followup_prompt_template_path_for_profile(profile_resolved)
-        if not followup_template_path.is_file():
-            raise ReviewflowError(f"Missing follow-up prompt template: {followup_template_path}")
-
-        followup_template = followup_template_path.read_text(encoding="utf-8")
+        followup_template_name = followup_prompt_template_name_for_profile(profile_resolved)
+        followup_template = load_builtin_prompt_text(followup_template_name)
         followup_prompt = render_prompt(
             followup_template,
             base_ref_for_review=base_ref_for_review,
@@ -6059,7 +6081,7 @@ def followup_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
             "no_update": (not update_enabled),
             "head_sha_before": head_before,
             "head_sha_after": head_after,
-            "template_path": str(followup_template_path),
+            "template_id": builtin_prompt_id(followup_template_name),
             "output_path": str(followup_md_path),
             "verdicts": review_verdicts_to_meta(verdicts) if verdicts is not None else None,
             "llm": {
@@ -6291,8 +6313,16 @@ def select_zip_sources_for_pr_head(
     return sources
 
 
-def zip_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
+def zip_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
     global _ACTIVE_OUTPUT
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
@@ -6330,9 +6360,9 @@ def zip_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         raise ReviewflowError(
             f"zip: no completed non-rejected review artifacts found for PR HEAD {head_sha[:12]}.\n"
             "Run a fresh review or follow-up first:\n"
-            f"  python3 /workspaces/reviewflow/reviewflow.py pr {pr_url}\n"
+            f"  reviewflow pr {pr_url}\n"
             "  # or\n"
-            "  python3 /workspaces/reviewflow/reviewflow.py followup <session_id>"
+            "  reviewflow followup <session_id>"
         )
 
     host_session_dir = sources[0].session_dir
@@ -6454,7 +6484,11 @@ def zip_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     success_resume_command: str | None = None
     try:
         env = {"REVIEWFLOW_WORK_DIR": str(host_work_dir)}
-        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(args)
+        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+            args,
+            reviewflow_config_path=effective_config_path,
+            base_codex_config_path=effective_codex_base_config_path,
+        )
         env = apply_llm_env(env, resolved=llm_resolved)
         codex_flags: list[str] = []
         codex_meta: dict[str, Any] | None = None
@@ -6470,10 +6504,8 @@ def zip_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                 paths=paths,
             )
 
-        template_path = Path("/workspaces/reviewflow/prompts/mrereview_zip.md")
-        if not template_path.is_file():
-            raise ReviewflowError(f"zip: missing arbiter prompt template: {template_path}")
-        template_text = template_path.read_text(encoding="utf-8")
+        template_name = "mrereview_zip.md"
+        template_text = load_builtin_prompt_text(template_name)
         rendered = render_prompt(
             template_text,
             base_ref_for_review=base_ref_for_review,
@@ -6492,7 +6524,7 @@ def zip_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
         )
 
         zip_progress.meta["prompt"] = {
-            "template_path": str(template_path),
+            "template_id": builtin_prompt_id(template_name),
             "prompt_chars": len(rendered),
             "prompt_sha256": sha256_text(rendered),
         }
@@ -7467,8 +7499,12 @@ def _interactive_session_resume_is_poisoned(
     )
 
 def build_interactive_resume_command(
-    *, session: InteractiveReviewSession, paths: ReviewflowPaths
+    *,
+    session: InteractiveReviewSession,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
 ) -> tuple[str, dict[str, str]]:
+    effective_config_path = config_path or default_reviewflow_config_path()
     meta_path = session.session_dir / "meta.json"
     meta = _load_session_meta(meta_path)
     if not meta:
@@ -7493,9 +7529,9 @@ def build_interactive_resume_command(
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
 
-    ensure_review_config(paths)
+    ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
-        config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        config_path=effective_config_path,
         require=True,
     )
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -7518,7 +7554,7 @@ def build_interactive_resume_command(
         )
 
     env = apply_llm_env(
-        merged_env(chunkhound_env(paths, source_config_path=chunkhound_cfg.base_config_path)),
+        merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)),
         resolved=llm_meta,
     )
     gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
@@ -7643,6 +7679,7 @@ def interactive_flow(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
+    config_path: Path | None = None,
     stdin: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -7680,7 +7717,11 @@ def interactive_flow(
             "This session is execution-only."
         )
 
-    resume_command, resume_env = build_interactive_resume_command(session=selected, paths=paths)
+    resume_command, resume_env = build_interactive_resume_command(
+        session=selected,
+        paths=paths,
+        config_path=config_path,
+    )
     try:
         err_stream.write(f"\nLatest review artifact: {selected.latest_artifact_path}\n")
         err_stream.write(f"\nContinuing {selected.repo_slug} ({selected.session_id})...\n")
@@ -8237,7 +8278,7 @@ def interactive_clean_flow(
     if not is_tty:
         raise ReviewflowError(
             "clean without a session_id requires a TTY on stdin/stderr. "
-            "Use `python3 /workspaces/reviewflow/reviewflow.py clean <session_id>` for exact deletion."
+            "Use `reviewflow clean <session_id>` for exact deletion."
         )
 
     sessions = scan_cleanup_sessions(sandbox_root=paths.sandbox_root)
@@ -8363,7 +8404,15 @@ def clean_session(session_id: str, *, paths: ReviewflowPaths) -> int:
     return 0
 
 
-def jira_smoke_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
+def jira_smoke_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     quiet = bool(getattr(args, "quiet", False))
     no_stream = bool(getattr(args, "no_stream", False))
     stream = (not quiet) and (not no_stream)
@@ -8402,10 +8451,9 @@ def jira_smoke_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     if netrc.is_file():
         env["NETRC"] = str(netrc)
 
-    base_codex_config_path = Path("/workspaces/academy+/.codex/config.toml")
     codex_flags, _ = resolve_codex_flags(
-        base_config_path=base_codex_config_path,
-        reviewflow_config_path=DEFAULT_REVIEWFLOW_CONFIG_PATH,
+        base_config_path=effective_codex_base_config_path,
+        reviewflow_config_path=effective_config_path,
         cli_model=None,
         cli_effort=None,
         cli_plan_effort=None,
@@ -8470,12 +8518,349 @@ Requirements:
 
     raise ReviewflowError(f"jira-smoke FAILED; inspect: {session_dir}")
 
+CHUNKHOUND_GIT_MAIN_INSTALL_SPEC = "git+https://github.com/chunkhound/chunkhound@main"
+
+
+@dataclass(frozen=True)
+class DoctorCheck:
+    name: str
+    status: str
+    detail: str
+
+
+def build_chunkhound_install_command(*, chunkhound_source: str) -> list[str]:
+    if chunkhound_source == "release":
+        spec = "chunkhound"
+    elif chunkhound_source == "git-main":
+        spec = CHUNKHOUND_GIT_MAIN_INSTALL_SPEC
+    else:
+        raise ReviewflowError(f"Unknown chunkhound install source: {chunkhound_source}")
+    uv_path = shutil.which("uv")
+    if _running_in_uv_tool_environment(uv_path=uv_path):
+        if uv_path:
+            return [uv_path, "tool", "install", "--force", spec]
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "--upgrade", spec]
+    if uv_path:
+        return [uv_path, "pip", "install", "--python", sys.executable, "--upgrade", spec]
+    raise ReviewflowError("ChunkHound install requires either `pip` in the current interpreter or `uv` on PATH.")
+
+
+def _uv_tool_dir(*, uv_path: str, bin_dir: bool = False) -> Path | None:
+    cmd = [uv_path, "tool", "dir"]
+    if bin_dir:
+        cmd.append("--bin")
+    try:
+        result = run_cmd(cmd)
+    except ReviewflowSubprocessError:
+        return None
+    raw = result.stdout.strip()
+    return Path(raw).resolve(strict=False) if raw else None
+
+
+def _running_in_uv_tool_environment(*, uv_path: str | None) -> bool:
+    if not uv_path:
+        return False
+    tool_root = _uv_tool_dir(uv_path=uv_path, bin_dir=False)
+    if tool_root is None:
+        return False
+    exe = Path(sys.executable)
+    prefix = Path(sys.prefix)
+    return (tool_root == exe or tool_root in exe.parents or tool_root == prefix or tool_root in prefix.parents)
+
+
+def _chunkhound_not_on_path_error(*, uv_path: str | None) -> ReviewflowError:
+    detail = "ChunkHound install completed, but `chunkhound` is still not available on PATH."
+    if _running_in_uv_tool_environment(uv_path=uv_path) and uv_path:
+        tool_bin = _uv_tool_dir(uv_path=uv_path, bin_dir=True)
+        extra = f"\nuv tool bin dir: {tool_bin}" if tool_bin is not None else ""
+        detail += f"{extra}\nRun `uv tool update-shell` or add that directory to PATH."
+    return ReviewflowError(detail)
+
+
+def install_flow(args: argparse.Namespace) -> int:
+    chunkhound_source = str(getattr(args, "chunkhound_source", "release") or "release").strip()
+    uv_path = shutil.which("uv")
+    cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
+    _eprint(f"Installing ChunkHound from source={chunkhound_source}")
+    run_cmd(cmd)
+    chunkhound_path = shutil.which("chunkhound")
+    if not chunkhound_path:
+        raise _chunkhound_not_on_path_error(uv_path=uv_path)
+    _eprint(f"ChunkHound install complete: {chunkhound_path}")
+    return 0
+
+
+def _doctor_executable_check(name: str) -> DoctorCheck:
+    path = shutil.which(name)
+    if path:
+        return DoctorCheck(name=name, status="ok", detail=path)
+    return DoctorCheck(name=name, status="fail", detail="not found on PATH")
+
+
+def _default_jira_config_path() -> Path:
+    env_path = _resolve_optional_path(os.environ.get("JIRA_CONFIG_FILE"))
+    if env_path is not None:
+        return env_path
+    return (Path.home() / ".config" / ".jira" / ".config.yml").resolve(strict=False)
+
+
+def _doctor_gh_auth_check() -> DoctorCheck:
+    if shutil.which("gh") is None:
+        return DoctorCheck(name="gh-auth", status="fail", detail="`gh` is not installed")
+    try:
+        run_cmd(["gh", "auth", "status", "--hostname", "github.com"], check=True)
+    except ReviewflowSubprocessError as e:
+        msg = e.stderr.strip() or e.stdout.strip() or "not authenticated"
+        return DoctorCheck(name="gh-auth", status="fail", detail=msg)
+    return DoctorCheck(name="gh-auth", status="ok", detail="authenticated for github.com")
+
+
+def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool = True) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "path": str(path),
+        "source": source,
+        "exists": bool(exists),
+    }
+    if not enabled:
+        payload["enabled"] = False
+    return payload
+
+
+def _doctor_runtime_payload(runtime: ReviewflowRuntime) -> dict[str, Any]:
+    config_exists = runtime.config_path.is_file()
+    payload: dict[str, Any] = {
+        "reviewflow_config": _doctor_path_payload(
+            path=runtime.config_path,
+            source=runtime.config_source,
+            exists=config_exists,
+            enabled=runtime.config_enabled,
+        ),
+        "sandbox_root": _doctor_path_payload(
+            path=runtime.paths.sandbox_root,
+            source=runtime.sandbox_root_source,
+            exists=runtime.paths.sandbox_root.exists(),
+        ),
+        "cache_root": _doctor_path_payload(
+            path=runtime.paths.cache_root,
+            source=runtime.cache_root_source,
+            exists=runtime.paths.cache_root.exists(),
+        ),
+        "codex_base_config": _doctor_path_payload(
+            path=runtime.codex_base_config_path,
+            source=runtime.codex_base_config_source,
+            exists=runtime.codex_base_config_path.is_file(),
+        ),
+    }
+
+    if not runtime.config_enabled:
+        payload["chunkhound_base_config"] = {
+            "path": None,
+            "source": "disabled",
+            "exists": False,
+            "enabled": False,
+        }
+        return payload
+
+    try:
+        chunkhound_cfg, _ = load_reviewflow_chunkhound_config(config_path=runtime.config_path, require=True)
+    except ReviewflowError as e:
+        payload["chunkhound_base_config"] = {
+            "path": None,
+            "source": "config",
+            "exists": False,
+            "error": str(e).splitlines()[0],
+        }
+        return payload
+
+    assert chunkhound_cfg is not None
+    payload["chunkhound_base_config"] = _doctor_path_payload(
+        path=chunkhound_cfg.base_config_path,
+        source="config",
+        exists=chunkhound_cfg.base_config_path.is_file(),
+    )
+    return payload
+
+
+def _doctor_runtime_checks(runtime: ReviewflowRuntime) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    config_path = runtime.config_path
+    config_prefix = f"{config_path} (source={runtime.config_source})"
+    if not runtime.config_enabled:
+        checks.append(
+            DoctorCheck(
+                name="reviewflow-config",
+                status="warn",
+                detail=f"{config_prefix} (disabled by --no-config)",
+            )
+        )
+    elif config_path.is_file():
+        checks.append(DoctorCheck(name="reviewflow-config", status="ok", detail=config_prefix))
+    else:
+        checks.append(
+            DoctorCheck(
+                name="reviewflow-config",
+                status="fail",
+                detail=f"missing: {config_prefix}",
+            )
+        )
+
+    path_defaults, _ = load_reviewflow_paths_defaults(config_path=config_path)
+    sandbox_detail = f"{runtime.paths.sandbox_root} (source={runtime.sandbox_root_source})"
+    if runtime.sandbox_root_source == "config" and path_defaults.get("sandbox_root") is not None:
+        sandbox_detail += " (configured)"
+    if runtime.paths.sandbox_root.exists():
+        checks.append(DoctorCheck(name="sandbox-root", status="ok", detail=sandbox_detail))
+    else:
+        checks.append(
+            DoctorCheck(
+                name="sandbox-root",
+                status="warn",
+                detail=f"{sandbox_detail} (will be created on demand)",
+            )
+        )
+
+    cache_detail = f"{runtime.paths.cache_root} (source={runtime.cache_root_source})"
+    if runtime.cache_root_source == "config" and path_defaults.get("cache_root") is not None:
+        cache_detail += " (configured)"
+    if runtime.paths.cache_root.exists():
+        checks.append(DoctorCheck(name="cache-root", status="ok", detail=cache_detail))
+    else:
+        checks.append(
+            DoctorCheck(
+                name="cache-root",
+                status="warn",
+                detail=f"{cache_detail} (will be created on demand)",
+            )
+        )
+
+    if not runtime.config_enabled:
+        checks.append(
+            DoctorCheck(
+                name="chunkhound-config",
+                status="warn",
+                detail="disabled by --no-config",
+            )
+        )
+    else:
+        try:
+            chunkhound_cfg, _ = load_reviewflow_chunkhound_config(config_path=config_path, require=True)
+        except ReviewflowError as e:
+            checks.append(DoctorCheck(name="chunkhound-config", status="fail", detail=str(e).splitlines()[0]))
+        else:
+            assert chunkhound_cfg is not None
+            chunkhound_detail = f"{chunkhound_cfg.base_config_path} (source=config)"
+            if chunkhound_cfg.base_config_path.is_file():
+                checks.append(
+                    DoctorCheck(
+                        name="chunkhound-config",
+                        status="ok",
+                        detail=chunkhound_detail,
+                    )
+                )
+            else:
+                checks.append(
+                    DoctorCheck(
+                        name="chunkhound-config",
+                        status="fail",
+                        detail=f"missing base_config_path: {chunkhound_detail}",
+                    )
+                )
+
+    jira_cfg = _default_jira_config_path()
+    if jira_cfg.is_file():
+        checks.append(DoctorCheck(name="jira-config", status="ok", detail=str(jira_cfg)))
+    else:
+        checks.append(DoctorCheck(name="jira-config", status="fail", detail=f"missing: {jira_cfg}"))
+
+    if runtime.codex_base_config_path.is_file():
+        checks.append(
+            DoctorCheck(
+                name="codex-config",
+                status="ok",
+                detail=f"{runtime.codex_base_config_path} (source={runtime.codex_base_config_source})",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                name="codex-config",
+                status="warn",
+                detail=f"missing: {runtime.codex_base_config_path} (source={runtime.codex_base_config_source})",
+            )
+        )
+
+    checks.extend(_doctor_executable_check(name) for name in ("chunkhound", "gh", "jira", "codex"))
+    checks.append(_doctor_gh_auth_check())
+    return checks
+
+
+def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
+    checks = _doctor_runtime_checks(runtime)
+    if bool(getattr(args, "json_output", False)):
+        ok_count = sum(1 for item in checks if item.status == "ok")
+        warn_count = sum(1 for item in checks if item.status == "warn")
+        fail_count = sum(1 for item in checks if item.status == "fail")
+        payload = _doctor_runtime_payload(runtime)
+        payload["checks"] = [
+            {"name": item.name, "status": item.status, "detail": item.detail} for item in checks
+        ]
+        payload["summary"] = {"ok": ok_count, "warn": warn_count, "fail": fail_count}
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if fail_count == 0 else 1
+
+    checks = _doctor_runtime_checks(runtime)
+    ok_count = sum(1 for item in checks if item.status == "ok")
+    warn_count = sum(1 for item in checks if item.status == "warn")
+    fail_count = sum(1 for item in checks if item.status == "fail")
+    for item in checks:
+        print(f"[{item.status}] {item.name}: {item.detail}")
+    print(f"summary: ok={ok_count} warn={warn_count} fail={fail_count}")
+    return 0 if fail_count == 0 else 1
+
+
+def add_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--config",
+        dest="config_path",
+        default=argparse.SUPPRESS,
+        help="Override the reviewflow config path",
+    )
+    parser.add_argument(
+        "--no-config",
+        dest="no_config",
+        action="store_true",
+        default=False,
+        help="Disable reading the reviewflow TOML; CLI/env overrides still apply",
+    )
+    parser.add_argument(
+        "--sandbox-root",
+        dest="sandbox_root",
+        default=argparse.SUPPRESS,
+        help="Override the review sandbox root",
+    )
+    parser.add_argument(
+        "--cache-root",
+        dest="cache_root",
+        default=argparse.SUPPRESS,
+        help="Override the reviewflow cache root",
+    )
+    parser.add_argument(
+        "--codex-config",
+        dest="codex_config_path",
+        default=argparse.SUPPRESS,
+        help="Override the Codex base config path",
+    )
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="reviewflow")
+    runtime_parent = argparse.ArgumentParser(add_help=False)
+    add_runtime_args(runtime_parent)
+    parser = argparse.ArgumentParser(prog="reviewflow", parents=[runtime_parent])
     sub = parser.add_subparsers(dest="cmd", required=True)
+    codex_help = "Override Codex defaults after LLM preset resolution"
 
-    prp = sub.add_parser("pr", help="Create PR sandbox, index, and run review")
+    prp = sub.add_parser("pr", help="Create PR sandbox, index, and run review", parents=[runtime_parent])
     prp.add_argument("pr_url", help="GitHub PR URL")
     prp.add_argument(
         "--if-reviewed",
@@ -8492,354 +8877,189 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Prompt profile to use when no --prompt/--prompt-file is provided (default: auto)",
     )
-    prp.add_argument(
-        "--big-if-files",
-        type=int,
-        default=30,
-        help="Auto-select big prompt if changed files >= N (default: 30)",
-    )
+    prp.add_argument("--big-if-files", type=int, default=30, help="Auto-select big prompt if changed files >= N")
     prp.add_argument(
         "--big-if-lines",
         type=int,
         default=1500,
-        help="Auto-select big prompt if additions+deletions >= N (default: 1500)",
+        help="Auto-select big prompt if additions+deletions >= N",
     )
     prp.add_argument("--agent-desc", help="Extra contributor context ($AGENT_DESC)", default=None)
-    prp.add_argument(
-        "--agent-desc-file",
-        help="Path to file containing extra contributor context ($AGENT_DESC)",
-        default=None,
-    )
+    prp.add_argument("--agent-desc-file", help="Path to file containing extra contributor context", default=None)
     prp.add_argument("--refresh-base", action="store_true", help="Force base cache refresh")
     prp.add_argument("--base-ttl-hours", type=int, default=24, help="Base cache TTL in hours")
     add_llm_override_args(prp)
-    prp.add_argument(
-        "--codex-model",
-        dest="codex_model",
-        default=None,
-        help="Override Codex model for the review agent (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
-    )
+    prp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     prp.add_argument(
         "--codex-effort",
         dest="codex_effort",
         choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override Codex model_reasoning_effort (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
+        help=codex_help,
     )
     prp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
         choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override Codex plan_mode_reasoning_effort (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
+        help=codex_help,
     )
     mpg = prp.add_mutually_exclusive_group()
-    mpg.add_argument(
-        "--multipass",
-        dest="multipass",
-        action="store_true",
-        default=None,
-        help="Enable multipass review for the built-in big prompt profile (plan -> steps -> synth)",
-    )
-    mpg.add_argument(
-        "--no-multipass",
-        dest="multipass",
-        action="store_false",
-        default=None,
-        help="Disable multipass review execution (forces single-pass)",
-    )
-    prp.add_argument(
-        "--multipass-max-steps",
-        dest="multipass_max_steps",
-        type=int,
-        default=None,
-        help=f"Hard cap multipass steps (1..{MULTIPASS_MAX_STEPS_HARD_CAP}; default: from /workspaces/.reviewflow.toml or 20)",
-    )
+    mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
+    mpg.add_argument("--no-multipass", dest="multipass", action="store_false", default=None, help="Disable multipass review")
+    prp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     prp.add_argument("--no-index", action="store_true", help="Skip ChunkHound indexing")
     prp.add_argument("--no-review", action="store_true", help="Skip running codex review")
-    prp.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output (meta.json still updates)",
-    )
-    prp.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream chunkhound/codex output (phase markers still print)",
-    )
-    prp.add_argument(
-        "--ui",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Terminal UI dashboard (stderr): auto enables on TTY; off disables",
-    )
-    prp.add_argument(
-        "--verbosity",
-        choices=["quiet", "normal", "debug"],
-        default="normal",
-        help="Output verbosity for the TUI/plain output (default: normal). In TUI, verbosity can be changed live via keys.",
-    )
+    prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    prp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
+    prp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    cachep = sub.add_parser("cache", help="Manage base cache")
+    cachep = sub.add_parser("cache", help="Manage base cache", parents=[runtime_parent])
     cachesub = cachep.add_subparsers(dest="cache_cmd", required=True)
-    prime = cachesub.add_parser("prime", help="Prime/update base cache for a repo/base branch")
+    prime = cachesub.add_parser("prime", help="Prime/update base cache for a repo/base branch", parents=[runtime_parent])
     prime.add_argument("owner_repo", help="OWNER/REPO or HOST/OWNER/REPO")
-    prime.add_argument("--base", required=True, help="Base branch/ref to index (e.g., develop)")
+    prime.add_argument("--base", required=True, help="Base branch/ref to index")
     prime.add_argument("--force", action="store_true", help="Force reindex of all files")
-    prime.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output",
-    )
-    prime.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream chunkhound output (phase markers still print)",
-    )
+    prime.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    prime.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound output")
 
-    status = cachesub.add_parser("status", help="Show cache metadata JSON")
+    status = cachesub.add_parser("status", help="Show cache metadata JSON", parents=[runtime_parent])
     status.add_argument("owner_repo", help="OWNER/REPO or HOST/OWNER/REPO")
     status.add_argument("--base", required=True, help="Base branch/ref")
 
-    lp = sub.add_parser("list", help="List existing review sandboxes")
-    _ = lp
+    sub.add_parser("list", help="List existing review sandboxes", parents=[runtime_parent])
 
-    ip = sub.add_parser("interactive", help="Pick a past review and resume it when supported")
+    ip = sub.add_parser("interactive", help="Pick a past review and resume it when supported", parents=[runtime_parent])
     ip.add_argument("target", nargs="?", help="Optional PR URL to filter the picker")
 
     cp = sub.add_parser(
         "clean",
         help="Delete one review sandbox session, clean closed/merged PR sessions, or open the interactive cleaner",
+        parents=[runtime_parent],
     )
     cp.add_argument("session_id", nargs="?", help="Session id (folder name), or the reserved target `closed`")
 
     mp = sub.add_parser(
         "migrate-storage",
-        help="Migrate legacy reviewflow sandboxes and main ChunkHound config to the current default paths",
+        help="Show the storage-migration deprecation notice",
+        parents=[runtime_parent],
     )
-    mp.add_argument(
-        "--apply",
-        action="store_true",
-        help="Perform the migration (default: dry-run only)",
-    )
+    mp.add_argument("--apply", action="store_true", help="Accepted for compatibility; no migration is performed")
 
     rp = sub.add_parser(
         "resume",
         help="Resume a multipass review session (PR URL: runs follow-up if already completed)",
+        parents=[runtime_parent],
     )
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
-    rp.add_argument(
-        "--from",
-        dest="from_phase",
-        choices=["auto", "plan", "steps", "synth"],
-        default="auto",
-        help="Where to resume from (default: auto)",
-    )
+    rp.add_argument("--from", dest="from_phase", choices=["auto", "plan", "steps", "synth"], default="auto")
     add_llm_override_args(rp)
-    rp.add_argument(
-        "--codex-model",
-        dest="codex_model",
-        default=None,
-        help="Override Codex model for remaining calls (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
-    )
-    rp.add_argument(
-        "--codex-effort",
-        dest="codex_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
-        default=None,
-        help="Override Codex model_reasoning_effort for remaining calls",
-    )
+    rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    rp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     rp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
         choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override Codex plan_mode_reasoning_effort for remaining calls",
+        help=codex_help,
     )
-    rp.add_argument(
-        "--multipass-max-steps",
-        dest="multipass_max_steps",
-        type=int,
-        default=None,
-        help=f"Hard cap multipass steps (1..{MULTIPASS_MAX_STEPS_HARD_CAP}; default: from /workspaces/.reviewflow.toml or 20)",
-    )
+    rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     rp.add_argument("--no-index", action="store_true", help="Disable ChunkHound MCP for resume")
-    rp.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output (meta.json still updates)",
-    )
-    rp.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream chunkhound/codex output (phase markers still print)",
-    )
-    rp.add_argument(
-        "--ui",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Terminal UI dashboard (stderr): auto enables on TTY; off disables",
-    )
-    rp.add_argument(
-        "--verbosity",
-        choices=["quiet", "normal", "debug"],
-        default="normal",
-        help="Output verbosity for the TUI/plain output (default: normal). In TUI, verbosity can be changed live via keys.",
-    )
+    rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    rp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    fup = sub.add_parser("followup", help="Run a follow-up review for an existing session sandbox")
+    fup = sub.add_parser("followup", help="Run a follow-up review for an existing session sandbox", parents=[runtime_parent])
     fup.add_argument("session_id", help="Session id (folder name)")
-    fup.add_argument(
-        "--no-update",
-        action="store_true",
-        help="Do not update the sandbox repo to the latest PR HEAD before reviewing",
-    )
+    fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
     add_llm_override_args(fup)
-    fup.add_argument(
-        "--codex-model",
-        dest="codex_model",
-        default=None,
-        help="Override Codex model for the follow-up review agent (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
-    )
-    fup.add_argument(
-        "--codex-effort",
-        dest="codex_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
-        default=None,
-        help="Override Codex model_reasoning_effort for the follow-up review agent",
-    )
+    fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    fup.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     fup.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
         choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override Codex plan_mode_reasoning_effort for the follow-up review agent",
+        help=codex_help,
     )
-    fup.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output (meta.json still updates)",
-    )
-    fup.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream chunkhound/codex output (phase markers still print)",
-    )
-    fup.add_argument(
-        "--ui",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Terminal UI dashboard (stderr): auto enables on TTY; off disables",
-    )
-    fup.add_argument(
-        "--verbosity",
-        choices=["quiet", "normal", "debug"],
-        default="normal",
-        help="Output verbosity for the TUI/plain output (default: normal). In TUI, verbosity can be changed live via keys.",
-    )
+    fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    fup.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    zp = sub.add_parser("zip", help="Synthesize a final review from the latest generated reviews for a PR")
+    zp = sub.add_parser("zip", help="Synthesize a final review from the latest generated reviews for a PR", parents=[runtime_parent])
     zp.add_argument("pr_url", help="GitHub PR URL")
     add_llm_override_args(zp)
-    zp.add_argument(
-        "--codex-model",
-        dest="codex_model",
-        default=None,
-        help="Override Codex model for the zip arbiter agent (default: from /workspaces/.reviewflow.toml or /workspaces/academy+/.codex/config.toml)",
-    )
-    zp.add_argument(
-        "--codex-effort",
-        dest="codex_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
-        default=None,
-        help="Override Codex model_reasoning_effort for the zip arbiter agent",
-    )
+    zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    zp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     zp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
         choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override Codex plan_mode_reasoning_effort for the zip arbiter agent",
+        help=codex_help,
     )
-    zp.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output (zip meta.json still updates)",
-    )
-    zp.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream codex output (phase markers still print)",
-    )
-    zp.add_argument(
-        "--ui",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Terminal UI dashboard (stderr): auto enables on TTY; off disables",
-    )
-    zp.add_argument(
-        "--verbosity",
-        choices=["quiet", "normal", "debug"],
-        default="normal",
-        help="Output verbosity for the TUI/plain output (default: normal). In TUI, verbosity can be changed live via keys.",
-    )
+    zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    zp.add_argument("--no-stream", action="store_true", help="Do not stream codex output")
+    zp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    zp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session")
+    upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
     upp.add_argument("session_id", help="Session id (folder name)")
-    upp.add_argument(
-        "--watch",
-        action="store_true",
-        help="Continuously repaint the dashboard (~5 Hz) until Ctrl+C",
+    upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
+    upp.add_argument("--width", type=int, default=None, help="Terminal width")
+    upp.add_argument("--height", type=int, default=None, help="Terminal height")
+    upp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+    upp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
+
+    ins = sub.add_parser(
+        "install",
+        help="Install or update ChunkHound so the `chunkhound` CLI is available to reviewflow",
+        parents=[runtime_parent],
     )
-    upp.add_argument("--width", type=int, default=None, help="Terminal width (default: auto)")
-    upp.add_argument("--height", type=int, default=None, help="Terminal height (default: auto)")
-    upp.add_argument(
-        "--verbosity",
-        choices=["quiet", "normal", "debug"],
-        default="normal",
-        help="Dashboard verbosity (default: normal)",
-    )
-    upp.add_argument(
-        "--no-color",
-        action="store_true",
-        help="Disable ANSI styling (default: auto-enable on supported TTYs)",
+    ins.add_argument(
+        "--chunkhound-source",
+        choices=["release", "git-main"],
+        default="release",
+        help="ChunkHound source to install (default: release)",
     )
 
-    jsp = sub.add_parser("jira-smoke", help="Acceptance smoke test: Jira access via Codex")
-    jsp.add_argument("jira_key", help="Jira key to fetch (e.g., ABAU-985)")
-    jsp.add_argument(
-        "--attempts",
-        type=int,
-        default=1,
-        help="How many attempts to run (default: 1)",
-    )
-    jsp.add_argument(
-        "--sleep-seconds",
-        type=float,
-        default=0.0,
-        help="Seconds to wait between attempts (default: 0.0)",
-    )
-    jsp.add_argument(
-        "--quiet",
+    dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
+    dp.add_argument(
+        "--json",
+        dest="json_output",
         action="store_true",
-        help="Suppress progress output",
-    )
-    jsp.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not stream codex output",
+        help="Print structured doctor output as JSON",
     )
 
+    jsp = sub.add_parser("jira-smoke", help="Acceptance smoke test: Jira access via Codex", parents=[runtime_parent])
+    jsp.add_argument("jira_key", help="Jira key to fetch (e.g. ABAU-985)")
+    jsp.add_argument("--attempts", type=int, default=1, help="How many attempts to run")
+    jsp.add_argument("--sleep-seconds", type=float, default=0.0, help="Seconds to wait between attempts")
+    jsp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    jsp.add_argument("--no-stream", action="store_true", help="Do not stream codex output")
     return parser
 
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-    paths = DEFAULT_PATHS
+    runtime = resolve_runtime(args)
+    paths = runtime.paths
 
     try:
+        if args.cmd == "install":
+            return install_flow(args)
+        if args.cmd == "doctor":
+            return doctor_flow(args, runtime=runtime)
         if args.cmd == "pr":
-            return pr_flow(args, paths=paths)
+            return pr_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
         if args.cmd == "ui-preview":
             return ui_preview_flow(args, paths=paths)
         if args.cmd == "cache":
@@ -8847,6 +9067,7 @@ def main(argv: list[str]) -> int:
             if args.cache_cmd == "prime":
                 cache_prime(
                     paths=paths,
+                    config_path=runtime.config_path,
                     host=host,
                     owner=owner,
                     repo=repo,
@@ -8857,29 +9078,43 @@ def main(argv: list[str]) -> int:
                 )
                 return 0
             if args.cache_cmd == "status":
-                return cache_status(
-                    paths=paths,
-                    host=host,
-                    owner=owner,
-                    repo=repo,
-                    base_ref=str(args.base),
-                )
+                return cache_status(paths=paths, host=host, owner=owner, repo=repo, base_ref=str(args.base))
         if args.cmd == "list":
             return list_sessions(paths=paths)
         if args.cmd == "interactive":
-            return interactive_flow(args, paths=paths)
+            return interactive_flow(args, paths=paths, config_path=runtime.config_path)
         if args.cmd == "clean":
             return clean_flow(args, paths=paths)
         if args.cmd == "migrate-storage":
             return migrate_storage_flow(args, paths=paths)
         if args.cmd == "resume":
-            return resume_flow(args, paths=paths)
+            return resume_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
         if args.cmd == "followup":
-            return followup_flow(args, paths=paths)
+            return followup_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
         if args.cmd == "zip":
-            return zip_flow(args, paths=paths)
+            return zip_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
         if args.cmd == "jira-smoke":
-            return jira_smoke_flow(args, paths=paths)
+            return jira_smoke_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
     except ReviewflowError as e:
         _eprint(str(e))
         return 2
@@ -8892,5 +9127,9 @@ def main(argv: list[str]) -> int:
     raise AssertionError("Unhandled command")
 
 
+def console_main() -> int:
+    return main(sys.argv[1:])
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(console_main())

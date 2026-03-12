@@ -12,7 +12,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:
-- Do not read or write anything under `/workspaces/academy+/projects/*` (even “just to check”).
+- Do not read or write outside the sandbox checkout, except reviewflow scratch space under `$REVIEWFLOW_WORK_DIR`.
 - If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree (including `.reviewflow/`).
 
 If you must ABORT:

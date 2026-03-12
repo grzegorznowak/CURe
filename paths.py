@@ -1,22 +1,55 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import pwd
 
-LEGACY_SANDBOX_ROOT = Path("/workspaces/academy+/.tmp/review-sandboxes")
-DEFAULT_SANDBOX_ROOT = Path("/workspaces/.reviewflow-sandboxes")
-DEFAULT_CACHE_ROOT = Path("/workspaces/.reviewflow-cache")
-DEFAULT_REVIEW_CHUNKHOUND_CONFIG = Path("/workspaces/.chunkhound.review.json")
-LEGACY_MAIN_CHUNKHOUND_CONFIG = Path("/workspaces/.chunkhound.json")
-DEFAULT_MAIN_CHUNKHOUND_CONFIG = Path("/workspaces/academy+/.chunkhound.json")
+
+def real_user_home_dir() -> Path:
+    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=False)
+
+
+def _home_relative(path: str) -> Path:
+    return (real_user_home_dir() / path).resolve(strict=False)
+
+
+def _xdg_root(env_var: str, *, fallback: str) -> Path:
+    raw = str(os.environ.get(env_var) or "").strip()
+    if not raw:
+        return _home_relative(fallback)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return _home_relative(fallback)
+    return path.resolve(strict=False)
+
+
+def default_reviewflow_config_path() -> Path:
+    return (_xdg_root("XDG_CONFIG_HOME", fallback=".config") / "reviewflow" / "reviewflow.toml").resolve(
+        strict=False
+    )
+
+
+def default_sandbox_root() -> Path:
+    return (_xdg_root("XDG_STATE_HOME", fallback=".local/state") / "reviewflow" / "sandboxes").resolve(
+        strict=False
+    )
+
+
+def default_cache_root() -> Path:
+    return (_xdg_root("XDG_CACHE_HOME", fallback=".cache") / "reviewflow").resolve(strict=False)
+
+
+def default_codex_base_config_path() -> Path:
+    return _home_relative(".codex/config.toml")
 
 
 @dataclass(frozen=True)
 class ReviewflowPaths:
     sandbox_root: Path
     cache_root: Path
-    review_chunkhound_config: Path
-    main_chunkhound_config: Path
+    review_chunkhound_config: Path | None = None
+    main_chunkhound_config: Path | None = None
 
     @property
     def seeds_root(self) -> Path:
@@ -28,11 +61,16 @@ class ReviewflowPaths:
 
 
 DEFAULT_PATHS = ReviewflowPaths(
-    sandbox_root=DEFAULT_SANDBOX_ROOT,
-    cache_root=DEFAULT_CACHE_ROOT,
-    review_chunkhound_config=DEFAULT_REVIEW_CHUNKHOUND_CONFIG,
-    main_chunkhound_config=DEFAULT_MAIN_CHUNKHOUND_CONFIG,
+    sandbox_root=_home_relative(".local/state/reviewflow/sandboxes"),
+    cache_root=_home_relative(".cache/reviewflow"),
 )
+
+
+def default_paths() -> ReviewflowPaths:
+    return ReviewflowPaths(
+        sandbox_root=default_sandbox_root(),
+        cache_root=default_cache_root(),
+    )
 
 
 def safe_ref_slug(ref_name: str) -> str:

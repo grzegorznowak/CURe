@@ -423,10 +423,19 @@ class ChunkHoundConfigTests(unittest.TestCase):
                 {"CHUNKHOUND_EMBEDDING__API_KEY": "", "VOYAGE_API_KEY": ""},
                 clear=False,
             ):
-                env = rf.chunkhound_env(rf.DEFAULT_PATHS, source_config_path=base_cfg)
+                env = rf.chunkhound_env(source_config_path=base_cfg)
             self.assertEqual(env["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")
         finally:
             base_cfg.unlink(missing_ok=True)
+
+    def test_chunkhound_env_does_not_infer_without_explicit_base_config_path(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"CHUNKHOUND_EMBEDDING__API_KEY": "", "VOYAGE_API_KEY": ""},
+            clear=False,
+        ):
+            env = rf.chunkhound_env()
+        self.assertEqual(env, {})
 
 
 class CodexConfigTests(unittest.TestCase):
@@ -785,108 +794,33 @@ class LlmPresetConfigTests(unittest.TestCase):
 
 
 class StorageMigrationTests(unittest.TestCase):
-    def test_default_paths_use_relocated_main_config_and_sandbox_root(self) -> None:
-        self.assertEqual(rf.DEFAULT_PATHS.main_chunkhound_config, Path("/workspaces/academy+/.chunkhound.json"))
-        self.assertEqual(rf.DEFAULT_PATHS.sandbox_root, Path("/workspaces/.reviewflow-sandboxes"))
+    def test_default_paths_use_generic_home_fallbacks(self) -> None:
+        home = rf.real_user_home_dir()
+        self.assertEqual(rf.DEFAULT_PATHS.sandbox_root, (home / ".local/state/reviewflow/sandboxes").resolve())
+        self.assertEqual(rf.DEFAULT_PATHS.cache_root, (home / ".cache/reviewflow").resolve())
 
-    def test_rewrite_session_meta_after_move_rewrites_nested_absolute_paths(self) -> None:
-        old_session = Path("/workspaces/academy+/.tmp/review-sandboxes/demo")
-        new_session = Path("/workspaces/.reviewflow-sandboxes/demo")
-        meta = {
-            "paths": {
-                "session_dir": str(old_session),
-                "repo_dir": str(old_session / "repo"),
-            },
-            "followups": [{"output_path": str(old_session / "followups" / "f1.md")}],
-            "zips": [{"output_path": str(old_session / "zips" / "z1.md")}],
-            "codex": {
-                "resume": {
-                    "cwd": str(old_session / "repo"),
-                    "command": f"cd {old_session / 'repo'} && codex resume",
-                }
-            },
-        }
-        rewritten = rf.rewrite_session_meta_after_move(
-            meta=meta,
-            old_session_dir=old_session,
-            new_session_dir=new_session,
+    def test_migrate_storage_flow_is_deprecation_stub(self) -> None:
+        paths = rf.ReviewflowPaths(
+            sandbox_root=ROOT / ".tmp_test_storage_migration",
+            cache_root=ROOT / ".tmp_test_storage_migration_cache",
         )
-        payload = json.dumps(rewritten)
-        self.assertIn(str(new_session), payload)
-        self.assertNotIn(str(old_session), payload)
+        with mock.patch.object(rf, "_eprint") as eprint:
+            rc = rf.migrate_storage_flow(argparse.Namespace(apply=False), paths=paths)
+        self.assertEqual(rc, 0)
+        text = "\n".join(" ".join(str(a) for a in call.args) for call in eprint.call_args_list)
+        self.assertIn("deprecated", text)
+        self.assertIn("no longer performs any migration", text)
 
-    def test_migrate_storage_flow_dry_run_and_apply(self) -> None:
-        root = ROOT / ".tmp_test_storage_migration"
-        legacy_root = root / "legacy-sandboxes"
-        new_root = root / "new-sandboxes"
-        legacy_cfg = root / ".chunkhound.json"
-        new_cfg = root / "academy+" / ".chunkhound.json"
-        review_cfg = root / ".chunkhound.review.json"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            (legacy_root / "sess-1" / "repo").mkdir(parents=True, exist_ok=True)
-            (legacy_root / "sess-1" / "zips").mkdir(exist_ok=True)
-            (legacy_root / "sess-1" / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "sess-1",
-                        "paths": {
-                            "session_dir": str(legacy_root / "sess-1"),
-                            "repo_dir": str(legacy_root / "sess-1" / "repo"),
-                        },
-                        "codex": {
-                            "resume": {
-                                "cwd": str(legacy_root / "sess-1" / "repo"),
-                                "command": f"cd {legacy_root / 'sess-1' / 'repo'} && codex resume",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (legacy_root / "sess-1" / "zips" / "zip-1.meta.json").write_text(
-                json.dumps({"output_path": str(legacy_root / "sess-1" / "zips" / "zip-1.md")}),
-                encoding="utf-8",
-            )
-            legacy_cfg.write_text(json.dumps({"embedding": {"api_key": "k"}}), encoding="utf-8")
-            review_cfg.write_text("{}", encoding="utf-8")
-            paths = rf.ReviewflowPaths(
-                sandbox_root=new_root,
-                cache_root=ROOT / ".tmp_test_storage_migration_cache",
-                review_chunkhound_config=review_cfg,
-                main_chunkhound_config=new_cfg,
-            )
-
-            with mock.patch.object(rf, "LEGACY_SANDBOX_ROOT", legacy_root), mock.patch.object(
-                rf, "LEGACY_MAIN_CHUNKHOUND_CONFIG", legacy_cfg
-            ), mock.patch.object(rf, "_eprint") as eprint:
-                rc = rf.migrate_storage_flow(argparse.Namespace(apply=False), paths=paths)
-            self.assertEqual(rc, 0)
-            self.assertTrue((legacy_root / "sess-1").exists())
-            self.assertFalse(new_cfg.exists())
-            dry_output = "\n".join(" ".join(str(a) for a in call.args) for call in eprint.call_args_list)
-            self.assertIn("Migration dry run:", dry_output)
-            self.assertIn(str(new_root / "sess-1"), dry_output)
-
-            with mock.patch.object(rf, "LEGACY_SANDBOX_ROOT", legacy_root), mock.patch.object(
-                rf, "LEGACY_MAIN_CHUNKHOUND_CONFIG", legacy_cfg
-            ), mock.patch.object(rf, "_eprint"):
-                rc = rf.migrate_storage_flow(argparse.Namespace(apply=True), paths=paths)
-            self.assertEqual(rc, 0)
-            self.assertFalse(legacy_cfg.exists())
-            self.assertTrue(new_cfg.exists())
-            cfg = json.loads(new_cfg.read_text(encoding="utf-8"))
-            self.assertEqual(cfg["database"]["provider"], "duckdb")
-            self.assertEqual(cfg["database"]["path"], str(rf.MIGRATED_MAIN_CHUNKHOUND_DB_PATH))
-            migrated_meta = json.loads((new_root / "sess-1" / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(migrated_meta["paths"]["session_dir"], str(new_root / "sess-1"))
-            self.assertIn(str(new_root / "sess-1"), migrated_meta["codex"]["resume"]["command"])
-            migrated_zip_meta = json.loads(
-                (new_root / "sess-1" / "zips" / "zip-1.meta.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(migrated_zip_meta["output_path"], str(new_root / "sess-1" / "zips" / "zip-1.md"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+    def test_migrate_storage_apply_flag_is_tolerated_without_side_effects(self) -> None:
+        paths = rf.ReviewflowPaths(
+            sandbox_root=ROOT / ".tmp_test_storage_migration_apply",
+            cache_root=ROOT / ".tmp_test_storage_migration_apply_cache",
+        )
+        with mock.patch.object(rf, "_eprint") as eprint:
+            rc = rf.migrate_storage_flow(argparse.Namespace(apply=True), paths=paths)
+        self.assertEqual(rc, 0)
+        text = "\n".join(" ".join(str(a) for a in call.args) for call in eprint.call_args_list)
+        self.assertIn("deprecated", text)
 
 
 class GhConfigCopyTests(unittest.TestCase):
@@ -1046,6 +980,21 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("`gh`/`jira`", text)
             self.assertNotIn("Jira key", text)
 
+    def test_review_templates_use_generic_sandbox_guardrail(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("outside the sandbox checkout", text)
+            self.assertIn("$REVIEWFLOW_WORK_DIR", text)
+
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",
@@ -1098,12 +1047,20 @@ class PromptTemplateTests(unittest.TestCase):
 
     def test_review_docs_explain_section_relative_scope(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        master = (
-            Path("/workspaces/academy+/.tmp/agent_coordination/epics/reviewflow-chunkhound-pr-sandboxes/MASTER.md")
-        ).read_text(encoding="utf-8")
-        for text in (readme, master):
-            self.assertIn("uses product/ticket scope", text)
-            self.assertIn("uses implementation scope", text)
+        self.assertIn("uses product/ticket scope", readme)
+        self.assertIn("uses implementation scope", readme)
+
+
+class PromptResourceTests(unittest.TestCase):
+    def test_load_builtin_prompt_text_works_outside_repo_root(self) -> None:
+        old_cwd = Path.cwd()
+        try:
+            os.chdir("/")
+            text = rf.load_builtin_prompt_text("mrereview_gh_local.md")
+        finally:
+            os.chdir(old_cwd)
+        self.assertIn("$REVIEW_INTELLIGENCE_GUIDANCE", text)
+        self.assertIn("ChunkHound MCP", text)
 
 
 class MultipassPlanParsingTests(unittest.TestCase):
@@ -1740,6 +1697,16 @@ class InteractiveFlowTests(unittest.TestCase):
             stderr = self._FakeTty()
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
@@ -1847,6 +1814,16 @@ class InteractiveFlowTests(unittest.TestCase):
             stderr = self._FakeTty()
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
@@ -1944,6 +1921,16 @@ class InteractiveFlowTests(unittest.TestCase):
             args = argparse.Namespace(target="https://github.com/Academy-Plus/ssa-lms/pull/86")
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=9) as runner,
             ):
@@ -2016,6 +2003,16 @@ class InteractiveFlowTests(unittest.TestCase):
             stderr = self._FakeTty()
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0),
             ):
@@ -2119,6 +2116,16 @@ class InteractiveFlowTests(unittest.TestCase):
             stderr = self._FakeTty()
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
@@ -2226,6 +2233,16 @@ class InteractiveFlowTests(unittest.TestCase):
             stderr = self._FakeTty()
 
             with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
                 mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
@@ -3545,6 +3562,7 @@ class CodexCommandTests(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertIn("mcp_servers.chunkhound.startup_timeout_sec=20", joined)
         self.assertIn("mcp_servers.chunk-hound.enabled=false", joined)
+        self.assertIn(str(repo), joined)
         self.assertNotIn("--no-daemon", joined)
 
 
@@ -3601,6 +3619,38 @@ class TuiDashboardTests(unittest.TestCase):
 
         args5 = p.parse_args(["clean", "session-123"])
         self.assertEqual(args5.session_id, "session-123")
+
+    def test_parser_accepts_runtime_overrides_before_and_after_subcommand(self) -> None:
+        p = rf.build_parser()
+        args = p.parse_args(["--config", "/tmp/reviewflow.toml", "doctor"])
+        self.assertEqual(args.config_path, "/tmp/reviewflow.toml")
+
+        args2 = p.parse_args(
+            [
+                "doctor",
+                "--config",
+                "/tmp/reviewflow.toml",
+                "--sandbox-root",
+                "/tmp/sandboxes",
+                "--cache-root",
+                "/tmp/cache",
+                "--codex-config",
+                "/tmp/codex.toml",
+            ]
+        )
+        self.assertEqual(args2.config_path, "/tmp/reviewflow.toml")
+        self.assertFalse(args2.no_config)
+        self.assertEqual(args2.sandbox_root, "/tmp/sandboxes")
+        self.assertEqual(args2.cache_root, "/tmp/cache")
+        self.assertEqual(args2.codex_config_path, "/tmp/codex.toml")
+        args3 = p.parse_args(["doctor", "--no-config", "--json"])
+        self.assertTrue(args3.no_config)
+        self.assertTrue(args3.json_output)
+
+    def test_parser_accepts_install_command(self) -> None:
+        p = rf.build_parser()
+        args = p.parse_args(["install", "--chunkhound-source", "git-main"])
+        self.assertEqual(args.chunkhound_source, "git-main")
 
     def test_parser_accepts_zip_flags(self) -> None:
         p = rf.build_parser()
@@ -3687,6 +3737,515 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(args3.height, 30)
         self.assertEqual(args3.verbosity, "debug")
         self.assertTrue(args3.no_color)
+
+
+class RuntimeResolutionTests(unittest.TestCase):
+    def _runtime_args(self, **overrides: object) -> argparse.Namespace:
+        payload = {
+            "config_path": None,
+            "no_config": False,
+            "sandbox_root": None,
+            "cache_root": None,
+            "codex_config_path": None,
+        }
+        payload.update(overrides)
+        return argparse.Namespace(**payload)
+
+    def test_resolve_reviewflow_config_path_prefers_cli_then_env(self) -> None:
+        args = self._runtime_args(config_path="/tmp/cli.toml")
+        with mock.patch.dict(os.environ, {"REVIEWFLOW_CONFIG": "/tmp/env.toml"}, clear=False):
+            self.assertEqual(
+                rf.resolve_reviewflow_config_path(args),
+                (Path("/tmp/cli.toml"), "cli", True),
+            )
+        args = self._runtime_args()
+        with mock.patch.dict(os.environ, {"REVIEWFLOW_CONFIG": "/tmp/env.toml"}, clear=False):
+            self.assertEqual(
+                rf.resolve_reviewflow_config_path(args),
+                (Path("/tmp/env.toml"), "env", True),
+            )
+
+    def test_resolve_reviewflow_config_path_uses_xdg_default(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "REVIEWFLOW_CONFIG": "",
+                "XDG_CONFIG_HOME": "/tmp/xdg-config",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                rf.resolve_reviewflow_config_path(args),
+                (Path("/tmp/xdg-config/reviewflow/reviewflow.toml"), "default", True),
+            )
+
+    def test_resolve_reviewflow_config_path_marks_selected_file_disabled(self) -> None:
+        args = self._runtime_args(config_path="/tmp/cli.toml", no_config=True)
+        self.assertEqual(
+            rf.resolve_reviewflow_config_path(args),
+            (Path("/tmp/cli.toml"), "cli", False),
+        )
+
+    def test_resolve_runtime_uses_xdg_defaults_when_unset(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.object(
+            rf,
+            "default_codex_base_config_path",
+            return_value=Path("/home/tester/.codex/config.toml"),
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "REVIEWFLOW_CONFIG": "",
+                "REVIEWFLOW_SANDBOX_ROOT": "",
+                "REVIEWFLOW_CACHE_ROOT": "",
+                "REVIEWFLOW_CODEX_CONFIG": "",
+                "XDG_CONFIG_HOME": "/tmp/xdg-config",
+                "XDG_STATE_HOME": "/tmp/xdg-state",
+                "XDG_CACHE_HOME": "/tmp/xdg-cache",
+            },
+            clear=False,
+        ):
+            runtime = rf.resolve_runtime(args)
+        self.assertEqual(runtime.config_path, Path("/tmp/xdg-config/reviewflow/reviewflow.toml"))
+        self.assertEqual(runtime.config_source, "default")
+        self.assertTrue(runtime.config_enabled)
+        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/xdg-state/reviewflow/sandboxes"))
+        self.assertEqual(runtime.sandbox_root_source, "default")
+        self.assertEqual(runtime.paths.cache_root, Path("/tmp/xdg-cache/reviewflow"))
+        self.assertEqual(runtime.cache_root_source, "default")
+        self.assertEqual(runtime.codex_base_config_path, Path("/home/tester/.codex/config.toml"))
+        self.assertEqual(runtime.codex_base_config_source, "default")
+
+    def test_resolve_runtime_ignores_relative_xdg_roots(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.object(
+            rf,
+            "default_codex_base_config_path",
+            return_value=Path("/home/tester/.codex/config.toml"),
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "REVIEWFLOW_CONFIG": "",
+                "REVIEWFLOW_SANDBOX_ROOT": "",
+                "REVIEWFLOW_CACHE_ROOT": "",
+                "REVIEWFLOW_CODEX_CONFIG": "",
+                "XDG_CONFIG_HOME": "relative-config",
+                "XDG_STATE_HOME": "relative-state",
+                "XDG_CACHE_HOME": "relative-cache",
+            },
+            clear=False,
+        ), mock.patch.object(rf, "default_reviewflow_config_path", return_value=Path("/home/tester/.config/reviewflow/reviewflow.toml")), mock.patch.object(
+            rf,
+            "default_sandbox_root",
+            return_value=Path("/home/tester/.local/state/reviewflow/sandboxes"),
+        ), mock.patch.object(
+            rf,
+            "default_cache_root",
+            return_value=Path("/home/tester/.cache/reviewflow"),
+        ):
+            runtime = rf.resolve_runtime(args)
+        self.assertEqual(runtime.config_path, Path("/home/tester/.config/reviewflow/reviewflow.toml"))
+        self.assertEqual(runtime.paths.sandbox_root, Path("/home/tester/.local/state/reviewflow/sandboxes"))
+        self.assertEqual(runtime.paths.cache_root, Path("/home/tester/.cache/reviewflow"))
+
+    def test_resolve_runtime_prefers_cli_over_env_and_config(self) -> None:
+        root = ROOT / ".tmp_test_runtime_resolution_cli"
+        cfg = root / "reviewflow.toml"
+        codex_cfg = root / "codex.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            codex_cfg.write_text("", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        'sandbox_root = "cfg-sandboxes"',
+                        'cache_root = "cfg-cache"',
+                        "",
+                        "[codex]",
+                        'base_config_path = "codex.toml"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = self._runtime_args(
+                config_path=str(cfg),
+                sandbox_root=str(root / "cli-sandboxes"),
+                cache_root=str(root / "cli-cache"),
+                codex_config_path=str(root / "cli-codex.toml"),
+            )
+            runtime = rf.resolve_runtime(args)
+            self.assertEqual(runtime.config_path, cfg)
+            self.assertEqual(runtime.config_source, "cli")
+            self.assertEqual(runtime.paths.sandbox_root, (root / "cli-sandboxes").resolve())
+            self.assertEqual(runtime.sandbox_root_source, "cli")
+            self.assertEqual(runtime.paths.cache_root, (root / "cli-cache").resolve())
+            self.assertEqual(runtime.cache_root_source, "cli")
+            self.assertEqual(runtime.codex_base_config_path, (root / "cli-codex.toml").resolve())
+            self.assertEqual(runtime.codex_base_config_source, "cli")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_resolve_runtime_prefers_env_over_config_for_paths(self) -> None:
+        root = ROOT / ".tmp_test_runtime_resolution_env"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        'sandbox_root = "cfg-sandboxes"',
+                        'cache_root = "cfg-cache"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = self._runtime_args(config_path=str(cfg))
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "REVIEWFLOW_SANDBOX_ROOT": str(root / "env-sandboxes"),
+                    "REVIEWFLOW_CACHE_ROOT": str(root / "env-cache"),
+                },
+                clear=False,
+            ):
+                runtime = rf.resolve_runtime(args)
+            self.assertEqual(runtime.paths.sandbox_root, (root / "env-sandboxes").resolve())
+            self.assertEqual(runtime.sandbox_root_source, "env")
+            self.assertEqual(runtime.paths.cache_root, (root / "env-cache").resolve())
+            self.assertEqual(runtime.cache_root_source, "env")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_resolve_runtime_no_config_ignores_reviewflow_toml(self) -> None:
+        root = ROOT / ".tmp_test_runtime_resolution_no_config"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        'sandbox_root = "cfg-sandboxes"',
+                        'cache_root = "cfg-cache"',
+                        "",
+                        "[codex]",
+                        'base_config_path = "cfg-codex.toml"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = self._runtime_args(config_path=str(cfg), no_config=True)
+            with mock.patch.object(rf, "default_sandbox_root", return_value=root / "default-sandboxes"), mock.patch.object(
+                rf, "default_cache_root", return_value=root / "default-cache"
+            ), mock.patch.object(
+                rf,
+                "default_codex_base_config_path",
+                return_value=root / "default-codex.toml",
+            ):
+                runtime = rf.resolve_runtime(args)
+            self.assertFalse(runtime.config_enabled)
+            self.assertEqual(runtime.config_path, cfg)
+            self.assertEqual(runtime.paths.sandbox_root, (root / "default-sandboxes").resolve())
+            self.assertEqual(runtime.paths.cache_root, (root / "default-cache").resolve())
+            self.assertEqual(runtime.codex_base_config_path, (root / "default-codex.toml").resolve())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class InstallAndDoctorTests(unittest.TestCase):
+    def _runtime_args(self, **overrides: object) -> argparse.Namespace:
+        payload = {
+            "config_path": None,
+            "no_config": False,
+            "sandbox_root": None,
+            "cache_root": None,
+            "codex_config_path": None,
+        }
+        payload.update(overrides)
+        return argparse.Namespace(**payload)
+
+    def test_build_chunkhound_install_command_uses_expected_specs(self) -> None:
+        with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=False), mock.patch.object(
+            rf.importlib.util, "find_spec", return_value=object()
+        ):
+            self.assertEqual(
+                rf.build_chunkhound_install_command(chunkhound_source="release"),
+                [sys.executable, "-m", "pip", "install", "--upgrade", "chunkhound"],
+            )
+            self.assertEqual(
+                rf.build_chunkhound_install_command(chunkhound_source="git-main"),
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "git+https://github.com/chunkhound/chunkhound@main",
+                ],
+            )
+
+    def test_build_chunkhound_install_command_uses_uv_tool_when_running_inside_uv_tool(self) -> None:
+        with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=True), mock.patch.object(
+            shutil, "which", return_value="/usr/bin/uv"
+        ):
+            cmd = rf.build_chunkhound_install_command(chunkhound_source="git-main")
+        self.assertEqual(
+            cmd,
+            [
+                "/usr/bin/uv",
+                "tool",
+                "install",
+                "--force",
+                "git+https://github.com/chunkhound/chunkhound@main",
+            ],
+        )
+
+    def test_running_in_uv_tool_environment_detects_uv_tool_python_without_resolving_symlink(self) -> None:
+        with mock.patch.object(rf, "_uv_tool_dir", return_value=Path("/home/vscode/.local/share/uv/tools")), mock.patch.object(
+            rf.sys,
+            "executable",
+            "/home/vscode/.local/share/uv/tools/reviewflow/bin/python",
+        ), mock.patch.object(
+            rf.sys,
+            "prefix",
+            "/home/vscode/.local/share/uv/tools/reviewflow",
+        ):
+            self.assertTrue(rf._running_in_uv_tool_environment(uv_path="/usr/bin/uv"))
+
+    def test_build_chunkhound_install_command_falls_back_to_uv_pip_when_pip_missing_outside_uv_tool(self) -> None:
+        with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=False), mock.patch.object(
+            rf.importlib.util, "find_spec", return_value=None
+        ), mock.patch.object(shutil, "which", return_value="/usr/bin/uv"):
+            cmd = rf.build_chunkhound_install_command(chunkhound_source="git-main")
+        self.assertEqual(
+            cmd,
+            [
+                "/usr/bin/uv",
+                "pip",
+                "install",
+                "--python",
+                sys.executable,
+                "--upgrade",
+                "git+https://github.com/chunkhound/chunkhound@main",
+            ],
+        )
+
+    def test_readme_documents_uv_tool_install_flow(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("uv tool install /path/to/reviewflow", readme)
+        self.assertIn("uv tool install --editable /path/to/reviewflow", readme)
+        self.assertIn("reviewflow install", readme)
+        self.assertIn("reviewflow doctor", readme)
+        self.assertIn("reviewflow doctor --json", readme)
+        self.assertIn("--no-config", readme)
+        self.assertIn("uv tool dir --bin", readme)
+        self.assertIn("runnable from PATH", readme)
+        self.assertIn("Treat reviewflow as an external CLI tool", readme)
+        self.assertIn("project.reviewflow.toml", readme)
+        self.assertIn("The project itself does not need to import reviewflow.", readme)
+        self.assertIn("REVIEWFLOW_CONFIG=/workspaces/.reviewflow.toml reviewflow", readme)
+
+    def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
+        reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        selftest = (ROOT / "selftest.sh").read_text(encoding="utf-8")
+        for text in (reviewflow_src, readme, selftest):
+            self.assertNotIn("reviewflow.py jira-smoke", text)
+            self.assertNotIn("reviewflow.py clean", text)
+            self.assertNotIn("reviewflow.py list", text)
+
+    def test_install_flow_runs_constructed_command(self) -> None:
+        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
+            shutil, "which", return_value="/usr/bin/chunkhound"
+        ):
+            rc = rf.install_flow(argparse.Namespace(chunkhound_source="git-main"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            run_cmd.call_args.args[0],
+            rf.build_chunkhound_install_command(chunkhound_source="git-main"),
+        )
+
+    def test_install_flow_errors_when_chunkhound_still_missing_from_path(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run_cmd(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(list(cmd))
+            if cmd[:3] == ["/usr/bin/uv", "tool", "dir"]:
+                stdout = "/home/vscode/.local/share/uv/tools\n"
+            elif cmd[:4] == ["/usr/bin/uv", "tool", "dir", "--bin"]:
+                stdout = "/home/vscode/.local/bin\n"
+            else:
+                stdout = ""
+            return mock.Mock(stdout=stdout, stderr="", exit_code=0)
+
+        with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd), mock.patch.object(
+            shutil,
+            "which",
+            side_effect=lambda name: "/usr/bin/uv" if name == "uv" else None,
+        ), mock.patch.object(
+            rf,
+            "_running_in_uv_tool_environment",
+            return_value=True,
+        ), mock.patch.object(
+            rf,
+            "_uv_tool_dir",
+            side_effect=[
+                Path("/home/vscode/.local/share/uv/tools"),
+                Path("/home/vscode/.local/bin"),
+            ],
+        ), mock.patch.object(
+            rf.importlib.util,
+            "find_spec",
+            return_value=None,
+        ), mock.patch.object(
+            rf.sys,
+            "executable",
+            "/home/vscode/.local/share/uv/tools/reviewflow/bin/python",
+        ):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.install_flow(argparse.Namespace(chunkhound_source="release"))
+        self.assertIn("still not available on PATH", str(ctx.exception))
+        self.assertIn("uv tool bin dir", str(ctx.exception))
+        self.assertIn(["/usr/bin/uv", "tool", "install", "--force", "chunkhound"], calls)
+
+    def test_doctor_runtime_checks_report_healthy_state(self) -> None:
+        root = ROOT / ".tmp_test_doctor_ok"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        codex_cfg = root / "codex.toml"
+        jira_cfg = root / ".jira.yml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            codex_cfg.write_text("", encoding="utf-8")
+            jira_cfg.write_text("endpoint: https://example.atlassian.net\n", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                        "[codex]",
+                        f'base_config_path = "{codex_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=False), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ), mock.patch.object(rf, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
+                checks = rf._doctor_runtime_checks(runtime)
+            by_name = {item.name: item for item in checks}
+            self.assertEqual(by_name["reviewflow-config"].status, "ok")
+            self.assertEqual(by_name["chunkhound-config"].status, "ok")
+            self.assertEqual(by_name["jira-config"].status, "ok")
+            self.assertEqual(by_name["codex-config"].status, "ok")
+            self.assertEqual(by_name["gh-auth"].status, "ok")
+            self.assertEqual(by_name["chunkhound"].status, "ok")
+            self.assertIn("source=cli", by_name["reviewflow-config"].detail)
+            self.assertIn("source=config", by_name["chunkhound-config"].detail)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_reports_missing_state(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=ROOT / ".tmp_missing_reviewflow.toml",
+            config_source="default",
+            config_enabled=True,
+            paths=rf.DEFAULT_PATHS,
+            sandbox_root_source="default",
+            cache_root_source="default",
+            codex_base_config_path=ROOT / ".tmp_missing_codex.toml",
+            codex_base_config_source="default",
+        )
+        stdout = StringIO()
+        with mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
+            rf,
+            "_default_jira_config_path",
+            return_value=ROOT / ".tmp_missing_jira.yml",
+        ), mock.patch("sys.stdout", stdout):
+            rc = rf.doctor_flow(argparse.Namespace(), runtime=runtime)
+        self.assertEqual(rc, 1)
+        text = stdout.getvalue()
+        self.assertIn("[fail] reviewflow-config", text)
+        self.assertIn("[fail] chunkhound", text)
+        self.assertIn("[fail] jira-config", text)
+        self.assertIn("[warn] codex-config", text)
+
+    def test_doctor_flow_json_reports_sources(self) -> None:
+        root = ROOT / ".tmp_test_doctor_json"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+            with mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
+            self.assertEqual(rc, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["reviewflow_config"]["source"], "cli")
+            self.assertTrue(payload["reviewflow_config"]["exists"])
+            self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
+            self.assertEqual(payload["sandbox_root"]["source"], "config")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_runtime_checks_warn_when_config_disabled(self) -> None:
+        root = ROOT / ".tmp_test_doctor_no_config"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(root / "reviewflow.toml"), no_config=True))
+            checks = rf._doctor_runtime_checks(runtime)
+            by_name = {item.name: item for item in checks}
+            self.assertEqual(by_name["reviewflow-config"].status, "warn")
+            self.assertEqual(by_name["chunkhound-config"].status, "warn")
+            self.assertIn("disabled by --no-config", by_name["reviewflow-config"].detail)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_dashboard_renders_multipass_step_x_of_y(self) -> None:
         meta = {
