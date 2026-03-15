@@ -5,6 +5,91 @@ Goal: create an isolated checkout of a PR, reuse a cached ChunkHound base index,
 Terminology:
 - `CURe` = the codebase-under-review. In practice this is the sandbox checkout plus the surrounding PR, ticket, and supporting context the agent mines to understand that specific change accurately.
 
+## Agentic Quickstart
+Use this when an agent is bootstrapping reviewflow from scratch.
+
+1. Install the CLI:
+```bash
+uv tool install /path/to/reviewflow
+```
+Alternative:
+```bash
+python3 -m pip install /path/to/reviewflow
+```
+2. Provision ChunkHound:
+```bash
+reviewflow install
+```
+`reviewflow install provisions ChunkHound only`.
+3. Check readiness:
+```bash
+reviewflow doctor --json
+```
+`reviewflow doctor --json` is the preferred readiness check for agents.
+4. Create or update a project-specific reviewflow config.
+5. Start the review with the stable agent-safe command:
+```bash
+reviewflow pr <PR_URL> --if-reviewed new
+```
+6. Observe the run:
+```bash
+reviewflow status <session_id|PR_URL> --json
+reviewflow watch <session_id|PR_URL>
+```
+7. Optional follow-up actions:
+```bash
+reviewflow followup <session_id>
+reviewflow resume <session_id|PR_URL>
+reviewflow zip <PR_URL>
+reviewflow clean closed --json
+```
+
+Agent expectations:
+- `reviewflow install` provisions ChunkHound only. It does not authenticate external tools or write project config for you.
+- The agent should inspect the environment and ask only the missing config questions.
+- There is no built-in setup wizard in this story.
+- There is no built-in setup wizard or `reviewflow init` flow here, so agents should adapt the minimal config below instead of expecting an interactive bootstrap.
+
+Minimal config example:
+```toml
+[review_intelligence]
+tool_prompt_fragment = """
+Preferred review-intelligence tools:
+- Use GitHub MCP for PR context when available.
+- Otherwise use gh CLI / gh api.
+- Use any additional tools or sources that materially improve understanding of the codebase-under-review (CURe).
+"""
+
+[chunkhound]
+base_config_path = "/absolute/path/to/chunkhound-base.json"
+```
+
+## Agent Operating Contract
+If you are an autonomous agent reading this README, use this section as the reviewflow operating contract.
+
+Canonical agent prompt:
+```text
+Use reviewflow from <REVIEWFLOW_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.
+
+Required behavior:
+- If `reviewflow` is already installed and working, use it.
+- If `reviewflow` is installed but not working, diagnose and repair or reinstall it from <REVIEWFLOW_SOURCE>.
+- If `reviewflow` is not installed, install it from <REVIEWFLOW_SOURCE>.
+- After install or repair, run `reviewflow install`.
+- Then run `reviewflow doctor --json` and use it as the readiness gate.
+- Ask only for the missing configuration, credentials, or project-specific inputs.
+- Do not invent config, assume hidden secrets, or skip readiness checks.
+- If the environment is ready, start the review with `reviewflow pr <PR_URL> --if-reviewed new`.
+- Then report progress with `reviewflow status <session_id|PR_URL> --json` and `reviewflow watch <session_id|PR_URL>`.
+- If the environment is not ready for a live review, stop and report the exact missing prerequisites.
+```
+
+Expected agent outcomes:
+- Ready and started review:
+  report install or repair outcome, exact commands used, the created session path, and the status/watch summary.
+- Not ready for live review:
+  report install or repair outcome, the `reviewflow doctor --json` summary, and the exact missing prerequisites.
+
 ## Prereqs
 - `gh` authenticated (`gh auth login -h github.com`)
 - Any tooling referenced by the active reviewflow config `[review_intelligence].tool_prompt_fragment` must be available and authenticated
@@ -74,6 +159,20 @@ The project itself does not need to import reviewflow. It only needs:
 - a project config file
 - the required external tools (`gh`, `jira`, `codex`) installed separately if that workflow uses them
 
+## Agent Command Contract
+- `reviewflow commands --json` is the curated machine-readable workflow catalog for agents.
+- `reviewflow pr <PR_URL> --if-reviewed new` is the stable agent-safe start-review command.
+- Bare `reviewflow pr <PR_URL>` keeps current compatibility behavior, including the existing non-TTY fallback from `prompt` to `new`, but it is not the primary documented agent contract.
+- `reviewflow pr` prints the session directory path to stdout on success.
+- `reviewflow followup <session_id>` keeps its current exact-session target contract.
+- `reviewflow resume <session_id|PR_URL>` keeps its existing special PR URL behavior. PR URL mode is compatibility behavior for resume/follow-up, not the shared `status/watch` resolver contract.
+- `reviewflow zip <PR_URL>` prints the generated markdown path to stdout on success.
+- `reviewflow clean closed --json` previews bulk cleanup without deleting anything.
+- `reviewflow clean closed --yes --json` executes bulk cleanup and returns a structured result.
+- `reviewflow clean <session_id> --json` performs an exact delete and returns a structured result.
+- `reviewflow clean <session_id> --yes` is invalid.
+- `reviewflow clean` with no target stays TTY-only and rejects `--yes` / `--json`.
+
 ## Commands
 
 Prime base cache (per repo + base branch):
@@ -89,6 +188,10 @@ reviewflow pr https://github.com/OWNER/REPO/pull/123
 If the PR was already reviewed in this workspace, control how `reviewflow pr` behaves:
 ```bash
 reviewflow pr https://github.com/OWNER/REPO/pull/123 --if-reviewed prompt|new|list|latest
+```
+For the documented agent-safe path, use:
+```bash
+reviewflow pr <PR_URL> --if-reviewed new
 ```
 
 Run a follow-up review on an existing session (writes a new markdown under `<session>/followups/`):
@@ -127,6 +230,22 @@ reviewflow resume <session_id>
 reviewflow resume https://github.com/OWNER/REPO/pull/123
 ```
 
+Show the curated workflow catalog:
+```bash
+reviewflow commands --json
+```
+
+Show run status for an exact session id or PR URL:
+```bash
+reviewflow status <session_id|PR_URL>
+reviewflow status <session_id|PR_URL> --json
+```
+
+Watch a run from another terminal or agent session:
+```bash
+reviewflow watch <session_id|PR_URL>
+```
+
 Select a named preset and override it generically:
 ```bash
 reviewflow pr https://github.com/OWNER/REPO/pull/123 \
@@ -137,6 +256,13 @@ reviewflow pr https://github.com/OWNER/REPO/pull/123 \
   --llm-max-output-tokens 9000 \
   --llm-header HTTP-Referer=https://academypl.us \
   --llm-set provider='{ sort = "latency" }'
+```
+
+Select a reviewflow-owned coding-agent runtime profile for CLI providers:
+```bash
+reviewflow pr https://github.com/OWNER/REPO/pull/123 \
+  --llm-preset claude-cli \
+  --agent-runtime-profile strict
 ```
 
 Deprecated Codex compatibility flags still work:
@@ -171,6 +297,21 @@ Delete sessions whose PR is already closed or merged:
 reviewflow clean closed
 ```
 
+Preview closed/merged cleanup without deleting anything:
+```bash
+reviewflow clean closed --json
+```
+
+Execute closed/merged cleanup with a structured result:
+```bash
+reviewflow clean closed --yes --json
+```
+
+Delete one exact session with a structured result:
+```bash
+reviewflow clean <session_id> --json
+```
+
 Interactive cleanup picker:
 ```bash
 reviewflow clean
@@ -193,7 +334,7 @@ reviewflow clean
 - Base caches live under the resolved reviewflow cache root.
 - ChunkHound is exposed to the review agent via a sandbox-scoped MCP server (configured per run).
 - `reviewflow doctor` is read-only: it diagnoses tool presence, config paths, `gh` auth, and Jira config, but does not install or authenticate anything.
-- `reviewflow doctor --json` prints the resolved config/sandbox/cache/Codex/ChunkHound paths with their sources (`cli`, `env`, `config`, `default`, or disabled).
+- `reviewflow doctor --json` prints the resolved config/sandbox/cache/Codex/ChunkHound paths with their sources (`cli`, `env`, `config`, `default`, or disabled), plus the resolved `agent_runtime` profile/provider enforcement payload.
 - `reviewflow pr` prints progress to **stderr** (phase markers + streamed tool output by default) and prints the sandbox session path to **stdout** on success.
 - Built-in review artifacts use a dual-axis format: `Summary`, then `Business / Product Assessment` and `Technical Assessment`, each with its own `Verdict`, `Strengths`, `In Scope Issues`, and `Out of Scope Issues`. `Reusability` lives under the technical assessment. There is no merged final decision.
 - `Business / Product Assessment` uses product/ticket scope: Jira is primary, the PR description is secondary, and clarifying Jira/GitHub discussion can expand what counts as `In Scope`.
@@ -220,6 +361,7 @@ reviewflow clean
 - Full logs are written under `<session>/work/logs/` (reviewflow/chunkhound/codex) and their paths are recorded in `meta.json`.
 - Generated review artifacts normalize sandbox-local file refs to portable `path:line` text instead of embedding absolute sandbox-local Markdown file links.
 - Provider-neutral runtime metadata is persisted under `meta.json` in `llm` (`preset`, `transport`, `provider`, resolved model/effort values, runtime overrides, adapter metadata, resume when supported, capabilities`).
+- Reviewflow also persists the resolved coding-agent runtime posture under `meta.json` in `agent_runtime` (profile, provider, sandbox/permission mode, dangerous bypass on/off, env keys passed, add dirs, and staged runtime files).
 - Legacy Codex sessions are still read from `meta.codex`; new Codex runs keep that metadata as a deprecated compatibility mirror.
 
 ## Prompt profiles (default: `auto`)
@@ -325,6 +467,16 @@ plan_mode_reasoning_effort = "xhigh"
 # Optional defaults for big-profile reviews (CLI flags override these).
 enabled = true
 max_steps = 20
+
+[agent_runtime]
+# CLI/env/config precedence: --agent-runtime-profile, REVIEWFLOW_AGENT_RUNTIME_PROFILE,
+# [agent_runtime].profile, then the default `balanced`.
+profile = "balanced"
+
+[agent_runtime.gemini]
+# Required if you want `strict` Gemini runtime enforcement.
+sandbox = "docker"
+seatbelt_profile = "strict-open"
 ```
 
 Behavior:
@@ -373,6 +525,21 @@ Behavior:
 - Legacy explicit Story 20 preset blocks are still read as deprecated compatibility input and normalized onto the built-in ids above.
 - Legacy `[codex]` defaults are mapped to a synthetic `legacy_codex` preset when no named preset is selected.
 
+## Agent runtime profiles
+- Reviewflow exposes a provider-neutral runtime posture for CLI coding-agent providers via `--agent-runtime-profile`, `REVIEWFLOW_AGENT_RUNTIME_PROFILE`, and `[agent_runtime].profile`.
+- Precedence is: CLI, env, config, default `balanced`.
+- Built-in profiles:
+  - `balanced`
+  - `strict`
+  - `permissive`
+- HTTP presets (`openai-responses`, `openrouter-responses`) are outside this runtime-profile layer in v1.
+- Provider mapping summary:
+  - Codex: `balanced` = `workspace-write` + non-interactive `-a never`; `strict` = `read-only`; `permissive` = dangerous bypass.
+  - Claude: `balanced` = non-interactive `dontAsk` and interactive `default`; `strict` = `plan`; `permissive` = dangerous skip permissions.
+  - Gemini: `balanced` = sandboxed `auto_edit`; `strict` = sandboxed `plan`; `permissive` = `yolo`.
+- Gemini strict mode has an extra prerequisite: reviewflow will hard-fail unless `[agent_runtime.gemini].sandbox` is configured.
+- Reviewflow does not silently downgrade a requested runtime posture. If the selected provider binary, sandbox backend, or staged runtime files cannot enforce the requested profile exactly, the run fails before review execution starts.
+
 ## Codex transport notes
 - Codex runs still use base settings from the resolved Codex config path (`--codex-config`, `REVIEWFLOW_CODEX_CONFIG`, `[codex].base_config_path`, then `~/.codex/config.toml`), plus optional overrides from the active reviewflow config.
 - Review runs disable any non-sandbox ChunkHound MCP server from the base Codex config and inject a sandbox-scoped ChunkHound MCP server for the sandbox repo.
@@ -382,12 +549,18 @@ Behavior:
   - Prompts instruct using MCP tools `search` and `code_research` (a.k.a. `chunkhound.search` / `chunkhound.code_research`).
 - `gh` auth is made available to the Codex run by copying `~/.config/gh` (or `$GH_CONFIG_DIR`) into `<session>/work/gh_config` and setting `GH_CONFIG_DIR` to that copied path.
 - `jira` auth is made available to the Codex run by copying the Jira CLI config file (default `~/.config/.jira/.config.yml` or `$JIRA_CONFIG_FILE`) into `<session>/work/jira_config` and setting `JIRA_CONFIG_FILE` to that copied path.
+- `NETRC` is copied into `<session>/work/netrc/.netrc` and staged explicitly for review runs.
 - Reviewflow also writes a sandbox-local `./rf-jira` helper which requires `JIRA_CONFIG_FILE`, forces `HOME`/`NETRC` from the real user home, and retries a few times on intermittent `401 Unauthorized` responses.
   - Debug: set `RF_JIRA_DEBUG=1` to print non-secret env diagnostics (HOME/NETRC path + existence) on each invocation.
   - Retry tuning: set `RF_JIRA_401_RETRIES=<n>` (default: 4).
 - `/tmp` is added as a writable directory for the Codex sandbox via `--add-dir /tmp`.
 - Reviewflow also sets `REVIEWFLOW_WORK_DIR=<session>/work` for the agent to store scratch files outside the repo tree.
-- Review runs add `--dangerously-bypass-approvals-and-sandbox` so the agent can run `gh`/`jira` network reads in-session.
+- Codex runtime posture is now reviewflow-owned: `balanced` and `strict` stay sandboxed, while only `permissive` uses `--dangerously-bypass-approvals-and-sandbox`.
+
+## Claude and Gemini runtime notes
+- Claude review runs now use a reviewflow-owned session-local settings file, explicit `--setting-sources user`, explicit `--add-dir` shaping for reviewflow-owned writable paths, and a reviewflow-owned MCP config file with `--strict-mcp-config` when ChunkHound is enabled.
+- Gemini review runs now use a reviewflow-owned staged runtime home under the session `work/` directory, with generated system settings and trusted folders files instead of mutating the operator’s global Gemini state.
+- Gemini MCP wiring stays explicit and non-global: reviewflow stages its own `mcpServers` config, `mcp.allowed` allowlist, and `trust=false` server entries for the staged reviewflow-owned server(s).
 
 ## Tests
 Fast local checks (no network):

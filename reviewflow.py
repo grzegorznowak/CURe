@@ -485,12 +485,42 @@ CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 BUILTIN_PROMPT_PACKAGE = "prompts"
+AGENT_RUNTIME_PROFILE_CHOICES = ("balanced", "strict", "permissive")
+DEFAULT_AGENT_RUNTIME_PROFILE = "balanced"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
     "gemini-cli",
     "openai-responses",
     "openrouter-responses",
+)
+CURATED_ENV_INHERIT_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "CHUNKHOUND_EMBEDDING__API_KEY",
+    "COLORTERM",
+    "FORCE_COLOR",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "NO_COLOR",
+    "OPENAI_API_KEY",
+    "PATH",
+    "SHELL",
+    "SSH_AUTH_SOCK",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "VOYAGE_API_KEY",
 )
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
@@ -816,6 +846,7 @@ def build_llm_meta(
         "selected_name": resolved.get("selected_name"),
         "transport": resolved.get("transport"),
         "provider": resolved.get("provider"),
+        "command": resolved.get("command"),
         "model": resolved.get("model"),
         "reasoning_effort": resolved.get("reasoning_effort"),
         "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
@@ -834,6 +865,37 @@ def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict
     env = dict(base_env)
     env.update(_string_dict(resolved.get("env")))
     return env
+
+
+def build_curated_subprocess_env(
+    *,
+    inherited_env: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
+    home_override: Path | None = None,
+) -> dict[str, str]:
+    source = inherited_env if inherited_env is not None else os.environ
+    env: dict[str, str] = {}
+    for key in CURATED_ENV_INHERIT_KEYS:
+        value = str(source.get(key) or "").strip()
+        if value:
+            env[key] = value
+    if home_override is not None:
+        env["HOME"] = str(home_override)
+    if extra_env:
+        env.update({str(k): str(v) for k, v in extra_env.items() if str(v)})
+    return env
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in paths:
+        resolved = str(path.resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(path)
+    return out
 
 
 def load_reviewflow_multipass_defaults(
@@ -1155,6 +1217,75 @@ def load_reviewflow_llm_config(
         "deprecated_explicit_presets": sorted(deprecated_explicit_presets),
     }
     return cfg, meta
+
+
+def _normalize_agent_runtime_profile(value: object, *, source: str) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text not in AGENT_RUNTIME_PROFILE_CHOICES:
+        raise ReviewflowError(
+            f"Invalid agent runtime profile from {source}: {text!r}. "
+            f"Expected one of: {', '.join(AGENT_RUNTIME_PROFILE_CHOICES)}"
+        )
+    return text
+
+
+def load_reviewflow_agent_runtime_config(
+    *, config_path: Path | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = config_path or default_reviewflow_config_path()
+    raw = load_toml(path)
+    section = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
+    section = section if isinstance(section, dict) else {}
+    gemini = section.get("gemini", {})
+    gemini = gemini if isinstance(gemini, dict) else {}
+
+    profile = _normalize_agent_runtime_profile(section.get("profile"), source="config")
+    sandbox = str(gemini.get("sandbox") or "").strip() or None
+    seatbelt_profile = str(gemini.get("seatbelt_profile") or "").strip() or None
+
+    cfg = {
+        "profile": profile,
+        "gemini": {
+            "sandbox": sandbox,
+            "seatbelt_profile": seatbelt_profile,
+        },
+    }
+    meta = {
+        "config_path": str(path),
+        "loaded": bool(raw),
+        "agent_runtime": {
+            "profile": profile,
+            "gemini": dict(cfg["gemini"]),
+        },
+    }
+    return cfg, meta
+
+
+def resolve_agent_runtime_profile(
+    *,
+    cli_value: str | None,
+    config_path: Path | None = None,
+    config_enabled: bool = True,
+) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    cfg, meta = load_reviewflow_agent_runtime_config(config_path=config_path)
+    cli_profile = _normalize_agent_runtime_profile(cli_value, source="cli")
+    if cli_profile is not None:
+        return cli_profile, "cli", cfg, meta
+
+    env_profile = _normalize_agent_runtime_profile(
+        os.environ.get("REVIEWFLOW_AGENT_RUNTIME_PROFILE"), source="env"
+    )
+    if env_profile is not None:
+        return env_profile, "env", cfg, meta
+
+    if config_enabled:
+        config_profile = _normalize_agent_runtime_profile(cfg.get("profile"), source="config")
+        if config_profile is not None:
+            return config_profile, "config", cfg, meta
+
+    return DEFAULT_AGENT_RUNTIME_PROFILE, "default", cfg, meta
 
 
 def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
@@ -1644,34 +1775,34 @@ def build_codex_exec_cmd(
     prompt: str,
     add_dirs: list[Path] | None = None,
     skip_git_repo_check: bool = False,
+    approval_policy: str = "never",
+    dangerously_bypass_approvals_and_sandbox: bool = True,
+    include_shell_environment_inherit_all: bool = True,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     cmd = [
         "codex",
-        "-a",
-        "never",
         "-C",
         str(repo_dir),
         "--add-dir",
         "/tmp",
-        *codex_flags,
     ]
     for d in add_dirs or []:
         cmd.extend(["--add-dir", str(d)])
+    cmd.extend(codex_flags)
+    if approval_policy and (not dangerously_bypass_approvals_and_sandbox):
+        cmd.extend(["-a", approval_policy])
     for override in overrides:
         cmd.extend(["-c", override])
-    cmd.extend(
-        [
-            "-c",
-            "shell_environment_policy.inherit=all",
-        ]
-    )
+    if include_shell_environment_inherit_all:
+        cmd.extend(["-c", "shell_environment_policy.inherit=all"])
     cmd.extend(
         [
         "exec",
-        "--dangerously-bypass-approvals-and-sandbox",
         ]
     )
+    if dangerously_bypass_approvals_and_sandbox:
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
     if skip_git_repo_check:
         cmd.append("--skip-git-repo-check")
     cmd.extend(
@@ -1697,6 +1828,9 @@ def run_codex_exec(
     progress: "SessionProgress",
     add_dirs: list[Path] | None = None,
     stream_label: str = "codex",
+    approval_policy: str = "never",
+    dangerously_bypass_approvals_and_sandbox: bool = True,
+    include_shell_environment_inherit_all: bool = True,
 ) -> CodexRunResult:
     started_at = datetime.now(timezone.utc)
     cmd = build_codex_exec_cmd(
@@ -1707,6 +1841,9 @@ def run_codex_exec(
         prompt=prompt,
         add_dirs=add_dirs,
         skip_git_repo_check=False,
+        approval_policy=approval_policy,
+        dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
+        include_shell_environment_inherit_all=include_shell_environment_inherit_all,
     )
     progress.record_cmd(cmd)
     try:
@@ -1751,6 +1888,9 @@ def run_codex_exec(
                 prompt=prompt,
                 add_dirs=add_dirs,
                 skip_git_repo_check=True,
+                approval_policy=approval_policy,
+                dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
+                include_shell_environment_inherit_all=include_shell_environment_inherit_all,
             )
             progress.record_cmd(fallback)
             out = _ACTIVE_OUTPUT
@@ -1787,7 +1927,7 @@ def run_codex_exec(
 
 
 def build_codex_flags_from_llm_config(
-    *, resolved: dict[str, Any], resolution_meta: dict[str, Any]
+    *, resolved: dict[str, Any], resolution_meta: dict[str, Any], include_sandbox: bool = True
 ) -> tuple[list[str], dict[str, Any]]:
     base_meta = resolution_meta.get("base_codex_config")
     base_meta = base_meta if isinstance(base_meta, dict) else {}
@@ -1796,7 +1936,7 @@ def build_codex_flags_from_llm_config(
     if model:
         flags.extend(["-m", model])
     sandbox_mode = str(base_meta.get("sandbox_mode") or "").strip()
-    if sandbox_mode in {"read-only", "workspace-write", "danger-full-access"}:
+    if include_sandbox and sandbox_mode in {"read-only", "workspace-write", "danger-full-access"}:
         flags.extend(["--sandbox", sandbox_mode])
     if str(base_meta.get("web_search") or "").strip() == "live":
         flags.append("--search")
@@ -1903,8 +2043,22 @@ def _run_logged_text_command(
     return run_cmd(cmd, cwd=cwd, env=env, check=True, stream=False, stream_label="codex")
 
 
-def build_claude_exec_cmd(*, command: str, model: str | None, prompt: str) -> list[str]:
-    cmd = [command, "--print", "--output-format", "json", "--dangerously-skip-permissions"]
+def build_claude_exec_cmd(
+    *,
+    command: str,
+    model: str | None,
+    prompt: str,
+    runtime_policy: dict[str, Any] | None = None,
+) -> list[str]:
+    cmd = [command, "--print", "--output-format", "json"]
+    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+    provider_args = policy.get("provider_args")
+    if isinstance(provider_args, list):
+        cmd.extend([str(item) for item in provider_args])
+    elif not policy:
+        cmd.append("--dangerously-skip-permissions")
+    if bool(policy.get("dangerously_skip_permissions")):
+        cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
     cmd.append(prompt)
@@ -1912,7 +2066,12 @@ def build_claude_exec_cmd(*, command: str, model: str | None, prompt: str) -> li
 
 
 def build_claude_resume_command(
-    *, repo_dir: Path, session_id: str, env: dict[str, str], command: str
+    *,
+    repo_dir: Path,
+    session_id: str,
+    env: dict[str, str],
+    command: str,
+    runtime_policy: dict[str, Any] | None = None,
 ) -> str:
     env_prefix = _build_env_prefix_assignments(
         env,
@@ -1924,7 +2083,16 @@ def build_claude_resume_command(
             "REVIEWFLOW_WORK_DIR",
         ),
     )
-    resume_cmd = [command, "--dangerously-skip-permissions", "--resume", session_id]
+    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+    resume_cmd = [command]
+    provider_args = policy.get("provider_args")
+    if isinstance(provider_args, list):
+        resume_cmd.extend([str(item) for item in provider_args])
+    elif not policy:
+        resume_cmd.append("--dangerously-skip-permissions")
+    if bool(policy.get("dangerously_skip_permissions")):
+        resume_cmd.append("--dangerously-skip-permissions")
+    resume_cmd.extend(["--resume", session_id])
     return f"cd {shlex.quote(str(repo_dir))} && {env_prefix}{_shell_join(resume_cmd)}"
 
 
@@ -1936,11 +2104,13 @@ def run_claude_exec(
     prompt: str,
     env: dict[str, str],
     progress: "SessionProgress",
+    runtime_policy: dict[str, Any] | None = None,
 ) -> LlmRunResult:
     cmd = build_claude_exec_cmd(
         command=str(resolved.get("command") or "claude"),
         model=str(resolved.get("model") or "").strip() or None,
         prompt=prompt,
+        runtime_policy=runtime_policy,
     )
     progress.record_cmd(cmd)
     result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
@@ -1962,6 +2132,7 @@ def run_claude_exec(
                 session_id=session_id,
                 env=env,
                 command=str(resolved.get("command") or "claude"),
+                runtime_policy=runtime_policy,
             ),
         )
     return LlmRunResult(
@@ -1970,8 +2141,18 @@ def run_claude_exec(
     )
 
 
-def build_gemini_exec_cmd(*, command: str, model: str | None, prompt: str) -> list[str]:
+def build_gemini_exec_cmd(
+    *,
+    command: str,
+    model: str | None,
+    prompt: str,
+    runtime_policy: dict[str, Any] | None = None,
+) -> list[str]:
     cmd = [command]
+    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+    provider_args = policy.get("provider_args")
+    if isinstance(provider_args, list):
+        cmd.extend([str(item) for item in provider_args])
     if model:
         cmd.extend(["-m", model])
     cmd.extend(["-p", prompt])
@@ -1986,15 +2167,18 @@ def run_gemini_exec(
     prompt: str,
     env: dict[str, str],
     progress: "SessionProgress",
+    runtime_policy: dict[str, Any] | None = None,
 ) -> LlmRunResult:
     cmd = build_gemini_exec_cmd(
         command=str(resolved.get("command") or "gemini"),
         model=str(resolved.get("model") or "").strip() or None,
         prompt=prompt,
+        runtime_policy=runtime_policy,
     )
     progress.record_cmd(cmd)
     result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
-    text = str(result.stdout or "").strip()
+    payload = _extract_json_object(result.stdout)
+    text = str((payload or {}).get("response") or result.stdout or "").strip()
     if not text:
         raise ReviewflowError("Gemini did not return any printable review output.")
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
@@ -2084,10 +2268,14 @@ def run_llm_exec(
     progress: "SessionProgress",
     add_dirs: list[Path] | None = None,
     codex_config_overrides: list[str] | None = None,
+    runtime_policy: dict[str, Any] | None = None,
 ) -> LlmRunResult:
     provider = str(resolved.get("provider") or "").strip().lower()
     if provider == "codex":
         codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta)
+        policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+        codex_flags = list(policy.get("codex_flags") or codex_flags)
+        codex_config_overrides = list(policy.get("codex_config_overrides") or codex_config_overrides or [])
         result = run_codex_exec(
             repo_dir=repo_dir,
             codex_flags=codex_flags,
@@ -2097,7 +2285,14 @@ def run_llm_exec(
             env=env,
             stream=stream,
             progress=progress,
-            add_dirs=add_dirs,
+            add_dirs=list(policy.get("add_dirs") or add_dirs or []),
+            approval_policy=str(policy.get("approval_policy") or "never"),
+            dangerously_bypass_approvals_and_sandbox=bool(
+                policy.get("dangerously_bypass_approvals_and_sandbox", True)
+            ),
+            include_shell_environment_inherit_all=bool(
+                policy.get("include_shell_environment_inherit_all", False)
+            ),
         )
         resume = None
         if result.resume is not None:
@@ -2119,6 +2314,7 @@ def run_llm_exec(
             prompt=prompt,
             env=env,
             progress=progress,
+            runtime_policy=runtime_policy,
         )
     if provider == "gemini":
         return run_gemini_exec(
@@ -2128,6 +2324,7 @@ def run_llm_exec(
             prompt=prompt,
             env=env,
             progress=progress,
+            runtime_policy=runtime_policy,
         )
     if provider in HTTP_LLM_PROVIDERS:
         return run_http_response_exec(
@@ -2192,6 +2389,299 @@ def codex_mcp_overrides_for_reviewflow(
     overrides.append("mcp_servers.chunkhound.startup_timeout_sec=20")
     overrides.append("mcp_servers.chunkhound.tool_timeout_sec=12000")
     return overrides
+
+
+def _require_provider_command(command: str, *, provider: str) -> str:
+    name = str(command or provider).strip() or provider
+    if shutil.which(name) is None:
+        raise ReviewflowError(
+            f"Required {provider} command not found on PATH: {name}. "
+            "Install the provider CLI or choose a different llm preset."
+        )
+    return name
+
+
+def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    staged_paths: dict[str, str] = {}
+    gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
+    if gh_cfg:
+        env["GH_CONFIG_DIR"] = str(gh_cfg)
+        staged_paths["gh_config_dir"] = str(gh_cfg)
+    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
+    if jira_cfg:
+        env["JIRA_CONFIG_FILE"] = str(jira_cfg)
+        staged_paths["jira_config_file"] = str(jira_cfg)
+    netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
+    if netrc:
+        env["NETRC"] = str(netrc)
+        staged_paths["netrc"] = str(netrc)
+    env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
+    staged_paths["reviewflow_work_dir"] = str(work_dir)
+    rf_jira = write_rf_jira(repo_dir=repo_dir)
+    staged_paths["rf_jira"] = str(rf_jira)
+    return env, staged_paths
+
+
+def _reviewflow_chunkhound_mcp_entry(
+    *,
+    sandbox_repo_dir: Path,
+    chunkhound_config_path: Path | None,
+    chunkhound_db_path: Path | None,
+    chunkhound_cwd: Path | None,
+    trust: bool | None = None,
+) -> dict[str, Any]:
+    ch_db = chunkhound_db_path or (sandbox_repo_dir / ".chunkhound.db")
+    ch_cwd = chunkhound_cwd or sandbox_repo_dir
+    ch_cfg = chunkhound_config_path or (ch_cwd / "chunkhound.json")
+    args = [
+        "mcp",
+        "--config",
+        str(ch_cfg),
+        str(sandbox_repo_dir),
+    ]
+    if chunkhound_config_path is None:
+        args[3:3] = ["--database-provider", "duckdb", "--db", str(ch_db)]
+    entry: dict[str, Any] = {
+        "command": "chunkhound",
+        "args": args,
+        "cwd": str(ch_cwd),
+    }
+    if trust is not None:
+        entry["trust"] = bool(trust)
+    return entry
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, payload)
+    return path
+
+
+def _prepare_gemini_cli_home(*, work_dir: Path) -> tuple[Path, Path]:
+    home_root = work_dir / "gemini_home"
+    cli_dir = home_root / ".gemini"
+    if home_root.exists():
+        shutil.rmtree(home_root)
+    cli_dir.mkdir(parents=True, exist_ok=True)
+    src = real_user_home_dir() / ".gemini"
+    if src.is_dir():
+        shutil.copytree(src, cli_dir, dirs_exist_ok=True, copy_function=shutil.copy2)
+    return home_root, cli_dir
+
+
+def prepare_review_agent_runtime(
+    *,
+    args: argparse.Namespace,
+    resolved: dict[str, Any],
+    resolution_meta: dict[str, Any],
+    reviewflow_config_path: Path,
+    config_enabled: bool,
+    repo_dir: Path,
+    session_dir: Path,
+    work_dir: Path,
+    base_env: dict[str, str],
+    chunkhound_config_path: Path | None,
+    chunkhound_db_path: Path | None,
+    chunkhound_cwd: Path | None,
+    enable_mcp: bool,
+    interactive: bool,
+    paths: ReviewflowPaths,
+) -> dict[str, Any]:
+    _ = paths
+    transport = str(resolved.get("transport") or "").strip().lower()
+    provider = str(resolved.get("provider") or "").strip().lower()
+    profile, profile_source, runtime_cfg, runtime_meta = resolve_agent_runtime_profile(
+        cli_value=getattr(args, "agent_runtime_profile", None),
+        config_path=reviewflow_config_path,
+        config_enabled=config_enabled,
+    )
+    env = build_curated_subprocess_env(extra_env=base_env)
+    env.update(_string_dict(resolved.get("env")))
+    env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
+
+    add_dirs = _dedupe_paths([session_dir, work_dir])
+    runtime: dict[str, Any] = {
+        "profile": profile,
+        "profile_source": profile_source,
+        "provider": provider,
+        "transport": transport,
+        "command": str(resolved.get("command") or provider).strip() or None,
+        "env": env,
+        "add_dirs": add_dirs,
+        "staged_paths": staged_paths,
+        "dangerously_bypass_approvals_and_sandbox": False,
+        "dangerously_skip_permissions": False,
+        "sandbox_mode": None,
+        "approval_policy": None,
+        "permission_mode": None,
+        "approval_mode": None,
+        "codex_flags": [],
+        "codex_config_overrides": [],
+        "provider_args": [],
+        "config": {
+            "resolved_profile": profile,
+            "profile_source": profile_source,
+            "agent_runtime": runtime_meta.get("agent_runtime"),
+        },
+    }
+
+    if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
+        runtime["command"] = str(resolved.get("command") or "") or None
+        runtime["metadata"] = {
+            "profile": profile,
+            "profile_source": profile_source,
+            "provider": provider,
+            "transport": transport,
+            "supported": False,
+            "detail": "agent runtime profiles apply only to CLI coding-agent providers",
+            "env_keys": sorted(env.keys()),
+            "add_dirs": [str(path) for path in add_dirs],
+            "staged_paths": dict(staged_paths),
+        }
+        return runtime
+
+    command = _require_provider_command(str(resolved.get("command") or provider), provider=provider)
+    runtime["command"] = command
+
+    if provider == "codex":
+        codex_flags, _ = build_codex_flags_from_llm_config(
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            include_sandbox=False,
+        )
+        if profile == "balanced":
+            runtime["sandbox_mode"] = "workspace-write"
+            runtime["approval_policy"] = "on-request" if interactive else "never"
+        elif profile == "strict":
+            runtime["sandbox_mode"] = "read-only"
+            runtime["approval_policy"] = "on-request" if interactive else "never"
+        elif profile == "permissive":
+            runtime["dangerously_bypass_approvals_and_sandbox"] = True
+        else:
+            raise ReviewflowError(f"Unsupported codex agent runtime profile: {profile!r}")
+        if runtime["sandbox_mode"]:
+            codex_flags.extend(["--sandbox", str(runtime["sandbox_mode"])])
+        if runtime["approval_policy"]:
+            codex_flags.extend(["-a", str(runtime["approval_policy"])])
+        runtime["codex_flags"] = codex_flags
+        runtime["codex_config_overrides"] = codex_mcp_overrides_for_reviewflow(
+            enable_sandbox_chunkhound=enable_mcp,
+            sandbox_repo_dir=repo_dir,
+            chunkhound_db_path=chunkhound_db_path,
+            chunkhound_cwd=chunkhound_cwd,
+            chunkhound_config_path=chunkhound_config_path,
+            paths=paths,
+        )
+    elif provider == "claude":
+        claude_dir = work_dir / "claude"
+        settings_path = _write_json_file(claude_dir / "settings.json", {})
+        runtime["staged_paths"]["claude_settings"] = str(settings_path)
+        provider_args: list[str] = [
+            "--setting-sources",
+            "user",
+            "--settings",
+            str(settings_path),
+        ]
+        for add_dir in add_dirs:
+            provider_args.extend(["--add-dir", str(add_dir)])
+        if enable_mcp:
+            mcp_path = _write_json_file(
+                claude_dir / "mcp.json",
+                {
+                    "mcpServers": {
+                        "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                            sandbox_repo_dir=repo_dir,
+                            chunkhound_config_path=chunkhound_config_path,
+                            chunkhound_db_path=chunkhound_db_path,
+                            chunkhound_cwd=chunkhound_cwd,
+                        )
+                    }
+                },
+            )
+            runtime["staged_paths"]["claude_mcp_config"] = str(mcp_path)
+            provider_args.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
+        if profile == "balanced":
+            runtime["permission_mode"] = "default" if interactive else "dontAsk"
+        elif profile == "strict":
+            runtime["permission_mode"] = "plan"
+        elif profile == "permissive":
+            runtime["dangerously_skip_permissions"] = True
+        else:
+            raise ReviewflowError(f"Unsupported claude agent runtime profile: {profile!r}")
+        if runtime["permission_mode"]:
+            provider_args.extend(["--permission-mode", str(runtime["permission_mode"])])
+        runtime["provider_args"] = provider_args
+    elif provider == "gemini":
+        gemini_cfg = runtime_cfg.get("gemini")
+        gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
+        configured_sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
+        seatbelt_profile = str(gemini_cfg.get("seatbelt_profile") or "").strip() or None
+        if profile == "balanced":
+            runtime["approval_mode"] = "auto_edit"
+            env["GEMINI_SANDBOX"] = configured_sandbox or "true"
+        elif profile == "strict":
+            runtime["approval_mode"] = "plan"
+            if not configured_sandbox:
+                raise ReviewflowError(
+                    "Gemini strict agent runtime requires [agent_runtime.gemini].sandbox to be configured."
+                )
+            env["GEMINI_SANDBOX"] = configured_sandbox
+        elif profile == "permissive":
+            runtime["approval_mode"] = "yolo"
+            if configured_sandbox:
+                env["GEMINI_SANDBOX"] = configured_sandbox
+        else:
+            raise ReviewflowError(f"Unsupported gemini agent runtime profile: {profile!r}")
+        if seatbelt_profile:
+            env["SEATBELT_PROFILE"] = seatbelt_profile
+
+        home_root, cli_dir = _prepare_gemini_cli_home(work_dir=work_dir)
+        trusted_folders_path = _write_json_file(
+            cli_dir / "trustedFolders.json",
+            {str(repo_dir.resolve(strict=False)): "TRUST_FOLDER"},
+        )
+        system_settings: dict[str, Any] = {}
+        if enable_mcp:
+            system_settings["mcpServers"] = {
+                "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                    sandbox_repo_dir=repo_dir,
+                    chunkhound_config_path=chunkhound_config_path,
+                    chunkhound_db_path=chunkhound_db_path,
+                    chunkhound_cwd=chunkhound_cwd,
+                    trust=False,
+                )
+            }
+            system_settings["mcp"] = {"allowed": ["reviewflow-chunkhound"]}
+        system_settings_path = _write_json_file(work_dir / "gemini" / "system-settings.json", system_settings)
+        env["GEMINI_CLI_HOME"] = str(home_root)
+        env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(system_settings_path)
+        runtime["staged_paths"]["gemini_home"] = str(home_root)
+        runtime["staged_paths"]["gemini_trusted_folders"] = str(trusted_folders_path)
+        runtime["staged_paths"]["gemini_system_settings"] = str(system_settings_path)
+        provider_args = ["--output-format", "json", "--approval-mode", str(runtime["approval_mode"])]
+        for add_dir in add_dirs:
+            provider_args.extend(["--include-directories", str(add_dir)])
+        runtime["provider_args"] = provider_args
+    else:
+        raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
+
+    runtime["metadata"] = {
+        "profile": runtime["profile"],
+        "profile_source": runtime["profile_source"],
+        "provider": runtime["provider"],
+        "sandbox_mode": runtime["sandbox_mode"],
+        "approval_policy": runtime["approval_policy"],
+        "permission_mode": runtime["permission_mode"],
+        "approval_mode": runtime["approval_mode"],
+        "dangerously_bypass_approvals_and_sandbox": bool(
+            runtime["dangerously_bypass_approvals_and_sandbox"]
+        ),
+        "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
+        "env_keys": sorted(env.keys()),
+        "add_dirs": [str(path) for path in add_dirs],
+        "staged_paths": dict(runtime["staged_paths"]),
+    }
+    return runtime
 class SessionProgress:
     def __init__(self, meta_path: Path, *, quiet: bool) -> None:
         self.meta_path = meta_path
@@ -2529,6 +3019,9 @@ def build_codex_resume_command(
     codex_flags: list[str],
     codex_config_overrides: list[str] | None,
     add_dirs: list[Path] | None = None,
+    approval_policy: str | None = None,
+    dangerously_bypass_approvals_and_sandbox: bool = True,
+    include_shell_environment_inherit_all: bool = True,
 ) -> str:
     assignments: list[str] = []
     for key in (
@@ -2544,14 +3037,19 @@ def build_codex_resume_command(
     resume_cmd: list[str] = [
         "codex",
         "resume",
-        "--dangerously-bypass-approvals-and-sandbox",
         "--add-dir",
         "/tmp",
     ]
+    if approval_policy and (not dangerously_bypass_approvals_and_sandbox):
+        resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)
     for override in codex_config_overrides or []:
         resume_cmd.extend(["-c", override])
-    resume_cmd.extend(["-c", "shell_environment_policy.inherit=all", session_id])
+    if include_shell_environment_inherit_all:
+        resume_cmd.extend(["-c", "shell_environment_policy.inherit=all"])
+    if dangerously_bypass_approvals_and_sandbox:
+        resume_cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    resume_cmd.append(session_id)
 
     env_prefix = ""
     if assignments:
@@ -2568,6 +3066,9 @@ def find_codex_resume_info(
     codex_config_overrides: list[str] | None,
     add_dirs: list[Path] | None = None,
     codex_root: Path | None = None,
+    approval_policy: str | None = None,
+    dangerously_bypass_approvals_and_sandbox: bool = True,
+    include_shell_environment_inherit_all: bool = True,
 ) -> CodexResumeInfo | None:
     codex_home = codex_root or (real_user_home_dir() / ".codex")
     repo_root = repo_dir.resolve(strict=False)
@@ -2609,6 +3110,9 @@ def find_codex_resume_info(
                 codex_flags=codex_flags,
                 codex_config_overrides=codex_config_overrides,
                 add_dirs=add_dirs,
+                approval_policy=approval_policy,
+                dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
+                include_shell_environment_inherit_all=include_shell_environment_inherit_all,
             ),
         )
         if best is None or timestamp > best[0]:
@@ -2850,6 +3354,617 @@ def _resolve_log_path(*, session_dir: Path, raw: str | None) -> Path | None:
         return None
 
 
+@dataclass(frozen=True)
+class ResolvedObservationTarget:
+    requested_target: dict[str, Any]
+    resolved_target: dict[str, Any]
+    resolution_strategy: str
+    session_id: str
+    session_dir: Path
+    meta_path: Path
+    meta: dict[str, Any]
+
+
+def _resolve_session_id_target(raw: str, *, sandbox_root: Path, command_name: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        raise ReviewflowError(f"{command_name} requires a session_id or PR URL.")
+    if Path(text).is_absolute() or ("/" in text) or ("\\" in text):
+        raise ReviewflowError(
+            f"{command_name} expects a session id (folder name) or a PR URL. "
+            f"Tip: run `reviewflow list` to find a session id. Got: {text!r}"
+        )
+    return text
+
+
+def _load_session_meta_strict(meta_path: Path, *, command_name: str) -> dict[str, Any]:
+    if not meta_path.is_file():
+        raise ReviewflowError(f"{command_name}: missing meta.json at {meta_path}")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ReviewflowError(f"{command_name}: failed to parse meta.json at {meta_path}: {e}") from e
+    if not isinstance(payload, dict):
+        raise ReviewflowError(f"{command_name}: meta.json must contain a JSON object: {meta_path}")
+    return payload
+
+
+def _meta_matches_pr(*, meta: dict[str, Any], pr: PullRequestRef) -> bool:
+    if str(meta.get("host") or "").strip() != pr.host:
+        return False
+    if str(meta.get("owner") or "").strip() != pr.owner:
+        return False
+    if str(meta.get("repo") or "").strip() != pr.repo:
+        return False
+    try:
+        return int(meta.get("number") or 0) == int(pr.number)
+    except Exception:
+        return False
+
+
+def _observation_activity_dt(meta: dict[str, Any]) -> datetime:
+    return (
+        _parse_iso_dt(str(meta.get("resumed_at") or "").strip())
+        or _parse_iso_dt(str(meta.get("created_at") or "").strip())
+        or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+
+
+def resolve_observation_target(
+    target: str,
+    *,
+    sandbox_root: Path,
+    command_name: str,
+) -> ResolvedObservationTarget:
+    raw = str(target or "").strip()
+    if not raw:
+        raise ReviewflowError(f"{command_name} requires a session_id or PR URL.")
+
+    pr: PullRequestRef | None = None
+    try:
+        pr = parse_pr_url(raw)
+    except ReviewflowError:
+        pr = None
+
+    if pr is None:
+        session_id = _resolve_session_id_target(raw, sandbox_root=sandbox_root, command_name=command_name)
+        session_dir = sandbox_root / session_id
+        if not session_dir.is_dir():
+            raise ReviewflowError(f"{command_name}: session not found under {sandbox_root}: {session_id}")
+        meta_path = session_dir / "meta.json"
+        meta = _load_session_meta_strict(meta_path, command_name=command_name)
+        host = str(meta.get("host") or "").strip() or "github.com"
+        owner = str(meta.get("owner") or "").strip()
+        repo = str(meta.get("repo") or "").strip()
+        number_raw = meta.get("number")
+        try:
+            number = int(number_raw or 0)
+        except Exception:
+            number = 0
+        pr_url = f"https://{host}/{owner}/{repo}/pull/{number}" if owner and repo and number > 0 else None
+        return ResolvedObservationTarget(
+            requested_target={"raw": raw, "kind": "session_id"},
+            resolved_target={
+                "kind": "session",
+                "session_id": session_id,
+                "session_dir": str(session_dir),
+                "pr_url": pr_url,
+            },
+            resolution_strategy="exact_session_id",
+            session_id=session_id,
+            session_dir=session_dir,
+            meta_path=meta_path,
+            meta=meta,
+        )
+
+    if not sandbox_root.is_dir():
+        raise ReviewflowError(
+            f"No review sandboxes found under {sandbox_root} (needed to resolve PR {pr.owner}/{pr.repo}#{pr.number})."
+        )
+
+    running: list[tuple[datetime, Path, dict[str, Any]]] = []
+    others: list[tuple[datetime, Path, dict[str, Any]]] = []
+    for entry in sandbox_root.iterdir():
+        if not entry.is_dir():
+            continue
+        meta = _load_session_meta(entry / "meta.json")
+        if not meta or (not _meta_matches_pr(meta=meta, pr=pr)):
+            continue
+        status = str(meta.get("status") or "").strip().lower()
+        activity_dt = _observation_activity_dt(meta)
+        if status == "running":
+            running.append((activity_dt, entry, meta))
+        else:
+            others.append((activity_dt, entry, meta))
+
+    strategy = ""
+    selected: tuple[datetime, Path, dict[str, Any]] | None = None
+    if running:
+        running.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        selected = running[0]
+        strategy = "newest_running"
+    elif others:
+        others.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        selected = others[0]
+        strategy = "newest_activity"
+
+    if selected is None:
+        raise ReviewflowError(
+            f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {sandbox_root}. "
+            "Tip: run `reviewflow list`."
+        )
+
+    _, session_dir, meta = selected
+    session_id = str(meta.get("session_id") or session_dir.name).strip() or session_dir.name
+    meta_path = session_dir / "meta.json"
+    pr_url = f"https://{pr.host}/{pr.owner}/{pr.repo}/pull/{pr.number}"
+    return ResolvedObservationTarget(
+        requested_target={
+            "raw": raw,
+            "kind": "pr_url",
+            "host": pr.host,
+            "owner": pr.owner,
+            "repo": pr.repo,
+            "number": pr.number,
+            "pr_url": pr_url,
+        },
+        resolved_target={
+            "kind": "session",
+            "session_id": session_id,
+            "session_dir": str(session_dir),
+            "pr_url": pr_url,
+        },
+        resolution_strategy=strategy,
+        session_id=session_id,
+        session_dir=session_dir,
+        meta_path=meta_path,
+        meta=meta,
+    )
+
+
+def _resolve_session_work_dir(*, session_dir: Path, meta: dict[str, Any]) -> Path:
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    raw = str((meta_paths or {}).get("work_dir") or "").strip()
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (session_dir / path).resolve()
+        else:
+            path = path.resolve()
+        return path
+    return session_dir / "work"
+
+
+def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_dir: Path) -> Path:
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    raw = str((meta_paths or {}).get("logs_dir") or "").strip()
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (session_dir / path).resolve()
+        else:
+            path = path.resolve()
+        return path
+    logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
+    for key in ("reviewflow", "chunkhound", "codex"):
+        candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
+        if candidate is not None:
+            return candidate.parent
+    return work_dir / "logs"
+
+
+def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
+    logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
+    payload: dict[str, str] = {}
+    for key in ("reviewflow", "chunkhound", "codex"):
+        candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
+        if candidate is None:
+            fallback = logs_dir / f"{key}.log"
+            candidate = fallback if fallback.exists() else None
+        if candidate is not None:
+            payload[key] = str(candidate)
+    return payload
+
+
+def build_status_payload(
+    target: str,
+    *,
+    sandbox_root: Path,
+    command_name: str = "status",
+) -> dict[str, Any]:
+    resolved = resolve_observation_target(target, sandbox_root=sandbox_root, command_name=command_name)
+    meta = _load_session_meta_strict(resolved.meta_path, command_name=command_name)
+    session_dir = resolved.session_dir
+    work_dir = _resolve_session_work_dir(session_dir=session_dir, meta=meta)
+    logs_dir = _resolve_session_logs_dir(session_dir=session_dir, meta=meta, work_dir=work_dir)
+    logs = _resolve_session_log_paths(session_dir=session_dir, meta=meta, logs_dir=logs_dir)
+    review_md_path = _resolve_session_review_md_path(session_dir=session_dir, meta=meta)
+    repo_dir_raw = str(
+        ((meta.get("paths") or {}).get("repo_dir") if isinstance(meta.get("paths"), dict) else "")
+        or (session_dir / "repo")
+    ).strip()
+    repo_dir = Path(repo_dir_raw)
+    if not repo_dir.is_absolute():
+        repo_dir = (session_dir / repo_dir).resolve()
+    else:
+        repo_dir = repo_dir.resolve()
+
+    latest_artifact: dict[str, Any] | None = None
+    if review_md_path is not None:
+        latest_artifact_path = _resolve_latest_session_artifact_path(
+            session_dir=session_dir,
+            meta=meta,
+            review_md_path=review_md_path,
+        )
+        latest_artifact = {"path": str(latest_artifact_path)}
+
+    llm_meta = resolve_meta_llm(meta)
+    llm_payload: dict[str, Any] | None = None
+    if isinstance(llm_meta, dict) and llm_meta:
+        llm_payload = dict(llm_meta)
+        llm_payload["summary"] = resolve_codex_summary(meta)
+
+    agent_runtime = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else None
+    agent_runtime_payload: dict[str, Any] | None = None
+    if agent_runtime:
+        agent_runtime_payload = dict(agent_runtime)
+        profile = str(agent_runtime_payload.get("profile") or "").strip()
+        provider = str(agent_runtime_payload.get("provider") or "").strip()
+        if profile or provider:
+            agent_runtime_payload["summary"] = "/".join(part for part in (profile, provider) if part)
+
+    host = str(meta.get("host") or "").strip() or "github.com"
+    owner = str(meta.get("owner") or "").strip()
+    repo = str(meta.get("repo") or "").strip()
+    number_raw = meta.get("number")
+    try:
+        number = int(number_raw or 0)
+    except Exception:
+        number = 0
+    pr_url = f"https://{host}/{owner}/{repo}/pull/{number}" if owner and repo and number > 0 else None
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "reviewflow.status",
+        "requested_target": resolved.requested_target,
+        "resolved_target": resolved.resolved_target,
+        "resolution_strategy": resolved.resolution_strategy,
+        "session_id": resolved.session_id,
+        "status": str(meta.get("status") or "").strip() or "unknown",
+        "phase": str(meta.get("phase") or "").strip() or "unknown",
+        "phases": meta.get("phases") if isinstance(meta.get("phases"), dict) else {},
+        "pr": {
+            "host": host,
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "pr_url": pr_url,
+        },
+        "paths": {
+            "session_dir": str(session_dir),
+            "repo_dir": str(repo_dir),
+            "work_dir": str(work_dir),
+            "logs_dir": str(logs_dir),
+            "review_md": (str(review_md_path) if review_md_path is not None else None),
+            "meta_json": str(resolved.meta_path),
+        },
+        "logs": logs,
+    }
+    if latest_artifact is not None:
+        payload["latest_artifact"] = latest_artifact
+    if llm_payload is not None:
+        payload["llm"] = llm_payload
+    if agent_runtime_payload is not None:
+        payload["agent_runtime"] = agent_runtime_payload
+    if isinstance(meta.get("error"), dict):
+        payload["error"] = meta.get("error")
+        payload["terminal_error"] = meta.get("error")
+    return payload
+
+
+def _coerce_ui_verbosity(raw: str) -> Verbosity:
+    try:
+        return Verbosity(str(raw or "normal").strip().lower())
+    except Exception as e:
+        raise ReviewflowError("--verbosity must be one of: quiet, normal, debug") from e
+
+
+def _stream_supports_color(stream: TextIO) -> bool:
+    try:
+        if not stream.isatty():
+            return False
+    except Exception:
+        return False
+    term = str(os.environ.get("TERM") or "")
+    if term in {"", "dumb"}:
+        return False
+    if "NO_COLOR" in os.environ:
+        return False
+    return True
+
+
+def _load_ui_preview_snapshot(
+    *,
+    meta_path: Path,
+    session_dir: Path,
+    verbosity: Verbosity,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ReviewflowError(f"ui-preview: failed to parse meta.json: {e}") from e
+    if not isinstance(meta, dict):
+        raise ReviewflowError("ui-preview: meta.json must contain a JSON object")
+
+    if verbosity is Verbosity.quiet:
+        ch_n, cx_n = (0, 0)
+    else:
+        ch_n, cx_n = (200, 400)
+
+    fallback_ch = session_dir / "work" / "logs" / "chunkhound.log"
+    fallback_cx = session_dir / "work" / "logs" / "codex.log"
+    logs = meta.get("logs")
+    logs = logs if isinstance(logs, dict) else {}
+    ch_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("chunkhound") or "").strip())
+    cx_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("codex") or "").strip())
+    if ch_log is None or (not ch_log.is_file()):
+        ch_log = fallback_ch if fallback_ch.is_file() else None
+    if cx_log is None or (not cx_log.is_file()):
+        cx_log = fallback_cx if fallback_cx.is_file() else None
+
+    chunkhound_tail = _tail_file_lines(ch_log, ch_n) if ch_log is not None else []
+    codex_tail = _tail_file_lines(cx_log, cx_n) if cx_log is not None else []
+    return meta, chunkhound_tail, codex_tail
+
+
+def _render_ui_preview(
+    *,
+    session_dir: Path,
+    meta_path: Path,
+    verbosity: Verbosity,
+    color: bool,
+    width: int | None,
+    height: int | None,
+    final_newline: bool,
+    stdout: TextIO,
+) -> str:
+    meta, chunkhound_tail, codex_tail = _load_ui_preview_snapshot(
+        meta_path=meta_path,
+        session_dir=session_dir,
+        verbosity=verbosity,
+    )
+    snap = UiSnapshot(verbosity=verbosity, show_help=False)
+    term = shutil.get_terminal_size(fallback=(120, 40))
+    render_width = int(width) if isinstance(width, int) else int(term.columns)
+    render_height = int(height) if isinstance(height, int) else int(term.lines)
+    lines = build_dashboard_lines(
+        meta=meta,
+        snapshot=snap,
+        chunkhound_tail=chunkhound_tail,
+        codex_tail=codex_tail,
+        no_stream=False,
+        width=render_width,
+        height=render_height,
+        color=color,
+    )
+    stdout.write("\n".join(lines))
+    if final_newline:
+        stdout.write("\n")
+    stdout.flush()
+    return str(meta.get("status") or "").strip().lower() or "unknown"
+
+
+def _watch_line_for_payload(payload: dict[str, Any]) -> str:
+    pr = payload.get("pr") if isinstance(payload.get("pr"), dict) else {}
+    repo_slug = f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}"
+    parts = [
+        f"session={payload.get('session_id')}",
+        f"repo={repo_slug}",
+        f"status={payload.get('status')}",
+        f"phase={payload.get('phase')}",
+    ]
+    latest_artifact = payload.get("latest_artifact") if isinstance(payload.get("latest_artifact"), dict) else {}
+    latest_path = str((latest_artifact or {}).get("path") or "").strip()
+    if latest_path:
+        parts.append(f"artifact={latest_path}")
+    llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
+    llm_summary = str((llm or {}).get("summary") or "").strip()
+    if llm_summary:
+        parts.append(llm_summary)
+    return " ".join(parts)
+
+
+def build_commands_catalog_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "reviewflow.commands",
+        "commands": [
+            {
+                "name": "pr",
+                "summary": "Create a new review session for a PR.",
+                "targets": ["PR_URL"],
+                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics.",
+                "tty": "Optional TUI on stderr when running in a real terminal.",
+                "stdout": "Prints the created session directory path on success.",
+                "exit_codes": {"0": "review started", "2": "usage or runtime error"},
+                "recommended_invocation": "reviewflow pr <PR_URL> --if-reviewed new",
+                "variants": [
+                    {
+                        "name": "compatibility",
+                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
+                        "invocation": "reviewflow pr <PR_URL>",
+                    }
+                ],
+            },
+            {
+                "name": "followup",
+                "summary": "Run a follow-up review inside an existing session sandbox.",
+                "targets": ["session_id"],
+                "safety": "Reuses the existing sandbox and appends a new follow-up artifact.",
+                "tty": "Optional TUI on stderr when running in a real terminal.",
+                "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
+                "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
+                "recommended_invocation": "reviewflow followup <session_id>",
+            },
+            {
+                "name": "resume",
+                "summary": "Resume a multipass session, or use its existing PR URL compatibility behavior.",
+                "targets": ["session_id", "PR_URL"],
+                "safety": "PR URL mode keeps its special resume-or-followup behavior for compatibility.",
+                "tty": "Optional TUI on stderr when running in a real terminal.",
+                "stdout": "Human-readable progress only.",
+                "exit_codes": {"0": "resume or compatible follow-up completed", "2": "usage or runtime error"},
+                "recommended_invocation": "reviewflow resume <session_id>",
+                "variants": [
+                    {
+                        "name": "pr_url_compatibility",
+                        "summary": "PR URL mode preserves the existing special behavior documented in the README.",
+                        "invocation": "reviewflow resume <PR_URL>",
+                    }
+                ],
+            },
+            {
+                "name": "zip",
+                "summary": "Synthesize a final arbiter review for the PR's current HEAD.",
+                "targets": ["PR_URL"],
+                "safety": "Reads existing review artifacts; does not create a new sandbox.",
+                "tty": "Optional TUI on stderr when running in a real terminal.",
+                "stdout": "Prints the generated zip markdown path on success.",
+                "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
+                "recommended_invocation": "reviewflow zip <PR_URL>",
+            },
+            {
+                "name": "clean",
+                "summary": "Delete an exact session, preview closed-session cleanup, or use the TTY cleaner.",
+                "targets": ["session_id", "closed"],
+                "safety": "Bulk cleanup is preview-first with `clean closed --json`; exact delete rejects `--yes`.",
+                "tty": "Required only for `clean` with no target and `clean closed` without `--yes`.",
+                "stdout": "Structured JSON on `--json`; otherwise human-readable cleanup output.",
+                "exit_codes": {"0": "cleanup query or deletion completed", "2": "usage, lookup, or runtime error"},
+                "recommended_invocation": "reviewflow clean closed --json",
+                "variants": [
+                    {
+                        "name": "bulk_execute",
+                        "summary": "Execute closed-session cleanup after previewing matches.",
+                        "invocation": "reviewflow clean closed --yes --json",
+                    },
+                    {
+                        "name": "exact_delete",
+                        "summary": "Delete one exact session with a structured result.",
+                        "invocation": "reviewflow clean <session_id> --json",
+                    },
+                ],
+            },
+            {
+                "name": "status",
+                "summary": "Resolve a session or PR URL and report the current recorded run state.",
+                "targets": ["session_id", "PR_URL"],
+                "safety": "Read-only view backed by `meta.json` and recorded artifacts/logs.",
+                "tty": "No TTY required.",
+                "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
+                "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
+                "recommended_invocation": "reviewflow status <session_id|PR_URL> --json",
+            },
+            {
+                "name": "watch",
+                "summary": "Attach to a recorded session and follow progress until completion.",
+                "targets": ["session_id", "PR_URL"],
+                "safety": "Read-only attach flow; uses the same resolver as `status`.",
+                "tty": "TTY mode reuses the existing dashboard; non-TTY mode prints plain polling lines.",
+                "stdout": "Progress lines until the session reaches `done` or `error`.",
+                "exit_codes": {
+                    "0": "session finished with status=done",
+                    "1": "session finished with status=error",
+                    "2": "invalid target, lookup failure, or corrupt metadata",
+                },
+                "recommended_invocation": "reviewflow watch <session_id|PR_URL>",
+            },
+        ],
+    }
+
+
+def commands_flow(args: argparse.Namespace, *, stdout: TextIO | None = None) -> int:
+    out = stdout or sys.stdout
+    payload = build_commands_catalog_payload()
+    if bool(getattr(args, "json_output", False)):
+        print(json.dumps(payload, indent=2, sort_keys=True), file=out)
+        return 0
+    for command in payload["commands"]:
+        print(f"{command['name']}: {command['summary']}", file=out)
+        print(f"  {command['recommended_invocation']}", file=out)
+    return 0
+
+
+def status_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    stdout: TextIO | None = None,
+) -> int:
+    out = stdout or sys.stdout
+    payload = build_status_payload(str(getattr(args, "target", "") or ""), sandbox_root=paths.sandbox_root)
+    if bool(getattr(args, "json_output", False)):
+        print(json.dumps(payload, indent=2, sort_keys=True), file=out)
+        return 0
+    print(
+        _watch_line_for_payload(payload),
+        file=out,
+    )
+    return 0
+
+
+def watch_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    out = stdout or sys.stdout
+    err = stderr or sys.stderr
+    target = str(getattr(args, "target", "") or "")
+    resolved = resolve_observation_target(target, sandbox_root=paths.sandbox_root, command_name="watch")
+    interval = max(0.0, float(getattr(args, "interval", 2.0) or 0.0))
+    verbosity = _coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
+
+    try:
+        is_tty = bool(out.isatty()) and bool(err.isatty())
+    except Exception:
+        is_tty = False
+
+    if is_tty:
+        color = _stream_supports_color(out) and (not bool(getattr(args, "no_color", False)))
+        while True:
+            out.write("\x1b[2J\x1b[H")
+            out.flush()
+            status = _render_ui_preview(
+                session_dir=resolved.session_dir,
+                meta_path=resolved.meta_path,
+                verbosity=verbosity,
+                color=color,
+                width=None,
+                height=None,
+                final_newline=False,
+                stdout=out,
+            )
+            if status in {"done", "error"}:
+                return 0 if status == "done" else 1
+            time.sleep(interval if interval > 0 else 0.2)
+
+    last_line = None
+    while True:
+        payload = build_status_payload(resolved.session_id, sandbox_root=paths.sandbox_root, command_name="watch")
+        line = _watch_line_for_payload(payload)
+        if line != last_line:
+            print(line, file=out)
+            out.flush()
+            last_line = line
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"done", "error"}:
+            return 0 if status == "done" else 1
+        time.sleep(interval if interval > 0 else 0.2)
+
+
 def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     session_id = str(getattr(args, "session_id", "") or "").strip()
     if not session_id:
@@ -2860,84 +3975,10 @@ def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     if not meta_path.is_file():
         raise ReviewflowError(f"ui-preview: missing meta.json at {meta_path}")
 
-    verbosity_raw = str(getattr(args, "verbosity", "normal") or "normal").strip().lower()
-    try:
-        verbosity = Verbosity(verbosity_raw)
-    except Exception:
-        raise ReviewflowError("--verbosity must be one of: quiet, normal, debug")
-
-    # Read generous tails; the renderer decides how much to display based on height.
-    if verbosity is Verbosity.quiet:
-        ch_n, cx_n = (0, 0)
-    else:
-        ch_n, cx_n = (200, 400)
-
-    fallback_ch = session_dir / "work" / "logs" / "chunkhound.log"
-    fallback_cx = session_dir / "work" / "logs" / "codex.log"
-
-    snap = UiSnapshot(verbosity=verbosity, show_help=False)
-
+    verbosity = _coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
     width_arg = getattr(args, "width", None)
     height_arg = getattr(args, "height", None)
-
-    def _auto_color_enabled() -> bool:
-        try:
-            if not sys.stdout.isatty():
-                return False
-        except Exception:
-            return False
-        term = str(os.environ.get("TERM") or "")
-        if term in {"", "dumb"}:
-            return False
-        if "NO_COLOR" in os.environ:
-            return False
-        return True
-
-    color = _auto_color_enabled() and (not bool(getattr(args, "no_color", False)))
-
-    def render_once(*, final_newline: bool) -> None:
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            raise ReviewflowError(f"ui-preview: failed to parse meta.json: {e}")
-        if not isinstance(meta, dict):
-            raise ReviewflowError("ui-preview: meta.json must contain a JSON object")
-
-        logs = meta.get("logs")
-        logs = logs if isinstance(logs, dict) else {}
-        ch_log = _resolve_log_path(
-            session_dir=session_dir, raw=str(logs.get("chunkhound") or "").strip()
-        )
-        cx_log = _resolve_log_path(
-            session_dir=session_dir, raw=str(logs.get("codex") or "").strip()
-        )
-
-        if ch_log is None or (not ch_log.is_file()):
-            ch_log = fallback_ch if fallback_ch.is_file() else None
-        if cx_log is None or (not cx_log.is_file()):
-            cx_log = fallback_cx if fallback_cx.is_file() else None
-
-        chunkhound_tail = _tail_file_lines(ch_log, ch_n) if ch_log is not None else []
-        codex_tail = _tail_file_lines(cx_log, cx_n) if cx_log is not None else []
-
-        term = shutil.get_terminal_size(fallback=(120, 40))
-        width = int(width_arg) if isinstance(width_arg, int) else int(term.columns)
-        height = int(height_arg) if isinstance(height_arg, int) else int(term.lines)
-
-        lines = build_dashboard_lines(
-            meta=meta,
-            snapshot=snap,
-            chunkhound_tail=chunkhound_tail,
-            codex_tail=codex_tail,
-            no_stream=False,
-            width=width,
-            height=height,
-            color=color,
-        )
-        sys.stdout.write("\n".join(lines))
-        if final_newline:
-            sys.stdout.write("\n")
-        sys.stdout.flush()
+    color = _stream_supports_color(sys.stdout) and (not bool(getattr(args, "no_color", False)))
 
     watch = bool(getattr(args, "watch", False))
     if not watch:
@@ -2948,14 +3989,32 @@ def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
                 sys.stdout.write("\n")
         except Exception:
             pass
-        render_once(final_newline=True)
+        _render_ui_preview(
+            session_dir=session_dir,
+            meta_path=meta_path,
+            verbosity=verbosity,
+            color=color,
+            width=width_arg,
+            height=height_arg,
+            final_newline=True,
+            stdout=sys.stdout,
+        )
         return 0
 
     try:
         while True:
             sys.stdout.write("\x1b[2J\x1b[H")
             sys.stdout.flush()
-            render_once(final_newline=False)
+            _render_ui_preview(
+                session_dir=session_dir,
+                meta_path=meta_path,
+                verbosity=verbosity,
+                color=color,
+                width=width_arg,
+                height=height_arg,
+                final_newline=False,
+                stdout=sys.stdout,
+            )
             time.sleep(0.2)
     except KeyboardInterrupt:
         return 0
@@ -4038,6 +5097,19 @@ def prepare_jira_config_for_codex(*, dst_root: Path) -> Path | None:
     return dst if dst.is_file() else None
 
 
+def prepare_netrc_for_reviewflow(*, dst_root: Path) -> Path | None:
+    src = real_user_home_dir() / ".netrc"
+    if not src.is_file():
+        return None
+    dst_dir = dst_root / "netrc"
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / ".netrc"
+    shutil.copy2(src, dst)
+    return dst if dst.is_file() else None
+
+
 def write_rf_jira(*, repo_dir: Path) -> Path:
     path = repo_dir / "rf-jira"
     script = """#!/usr/bin/env python3
@@ -4674,53 +5746,54 @@ def pr_flow(
             progress.flush()
 
         if not args.no_review:
-            base_env = merged_env(
-                chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
-            )
-            gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-            if gh_cfg:
-                base_env["GH_CONFIG_DIR"] = str(gh_cfg)
-            jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-            if jira_cfg:
-                base_env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-            netrc = real_user_home_dir() / ".netrc"
-            if netrc.is_file():
-                base_env["NETRC"] = str(netrc)
-            base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-            rf_jira = write_rf_jira(repo_dir=repo_dir)
-
             llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
                 args,
                 reviewflow_config_path=effective_config_path,
                 base_codex_config_path=effective_codex_base_config_path,
             )
-            env = apply_llm_env(base_env, resolved=llm_resolved)
-            codex_overrides: list[str] = []
-            codex_flags: list[str] = []
-            codex_meta: dict[str, Any] | None = None
-            adapter_meta: dict[str, Any] = {}
+            runtime_policy = prepare_review_agent_runtime(
+                args=args,
+                resolved=llm_resolved,
+                resolution_meta=llm_resolution_meta,
+                reviewflow_config_path=effective_config_path,
+                config_enabled=True,
+                repo_dir=repo_dir,
+                session_dir=session_dir,
+                work_dir=work_dir,
+                base_env=chunkhound_env(source_config_path=chunkhound_cfg.base_config_path),
+                chunkhound_config_path=chunkhound_cfg_path,
+                chunkhound_db_path=chunkhound_db_path,
+                chunkhound_cwd=chunkhound_work_dir,
+                enable_mcp=(not bool(getattr(args, "no_index", False))),
+                interactive=False,
+                paths=paths,
+            )
+            env = dict(runtime_policy["env"])
+            adapter_meta: dict[str, Any] = {
+                "transport": f"cli-{llm_resolved.get('provider')}",
+                "runtime_policy": runtime_policy["metadata"],
+            }
             if str(llm_resolved.get("provider") or "") == "codex":
-                codex_flags, codex_meta = build_codex_flags_from_llm_config(
-                    resolved=llm_resolved,
-                    resolution_meta=llm_resolution_meta,
+                codex_flags = list(runtime_policy.get("codex_flags") or [])
+                codex_overrides = list(runtime_policy.get("codex_config_overrides") or [])
+                adapter_meta.update(
+                    {
+                        "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                            "dangerously_bypass_approvals_and_sandbox"
+                        ],
+                        "config_overrides": codex_overrides,
+                        "flags": codex_flags,
+                    }
                 )
-                codex_overrides = codex_mcp_overrides_for_reviewflow(
-                    enable_sandbox_chunkhound=(not bool(getattr(args, "no_index", False))),
-                    sandbox_repo_dir=repo_dir,
-                    chunkhound_db_path=chunkhound_db_path,
-                    chunkhound_cwd=chunkhound_work_dir,
-                    chunkhound_config_path=chunkhound_cfg_path,
-                    paths=paths,
-                )
-                adapter_meta = {
-                    "transport": "cli-codex",
-                    "dangerously_bypass_approvals_and_sandbox": True,
-                    "config_overrides": codex_overrides,
-                    "flags": codex_flags,
-                }
                 progress.meta["codex"] = {
-                    "config": codex_meta,
-                    "dangerously_bypass_approvals_and_sandbox": True,
+                    "config": build_codex_flags_from_llm_config(
+                        resolved=llm_resolved,
+                        resolution_meta=llm_resolution_meta,
+                        include_sandbox=False,
+                    )[1],
+                    "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                        "dangerously_bypass_approvals_and_sandbox"
+                    ],
                     "config_overrides": codex_overrides,
                     "flags": codex_flags,
                     "env": {
@@ -4729,18 +5802,19 @@ def pr_flow(
                         "NETRC": env.get("NETRC"),
                         "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
                     },
-                    "helpers": {"rf_jira": str(rf_jira)},
+                    "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
                 }
+            progress.meta["agent_runtime"] = runtime_policy["metadata"]
             progress.meta["llm"] = build_llm_meta(
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
                 env=env,
                 adapter_meta=adapter_meta,
-                helpers={"rf_jira": str(rf_jira)},
+                helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
             )
             progress.flush()
 
-            add_dirs = [session_dir]
+            add_dirs = list(runtime_policy.get("add_dirs") or [])
             if str(llm_resolved.get("provider") or "") == "codex":
                 if not args.no_index:
                     log(
@@ -4808,7 +5882,8 @@ def pr_flow(
                         stream=stream,
                         progress=progress,
                         add_dirs=add_dirs,
-                        codex_config_overrides=codex_overrides,
+                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=runtime_policy,
                     )
                     plan_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                     if plan_runs and isinstance(plan_runs[-1], dict) and plan_result.resume is not None:
@@ -4940,7 +6015,8 @@ def pr_flow(
                                     stream=stream,
                                     progress=progress,
                                     add_dirs=add_dirs,
-                                    codex_config_overrides=codex_overrides,
+                                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                                    runtime_policy=runtime_policy,
                                 )
                                 step_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                                 if step_runs and isinstance(step_runs[-1], dict) and step_result.resume is not None:
@@ -5004,7 +6080,8 @@ def pr_flow(
                             stream=stream,
                             progress=progress,
                             add_dirs=add_dirs,
-                            codex_config_overrides=codex_overrides,
+                            codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                            runtime_policy=runtime_policy,
                         )
                         synth_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                         if synth_runs and isinstance(synth_runs[-1], dict) and synth_result.resume is not None:
@@ -5095,7 +6172,8 @@ def pr_flow(
                         stream=stream,
                         progress=progress,
                         add_dirs=add_dirs,
-                        codex_config_overrides=codex_overrides,
+                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=runtime_policy,
                     )
                     success_resume_command = record_llm_resume(
                         progress.meta.setdefault("llm", {}), review_result.resume
@@ -5351,21 +6429,6 @@ def resume_flow(
         progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
         progress.flush()
 
-        base_env = merged_env(
-            chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
-        )
-        gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-        if gh_cfg:
-            base_env["GH_CONFIG_DIR"] = str(gh_cfg)
-        jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-        if jira_cfg:
-            base_env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-        netrc = real_user_home_dir() / ".netrc"
-        if netrc.is_file():
-            base_env["NETRC"] = str(netrc)
-        base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-        rf_jira = write_rf_jira(repo_dir=repo_dir)
-
         llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
             args,
             reviewflow_config_path=effective_config_path,
@@ -5376,34 +6439,52 @@ def resume_flow(
                 f"resume is not supported for provider {llm_resolved.get('provider')} in v1. "
                 "This provider is execution-only."
             )
-        env = apply_llm_env(base_env, resolved=llm_resolved)
         no_index = False
-        codex_overrides: list[str] = []
-        codex_flags: list[str] = []
         codex_meta: dict[str, Any] | None = None
-        adapter_meta: dict[str, Any] = {}
+        runtime_policy = prepare_review_agent_runtime(
+            args=args,
+            resolved=llm_resolved,
+            resolution_meta=llm_resolution_meta,
+            reviewflow_config_path=effective_config_path,
+            config_enabled=True,
+            repo_dir=repo_dir,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            base_env=chunkhound_env(source_config_path=chunkhound_cfg.base_config_path),
+            chunkhound_config_path=chunkhound_cfg_path,
+            chunkhound_db_path=chunkhound_db_path,
+            chunkhound_cwd=chunkhound_work_dir,
+            enable_mcp=(not no_index),
+            interactive=True,
+            paths=paths,
+        )
+        env = dict(runtime_policy["env"])
+        adapter_meta: dict[str, Any] = {
+            "transport": f"cli-{llm_resolved.get('provider')}",
+            "runtime_policy": runtime_policy["metadata"],
+        }
         if str(llm_resolved.get("provider") or "") == "codex":
-            codex_flags, codex_meta = build_codex_flags_from_llm_config(
+            codex_flags = list(runtime_policy.get("codex_flags") or [])
+            codex_overrides = list(runtime_policy.get("codex_config_overrides") or [])
+            codex_meta = build_codex_flags_from_llm_config(
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
+                include_sandbox=False,
+            )[1]
+            adapter_meta.update(
+                {
+                    "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                        "dangerously_bypass_approvals_and_sandbox"
+                    ],
+                    "config_overrides": codex_overrides,
+                    "flags": codex_flags,
+                }
             )
-            codex_overrides = codex_mcp_overrides_for_reviewflow(
-                enable_sandbox_chunkhound=(not no_index),
-                sandbox_repo_dir=repo_dir,
-                chunkhound_db_path=chunkhound_db_path,
-                chunkhound_cwd=chunkhound_work_dir,
-                chunkhound_config_path=chunkhound_cfg_path,
-                paths=paths,
-            )
-            adapter_meta = {
-                "transport": "cli-codex",
-                "dangerously_bypass_approvals_and_sandbox": True,
-                "config_overrides": codex_overrides,
-                "flags": codex_flags,
-            }
             progress.meta["codex"] = {
                 "config": codex_meta,
-                "dangerously_bypass_approvals_and_sandbox": True,
+                "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                    "dangerously_bypass_approvals_and_sandbox"
+                ],
                 "config_overrides": codex_overrides,
                 "flags": codex_flags,
                 "env": {
@@ -5412,18 +6493,19 @@ def resume_flow(
                     "NETRC": env.get("NETRC"),
                     "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
                 },
-                "helpers": {"rf_jira": str(rf_jira)},
+                "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
             }
+        progress.meta["agent_runtime"] = runtime_policy["metadata"]
         progress.meta["llm"] = build_llm_meta(
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
             env=env,
             adapter_meta=adapter_meta,
-            helpers={"rf_jira": str(rf_jira)},
+            helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
         )
         progress.flush()
 
-        add_dirs = [session_dir]
+        add_dirs = list(runtime_policy.get("add_dirs") or [])
         if str(llm_resolved.get("provider") or "") == "codex":
             if not no_index:
                 log(
@@ -5523,7 +6605,8 @@ def resume_flow(
                     stream=stream,
                     progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=codex_overrides,
+                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                    runtime_policy=runtime_policy,
                 )
                 success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), plan_result.resume)
                 if codex_meta is not None:
@@ -5642,7 +6725,8 @@ def resume_flow(
                     stream=stream,
                     progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=codex_overrides,
+                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                    runtime_policy=runtime_policy,
                 )
                 success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), step_result.resume)
                 if codex_meta is not None:
@@ -5698,7 +6782,8 @@ def resume_flow(
                     stream=stream,
                     progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=codex_overrides,
+                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                    runtime_policy=runtime_policy,
                 )
                 success_resume_command = record_llm_resume(
                     progress.meta.setdefault("llm", {}), synth_result.resume
@@ -5890,33 +6975,37 @@ def followup_flow(
         if agent_desc_path.is_file():
             agent_desc = agent_desc_path.read_text(encoding="utf-8")
 
-        base_env = merged_env(
-            chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
-        )
-        gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-        if gh_cfg:
-            base_env["GH_CONFIG_DIR"] = str(gh_cfg)
-        jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-        if jira_cfg:
-            base_env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-        netrc = real_user_home_dir() / ".netrc"
-        if netrc.is_file():
-            base_env["NETRC"] = str(netrc)
-        base_env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-        rf_jira = write_rf_jira(repo_dir=repo_dir)
         llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
             args,
             reviewflow_config_path=effective_config_path,
             base_codex_config_path=effective_codex_base_config_path,
         )
-        env = apply_llm_env(base_env, resolved=llm_resolved)
-        codex_flags: list[str] = []
+        runtime_policy = prepare_review_agent_runtime(
+            args=args,
+            resolved=llm_resolved,
+            resolution_meta=llm_resolution_meta,
+            reviewflow_config_path=effective_config_path,
+            config_enabled=True,
+            repo_dir=repo_dir,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            base_env=chunkhound_env(source_config_path=chunkhound_cfg.base_config_path),
+            chunkhound_config_path=chunkhound_cfg_path,
+            chunkhound_db_path=chunkhound_db_path,
+            chunkhound_cwd=chunkhound_work_dir,
+            enable_mcp=True,
+            interactive=False,
+            paths=paths,
+        )
+        env = dict(runtime_policy["env"])
         codex_meta: dict[str, Any] | None = None
+        codex_flags = list(runtime_policy.get("codex_flags") or [])
         if str(llm_resolved.get("provider") or "") == "codex":
-            codex_flags, codex_meta = build_codex_flags_from_llm_config(
+            codex_meta = build_codex_flags_from_llm_config(
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
-            )
+                include_sandbox=False,
+            )[1]
 
         meta.setdefault("followups", [])
         followup_started_at = _utc_now_iso()
@@ -6016,36 +7105,28 @@ def followup_flow(
             },
         )
 
-        codex_overrides: list[str] = []
-        if str(llm_resolved.get("provider") or "") == "codex":
-            codex_overrides = codex_mcp_overrides_for_reviewflow(
-                enable_sandbox_chunkhound=True,
-                sandbox_repo_dir=repo_dir,
-                chunkhound_cwd=chunkhound_work_dir,
-                chunkhound_config_path=chunkhound_cfg_path,
-                paths=paths,
-            )
-
         meta["llm"] = build_llm_meta(
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
             env=env,
             adapter_meta={
-                "transport": (
-                    "cli-codex" if str(llm_resolved.get("provider") or "") == "codex" else None
-                ),
-                "config_overrides": codex_overrides,
+                "transport": f"cli-{llm_resolved.get('provider')}",
+                "runtime_policy": runtime_policy["metadata"],
+                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
             },
-            helpers={"rf_jira": str(rf_jira)},
+            helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
         )
+        meta["agent_runtime"] = runtime_policy["metadata"]
         if codex_meta is not None:
             meta["codex"] = {
                 "config": codex_meta,
-                "dangerously_bypass_approvals_and_sandbox": True,
-                "config_overrides": codex_overrides,
+                "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                    "dangerously_bypass_approvals_and_sandbox"
+                ],
+                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
-                "helpers": {"rf_jira": str(rf_jira)},
+                "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
             }
 
         with phase("followup_review", progress=None, quiet=quiet):
@@ -6058,8 +7139,9 @@ def followup_flow(
                 env=env,
                 stream=stream,
                 progress=progress,
-                add_dirs=[session_dir],
-                codex_config_overrides=codex_overrides,
+                add_dirs=list(runtime_policy.get("add_dirs") or []),
+                codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                runtime_policy=runtime_policy,
             )
         success_resume_command = record_llm_resume(meta.setdefault("llm", {}), followup_result.resume)
         if codex_meta is not None:
@@ -6093,7 +7175,8 @@ def followup_flow(
                 "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
-            "helpers": {"rf_jira": str(rf_jira)},
+            "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+            "agent_runtime": runtime_policy["metadata"],
             "review_intelligence": dict(review_intelligence_meta["review_intelligence"]),
         }
         if codex_meta is not None:
@@ -6483,26 +7566,37 @@ def zip_flow(
     success_markdown_path: Path | None = None
     success_resume_command: str | None = None
     try:
-        env = {"REVIEWFLOW_WORK_DIR": str(host_work_dir)}
         llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
             args,
             reviewflow_config_path=effective_config_path,
             base_codex_config_path=effective_codex_base_config_path,
         )
-        env = apply_llm_env(env, resolved=llm_resolved)
-        codex_flags: list[str] = []
+        runtime_policy = prepare_review_agent_runtime(
+            args=args,
+            resolved=llm_resolved,
+            resolution_meta=llm_resolution_meta,
+            reviewflow_config_path=effective_config_path,
+            config_enabled=True,
+            repo_dir=host_repo_dir,
+            session_dir=host_session_dir,
+            work_dir=host_work_dir,
+            base_env={},
+            chunkhound_config_path=None,
+            chunkhound_db_path=None,
+            chunkhound_cwd=None,
+            enable_mcp=False,
+            interactive=False,
+            paths=paths,
+        )
+        env = dict(runtime_policy["env"])
+        codex_flags = list(runtime_policy.get("codex_flags") or [])
         codex_meta: dict[str, Any] | None = None
-        codex_overrides: list[str] = []
         if str(llm_resolved.get("provider") or "") == "codex":
-            codex_flags, codex_meta = build_codex_flags_from_llm_config(
+            codex_meta = build_codex_flags_from_llm_config(
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
-            )
-            codex_overrides = codex_mcp_overrides_for_reviewflow(
-                enable_sandbox_chunkhound=False,
-                sandbox_repo_dir=host_repo_dir,
-                paths=paths,
-            )
+                include_sandbox=False,
+            )[1]
 
         template_name = "mrereview_zip.md"
         template_text = load_builtin_prompt_text(template_name)
@@ -6533,18 +7627,20 @@ def zip_flow(
             resolution_meta=llm_resolution_meta,
             env=env,
             adapter_meta={
-                "transport": (
-                    "cli-codex" if str(llm_resolved.get("provider") or "") == "codex" else None
-                ),
-                "config_overrides": codex_overrides,
+                "transport": f"cli-{llm_resolved.get('provider')}",
+                "runtime_policy": runtime_policy["metadata"],
+                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
             },
         )
+        zip_progress.meta["agent_runtime"] = runtime_policy["metadata"]
         if codex_meta is not None:
             zip_progress.meta["codex"] = {
                 "config": codex_meta,
-                "dangerously_bypass_approvals_and_sandbox": True,
-                "config_overrides": codex_overrides,
+                "dangerously_bypass_approvals_and_sandbox": runtime_policy[
+                    "dangerously_bypass_approvals_and_sandbox"
+                ],
+                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
                 "env": {
                     "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
@@ -6563,8 +7659,9 @@ def zip_flow(
                 env=env,
                 stream=stream,
                 progress=zip_progress,
-                add_dirs=[paths.sandbox_root, host_session_dir],
-                codex_config_overrides=codex_overrides,
+                add_dirs=list(runtime_policy.get("add_dirs") or []),
+                codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                runtime_policy=runtime_policy,
             )
         success_resume_command = record_llm_resume(
             zip_progress.meta.setdefault("llm", {}), zip_result.resume
@@ -7553,21 +8650,27 @@ def build_interactive_resume_command(
             "This session is execution-only."
         )
 
-    env = apply_llm_env(
-        merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)),
+    saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
+    runtime_policy = prepare_review_agent_runtime(
+        args=argparse.Namespace(
+            agent_runtime_profile=(saved_runtime_meta.get("profile") if isinstance(saved_runtime_meta, dict) else None)
+        ),
         resolved=llm_meta,
+        resolution_meta=(llm_meta.get("config") if isinstance(llm_meta.get("config"), dict) else {}),
+        reviewflow_config_path=effective_config_path,
+        config_enabled=True,
+        repo_dir=repo_dir,
+        session_dir=session.session_dir,
+        work_dir=work_dir,
+        base_env=chunkhound_env(source_config_path=chunkhound_cfg.base_config_path),
+        chunkhound_config_path=chunkhound_cfg_path,
+        chunkhound_db_path=chunkhound_db_path,
+        chunkhound_cwd=chunkhound_work_dir,
+        enable_mcp=True,
+        interactive=True,
+        paths=paths,
     )
-    gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-    if gh_cfg:
-        env["GH_CONFIG_DIR"] = str(gh_cfg)
-    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-    if jira_cfg:
-        env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-    netrc = real_user_home_dir() / ".netrc"
-    if netrc.is_file():
-        env["NETRC"] = str(netrc)
-    env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-    _ = write_rf_jira(repo_dir=repo_dir)
+    env = dict(runtime_policy["env"])
 
     llm_resume = llm_meta.get("resume") if isinstance(llm_meta.get("resume"), dict) else {}
     resume_session_id = str((llm_resume or {}).get("session_id") or "").strip()
@@ -7579,6 +8682,7 @@ def build_interactive_resume_command(
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
     meta["llm"] = llm_meta
+    meta["agent_runtime"] = runtime_policy["metadata"]
 
     if provider == "codex":
         codex_meta = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
@@ -7591,20 +8695,8 @@ def build_interactive_resume_command(
             completed_at=str(meta.get("completed_at") or "").strip() or None,
         )
 
-        codex_flags_raw = codex_meta.get("flags")
-        codex_flags = (
-            [str(item) for item in codex_flags_raw if isinstance(item, str)]
-            if isinstance(codex_flags_raw, list)
-            else []
-        )
-        codex_overrides = codex_mcp_overrides_for_reviewflow(
-            enable_sandbox_chunkhound=True,
-            sandbox_repo_dir=repo_dir,
-            chunkhound_db_path=chunkhound_db_path,
-            chunkhound_cwd=chunkhound_work_dir,
-            chunkhound_config_path=chunkhound_cfg_path,
-            paths=paths,
-        )
+        codex_flags = list(runtime_policy.get("codex_flags") or [])
+        codex_overrides = list(runtime_policy.get("codex_config_overrides") or [])
 
         codex_meta["config_overrides"] = codex_overrides
         codex_meta["env"] = {
@@ -7635,6 +8727,13 @@ def build_interactive_resume_command(
             codex_flags=codex_flags,
             codex_config_overrides=codex_overrides,
             add_dirs=None,
+            approval_policy=(runtime_policy.get("approval_policy") if isinstance(runtime_policy, dict) else None),
+            dangerously_bypass_approvals_and_sandbox=bool(
+                runtime_policy.get("dangerously_bypass_approvals_and_sandbox", True)
+            ),
+            include_shell_environment_inherit_all=bool(
+                runtime_policy.get("include_shell_environment_inherit_all", False)
+            ),
         )
         record_codex_resume(
             codex_meta,
@@ -7661,6 +8760,7 @@ def build_interactive_resume_command(
             session_id=resume_session_id,
             env=env,
             command="claude",
+            runtime_policy=runtime_policy,
         )
         record_llm_resume(
             llm_meta,
@@ -8136,6 +9236,43 @@ def _delete_cleanup_sessions(*, session_ids: list[str], paths: ReviewflowPaths) 
     return deleted
 
 
+def _cleanup_session_json(session: CleanupSession, *, pr_state: str | None = None) -> dict[str, Any]:
+    payload = {
+        "session_id": session.session_id,
+        "status": _cleanup_session_status(session),
+        "repo_slug": session.repo_slug,
+        "path": str(session.session_dir),
+        "size_bytes": int(session.size_bytes),
+        "is_risky": bool(session.is_risky),
+    }
+    if pr_state is not None:
+        payload["pr_state"] = pr_state
+    return payload
+
+
+def _cleanup_payload(
+    *,
+    kind: str,
+    requested_target: str,
+    matched: list[dict[str, Any]],
+    deleted: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": kind,
+        "requested_target": requested_target,
+        "matched": matched,
+        "deleted": deleted,
+        "skipped": skipped,
+        "summary": {
+            "matched": len(matched),
+            "deleted": len(deleted),
+            "skipped": len(skipped),
+        },
+    }
+
+
 def _cleanup_confirm_delete(
     *,
     stdin: TextIO,
@@ -8183,10 +9320,14 @@ def clean_closed_flow(
     *,
     paths: ReviewflowPaths,
     stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
     in_stream = stdin or sys.stdin
+    out_stream = stdout or sys.stdout
     err_stream = stderr or sys.stderr
+    json_output = bool(getattr(args, "json_output", False))
+    auto_yes = bool(getattr(args, "yes", False))
 
     def emit(line: str) -> None:
         print(line, file=err_stream, flush=True)
@@ -8195,11 +9336,27 @@ def clean_closed_flow(
         is_tty = bool(in_stream.isatty()) and bool(err_stream.isatty())
     except Exception:
         is_tty = False
-    if not is_tty:
+    if (not json_output) and (not auto_yes) and (not is_tty):
         raise ReviewflowError("clean closed requires a TTY on stdin/stderr for confirmation.")
 
     sessions = scan_cleanup_sessions(sandbox_root=paths.sandbox_root)
     if not sessions:
+        if json_output:
+            print(
+                json.dumps(
+                    _cleanup_payload(
+                        kind="reviewflow.clean.preview",
+                        requested_target="closed",
+                        matched=[],
+                        deleted=[],
+                        skipped=[],
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+                file=out_stream,
+            )
+            return 0
         emit(f"No review sandboxes found under {paths.sandbox_root}.")
         return 0
 
@@ -8211,12 +9368,18 @@ def clean_closed_flow(
         label = f"{owner}/{repo}#{number}"
         if host not in {"", "github.com"}:
             label = f"{host}:{label}"
-        err_stream.write(f"\rResolving PR states [{bar}] {current}/{total}  {label}")
-        err_stream.flush()
+        try:
+            err_stream.write(f"\rResolving PR states [{bar}] {current}/{total}  {label}")
+            err_stream.flush()
+        except Exception:
+            return
 
     states, skipped_states = resolve_cleanup_pr_states(sessions=sessions, on_progress=progress)
-    err_stream.write("\n")
-    err_stream.flush()
+    try:
+        err_stream.write("\n")
+        err_stream.flush()
+    except Exception:
+        pass
     matched: list[tuple[CleanupSession, str]] = []
     skipped: list[tuple[CleanupSession, str]] = []
     for session in sessions:
@@ -8232,29 +9395,84 @@ def clean_closed_flow(
             continue
         skipped.append((session, skipped_states.get(key, "unknown PR state")))
 
+    matched_json = [_cleanup_session_json(session, pr_state=pr_state) for session, pr_state in matched]
+    skipped_json = [{**_cleanup_session_json(session), "reason": reason} for session, reason in skipped]
+
+    if json_output and (not auto_yes):
+        print(
+            json.dumps(
+                _cleanup_payload(
+                    kind="reviewflow.clean.preview",
+                    requested_target="closed",
+                    matched=matched_json,
+                    deleted=[],
+                    skipped=skipped_json,
+                ),
+                indent=2,
+                sort_keys=True,
+            ),
+            file=out_stream,
+        )
+        return 0
+
     if not matched:
+        if json_output:
+            print(
+                json.dumps(
+                    _cleanup_payload(
+                        kind="reviewflow.clean.result" if auto_yes else "reviewflow.clean.preview",
+                        requested_target="closed",
+                        matched=[],
+                        deleted=[],
+                        skipped=skipped_json,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+                file=out_stream,
+            )
+            return 0
         emit("No closed or merged PR sessions matched for cleanup.")
         if skipped:
             emit(f"Skipped {len(skipped)} session(s) with unknown PR state.")
         return 0
 
     now = _cleanup_now()
-    confirm_lines = _build_clean_closed_confirmation_lines(matched=matched, skipped=skipped, now=now)
-    risky = any(session.is_risky for session, _ in matched)
-    for line in confirm_lines:
-        emit(line)
-    if risky:
-        typed = in_stream.readline()
-        if typed.strip() != "DELETE":
-            emit("Deletion cancelled.")
-            return 0
-    else:
-        typed = in_stream.readline()
-        if typed.strip().lower() != "y":
-            emit("Deletion cancelled.")
-            return 0
+    if not auto_yes:
+        confirm_lines = _build_clean_closed_confirmation_lines(matched=matched, skipped=skipped, now=now)
+        risky = any(session.is_risky for session, _ in matched)
+        for line in confirm_lines:
+            emit(line)
+        if risky:
+            typed = in_stream.readline()
+            if typed.strip() != "DELETE":
+                emit("Deletion cancelled.")
+                return 0
+        else:
+            typed = in_stream.readline()
+            if typed.strip().lower() != "y":
+                emit("Deletion cancelled.")
+                return 0
 
     deleted = _delete_cleanup_sessions(session_ids=[session.session_id for session, _ in matched], paths=paths)
+    if json_output:
+        deleted_ids = {item["session_id"] for item in matched_json[:deleted]}
+        deleted_json = [item for item in matched_json if item["session_id"] in deleted_ids]
+        print(
+            json.dumps(
+                _cleanup_payload(
+                    kind="reviewflow.clean.result",
+                    requested_target="closed",
+                    matched=matched_json,
+                    deleted=deleted_json,
+                    skipped=skipped_json,
+                ),
+                indent=2,
+                sort_keys=True,
+            ),
+            file=out_stream,
+        )
+        return 0
     emit(
         f"Deleted {deleted} session(s), reclaimed "
         f"{_format_size_short(sum(int(session.size_bytes) for session, _ in matched))}."
@@ -8382,17 +9600,31 @@ def clean_flow(
     *,
     paths: ReviewflowPaths,
     stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
     session_id = str(getattr(args, "session_id", "") or "").strip()
+    json_output = bool(getattr(args, "json_output", False))
+    auto_yes = bool(getattr(args, "yes", False))
+    out_stream = stdout or sys.stdout
+    if (not session_id) and (json_output or auto_yes):
+        raise ReviewflowError("clean with no target does not accept --yes or --json.")
     if session_id == "closed":
-        return clean_closed_flow(args, paths=paths, stdin=stdin, stderr=stderr)
+        return clean_closed_flow(args, paths=paths, stdin=stdin, stdout=out_stream, stderr=stderr)
     if session_id:
-        return clean_session(session_id, paths=paths)
+        if auto_yes:
+            raise ReviewflowError("clean <session_id> does not accept --yes.")
+        return clean_session(session_id, paths=paths, stdout=out_stream, json_output=json_output)
     return interactive_clean_flow(args, paths=paths, stdin=stdin, stderr=stderr)
 
 
-def clean_session(session_id: str, *, paths: ReviewflowPaths) -> int:
+def clean_session(
+    session_id: str,
+    *,
+    paths: ReviewflowPaths,
+    stdout: TextIO | None = None,
+    json_output: bool = False,
+) -> int:
     root = paths.sandbox_root.resolve()
     target = (paths.sandbox_root / session_id).resolve()
     if root not in target.parents:
@@ -8400,7 +9632,49 @@ def clean_session(session_id: str, *, paths: ReviewflowPaths) -> int:
     if not target.is_dir():
         _eprint(f"Session not found: {target}")
         return 2
+    payload = None
+    if json_output:
+        meta = _load_session_meta(target / "meta.json") or {}
+        owner = str(meta.get("owner") or "").strip() or "?"
+        repo = str(meta.get("repo") or "").strip() or "?"
+        number_text = str(meta.get("number") or "").strip()
+        try:
+            number = int(number_text)
+        except Exception:
+            number = 0
+        session = CleanupSession(
+            session_id=session_id,
+            session_dir=target,
+            host=str(meta.get("host") or "").strip() or "?",
+            owner=owner,
+            repo=repo,
+            number=number,
+            repo_slug=f"{owner}/{repo}#{number if number else '?'}",
+            title=str(meta.get("title") or "").strip(),
+            status=str(meta.get("status") or "").strip().lower() or "unknown",
+            created_at=str(meta.get("created_at") or "").strip() or None,
+            completed_at=str(meta.get("completed_at") or "").strip() or None,
+            failed_at=str(meta.get("failed_at") or "").strip() or None,
+            resumed_at=str(meta.get("resumed_at") or "").strip() or None,
+            verdicts=None,
+            codex_summary=resolve_codex_summary(meta) if meta else "llm=legacy_codex/?",
+            size_bytes=_cleanup_dir_size_bytes(target),
+            path_display=str(target),
+            is_running=(str(meta.get("status") or "").strip().lower() == "running"),
+            is_recent=False,
+            is_risky=False,
+        )
+        session_json = _cleanup_session_json(session)
+        payload = _cleanup_payload(
+            kind="reviewflow.clean.result",
+            requested_target=session_id,
+            matched=[session_json],
+            deleted=[session_json],
+            skipped=[],
+        )
     shutil.rmtree(target)
+    if json_output and payload is not None:
+        print(json.dumps(payload, indent=2, sort_keys=True), file=(stdout or sys.stdout))
     return 0
 
 
@@ -8627,7 +9901,90 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
     return payload
 
 
-def _doctor_runtime_payload(runtime: ReviewflowRuntime) -> dict[str, Any]:
+def _resolved_doctor_agent_runtime(
+    runtime: ReviewflowRuntime, *, cli_profile: str | None = None
+) -> dict[str, Any]:
+    profile, profile_source, runtime_cfg, _ = resolve_agent_runtime_profile(
+        cli_value=cli_profile,
+        config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+    )
+    llm_resolved, _ = resolve_llm_config(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        cli_preset=None,
+        cli_model=None,
+        cli_effort=None,
+        cli_plan_effort=None,
+        cli_verbosity=None,
+        cli_max_output_tokens=None,
+        cli_request_overrides=None,
+        cli_header_overrides=None,
+        deprecated_codex_model=None,
+        deprecated_codex_effort=None,
+        deprecated_codex_plan_effort=None,
+    )
+    provider = str(llm_resolved.get("provider") or "").strip().lower()
+    transport = str(llm_resolved.get("transport") or "").strip().lower()
+    payload: dict[str, Any] = {
+        "profile": profile,
+        "profile_source": profile_source,
+        "provider": provider,
+        "transport": transport,
+        "command": llm_resolved.get("command"),
+    }
+    if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
+        payload["supported"] = False
+        payload["detail"] = "agent runtime profiles apply only to CLI coding-agent providers"
+        return payload
+
+    payload["supported"] = True
+    gemini_cfg = runtime_cfg.get("gemini")
+    gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
+    if provider == "codex":
+        if profile == "permissive":
+            payload.update(
+                {
+                    "dangerously_bypass_approvals_and_sandbox": True,
+                    "sandbox_mode": None,
+                    "approval_policy": None,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "dangerously_bypass_approvals_and_sandbox": False,
+                    "sandbox_mode": ("read-only" if profile == "strict" else "workspace-write"),
+                    "approval_policy": "never",
+                }
+            )
+    elif provider == "claude":
+        payload.update(
+            {
+                "dangerously_skip_permissions": (profile == "permissive"),
+                "permission_mode": (
+                    None
+                    if profile == "permissive"
+                    else ("plan" if profile == "strict" else "dontAsk")
+                ),
+            }
+        )
+    elif provider == "gemini":
+        sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
+        payload.update(
+            {
+                "approval_mode": (
+                    "plan" if profile == "strict" else ("yolo" if profile == "permissive" else "auto_edit")
+                ),
+                "sandbox": sandbox,
+                "seatbelt_profile": str(gemini_cfg.get("seatbelt_profile") or "").strip() or None,
+                "strict_ready": (bool(sandbox) if profile == "strict" else None),
+            }
+        )
+    return payload
+
+
+def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> dict[str, Any]:
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
         "reviewflow_config": _doctor_path_payload(
@@ -8651,6 +10008,7 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime) -> dict[str, Any]:
             source=runtime.codex_base_config_source,
             exists=runtime.codex_base_config_path.is_file(),
         ),
+        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
     }
 
     if not runtime.config_enabled:
@@ -8682,8 +10040,9 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime) -> dict[str, Any]:
     return payload
 
 
-def _doctor_runtime_checks(runtime: ReviewflowRuntime) -> list[DoctorCheck]:
+def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
+    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
     if not runtime.config_enabled:
@@ -8791,17 +10150,45 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime) -> list[DoctorCheck]:
         )
 
     checks.extend(_doctor_executable_check(name) for name in ("chunkhound", "gh", "jira", "codex"))
+    provider = str(agent_runtime.get("provider") or "").strip().lower()
+    command = str(agent_runtime.get("command") or "").strip()
+    if bool(agent_runtime.get("supported")) and provider and command and (provider != "codex"):
+        selected = _doctor_executable_check(command)
+        checks.append(
+            DoctorCheck(
+                name="agent-runtime-command",
+                status=selected.status,
+                detail=f"{provider}: {selected.detail}",
+            )
+        )
+    if provider == "gemini" and str(agent_runtime.get("profile") or "") == "strict":
+        if bool(agent_runtime.get("strict_ready")):
+            checks.append(
+                DoctorCheck(
+                    name="agent-runtime",
+                    status="ok",
+                    detail="gemini strict runtime backend configured",
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    name="agent-runtime",
+                    status="fail",
+                    detail="gemini strict runtime requires [agent_runtime.gemini].sandbox",
+                )
+            )
     checks.append(_doctor_gh_auth_check())
     return checks
 
 
 def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
-    checks = _doctor_runtime_checks(runtime)
+    checks = _doctor_runtime_checks(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
     if bool(getattr(args, "json_output", False)):
         ok_count = sum(1 for item in checks if item.status == "ok")
         warn_count = sum(1 for item in checks if item.status == "warn")
         fail_count = sum(1 for item in checks if item.status == "fail")
-        payload = _doctor_runtime_payload(runtime)
+        payload = _doctor_runtime_payload(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
         payload["checks"] = [
             {"name": item.name, "status": item.status, "detail": item.detail} for item in checks
         ]
@@ -8809,7 +10196,7 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if fail_count == 0 else 1
 
-    checks = _doctor_runtime_checks(runtime)
+    checks = _doctor_runtime_checks(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
     ok_count = sum(1 for item in checks if item.status == "ok")
     warn_count = sum(1 for item in checks if item.status == "warn")
     fail_count = sum(1 for item in checks if item.status == "fail")
@@ -8853,6 +10240,16 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--agent-runtime-profile",
+        dest="agent_runtime_profile",
+        choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
+        default=None,
+        help="Reviewflow-owned CLI coding-agent runtime posture (balanced, strict, permissive)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     add_runtime_args(runtime_parent)
@@ -8889,6 +10286,7 @@ def build_parser() -> argparse.ArgumentParser:
     prp.add_argument("--refresh-base", action="store_true", help="Force base cache refresh")
     prp.add_argument("--base-ttl-hours", type=int, default=24, help="Base cache TTL in hours")
     add_llm_override_args(prp)
+    add_agent_runtime_args(prp)
     prp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     prp.add_argument(
         "--codex-effort",
@@ -8928,6 +10326,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("owner_repo", help="OWNER/REPO or HOST/OWNER/REPO")
     status.add_argument("--base", required=True, help="Base branch/ref")
 
+    cdp = sub.add_parser("commands", help="Show the curated workflow command catalog", parents=[runtime_parent])
+    cdp.add_argument("--json", dest="json_output", action="store_true", help="Print structured command catalog JSON")
+
     sub.add_parser("list", help="List existing review sandboxes", parents=[runtime_parent])
 
     ip = sub.add_parser("interactive", help="Pick a past review and resume it when supported", parents=[runtime_parent])
@@ -8939,6 +10340,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[runtime_parent],
     )
     cp.add_argument("session_id", nargs="?", help="Session id (folder name), or the reserved target `closed`")
+    cp.add_argument("--yes", action="store_true", help="Execute bulk closed-session cleanup without confirmation")
+    cp.add_argument("--json", dest="json_output", action="store_true", help="Print structured cleanup JSON")
 
     mp = sub.add_parser(
         "migrate-storage",
@@ -8955,6 +10358,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
     rp.add_argument("--from", dest="from_phase", choices=["auto", "plan", "steps", "synth"], default="auto")
     add_llm_override_args(rp)
+    add_agent_runtime_args(rp)
     rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     rp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     rp.add_argument(
@@ -8975,6 +10379,7 @@ def build_parser() -> argparse.ArgumentParser:
     fup.add_argument("session_id", help="Session id (folder name)")
     fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
     add_llm_override_args(fup)
+    add_agent_runtime_args(fup)
     fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     fup.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     fup.add_argument(
@@ -8992,6 +10397,7 @@ def build_parser() -> argparse.ArgumentParser:
     zp = sub.add_parser("zip", help="Synthesize a final review from the latest generated reviews for a PR", parents=[runtime_parent])
     zp.add_argument("pr_url", help="GitHub PR URL")
     add_llm_override_args(zp)
+    add_agent_runtime_args(zp)
     zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     zp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
     zp.add_argument(
@@ -9014,6 +10420,16 @@ def build_parser() -> argparse.ArgumentParser:
     upp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
     upp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
+    sp = sub.add_parser("status", help="Show run status for a session id or PR URL", parents=[runtime_parent])
+    sp.add_argument("target", help="Session id (folder name) or PR URL")
+    sp.add_argument("--json", dest="json_output", action="store_true", help="Print structured status JSON")
+
+    wp = sub.add_parser("watch", help="Follow run status for a session id or PR URL", parents=[runtime_parent])
+    wp.add_argument("target", help="Session id (folder name) or PR URL")
+    wp.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds (default: 2.0)")
+    wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+    wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
+
     ins = sub.add_parser(
         "install",
         help="Install or update ChunkHound so the `chunkhound` CLI is available to reviewflow",
@@ -9027,6 +10443,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
+    add_agent_runtime_args(dp)
     dp.add_argument(
         "--json",
         dest="json_output",
@@ -9053,6 +10470,8 @@ def main(argv: list[str]) -> int:
             return install_flow(args)
         if args.cmd == "doctor":
             return doctor_flow(args, runtime=runtime)
+        if args.cmd == "commands":
+            return commands_flow(args)
         if args.cmd == "pr":
             return pr_flow(
                 args,
@@ -9062,6 +10481,10 @@ def main(argv: list[str]) -> int:
             )
         if args.cmd == "ui-preview":
             return ui_preview_flow(args, paths=paths)
+        if args.cmd == "status":
+            return status_flow(args, paths=paths)
+        if args.cmd == "watch":
+            return watch_flow(args, paths=paths)
         if args.cmd == "cache":
             host, owner, repo = parse_owner_repo(args.owner_repo)
             if args.cache_cmd == "prime":

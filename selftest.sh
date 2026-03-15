@@ -19,12 +19,18 @@ python3 -m venv "$tmpdir/venv"
 "$tmpdir/venv/bin/python" -m pip install "$repo_root"
 "$tmpdir/venv/bin/reviewflow" --help >/dev/null
 "$tmpdir/venv/bin/reviewflow" doctor --help >/dev/null
+python3 "$repo_root/tests/story26_cli_smoke.py" \
+  --reviewflow-bin "$tmpdir/venv/bin/reviewflow" \
+  --script-bin /usr/bin/script
 
 mkdir -p "$tmpdir/home"
 uv_bin_dir="$(HOME="$tmpdir/home" uv tool dir --bin)"
 HOME="$tmpdir/home" uv tool install --force --editable "$repo_root"
 "$uv_bin_dir/reviewflow" --help >/dev/null
 "$uv_bin_dir/reviewflow" doctor --help >/dev/null
+python3 "$repo_root/tests/story26_cli_smoke.py" \
+  --reviewflow-bin "$uv_bin_dir/reviewflow" \
+  --script-bin /usr/bin/script
 
 # Optional: real network/auth acceptance test (Codex must be available + Jira must be authenticated).
 # Usage:

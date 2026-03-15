@@ -758,6 +758,423 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+
+class AgentRuntimeConfigTests(unittest.TestCase):
+    def test_load_reviewflow_agent_runtime_config_parses_profile_and_gemini_backend(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_agent_runtime.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[agent_runtime]",
+                        'profile = "strict"',
+                        "",
+                        "[agent_runtime.gemini]",
+                        'sandbox = "runsc"',
+                        'seatbelt_profile = "strict-open"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            loaded, meta = rf.load_reviewflow_agent_runtime_config(config_path=cfg)
+            self.assertEqual(loaded["profile"], "strict")
+            self.assertEqual(loaded["gemini"]["sandbox"], "runsc")
+            self.assertEqual(loaded["gemini"]["seatbelt_profile"], "strict-open")
+            self.assertEqual(meta["agent_runtime"]["profile"], "strict")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_resolve_agent_runtime_profile_precedence(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_agent_runtime_precedence.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[agent_runtime]",
+                        'profile = "strict"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            profile, source, loaded, _ = rf.resolve_agent_runtime_profile(
+                cli_value=None,
+                config_path=cfg,
+                config_enabled=True,
+            )
+            self.assertEqual(profile, "strict")
+            self.assertEqual(source, "config")
+            self.assertEqual(loaded["profile"], "strict")
+
+            with mock.patch.dict(
+                os.environ,
+                {"REVIEWFLOW_AGENT_RUNTIME_PROFILE": "permissive"},
+                clear=False,
+            ):
+                profile, source, _, _ = rf.resolve_agent_runtime_profile(
+                    cli_value=None,
+                    config_path=cfg,
+                    config_enabled=True,
+                )
+            self.assertEqual(profile, "permissive")
+            self.assertEqual(source, "env")
+
+            profile, source, _, _ = rf.resolve_agent_runtime_profile(
+                cli_value="balanced",
+                config_path=cfg,
+                config_enabled=True,
+            )
+            self.assertEqual(profile, "balanced")
+            self.assertEqual(source, "cli")
+
+            profile, source, _, _ = rf.resolve_agent_runtime_profile(
+                cli_value=None,
+                config_path=cfg,
+                config_enabled=False,
+            )
+            self.assertEqual(profile, "balanced")
+            self.assertEqual(source, "default")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+
+class AgentRuntimePolicyTests(unittest.TestCase):
+    def _llm_resolved(self, provider: str, *, command: str | None = None) -> dict[str, object]:
+        return {
+            "preset": f"{provider}-cli",
+            "selected_name": f"{provider}-cli",
+            "transport": "cli",
+            "provider": provider,
+            "command": command or provider,
+            "model": f"{provider}-model",
+            "reasoning_effort": "medium",
+            "plan_reasoning_effort": "high",
+            "text_verbosity": None,
+            "max_output_tokens": None,
+            "env": {},
+            "capabilities": {"supports_resume": provider in {"codex", "claude"}},
+        }
+
+    def _llm_resolution_meta(self) -> dict[str, object]:
+        return {
+            "base_codex_config": {
+                "path": "/tmp/codex.toml",
+                "loaded": True,
+                "model": "gpt-5.3-codex",
+                "sandbox_mode": "danger-full-access",
+                "web_search": "live",
+                "reasoning_effort": "medium",
+                "plan_reasoning_effort": "high",
+            },
+            "resolved": {
+                "model_source": "preset",
+                "reasoning_effort_source": "preset",
+                "plan_reasoning_effort_source": "preset",
+            },
+            "runtime_overrides": {},
+        }
+
+    def _runtime_args(self, *, profile: str | None = None) -> argparse.Namespace:
+        return argparse.Namespace(agent_runtime_profile=profile)
+
+    def test_prepare_review_agent_runtime_maps_codex_profiles(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_codex"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                balanced = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="balanced"),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertEqual(balanced["profile"], "balanced")
+                self.assertEqual(balanced["provider"], "codex")
+                self.assertEqual(balanced["sandbox_mode"], "workspace-write")
+                self.assertEqual(balanced["approval_policy"], "never")
+                self.assertFalse(balanced["dangerously_bypass_approvals_and_sandbox"])
+                self.assertIn("--sandbox", balanced["codex_flags"])
+                self.assertIn("workspace-write", balanced["codex_flags"])
+
+                strict = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="strict"),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=True,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertEqual(strict["sandbox_mode"], "read-only")
+                self.assertEqual(strict["approval_policy"], "on-request")
+                self.assertFalse(strict["dangerously_bypass_approvals_and_sandbox"])
+
+                permissive = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive"),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertTrue(permissive["dangerously_bypass_approvals_and_sandbox"])
+                self.assertIsNone(permissive["sandbox_mode"])
+                self.assertIsNone(permissive["approval_policy"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_maps_claude_profiles_and_stages_files(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_claude"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="balanced"),
+                    resolved=self._llm_resolved("claude"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+            self.assertEqual(runtime["profile"], "balanced")
+            self.assertEqual(runtime["permission_mode"], "dontAsk")
+            self.assertFalse(runtime["dangerously_skip_permissions"])
+            self.assertTrue(Path(runtime["staged_paths"]["claude_settings"]).is_file())
+            self.assertTrue(Path(runtime["staged_paths"]["claude_mcp_config"]).is_file())
+            cmd = rf.build_claude_exec_cmd(
+                command="claude",
+                model="claude-sonnet-4-6",
+                prompt="hello",
+                runtime_policy=runtime,
+            )
+            self.assertIn("--setting-sources", cmd)
+            self.assertIn("user", cmd)
+            self.assertIn("--settings", cmd)
+            self.assertIn("--strict-mcp-config", cmd)
+            self.assertIn("--permission-mode", cmd)
+            self.assertIn("dontAsk", cmd)
+            self.assertIn("--add-dir", cmd)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_maps_gemini_profiles_and_stages_files(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_gemini"
+        cfg = ROOT / ".tmp_test_agent_runtime_gemini.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[agent_runtime.gemini]",
+                        'sandbox = "runsc"',
+                        'seatbelt_profile = "strict-open"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                balanced = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="balanced"),
+                    resolved=self._llm_resolved("gemini"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=cfg,
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertEqual(balanced["approval_mode"], "auto_edit")
+                self.assertTrue(Path(balanced["staged_paths"]["gemini_system_settings"]).is_file())
+                self.assertTrue(Path(balanced["staged_paths"]["gemini_trusted_folders"]).is_file())
+                self.assertEqual(balanced["env"]["GEMINI_SANDBOX"], "runsc")
+
+                strict = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="strict"),
+                    resolved=self._llm_resolved("gemini"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=cfg,
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertEqual(strict["approval_mode"], "plan")
+                self.assertEqual(strict["env"]["SEATBELT_PROFILE"], "strict-open")
+
+                permissive = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive"),
+                    resolved=self._llm_resolved("gemini"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=cfg,
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                self.assertEqual(permissive["approval_mode"], "yolo")
+                cmd = rf.build_gemini_exec_cmd(
+                    command="gemini",
+                    model="gemini-2.5-pro",
+                    prompt="hello",
+                    runtime_policy=permissive,
+                )
+                self.assertIn("--approval-mode", cmd)
+                self.assertIn("yolo", cmd)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_prepare_review_agent_runtime_rejects_gemini_strict_without_hardened_backend(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_gemini_strict_fail"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.prepare_review_agent_runtime(
+                        args=self._runtime_args(profile="strict"),
+                        resolved=self._llm_resolved("gemini"),
+                        resolution_meta=self._llm_resolution_meta(),
+                        reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                        config_enabled=True,
+                        repo_dir=repo,
+                        session_dir=session,
+                        work_dir=work,
+                        base_env={"PATH": "/usr/bin"},
+                        chunkhound_config_path=work / "chunkhound.json",
+                        chunkhound_db_path=work / ".chunkhound.db",
+                        chunkhound_cwd=work / "chunkhound",
+                        enable_mcp=True,
+                        interactive=False,
+                        paths=rf.DEFAULT_PATHS,
+                    )
+            self.assertIn("strict", str(ctx.exception))
+            self.assertIn("Gemini", str(ctx.exception))
+            self.assertIn("sandbox", str(ctx.exception))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_hard_fails_when_provider_binary_missing(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_missing_binary"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: None if name == "claude" else f"/usr/bin/{name}",
+            ):
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.prepare_review_agent_runtime(
+                        args=self._runtime_args(profile="balanced"),
+                        resolved=self._llm_resolved("claude"),
+                        resolution_meta=self._llm_resolution_meta(),
+                        reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                        config_enabled=True,
+                        repo_dir=repo,
+                        session_dir=session,
+                        work_dir=work,
+                        base_env={"PATH": "/usr/bin"},
+                        chunkhound_config_path=work / "chunkhound.json",
+                        chunkhound_db_path=work / ".chunkhound.db",
+                        chunkhound_cwd=work / "chunkhound",
+                        enable_mcp=True,
+                        interactive=False,
+                        paths=rf.DEFAULT_PATHS,
+                    )
+            self.assertIn("claude", str(ctx.exception))
+            self.assertIn("not found", str(ctx.exception))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_build_http_response_request_openrouter_uses_responses_api_and_headers(self) -> None:
         request = rf.build_http_response_request(
             {
@@ -3088,6 +3505,95 @@ class CleanFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+    def test_clean_flow_rejects_invalid_agent_flag_combinations(self) -> None:
+        root = ROOT / ".tmp_test_cleanup_invalid_flags_root"
+        cfg = ROOT / ".tmp_test_cleanup_invalid_flags_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            self._write_cleanup_session(
+                root=root,
+                session_id="exact-session",
+                status="done",
+                created_at="2026-03-01T00:00:00+00:00",
+                completed_at="2026-03-01T01:00:00+00:00",
+                review_md="**Decision**: APPROVE\n",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_cleanup_invalid_flags_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+
+            with self.assertRaises(rf.ReviewflowError):
+                rf.clean_flow(
+                    argparse.Namespace(session_id=None, yes=True, json_output=False),
+                    paths=paths,
+                    stdin=StringIO(),
+                    stderr=StringIO(),
+                )
+            with self.assertRaises(rf.ReviewflowError):
+                rf.clean_flow(
+                    argparse.Namespace(session_id=None, yes=False, json_output=True),
+                    paths=paths,
+                    stdin=StringIO(),
+                    stderr=StringIO(),
+                )
+            with self.assertRaises(rf.ReviewflowError):
+                rf.clean_flow(
+                    argparse.Namespace(session_id="exact-session", yes=True, json_output=False),
+                    paths=paths,
+                    stdin=StringIO(),
+                    stderr=StringIO(),
+                )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_clean_session_json_returns_structured_result(self) -> None:
+        root = ROOT / ".tmp_test_cleanup_exact_json_root"
+        cfg = ROOT / ".tmp_test_cleanup_exact_json_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            self._write_cleanup_session(
+                root=root,
+                session_id="exact-session",
+                status="done",
+                created_at="2026-03-01T00:00:00+00:00",
+                completed_at="2026-03-01T01:00:00+00:00",
+                number=22,
+                review_md="**Decision**: APPROVE\n",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_cleanup_exact_json_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+            stdout = StringIO()
+            rc = rf.clean_flow(
+                argparse.Namespace(session_id="exact-session", yes=False, json_output=True),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertFalse((root / "exact-session").exists())
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["kind"], "reviewflow.clean.result")
+            self.assertEqual(payload["requested_target"], "exact-session")
+            self.assertEqual(len(payload["matched"]), 1)
+            self.assertEqual(len(payload["deleted"]), 1)
+            self.assertEqual(payload["deleted"][0]["session_id"], "exact-session")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
     def test_interactive_clean_flow_bulk_deletes_visible_safe_sessions(self) -> None:
         root = ROOT / ".tmp_test_cleanup_safe_root"
         cfg = ROOT / ".tmp_test_cleanup_safe_cfg.json"
@@ -3466,6 +3972,88 @@ class CleanFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+    def test_clean_closed_json_preview_and_execute_use_structured_payloads(self) -> None:
+        root = ROOT / ".tmp_test_cleanup_closed_json_root"
+        cfg = ROOT / ".tmp_test_cleanup_closed_json_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            self._write_cleanup_session(
+                root=root,
+                session_id="closed-pr",
+                status="done",
+                created_at="2026-03-01T00:00:00+00:00",
+                completed_at="2026-03-01T01:00:00+00:00",
+                number=1,
+                review_md="**Decision**: APPROVE\n",
+            )
+            self._write_cleanup_session(
+                root=root,
+                session_id="open-pr",
+                status="done",
+                created_at="2026-03-02T00:00:00+00:00",
+                completed_at="2026-03-02T01:00:00+00:00",
+                number=2,
+                review_md="**Decision**: APPROVE\n",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_cleanup_closed_json_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+
+            with mock.patch.object(
+                rf,
+                "resolve_cleanup_pr_states",
+                return_value=(
+                    {("github.com", "acme", "repo", 1): "closed", ("github.com", "acme", "repo", 2): "open"},
+                    {},
+                ),
+            ), mock.patch.object(
+                rf,
+                "_cleanup_now",
+                return_value=datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc),
+            ):
+                preview_stdout = StringIO()
+                preview_stderr = StringIO()
+                preview_rc = rf.clean_flow(
+                    argparse.Namespace(session_id="closed", yes=False, json_output=True),
+                    paths=paths,
+                    stdout=preview_stdout,
+                    stderr=preview_stderr,
+                )
+                preview = json.loads(preview_stdout.getvalue())
+
+                self.assertEqual(preview_rc, 0)
+                self.assertTrue((root / "closed-pr").exists())
+                self.assertEqual(preview["schema_version"], 1)
+                self.assertEqual(preview["kind"], "reviewflow.clean.preview")
+                self.assertEqual([item["session_id"] for item in preview["matched"]], ["closed-pr"])
+                self.assertEqual(preview["deleted"], [])
+
+                execute_stdout = StringIO()
+                execute_stderr = StringIO()
+                execute_rc = rf.clean_flow(
+                    argparse.Namespace(session_id="closed", yes=True, json_output=True),
+                    paths=paths,
+                    stdout=execute_stdout,
+                    stderr=execute_stderr,
+                )
+                result = json.loads(execute_stdout.getvalue())
+
+            self.assertEqual(execute_rc, 0)
+            self.assertFalse((root / "closed-pr").exists())
+            self.assertTrue((root / "open-pr").exists())
+            self.assertEqual(result["schema_version"], 1)
+            self.assertEqual(result["kind"], "reviewflow.clean.result")
+            self.assertEqual([item["session_id"] for item in result["deleted"]], ["closed-pr"])
+            self.assertEqual(result["summary"]["deleted"], 1)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
     def test_interactive_clean_flow_requires_delete_word_for_risky_selection(self) -> None:
         root = ROOT / ".tmp_test_cleanup_risky_root"
         cfg = ROOT / ".tmp_test_cleanup_risky_cfg.json"
@@ -3521,6 +4109,409 @@ class RfJiraTests(unittest.TestCase):
             self.assertIn("pwd.getpwuid", text)
         finally:
             shutil.rmtree(repo, ignore_errors=True)
+
+
+class WorkflowContractTests(unittest.TestCase):
+    def _make_paths(self, root: Path, *, suffix: str) -> tuple[rf.ReviewflowPaths, Path]:
+        cfg = ROOT / f".tmp_test_workflow_contract_{suffix}.json"
+        cfg.write_text("{}", encoding="utf-8")
+        paths = rf.ReviewflowPaths(
+            sandbox_root=root,
+            cache_root=ROOT / f".tmp_test_workflow_contract_cache_{suffix}",
+            review_chunkhound_config=cfg,
+            main_chunkhound_config=cfg,
+        )
+        return paths, cfg
+
+    def _write_session(
+        self,
+        *,
+        root: Path,
+        session_id: str,
+        status: str,
+        created_at: str,
+        completed_at: str | None = None,
+        resumed_at: str | None = None,
+        host: str = "github.com",
+        owner: str = "acme",
+        repo: str = "repo",
+        number: int = 1,
+        phase: str = "review",
+        phases: dict[str, object] | None = None,
+        llm: dict[str, object] | None = None,
+        agent_runtime: dict[str, object] | None = None,
+        error: dict[str, object] | None = None,
+        followup_name: str | None = None,
+    ) -> Path:
+        session_dir = root / session_id
+        repo_dir = session_dir / "repo"
+        work_dir = session_dir / "work"
+        logs_dir = work_dir / "logs"
+        followups_dir = session_dir / "followups"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        review_md = session_dir / "review.md"
+        review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"), encoding="utf-8")
+        for name in ("reviewflow.log", "chunkhound.log", "codex.log"):
+            (logs_dir / name).write_text(f"{name}\n", encoding="utf-8")
+
+        followups: list[dict[str, object]] = []
+        if followup_name:
+            followups_dir.mkdir(parents=True, exist_ok=True)
+            followup_path = followups_dir / followup_name
+            followup_path.write_text("# Followup\n", encoding="utf-8")
+            followups.append(
+                {
+                    "completed_at": "2026-03-10T12:05:00+00:00",
+                    "output_path": str(followup_path),
+                }
+            )
+
+        meta: dict[str, object] = {
+            "session_id": session_id,
+            "status": status,
+            "phase": phase,
+            "phases": phases
+            or {
+                "init": {"status": "done", "started_at": created_at, "finished_at": created_at},
+                phase: {"status": status if status in {"done", "error"} else "running", "started_at": created_at},
+            },
+            "host": host,
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "title": "Story 26 test session",
+            "created_at": created_at,
+            "paths": {
+                "repo_dir": str(repo_dir),
+                "work_dir": str(work_dir),
+                "logs_dir": str(logs_dir),
+                "review_md": str(review_md),
+            },
+            "logs": {
+                "reviewflow": str(logs_dir / "reviewflow.log"),
+                "chunkhound": str(logs_dir / "chunkhound.log"),
+                "codex": str(logs_dir / "codex.log"),
+            },
+        }
+        if completed_at is not None:
+            meta["completed_at"] = completed_at
+        if resumed_at is not None:
+            meta["resumed_at"] = resumed_at
+        if llm is not None:
+            meta["llm"] = llm
+        if agent_runtime is not None:
+            meta["agent_runtime"] = agent_runtime
+        if error is not None:
+            meta["error"] = error
+        if followups:
+            meta["followups"] = followups
+
+        (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        return session_dir
+
+    def test_commands_flow_json_returns_curated_agent_catalog(self) -> None:
+        stdout = StringIO()
+        rc = rf.commands_flow(argparse.Namespace(json_output=True), stdout=stdout)
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["kind"], "reviewflow.commands")
+        names = [entry["name"] for entry in payload["commands"]]
+        self.assertEqual(names, ["pr", "followup", "resume", "zip", "clean", "status", "watch"])
+        pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
+        self.assertEqual(pr_entry["recommended_invocation"], "reviewflow pr <PR_URL> --if-reviewed new")
+        self.assertIn("variants", pr_entry)
+        self.assertNotIn("interactive", names)
+
+    def test_commands_flow_human_output_lists_curated_recommended_invocations(self) -> None:
+        stdout = StringIO()
+        rc = rf.commands_flow(argparse.Namespace(json_output=False), stdout=stdout)
+        rendered = stdout.getvalue()
+
+        self.assertEqual(rc, 0)
+        self.assertIn("pr: Create a new review session for a PR.", rendered)
+        self.assertIn("reviewflow clean closed --json", rendered)
+        self.assertIn("reviewflow status <session_id|PR_URL> --json", rendered)
+        self.assertIn("reviewflow watch <session_id|PR_URL>", rendered)
+        self.assertNotIn("interactive", rendered)
+
+    def test_status_flow_exact_session_human_output_uses_exact_resolution(self) -> None:
+        root = ROOT / ".tmp_test_status_exact_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_exact")
+            self._write_session(
+                root=root,
+                session_id="exact-session",
+                status="done",
+                created_at="2026-03-10T10:00:00+00:00",
+                completed_at="2026-03-10T10:10:00+00:00",
+                number=29,
+                llm={
+                    "preset": "codex-cli",
+                    "transport": "cli",
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(target="exact-session", json_output=False),
+                paths=paths,
+                stdout=stdout,
+            )
+
+            rendered = stdout.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("session=exact-session", rendered)
+            self.assertIn("repo=acme/repo#29", rendered)
+            self.assertIn("status=done", rendered)
+            self.assertIn("phase=review", rendered)
+            self.assertIn("llm=codex-cli/gpt-5.4/medium", rendered)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_json_prefers_newest_running_session_for_pr_url(self) -> None:
+        root = ROOT / ".tmp_test_status_running_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_running")
+            self._write_session(
+                root=root,
+                session_id="done-older",
+                status="done",
+                created_at="2026-03-10T10:00:00+00:00",
+                completed_at="2026-03-10T10:10:00+00:00",
+                number=26,
+            )
+            self._write_session(
+                root=root,
+                session_id="running-newer",
+                status="running",
+                created_at="2026-03-10T11:00:00+00:00",
+                resumed_at="2026-03-10T11:05:00+00:00",
+                number=26,
+                llm={
+                    "preset": "claude-cli",
+                    "transport": "cli",
+                    "provider": "claude",
+                    "model": "claude-sonnet-4-6",
+                    "reasoning_effort": "high",
+                    "capabilities": {"supports_resume": True},
+                },
+                agent_runtime={"profile": "balanced", "provider": "claude", "permission_mode": "dontAsk"},
+                followup_name="followup-1.md",
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(
+                    target="https://github.com/acme/repo/pull/26",
+                    json_output=True,
+                ),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["kind"], "reviewflow.status")
+            self.assertEqual(payload["requested_target"]["kind"], "pr_url")
+            self.assertEqual(payload["resolved_target"]["session_id"], "running-newer")
+            self.assertEqual(payload["resolution_strategy"], "newest_running")
+            self.assertEqual(payload["pr"]["pr_url"], "https://github.com/acme/repo/pull/26")
+            self.assertEqual(payload["status"], "running")
+            self.assertEqual(payload["phase"], "review")
+            self.assertTrue(payload["paths"]["logs_dir"].endswith("/work/logs"))
+            self.assertTrue(payload["logs"]["codex"].endswith("/work/logs/codex.log"))
+            self.assertEqual(payload["latest_artifact"]["path"].rsplit("/", 1)[-1], "followup-1.md")
+            self.assertEqual(payload["llm"]["summary"], "llm=claude-cli/claude-sonnet-4-6/high")
+            self.assertEqual(payload["agent_runtime"]["profile"], "balanced")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_json_uses_newest_resumed_or_created_when_no_session_running(self) -> None:
+        root = ROOT / ".tmp_test_status_fallback_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_fallback")
+            self._write_session(
+                root=root,
+                session_id="created-later",
+                status="done",
+                created_at="2026-03-10T11:00:00+00:00",
+                completed_at="2026-03-10T11:10:00+00:00",
+                number=27,
+            )
+            self._write_session(
+                root=root,
+                session_id="resumed-newest",
+                status="error",
+                created_at="2026-03-10T09:00:00+00:00",
+                resumed_at="2026-03-10T12:00:00+00:00",
+                number=27,
+                error={"type": "exception", "message": "boom"},
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(
+                    target="https://github.com/acme/repo/pull/27",
+                    json_output=True,
+                ),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["resolved_target"]["session_id"], "resumed-newest")
+            self.assertEqual(payload["resolution_strategy"], "newest_activity")
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["message"], "boom")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_rejects_invalid_or_missing_targets(self) -> None:
+        root = ROOT / ".tmp_test_status_negative_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_negative")
+
+            with self.assertRaises(rf.ReviewflowError):
+                rf.status_flow(
+                    argparse.Namespace(target="/tmp/not-a-session", json_output=True),
+                    paths=paths,
+                    stdout=StringIO(),
+                )
+
+            with self.assertRaises(rf.ReviewflowError):
+                rf.status_flow(
+                    argparse.Namespace(target="missing-session", json_output=True),
+                    paths=paths,
+                    stdout=StringIO(),
+                )
+
+            corrupt_dir = root / "corrupt-session"
+            corrupt_dir.mkdir(parents=True, exist_ok=True)
+            (corrupt_dir / "meta.json").write_text("{not-json", encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError):
+                rf.status_flow(
+                    argparse.Namespace(target="corrupt-session", json_output=True),
+                    paths=paths,
+                    stdout=StringIO(),
+                )
+
+            with self.assertRaises(rf.ReviewflowError):
+                rf.status_flow(
+                    argparse.Namespace(
+                        target="https://github.com/acme/repo/pull/404",
+                        json_output=True,
+                    ),
+                    paths=paths,
+                    stdout=StringIO(),
+                )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_rejects_empty_target(self) -> None:
+        paths = rf.ReviewflowPaths(
+            sandbox_root=ROOT / ".tmp_status_empty_root",
+            cache_root=ROOT / ".tmp_status_empty_cache",
+            review_chunkhound_config=ROOT / ".tmp_status_empty_cfg",
+            main_chunkhound_config=ROOT / ".tmp_status_empty_cfg2",
+        )
+        with self.assertRaises(rf.ReviewflowError):
+            rf.status_flow(argparse.Namespace(target="", json_output=True), paths=paths, stdout=StringIO())
+
+    def test_watch_flow_non_tty_prints_plain_status_and_uses_terminal_exit_codes(self) -> None:
+        root = ROOT / ".tmp_test_watch_error_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="watch_error")
+            self._write_session(
+                root=root,
+                session_id="watch-error",
+                status="error",
+                created_at="2026-03-10T09:00:00+00:00",
+                number=28,
+                error={"type": "exception", "message": "bad"},
+            )
+
+            stdout = StringIO()
+            rc = rf.watch_flow(
+                argparse.Namespace(
+                    target="watch-error",
+                    interval=0.0,
+                    verbosity="quiet",
+                    no_color=True,
+                ),
+                paths=paths,
+                stdout=stdout,
+                stderr=StringIO(),
+            )
+
+            rendered = stdout.getvalue()
+            self.assertEqual(rc, 1)
+            self.assertIn("session=watch-error", rendered)
+            self.assertIn("status=error", rendered)
+            self.assertIn("phase=review", rendered)
+            self.assertNotIn("\x1b[", rendered)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_watch_flow_non_tty_returns_zero_for_done(self) -> None:
+        root = ROOT / ".tmp_test_watch_done_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="watch_done")
+            self._write_session(
+                root=root,
+                session_id="watch-done",
+                status="done",
+                created_at="2026-03-10T09:00:00+00:00",
+                completed_at="2026-03-10T09:05:00+00:00",
+                number=30,
+            )
+
+            stdout = StringIO()
+            rc = rf.watch_flow(
+                argparse.Namespace(
+                    target="watch-done",
+                    interval=0.0,
+                    verbosity="quiet",
+                    no_color=True,
+                ),
+                paths=paths,
+                stdout=stdout,
+                stderr=StringIO(),
+            )
+
+            rendered = stdout.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("session=watch-done", rendered)
+            self.assertIn("status=done", rendered)
+            self.assertNotIn("\x1b[", rendered)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
 
 
 class CodexCommandTests(unittest.TestCase):
@@ -3620,6 +4611,34 @@ class TuiDashboardTests(unittest.TestCase):
         args5 = p.parse_args(["clean", "session-123"])
         self.assertEqual(args5.session_id, "session-123")
 
+        args6 = p.parse_args(["commands", "--json"])
+        self.assertTrue(args6.json_output)
+
+        args7 = p.parse_args(["status", "session-123", "--json"])
+        self.assertEqual(args7.target, "session-123")
+        self.assertTrue(args7.json_output)
+
+        args8 = p.parse_args(
+            [
+                "watch",
+                "https://github.com/acme/repo/pull/1",
+                "--interval",
+                "5",
+                "--verbosity",
+                "quiet",
+                "--no-color",
+            ]
+        )
+        self.assertEqual(args8.target, "https://github.com/acme/repo/pull/1")
+        self.assertEqual(args8.interval, 5.0)
+        self.assertEqual(args8.verbosity, "quiet")
+        self.assertTrue(args8.no_color)
+
+        args9 = p.parse_args(["clean", "closed", "--yes", "--json"])
+        self.assertEqual(args9.session_id, "closed")
+        self.assertTrue(args9.yes)
+        self.assertTrue(args9.json_output)
+
     def test_parser_accepts_runtime_overrides_before_and_after_subcommand(self) -> None:
         p = rf.build_parser()
         args = p.parse_args(["--config", "/tmp/reviewflow.toml", "doctor"])
@@ -3630,6 +4649,8 @@ class TuiDashboardTests(unittest.TestCase):
                 "doctor",
                 "--config",
                 "/tmp/reviewflow.toml",
+                "--agent-runtime-profile",
+                "strict",
                 "--sandbox-root",
                 "/tmp/sandboxes",
                 "--cache-root",
@@ -3640,6 +4661,7 @@ class TuiDashboardTests(unittest.TestCase):
         )
         self.assertEqual(args2.config_path, "/tmp/reviewflow.toml")
         self.assertFalse(args2.no_config)
+        self.assertEqual(args2.agent_runtime_profile, "strict")
         self.assertEqual(args2.sandbox_root, "/tmp/sandboxes")
         self.assertEqual(args2.cache_root, "/tmp/cache")
         self.assertEqual(args2.codex_config_path, "/tmp/codex.toml")
@@ -3744,6 +4766,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         payload = {
             "config_path": None,
             "no_config": False,
+            "agent_runtime_profile": None,
             "sandbox_root": None,
             "cache_root": None,
             "codex_config_path": None,
@@ -3966,6 +4989,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         payload = {
             "config_path": None,
             "no_config": False,
+            "agent_runtime_profile": None,
             "sandbox_root": None,
             "cache_root": None,
             "codex_config_path": None,
@@ -4041,11 +5065,28 @@ class InstallAndDoctorTests(unittest.TestCase):
 
     def test_readme_documents_uv_tool_install_flow(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Agentic Quickstart", readme)
+        self.assertIn("Agent Operating Contract", readme)
+        self.assertIn("Canonical agent prompt", readme)
+        self.assertIn("Use reviewflow from <REVIEWFLOW_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.", readme)
+        self.assertIn("If `reviewflow` is already installed and working, use it.", readme)
+        self.assertIn("If `reviewflow` is installed but not working", readme)
+        self.assertIn("If `reviewflow` is not installed, install it from <REVIEWFLOW_SOURCE>.", readme)
         self.assertIn("uv tool install /path/to/reviewflow", readme)
         self.assertIn("uv tool install --editable /path/to/reviewflow", readme)
         self.assertIn("reviewflow install", readme)
         self.assertIn("reviewflow doctor", readme)
         self.assertIn("reviewflow doctor --json", readme)
+        self.assertIn("reviewflow commands --json", readme)
+        self.assertIn("reviewflow status <session_id|PR_URL>", readme)
+        self.assertIn("reviewflow watch <session_id|PR_URL>", readme)
+        self.assertIn("reviewflow pr <PR_URL> --if-reviewed new", readme)
+        self.assertIn("reviewflow install provisions ChunkHound only", readme)
+        self.assertIn("ask only the missing config questions", readme)
+        self.assertIn("Ask only for the missing configuration, credentials, or project-specific inputs.", readme)
+        self.assertIn("Do not invent config, assume hidden secrets, or skip readiness checks.", readme)
+        self.assertIn("If the environment is not ready for a live review, stop and report the exact missing prerequisites.", readme)
+        self.assertIn("no built-in setup wizard", readme)
         self.assertIn("--no-config", readme)
         self.assertIn("uv tool dir --bin", readme)
         self.assertIn("runnable from PATH", readme)
@@ -4053,6 +5094,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("project.reviewflow.toml", readme)
         self.assertIn("The project itself does not need to import reviewflow.", readme)
         self.assertIn("REVIEWFLOW_CONFIG=/workspaces/.reviewflow.toml reviewflow", readme)
+        self.assertIn("--agent-runtime-profile", readme)
+        self.assertIn("balanced", readme)
+        self.assertIn("strict", readme)
+        self.assertIn("permissive", readme)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
         reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")
@@ -4212,6 +5257,15 @@ class InstallAndDoctorTests(unittest.TestCase):
                         "[chunkhound]",
                         f'base_config_path = "{base_cfg}"',
                         "",
+                        "[agent_runtime]",
+                        'profile = "strict"',
+                        "",
+                        "[llm]",
+                        'default_preset = "claude_default"',
+                        "",
+                        "[llm_presets.claude_default]",
+                        'preset = "claude-cli"',
+                        "",
                     ]
                 ),
                 encoding="utf-8",
@@ -4230,6 +5284,8 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertTrue(payload["reviewflow_config"]["exists"])
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
+            self.assertEqual(payload["agent_runtime"]["profile"], "strict")
+            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
