@@ -1,15 +1,54 @@
 # CURe (ChunkHound + LLM Presets) — PR Review Sandboxes
 
-Goal: create an isolated checkout of a PR, reuse a cached ChunkHound base index, top up indexing for the PR, then run a review agent against that sandbox without touching your source checkout. Reviews use a **sandbox-scoped ChunkHound MCP server** when the selected transport supports it.
+CURe creates an isolated PR review sandbox, reuses a cached ChunkHound base index, tops it up for the PR, and runs a review agent against that sandbox without touching the source checkout. Reviews use a **sandbox-scoped ChunkHound MCP server** when the selected transport supports it.
+
+Use CURe when you want:
+- a human-readable, repeatable PR review flow
+- an agent-safe bootstrap path from a pristine environment
+- a review workspace that does not mutate the project checkout
+
+Human operators should be able to skim the first screen and understand the premise, install model, and how to sync it with their agents. Agents should be able to read the skill section below and start working with only a PR URL, a CURe source path, and the missing project-specific config inputs.
 
 Terminology:
-- Use **CURe** as the public product name.
-- Use the plain phrase **code under review** for the thing being reviewed.
-- `reviewflow` remains the source checkout / package slug / compatibility namespace for this release.
+- **CURe** is the public product name.
+- **code under review** is the thing being reviewed.
+- `reviewflow` remains the package/config compatibility namespace for now.
 
-## Agentic Quickstart
-Use this when an agent is bootstrapping CURe from scratch.
+## Human Snapshot
+CURe is an external CLI that sits beside a project, not inside it. You install it once into an operator or agent environment, point it at a project-specific `reviewflow.toml`, and then both humans and agents use the same `cure ...` commands to create, observe, resume, and clean review sandboxes.
 
+If you only remember one command, it is:
+```bash
+cure pr <PR_URL> --if-reviewed new
+```
+
+If you are syncing CURe with an agent, the operator’s job is:
+1. Install CURe and ChunkHound once.
+2. Provide or point the agent at the right `reviewflow.toml`.
+3. Make sure required external tools are authenticated.
+4. Hand the agent the PR URL and the CURe source/install path.
+
+## Agent Skill
+Treat this section as a portable remote skill for a fresh agent session.
+
+### When to use CURe
+Use CURe when:
+- you need to review a GitHub PR from an isolated sandbox rather than the source checkout
+- you want a stable start command and observable review session state
+- you need a workflow that can bootstrap from a pristine environment with explicit readiness checks
+
+Do not use CURe when:
+- you only need a quick local diff review in the existing repo checkout
+- the environment cannot install tools or authenticate the required external systems
+
+### Inputs the agent needs
+Before starting, gather:
+- `PR_URL`
+- `<REVIEWFLOW_SOURCE>` or another install source for CURe
+- `<PROJECT_PATH>` if the operator expects project-local wrappers/config
+- a valid `reviewflow.toml` path or the missing project-specific values needed to create one
+
+### Bootstrap from a pristine environment
 1. Install the CLI:
 ```bash
 uv tool install /path/to/reviewflow
@@ -22,23 +61,27 @@ python3 -m pip install /path/to/reviewflow
 ```bash
 cure install
 ```
-`cure install provisions ChunkHound only`.
+`cure install` provisions ChunkHound only.
 3. Check readiness:
 ```bash
 cure doctor --json
 ```
-`cure doctor --json` is the preferred readiness check for agents.
-4. Create or update a project-specific CURe config.
-5. Start the review with the stable agent-safe command:
+4. Create or point CURe at the project’s `reviewflow.toml`.
+5. Start the review:
 ```bash
 cure pr <PR_URL> --if-reviewed new
 ```
-6. Observe the run:
+6. Observe progress:
 ```bash
 cure status <session_id|PR_URL> --json
 cure watch <session_id|PR_URL>
 ```
-7. Optional follow-up actions:
+
+### What success looks like
+- `cure pr <PR_URL> --if-reviewed new` creates a session sandbox and prints the session path to stdout.
+- `cure status ... --json` gives the machine-readable current state.
+- `cure watch ...` lets a second agent or human observe the run.
+- Follow-up actions use the same session id:
 ```bash
 cure followup <session_id>
 cure resume <session_id|PR_URL>
@@ -46,31 +89,14 @@ cure zip <PR_URL>
 cure clean closed --json
 ```
 
-Agent expectations:
-- `cure install` provisions ChunkHound only. It does not authenticate external tools or write project config for you.
-- The agent should inspect the environment and ask only the missing config questions.
-- There is no built-in setup wizard in this story.
-- There is no built-in setup wizard or `cure init` flow here, so agents should adapt the minimal config below instead of expecting an interactive bootstrap.
-- `reviewflow` remains a temporary deprecated alias for one release.
+### When to stop and ask
+Stop instead of guessing when:
+- `cure doctor --json` shows missing prerequisites
+- the project-specific `reviewflow.toml` or `[review_intelligence].tool_prompt_fragment` is missing
+- `gh`, Jira, provider credentials, or ChunkHound base config are unavailable
+- the operator has not supplied the missing project-specific config values
 
-Minimal config example:
-```toml
-[review_intelligence]
-tool_prompt_fragment = """
-Preferred review-intelligence tools:
-- Use GitHub MCP for PR context when available.
-- Otherwise use gh CLI / gh api.
-- Use any additional tools or sources that materially improve understanding of the code under review.
-"""
-
-[chunkhound]
-base_config_path = "/absolute/path/to/chunkhound-base.json"
-```
-
-## Agent Operating Contract
-If you are an autonomous agent reading this README, use this section as the CURe operating contract.
-
-Canonical agent prompt:
+### Canonical agent prompt
 ```text
 Use CURe from <REVIEWFLOW_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.
 
@@ -87,95 +113,79 @@ Required behavior:
 - If the environment is not ready for a live review, stop and report the exact missing prerequisites.
 ```
 
-Expected agent outcomes:
-- Ready and started review:
-  report install or repair outcome, exact commands used, the created session path, and the status/watch summary.
-- Not ready for live review:
-  report install or repair outcome, the `cure doctor --json` summary, and the exact missing prerequisites.
+### Minimal config example
+```toml
+[review_intelligence]
+tool_prompt_fragment = """
+Preferred review-intelligence tools:
+- Use GitHub MCP for PR context when available.
+- Otherwise use gh CLI / gh api.
+- Use any additional tools or sources that materially improve understanding of the code under review.
+"""
 
-## Prereqs
-- `gh` authenticated (`gh auth login -h github.com`)
-- Any tooling referenced by the active CURe config `[review_intelligence].tool_prompt_fragment` must be available and authenticated
-- The active CURe config includes a `[chunkhound]` section with an explicit `base_config_path`
-- ChunkHound embedding key available via `CHUNKHOUND_EMBEDDING__API_KEY` (CURe will infer it from the configured `[chunkhound].base_config_path` if present)
+[chunkhound]
+base_config_path = "/absolute/path/to/chunkhound-base.json"
+```
 
-## Install
-Install CURe into the current Python environment:
+## Human Operator Setup
+Treat CURe as an external CLI tool for the project environment, not as an in-repo Python dependency.
+
+### Install once per environment
 ```bash
 python3 -m pip install /path/to/reviewflow
 ```
-
-Or install CURe as a uv-managed CLI tool:
+or
 ```bash
 uv tool install /path/to/reviewflow
 ```
-
-For a live repo-checkout install while iterating locally:
+for local iteration from a checkout:
 ```bash
 uv tool install --editable /path/to/reviewflow
 ```
-
-After either install method, provision ChunkHound from the published release (default) and then run diagnostics:
+then
 ```bash
 cure install
 cure doctor
 cure doctor --json
 ```
-
-When the current package is installed via `uv tool`, `cure install` provisions ChunkHound as a `uv` tool too, so `chunkhound` lands in the `uv tool` bin dir and is expected to be runnable from PATH.
-
-Install ChunkHound from the latest upstream `main` instead:
-```bash
-cure install --chunkhound-source git-main
-```
-
-Inspect the executable directory directly if needed:
+If you need to inspect the executable directory directly:
 ```bash
 uv tool dir --bin
 ```
+When installed via `uv tool`, both `cure` and `chunkhound` are expected to be runnable from PATH.
 
-## Onboarding a Project
-Treat CURe as an external CLI tool for the project environment, not as an in-repo Python dependency.
+### Configure once per project
+Point CURe at the project config with one of:
+- `cure --config /path/to/project.reviewflow.toml ...`
+- `REVIEWFLOW_CONFIG=/path/to/project.reviewflow.toml`
+- `REVIEWFLOW_CONFIG=/path/to/workspace.reviewflow.toml cure ...`
 
-1. Install CURe into the environment where engineers will run reviews.
-   - `python3 -m pip install /path/to/reviewflow`
-   - or `uv tool install /path/to/reviewflow`
-2. Provision the review dependencies once in that environment.
-   - `cure install`
-   - `cure doctor`
-3. Create a project-specific CURe config file and point the CLI at it.
-   - `cure --config /path/to/project.reviewflow.toml ...`
-   - or `REVIEWFLOW_CONFIG=/path/to/project.reviewflow.toml`
-   - or use a small wrapper if your team wants a stable workspace-scoped file:
-     `REVIEWFLOW_CONFIG=/path/to/workspace.reviewflow.toml cure ...`
-4. Put the project defaults into that config file.
-   - `[review_intelligence]`
-   - `[chunkhound].base_config_path`
-   - optional `[paths]`, `[llm]`, `[llm_presets.*]`, `[codex]`, `[multipass]`
-5. Add a thin project wrapper if you want a stable team entrypoint.
-   - `make review-pr ...`
-   - `just review-pr ...`
-   - a shell script that exports `REVIEWFLOW_CONFIG` and calls `cure`
-
-The project itself does not need to import reviewflow. It only needs:
+The project itself does not need to import CURe. It only needs:
 - the `cure` executable available
 - a project config file
 - the required external tools (`gh`, `jira`, `codex`) installed separately if that workflow uses them
 
-## Agent Command Contract
-- `cure commands --json` is the curated machine-readable workflow catalog for agents.
-- `cure pr <PR_URL> --if-reviewed new` is the stable agent-safe start-review command.
-- Bare `cure pr <PR_URL>` keeps current compatibility behavior, including the existing non-TTY fallback from `prompt` to `new`, but it is not the primary documented agent contract.
-- `reviewflow` remains a temporary deprecated alias for the same command surface during this release.
-- `cure pr` prints the session directory path to stdout on success.
-- `cure followup <session_id>` keeps its current exact-session target contract.
-- `cure resume <session_id|PR_URL>` keeps its existing special PR URL behavior. PR URL mode is compatibility behavior for resume/follow-up, not the shared `status/watch` resolver contract.
-- `cure zip <PR_URL>` prints the generated markdown path to stdout on success.
-- `cure clean closed --json` previews bulk cleanup without deleting anything.
-- `cure clean closed --yes --json` executes bulk cleanup and returns a structured result.
-- `cure clean <session_id> --json` performs an exact delete and returns a structured result.
-- `cure clean <session_id> --yes` is invalid.
-- `cure clean` with no target stays TTY-only and rejects `--yes` / `--json`.
+### Sync CURe with your agents
+To make CURe usable by agents repeatedly:
+- give them the install/source path for CURe
+- give them the project config path or the exact missing values needed to create it
+- standardize on `cure pr <PR_URL> --if-reviewed new` as the start path
+- use wrappers only if they simplify config handoff, not to hide the core `cure` contract
+
+## Fast Reference
+
+### Prereqs
+- `gh` authenticated (`gh auth login -h github.com`)
+- Any tooling referenced by the active CURe config `[review_intelligence].tool_prompt_fragment` must be available and authenticated
+- The active CURe config includes a `[chunkhound]` section with an explicit `base_config_path`
+- ChunkHound embedding key available via `CHUNKHOUND_EMBEDDING__API_KEY` (CURe will infer it from the configured `[chunkhound].base_config_path` if present)
+
+Agent expectations:
+- `cure install` provisions ChunkHound only. It does not authenticate external tools or write project config for you.
+- The agent should inspect the environment and ask only the missing config questions.
+- There is no built-in setup wizard in this story.
+- There is no built-in setup wizard or `cure init` flow here, so agents should adapt the minimal config below instead of expecting an interactive bootstrap.
+- `reviewflow` remains a temporary deprecated alias for one release.
 
 ## Commands
 
