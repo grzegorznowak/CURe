@@ -178,7 +178,7 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
                         "Preferred review-intelligence tools:",
                         "- Use GitHub MCP for PR context when available.",
                         "- Otherwise use gh CLI / gh api.",
-                        "- Use any additional tools or sources that materially improve understanding of the codebase-under-review (CURe).",
+                        "- Use any additional tools or sources that materially improve understanding of the code under review.",
                         '"""',
                         "",
                     ]
@@ -264,9 +264,107 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
         )
         guidance = rf.build_review_intelligence_guidance(cfg)
         self.assertIn("Use GitHub MCP first.", guidance)
-        self.assertIn("CURe-first policy", guidance)
-        self.assertIn("materially improves understanding of the codebase-under-review", guidance)
+        self.assertIn("Code under review first policy", guidance)
+        self.assertIn("materially improves understanding of the code under review", guidance)
+        self.assertNotIn("codebase-under-review (CURe)", guidance)
         self.assertNotIn("rf-fetch-url", guidance)
+
+
+class PublicGitHubFallbackTests(unittest.TestCase):
+    def _gh_auth_error(self, cmd: list[str]) -> rf.ReviewflowSubprocessError:
+        return rf.ReviewflowSubprocessError(
+            cmd=cmd,
+            cwd=None,
+            exit_code=4,
+            stdout="",
+            stderr="To get started with GitHub CLI, please run:  gh auth login",
+        )
+
+    def test_gh_api_json_falls_back_to_public_github_api(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(
+            {
+                "title": "Public PR",
+                "base": {"ref": "main"},
+                "head": {"sha": "abc123"},
+            }
+        ).encode("utf-8")
+        with mock.patch.object(
+            rf,
+            "run_cmd",
+            side_effect=self._gh_auth_error(["gh", "api", "--hostname", "github.com", "repos/acme/repo/pulls/1"]),
+        ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response):
+            payload = rf.gh_api_json(
+                host="github.com",
+                path="repos/acme/repo/pulls/1",
+                allow_public_fallback=True,
+            )
+
+        self.assertEqual(payload["title"], "Public PR")
+        self.assertEqual(payload["base"]["ref"], "main")
+        self.assertEqual(payload["head"]["sha"], "abc123")
+
+    def test_clone_seed_repo_falls_back_to_public_git_clone(self) -> None:
+        seed = ROOT / ".tmp_test_public_seed"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "repo", "clone"]:
+                raise self._gh_auth_error(cmd)
+            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
+
+        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
+            rf.clone_seed_repo(host="github.com", owner="chunkhound", repo="chunkhound", seed=seed)
+
+        self.assertEqual(calls[0], ["gh", "repo", "clone", "chunkhound/chunkhound", str(seed)])
+        self.assertEqual(
+            calls[1],
+            ["git", "clone", "https://github.com/chunkhound/chunkhound.git", str(seed)],
+        )
+
+    def test_checkout_pr_in_repo_falls_back_to_public_git_fetch(self) -> None:
+        repo_dir = ROOT / ".tmp_test_public_checkout"
+        pr = rf.PullRequestRef(host="github.com", owner="chunkhound", repo="chunkhound", number=219)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "checkout"]:
+                raise self._gh_auth_error(cmd)
+            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
+
+        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
+            rf.checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
+
+        self.assertEqual(
+            calls[0],
+            ["gh", "pr", "checkout", "219", "-R", "chunkhound/chunkhound", "--force"],
+        )
+        self.assertEqual(
+            calls[1],
+            [
+                "git",
+                "-C",
+                str(repo_dir),
+                "fetch",
+                "origin",
+                "refs/pull/219/head:reviewflow_pr__219",
+            ],
+        )
+        self.assertEqual(
+            calls[2],
+            [
+                "git",
+                "-C",
+                str(repo_dir),
+                "checkout",
+                "-B",
+                "reviewflow_pr__219",
+                "reviewflow_pr__219",
+            ],
+        )
 
 
 class ChunkHoundConfigTests(unittest.TestCase):
@@ -572,7 +670,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         "",
                         "[llm_presets.fast_router]",
                         'preset = "openrouter-responses"',
-                        'api_key = "sk-openrouter"',
+                        'api_key = "test-openrouter-key"',
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
                         'plan_reasoning_effort = "xhigh"',
@@ -584,7 +682,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "gpt-5.4"',
                         'reasoning_effort = "medium"',
-                        'env = { OPENAI_API_KEY = "sk-codex" }',
+                        'env = { OPENAI_API_KEY = "test-openai-key" }',
                         "",
                     ]
                 ),
@@ -598,7 +696,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(llm_cfg["presets"]["fast_router"]["headers"]["X-Test"], "1")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["request"]["service_tier"], "flex")
             self.assertEqual(llm_cfg["presets"]["my_codex"]["transport"], "cli")
-            self.assertEqual(llm_cfg["presets"]["my_codex"]["env"]["OPENAI_API_KEY"], "sk-codex")
+            self.assertEqual(llm_cfg["presets"]["my_codex"]["env"]["OPENAI_API_KEY"], "test-openai-key")
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -745,7 +843,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'provider = "openrouter"',
                         'endpoint = "responses"',
                         'base_url = "https://openrouter.ai/api/v1"',
-                        'api_key = "sk-openrouter"',
+                        'api_key = "test-openrouter-key"',
                         'model = "x-ai/grok-4.1-fast"',
                         "",
                     ]
@@ -757,6 +855,48 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["deprecated_explicit_presets"], ["legacy_router"])
         finally:
             cfg.unlink(missing_ok=True)
+
+    def test_build_llm_meta_persists_env_keys_not_env_values(self) -> None:
+        meta = rf.build_llm_meta(
+            resolved={
+                "preset": "codex-cli",
+                "selected_name": "team_codex",
+                "transport": "cli",
+                "provider": "codex",
+                "command": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "medium",
+                "plan_reasoning_effort": "high",
+                "text_verbosity": None,
+                "max_output_tokens": None,
+                "env": {"OPENAI_API_KEY": "test-openai-key"},
+                "capabilities": {"supports_resume": True},
+            },
+            resolution_meta={"runtime_overrides": {}},
+            env={},
+        )
+        self.assertEqual(meta["env_keys"], ["OPENAI_API_KEY"])
+        self.assertNotIn("env", meta)
+
+    def test_write_redacted_json_scrubs_secret_like_keys_case_insensitively(self) -> None:
+        path = ROOT / ".tmp_test_redacted_meta.json"
+        try:
+            rf.write_redacted_json(
+                path,
+                {
+                    "env": {"OPENAI_API_KEY": "test-openai-key"},
+                    "headers": {
+                        "Authorization": "Bearer test-openrouter-key",
+                        "HTTP-Referer": "https://example.com",
+                    },
+                },
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["env"]["OPENAI_API_KEY"], "REDACTED")
+            self.assertEqual(payload["headers"]["Authorization"], "REDACTED")
+            self.assertEqual(payload["headers"]["HTTP-Referer"], "https://example.com")
+        finally:
+            path.unlink(missing_ok=True)
 
 
 class AgentRuntimeConfigTests(unittest.TestCase):
@@ -1183,7 +1323,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 "provider": "openrouter",
                 "endpoint": "responses",
                 "base_url": "https://openrouter.ai/api/v1",
-                "api_key": "sk-openrouter",
+                "api_key": "test-openrouter-key",
                 "model": "x-ai/grok-4.1-fast",
                 "reasoning_effort": "high",
                 "text_verbosity": None,
@@ -1192,17 +1332,17 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 "include": [],
                 "metadata": {},
                 "headers": {
-                    "HTTP-Referer": "https://academypl.us",
-                    "X-OpenRouter-Title": "reviewflow",
+                    "HTTP-Referer": "https://example.com",
+                    "X-OpenRouter-Title": "cure",
                 },
                 "request": {"provider": {"sort": "latency"}},
             },
             prompt="Review this PR.",
         )
         self.assertEqual(request["url"], "https://openrouter.ai/api/v1/responses")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer sk-openrouter")
-        self.assertEqual(request["headers"]["HTTP-Referer"], "https://academypl.us")
-        self.assertEqual(request["headers"]["X-OpenRouter-Title"], "reviewflow")
+        self.assertEqual(request["headers"]["Authorization"], "Bearer test-openrouter-key")
+        self.assertEqual(request["headers"]["HTTP-Referer"], "https://example.com")
+        self.assertEqual(request["headers"]["X-OpenRouter-Title"], "cure")
         self.assertEqual(request["json"]["model"], "x-ai/grok-4.1-fast")
         self.assertEqual(request["json"]["input"], "Review this PR.")
         self.assertEqual(request["json"]["reasoning"]["effort"], "high")
@@ -1296,6 +1436,35 @@ class JiraConfigCopyTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class StagedAuthCleanupTests(unittest.TestCase):
+    def test_cleanup_sensitive_staged_paths_removes_copied_auth_material(self) -> None:
+        root = ROOT / ".tmp_test_staged_auth_cleanup"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            (root / "gh_config").mkdir(parents=True, exist_ok=True)
+            (root / "gh_config" / "hosts.yml").write_text("x", encoding="utf-8")
+            (root / "jira_config").mkdir(parents=True, exist_ok=True)
+            jira_cfg = root / "jira_config" / ".config.yml"
+            jira_cfg.write_text("x", encoding="utf-8")
+            (root / "netrc").mkdir(parents=True, exist_ok=True)
+            netrc = root / "netrc" / ".netrc"
+            netrc.write_text("x", encoding="utf-8")
+
+            rf.cleanup_sensitive_staged_paths(
+                {
+                    "gh_config_dir": str(root / "gh_config"),
+                    "jira_config_file": str(jira_cfg),
+                    "netrc": str(netrc),
+                }
+            )
+
+            self.assertFalse((root / "gh_config").exists())
+            self.assertFalse((root / "jira_config").exists())
+            self.assertFalse((root / "netrc").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class PromptTemplateTests(unittest.TestCase):
     def test_templates_do_not_require_tmp_writes(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
@@ -1341,6 +1510,11 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("./rf-jira", text)
             self.assertNotIn("REVIEWFLOW_CRAWL_ALLOW_HOSTS", text)
             self.assertNotIn("./rf-fetch-url", text)
+
+    def test_review_templates_use_plain_code_under_review_wording(self) -> None:
+        normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
+        self.assertIn("Treat the sandbox checkout as the code under review", normal)
+        self.assertNotIn("codebase-under-review (CURe)", normal)
 
     def test_templates_do_not_reference_ch_wrapper(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
@@ -2166,8 +2340,8 @@ class InteractiveFlowTests(unittest.TestCase):
                         "session_id": "s1",
                         "status": "done",
                         "host": "github.com",
-                        "owner": "Academy-Plus",
-                        "repo": "ssa-lms",
+                        "owner": "example-org",
+                        "repo": "example-repo",
                         "number": 78,
                         "created_at": "2026-03-10T10:05:13+00:00",
                         "completed_at": "2026-03-10T10:21:57+00:00",
@@ -2246,7 +2420,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
                 rc = rf.interactive_flow(
-                    argparse.Namespace(target="https://github.com/Academy-Plus/ssa-lms/pull/78"),
+                    argparse.Namespace(target="https://github.com/example-org/example-repo/pull/78"),
                     paths=paths,
                     stdin=stdin,
                     stderr=stderr,
@@ -2282,8 +2456,8 @@ class InteractiveFlowTests(unittest.TestCase):
                         "session_id": "s1",
                         "status": "done",
                         "host": "github.com",
-                        "owner": "Academy-Plus",
-                        "repo": "ssa-lms",
+                        "owner": "example-org",
+                        "repo": "example-repo",
                         "number": 86,
                         "created_at": "2026-03-04T00:00:00+00:00",
                         "completed_at": "2026-03-04T01:00:00+00:00",
@@ -2310,8 +2484,8 @@ class InteractiveFlowTests(unittest.TestCase):
                         "session_id": "s2",
                         "status": "done",
                         "host": "github.com",
-                        "owner": "Academy-Plus",
-                        "repo": "ssa-lms",
+                        "owner": "example-org",
+                        "repo": "example-repo",
                         "number": 75,
                         "created_at": "2026-03-05T00:00:00+00:00",
                         "completed_at": "2026-03-05T01:00:00+00:00",
@@ -2335,7 +2509,7 @@ class InteractiveFlowTests(unittest.TestCase):
             )
             stdin = self._FakeTty("1\n")
             stderr = self._FakeTty()
-            args = argparse.Namespace(target="https://github.com/Academy-Plus/ssa-lms/pull/86")
+            args = argparse.Namespace(target="https://github.com/example-org/example-repo/pull/86")
 
             with (
                 mock.patch.object(rf, "ensure_review_config"),
@@ -2465,8 +2639,8 @@ class InteractiveFlowTests(unittest.TestCase):
                         "session_id": "s1",
                         "status": "done",
                         "host": "github.com",
-                        "owner": "Academy-Plus",
-                        "repo": "ssa-lms",
+                        "owner": "example-org",
+                        "repo": "example-repo",
                         "number": 86,
                         "created_at": "2026-03-04T00:00:00+00:00",
                         "completed_at": "2026-03-04T01:00:00+00:00",
@@ -4221,8 +4395,9 @@ class WorkflowContractTests(unittest.TestCase):
         names = [entry["name"] for entry in payload["commands"]]
         self.assertEqual(names, ["pr", "followup", "resume", "zip", "clean", "status", "watch"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
-        self.assertEqual(pr_entry["recommended_invocation"], "reviewflow pr <PR_URL> --if-reviewed new")
+        self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
+        self.assertIn("deprecated_alias", {item["name"] for item in pr_entry["variants"]})
         self.assertNotIn("interactive", names)
 
     def test_commands_flow_human_output_lists_curated_recommended_invocations(self) -> None:
@@ -4232,9 +4407,10 @@ class WorkflowContractTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertIn("pr: Create a new review session for a PR.", rendered)
-        self.assertIn("reviewflow clean closed --json", rendered)
-        self.assertIn("reviewflow status <session_id|PR_URL> --json", rendered)
-        self.assertIn("reviewflow watch <session_id|PR_URL>", rendered)
+        self.assertIn("cure clean closed --json", rendered)
+        self.assertIn("cure status <session_id|PR_URL> --json", rendered)
+        self.assertIn("cure watch <session_id|PR_URL>", rendered)
+        self.assertIn("reviewflow pr <PR_URL>", rendered)
         self.assertNotIn("interactive", rendered)
 
     def test_status_flow_exact_session_human_output_uses_exact_resolution(self) -> None:
@@ -4527,6 +4703,18 @@ class CodexCommandTests(unittest.TestCase):
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertIn("shell_environment_policy.inherit=all", cmd)
 
+    def test_build_codex_exec_cmd_does_not_duplicate_approval_flag(self) -> None:
+        cmd = rf.build_codex_exec_cmd(
+            repo_dir=ROOT,
+            codex_flags=["--sandbox", "workspace-write", "-a", "never"],
+            codex_config_overrides=[],
+            review_md_path=ROOT / ".tmp_test_review.md",
+            prompt="hello",
+            approval_policy="never",
+            dangerously_bypass_approvals_and_sandbox=False,
+        )
+        self.assertEqual(cmd.count("-a"), 1)
+
     def test_build_codex_exec_cmd_injects_chunkhound_mcp_with_startup_timeout(self) -> None:
         repo = ROOT
         ch_cfg = ROOT / ".tmp_test_chunkhound_env.json"
@@ -4538,11 +4726,14 @@ class CodexCommandTests(unittest.TestCase):
         )
         ch_args_entry = next(o for o in overrides if o.startswith("mcp_servers.chunkhound.args="))
         ch_args = json.loads(ch_args_entry.split("=", 1)[1])
+        ch_env_entry = next(o for o in overrides if o.startswith("mcp_servers.chunkhound.env_vars="))
+        ch_env_vars = json.loads(ch_env_entry.split("=", 1)[1])
         self.assertNotIn("--exclude", ch_args)
         self.assertNotIn("--db", ch_args)
         self.assertNotIn("--database-provider", ch_args)
         self.assertIn("--config", ch_args)
         self.assertIn(str(ch_cfg), ch_args)
+        self.assertIn("CHUNKHOUND_LLM_API_KEY", ch_env_vars)
         cmd = rf.build_codex_exec_cmd(
             repo_dir=repo,
             codex_flags=["-m", "gpt-5.2"],
@@ -4671,8 +4862,18 @@ class TuiDashboardTests(unittest.TestCase):
 
     def test_parser_accepts_install_command(self) -> None:
         p = rf.build_parser()
+        self.assertEqual(p.prog, "cure")
         args = p.parse_args(["install", "--chunkhound-source", "git-main"])
         self.assertEqual(args.chunkhound_source, "git-main")
+
+    def test_deprecated_alias_warning_targets_stderr_only(self) -> None:
+        stderr = StringIO()
+        rf.maybe_warn_deprecated_cli_alias("reviewflow", stderr=stderr)
+        self.assertIn("Use `cure` instead.", stderr.getvalue())
+
+        quiet = StringIO()
+        rf.maybe_warn_deprecated_cli_alias("cure", stderr=quiet)
+        self.assertEqual(quiet.getvalue(), "")
 
     def test_parser_accepts_zip_flags(self) -> None:
         p = rf.build_parser()
@@ -4695,7 +4896,7 @@ class TuiDashboardTests(unittest.TestCase):
                 "--llm-set",
                 "top_p=0.9",
                 "--llm-header",
-                "HTTP-Referer=https://academypl.us",
+                "HTTP-Referer=https://example.com",
                 "--codex-model",
                 "gpt-5.3-codex-spark",
                 "--codex-effort",
@@ -4714,7 +4915,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(args.llm_verbosity, "low")
         self.assertEqual(args.llm_max_output_tokens, 9000)
         self.assertEqual(args.llm_set, ["top_p=0.9"])
-        self.assertEqual(args.llm_header, ["HTTP-Referer=https://academypl.us"])
+        self.assertEqual(args.llm_header, ["HTTP-Referer=https://example.com"])
         self.assertEqual(args.codex_model, "gpt-5.3-codex-spark")
         self.assertEqual(args.codex_effort, "low")
         self.assertEqual(args.ui, "off")
@@ -5068,20 +5269,22 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Agentic Quickstart", readme)
         self.assertIn("Agent Operating Contract", readme)
         self.assertIn("Canonical agent prompt", readme)
-        self.assertIn("Use reviewflow from <REVIEWFLOW_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.", readme)
-        self.assertIn("If `reviewflow` is already installed and working, use it.", readme)
-        self.assertIn("If `reviewflow` is installed but not working", readme)
-        self.assertIn("If `reviewflow` is not installed, install it from <REVIEWFLOW_SOURCE>.", readme)
+        self.assertIn("CURe", readme)
+        self.assertIn("Use CURe from <REVIEWFLOW_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.", readme)
+        self.assertIn("If `cure` is already installed and working, use it.", readme)
+        self.assertIn("If `cure` is installed but not working", readme)
+        self.assertIn("If `cure` is not installed, install it from <REVIEWFLOW_SOURCE>.", readme)
         self.assertIn("uv tool install /path/to/reviewflow", readme)
         self.assertIn("uv tool install --editable /path/to/reviewflow", readme)
-        self.assertIn("reviewflow install", readme)
-        self.assertIn("reviewflow doctor", readme)
-        self.assertIn("reviewflow doctor --json", readme)
-        self.assertIn("reviewflow commands --json", readme)
-        self.assertIn("reviewflow status <session_id|PR_URL>", readme)
-        self.assertIn("reviewflow watch <session_id|PR_URL>", readme)
-        self.assertIn("reviewflow pr <PR_URL> --if-reviewed new", readme)
-        self.assertIn("reviewflow install provisions ChunkHound only", readme)
+        self.assertIn("cure install", readme)
+        self.assertIn("cure doctor", readme)
+        self.assertIn("cure doctor --json", readme)
+        self.assertIn("cure commands --json", readme)
+        self.assertIn("cure status <session_id|PR_URL>", readme)
+        self.assertIn("cure watch <session_id|PR_URL>", readme)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
+        self.assertIn("cure install provisions ChunkHound only", readme)
+        self.assertIn("`reviewflow` remains a temporary deprecated alias", readme)
         self.assertIn("ask only the missing config questions", readme)
         self.assertIn("Ask only for the missing configuration, credentials, or project-specific inputs.", readme)
         self.assertIn("Do not invent config, assume hidden secrets, or skip readiness checks.", readme)
@@ -5090,14 +5293,15 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("--no-config", readme)
         self.assertIn("uv tool dir --bin", readme)
         self.assertIn("runnable from PATH", readme)
-        self.assertIn("Treat reviewflow as an external CLI tool", readme)
+        self.assertIn("Treat CURe as an external CLI tool", readme)
         self.assertIn("project.reviewflow.toml", readme)
         self.assertIn("The project itself does not need to import reviewflow.", readme)
-        self.assertIn("REVIEWFLOW_CONFIG=/workspaces/.reviewflow.toml reviewflow", readme)
+        self.assertIn("REVIEWFLOW_CONFIG=/path/to/workspace.reviewflow.toml cure", readme)
         self.assertIn("--agent-runtime-profile", readme)
         self.assertIn("balanced", readme)
         self.assertIn("strict", readme)
         self.assertIn("permissive", readme)
+        self.assertNotIn("`CURe` = the codebase-under-review", readme)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
         reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")
@@ -5376,7 +5580,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             "phase": "checkout_pr",
             "phases": {"checkout_pr": {"status": "running"}},
             "base_ref": "main",
-            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "head_sha": "0000000000000000000000000000000000000000",
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
         }
         for w in (80, 120):
@@ -5407,7 +5611,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             "phase": "checkout_pr",
             "phases": {"checkout_pr": {"status": "running"}},
             "base_ref": "main",
-            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "head_sha": "0000000000000000000000000000000000000000",
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
         }
         lines = rui.build_dashboard_lines(
@@ -5437,7 +5641,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             "phase": "checkout_pr",
             "phases": {"checkout_pr": {"status": "running"}, "resolve_pr_meta": {"status": "done"}},
             "base_ref": "main",
-            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "head_sha": "0000000000000000000000000000000000000000",
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
         }
         width = 80
@@ -5568,7 +5772,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             "phase": "checkout_pr",
             "phases": {"checkout_pr": {"status": "running"}},
             "base_ref": "main",
-            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "head_sha": "0000000000000000000000000000000000000000",
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
         }
         ch_tail = [f"ch-{i}" for i in range(1, 201)]
@@ -5683,7 +5887,7 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         text = (
             f"See [resources/js/Card.vue:36]({repo_file}#L36) and `{work_file}#L12`.\n"
             f"Follow-up: {followup_file}\n"
-            "External: https://github.com/Academy-Plus/ssa-lms/pull/75#discussion_r1\n"
+            "External: https://github.com/example-org/example-repo/pull/75#discussion_r1\n"
             "Already plain: resources/js/Card.vue:36\n"
         )
 
@@ -5692,7 +5896,7 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         self.assertIn("resources/js/Card.vue:36", normalized)
         self.assertIn("`work/review_plan.json:12`", normalized)
         self.assertIn("followups/followup-1.md", normalized)
-        self.assertIn("https://github.com/Academy-Plus/ssa-lms/pull/75#discussion_r1", normalized)
+        self.assertIn("https://github.com/example-org/example-repo/pull/75#discussion_r1", normalized)
         self.assertNotIn(f"[resources/js/Card.vue:36]({repo_file}#L36)", normalized)
         self.assertNotIn(str(repo_file), normalized)
         self.assertNotIn(str(work_file), normalized)
@@ -5807,6 +6011,18 @@ class CodexResumeTests(unittest.TestCase):
         self.assertIn("danger-full-access", cmd)
         self.assertIn('mcp_servers.chunkhound.command="chunkhound"', cmd)
         self.assertIn("019cd0ef-73cd-79c2-a4b9-dbb34c9a2eed", cmd)
+
+    def test_build_codex_resume_command_does_not_duplicate_approval_flag(self) -> None:
+        cmd = rf.build_codex_resume_command(
+            repo_dir=ROOT / ".tmp_test_resume_repo" / "repo",
+            session_id="session-123",
+            env={},
+            codex_flags=["--sandbox", "workspace-write", "-a", "never"],
+            codex_config_overrides=[],
+            approval_policy="never",
+            dangerously_bypass_approvals_and_sandbox=False,
+        )
+        self.assertEqual(cmd.count(" -a "), 1)
 
     def test_find_codex_resume_info_picks_newest_matching_cwd(self) -> None:
         codex_root = ROOT / ".tmp_test_codex_resume_root"

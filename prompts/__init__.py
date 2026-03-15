@@ -1,1 +1,1 @@
-"""Packaged built-in prompt templates for reviewflow."""
+"""Packaged built-in prompt templates for CURe."""

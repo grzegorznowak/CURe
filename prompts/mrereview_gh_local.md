@@ -5,18 +5,22 @@ argument-hint: [PR_URL="<github pr url>"] [AGENT_DESC="<agent description>"]
 
 You are maintainer reviewing $PR_URL in a local **isolated sandbox** checkout.
 Ensure code quality, prevent technical debt, and maintain architectural consistency.
-Treat the sandbox checkout as the codebase-under-review (CURe) and optimize your investigation toward understanding it accurately.
+Treat the sandbox checkout as the code under review and optimize your investigation toward understanding it accurately.
 
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review.
 $REVIEW_INTELLIGENCE_GUIDANCE
+Reviewflow may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
+- If that file exists, read it first and use it as the primary PR-context source for this session.
+- Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.
+- Do not ABORT solely because GitHub MCP or `gh` is unavailable if the staged PR context plus the local git history/diff provide enough context for this review.
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 Take pre-existing PR and ticket discussion history into account so you do not rerequest things that were already pushed back on,
 and so you have the most current understanding of goals and issues.
 
 Safety guardrail:
-- Do not read or write outside the sandbox checkout, except reviewflow scratch space under `$REVIEWFLOW_WORK_DIR`.
-- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree (including `.reviewflow/`).
+- Do not read or write outside the sandbox checkout, except CURe scratch space under `$REVIEWFLOW_WORK_DIR`.
+- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 
 If you must ABORT:
 - Output using the format below.

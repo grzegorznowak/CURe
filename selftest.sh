@@ -17,24 +17,30 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 python3 -m venv "$tmpdir/venv"
 "$tmpdir/venv/bin/python" -m pip install "$repo_root"
-"$tmpdir/venv/bin/reviewflow" --help >/dev/null
-"$tmpdir/venv/bin/reviewflow" doctor --help >/dev/null
+"$tmpdir/venv/bin/cure" --help >/dev/null
+"$tmpdir/venv/bin/cure" doctor --help >/dev/null
+"$tmpdir/venv/bin/reviewflow" --help >/dev/null 2>&1
+"$tmpdir/venv/bin/reviewflow" doctor --help >/dev/null 2>&1
 python3 "$repo_root/tests/story26_cli_smoke.py" \
-  --reviewflow-bin "$tmpdir/venv/bin/reviewflow" \
+  --cli-bin "$tmpdir/venv/bin/cure" \
+  --alias-bin "$tmpdir/venv/bin/reviewflow" \
   --script-bin /usr/bin/script
 
 mkdir -p "$tmpdir/home"
 uv_bin_dir="$(HOME="$tmpdir/home" uv tool dir --bin)"
 HOME="$tmpdir/home" uv tool install --force --editable "$repo_root"
-"$uv_bin_dir/reviewflow" --help >/dev/null
-"$uv_bin_dir/reviewflow" doctor --help >/dev/null
+"$uv_bin_dir/cure" --help >/dev/null
+"$uv_bin_dir/cure" doctor --help >/dev/null
+"$uv_bin_dir/reviewflow" --help >/dev/null 2>&1
+"$uv_bin_dir/reviewflow" doctor --help >/dev/null 2>&1
 python3 "$repo_root/tests/story26_cli_smoke.py" \
-  --reviewflow-bin "$uv_bin_dir/reviewflow" \
+  --cli-bin "$uv_bin_dir/cure" \
+  --alias-bin "$uv_bin_dir/reviewflow" \
   --script-bin /usr/bin/script
 
 # Optional: real network/auth acceptance test (Codex must be available + Jira must be authenticated).
 # Usage:
-#   REVIEWFLOW_ACCEPTANCE_JIRA_KEY=ABAU-985 ./selftest.sh
+#   REVIEWFLOW_ACCEPTANCE_JIRA_KEY=PROJ-123 ./selftest.sh
 if [[ -n "${REVIEWFLOW_ACCEPTANCE_JIRA_KEY:-}" ]]; then
-  "$tmpdir/venv/bin/reviewflow" jira-smoke "${REVIEWFLOW_ACCEPTANCE_JIRA_KEY}"
+  "$tmpdir/venv/bin/cure" jira-smoke "${REVIEWFLOW_ACCEPTANCE_JIRA_KEY}"
 fi

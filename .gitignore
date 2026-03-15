@@ -2,3 +2,6 @@ __pycache__
 build/
 dist/
 *.egg-info/
+.chunkhound.json
+.chunkhound/
+.codex/

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
 
-from meta import json_fingerprint, write_json
+from meta import json_fingerprint, write_json, write_redacted_json
 from paths import (
     DEFAULT_PATHS,
     ReviewflowPaths,
@@ -497,6 +497,7 @@ BUILTIN_LLM_PRESET_IDS = (
 CURATED_ENV_INHERIT_KEYS = (
     "ANTHROPIC_API_KEY",
     "CHUNKHOUND_EMBEDDING__API_KEY",
+    "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
     "FORCE_COLOR",
     "GEMINI_API_KEY",
@@ -525,13 +526,19 @@ CURATED_ENV_INHERIT_KEYS = (
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
+PRIMARY_CLI_COMMAND = "cure"
+DEPRECATED_CLI_ALIAS = "reviewflow"
+DEPRECATED_ALIAS_WARNING = (
+    "`reviewflow` is deprecated for this release and will be removed after the alias window. "
+    "Use `cure` instead."
+)
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
 tool_prompt_fragment = \"\"\"
 Preferred review-intelligence tools:
 - Use GitHub MCP for PR context when available.
 - Otherwise use gh CLI / gh api.
-- Use any additional tools or sources that materially improve understanding of the codebase-under-review (CURe).
+- Use any additional tools or sources that materially improve understanding of the code under review.
 \"\"\"
 """
 
@@ -757,7 +764,7 @@ def add_llm_override_args(parser: argparse.ArgumentParser) -> None:
         "--llm-preset",
         dest="llm_preset",
         default=None,
-        help="Select a named review-agent preset from the active reviewflow config",
+        help="Select a named review-agent preset from the active CURe config",
     )
     parser.add_argument(
         "--llm-model",
@@ -856,7 +863,7 @@ def build_llm_meta(
         "config": resolution_meta,
         "adapter": dict(adapter_meta or {}),
         "helpers": dict(helpers or {}),
-        "env": dict(resolved.get("env") or {}),
+        "env_keys": sorted(_string_dict(resolved.get("env")).keys()),
         "capabilities": dict(resolved.get("capabilities") or {}),
     }
 
@@ -1749,10 +1756,10 @@ def build_review_intelligence_guidance(cfg: ReviewIntelligenceConfig) -> str:
         lines.append("")
     lines.extend(
         [
-            "CURe-first policy:",
-            "- Use any source or tool that materially improves understanding of the codebase-under-review (CURe).",
+            "Code under review first policy:",
+            "- Use any source or tool that materially improves understanding of the code under review.",
             "- Favor depth, relevance, and evidence over source restrictions.",
-            "- Avoid spending time on context that does not improve understanding of the CURe or the change under review.",
+            "- Avoid spending time on context that does not improve understanding of the code under review or the change under review.",
         ]
     )
     return "\n".join(lines).strip() + "\n"
@@ -1780,6 +1787,7 @@ def build_codex_exec_cmd(
     include_shell_environment_inherit_all: bool = True,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
+    has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     cmd = [
         "codex",
         "-C",
@@ -1790,7 +1798,7 @@ def build_codex_exec_cmd(
     for d in add_dirs or []:
         cmd.extend(["--add-dir", str(d)])
     cmd.extend(codex_flags)
-    if approval_policy and (not dangerously_bypass_approvals_and_sandbox):
+    if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         cmd.extend(["-a", approval_policy])
     for override in overrides:
         cmd.extend(["-c", override])
@@ -2384,7 +2392,7 @@ def codex_mcp_overrides_for_reviewflow(
     overrides.append(f"mcp_servers.chunkhound.args={json.dumps(ch_args)}")
     overrides.append(f"mcp_servers.chunkhound.cwd={toml_string(str(ch_cwd))}")
     overrides.append(
-        f"mcp_servers.chunkhound.env_vars={json.dumps(['CHUNKHOUND_EMBEDDING__API_KEY', 'VOYAGE_API_KEY', 'OPENAI_API_KEY'])}"
+        f"mcp_servers.chunkhound.env_vars={json.dumps(['CHUNKHOUND_EMBEDDING__API_KEY', 'CHUNKHOUND_LLM_API_KEY', 'VOYAGE_API_KEY', 'OPENAI_API_KEY'])}"
     )
     overrides.append("mcp_servers.chunkhound.startup_timeout_sec=20")
     overrides.append("mcp_servers.chunkhound.tool_timeout_sec=12000")
@@ -2420,6 +2428,28 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     rf_jira = write_rf_jira(repo_dir=repo_dir)
     staged_paths["rf_jira"] = str(rf_jira)
     return env, staged_paths
+
+
+SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
+
+
+def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
+    if not isinstance(staged_paths, dict):
+        return
+    for key in SENSITIVE_STAGED_PATH_KEYS:
+        raw = str(staged_paths.get(key) or "").strip()
+        if not raw:
+            continue
+        target = Path(raw)
+        if key in {"jira_config_file", "netrc"}:
+            target = target.parent
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.exists():
+                target.unlink(missing_ok=True)
+        except Exception:
+            continue
 
 
 def _reviewflow_chunkhound_mcp_entry(
@@ -2696,7 +2726,7 @@ class SessionProgress:
         self.flush()
 
     def flush(self) -> None:
-        write_json(self.meta_path, self.meta)
+        write_redacted_json(self.meta_path, self.meta)
 
     def set_phase(self, phase: str) -> None:
         self.meta["phase"] = phase
@@ -3024,6 +3054,7 @@ def build_codex_resume_command(
     include_shell_environment_inherit_all: bool = True,
 ) -> str:
     assignments: list[str] = []
+    has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     for key in (
         "GH_CONFIG_DIR",
         "JIRA_CONFIG_FILE",
@@ -3040,7 +3071,7 @@ def build_codex_resume_command(
         "--add-dir",
         "/tmp",
     ]
-    if approval_policy and (not dangerously_bypass_approvals_and_sandbox):
+    if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)
     for override in codex_config_overrides or []:
@@ -3190,7 +3221,7 @@ def parse_pr_url(pr_url: str) -> PullRequestRef:
 def resolve_resume_target(
     target: str, *, sandbox_root: Path, from_phase: str
 ) -> tuple[str, str]:
-    """Resolve `reviewflow resume <target>` into (session_id, action).
+    """Resolve `cure resume <target>` into (session_id, action).
 
     `target` may be either:
     - a session folder name (session_id), or
@@ -3214,7 +3245,7 @@ def resolve_resume_target(
         if Path(raw).is_absolute() or ("/" in raw) or ("\\" in raw):
             raise ReviewflowError(
                 "resume expects a session id (folder name) or a PR URL. "
-                f"Tip: run `reviewflow list` to find a session id. Got: {raw!r}"
+                f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id. Got: {raw!r}"
             )
         return (raw, "resume")
 
@@ -3283,7 +3314,7 @@ def resolve_resume_target(
     if str(from_phase or "auto").strip().lower() != "auto":
         raise ReviewflowError(
             f"No resumable multipass session found for PR {pr.owner}/{pr.repo}#{pr.number}. "
-            "Tip: run `reviewflow list` to find a session id."
+            f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id."
         )
 
     if completed:
@@ -3291,7 +3322,7 @@ def resolve_resume_target(
 
     raise ReviewflowError(
         f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {root}. "
-        "Tip: run `reviewflow list`."
+        f"Tip: run `{PRIMARY_CLI_COMMAND} list`."
     )
 
 
@@ -3372,7 +3403,7 @@ def _resolve_session_id_target(raw: str, *, sandbox_root: Path, command_name: st
     if Path(text).is_absolute() or ("/" in text) or ("\\" in text):
         raise ReviewflowError(
             f"{command_name} expects a session id (folder name) or a PR URL. "
-            f"Tip: run `reviewflow list` to find a session id. Got: {text!r}"
+            f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id. Got: {text!r}"
         )
     return text
 
@@ -3491,7 +3522,7 @@ def resolve_observation_target(
     if selected is None:
         raise ReviewflowError(
             f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {sandbox_root}. "
-            "Tip: run `reviewflow list`."
+            f"Tip: run `{PRIMARY_CLI_COMMAND} list`."
         )
 
     _, session_dir, meta = selected
@@ -3774,6 +3805,22 @@ def _watch_line_for_payload(payload: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def preferred_cli_invocation(invocation: str) -> str:
+    return f"{PRIMARY_CLI_COMMAND} {invocation}"
+
+
+def deprecated_cli_invocation(invocation: str) -> str:
+    return f"{DEPRECATED_CLI_ALIAS} {invocation}"
+
+
+def deprecated_alias_variant(invocation: str) -> dict[str, str]:
+    return {
+        "name": "deprecated_alias",
+        "summary": "Temporary one-release alias; prints a deprecation warning on stderr.",
+        "invocation": deprecated_cli_invocation(invocation),
+    }
+
+
 def build_commands_catalog_payload() -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -3787,13 +3834,14 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Prints the created session directory path on success.",
                 "exit_codes": {"0": "review started", "2": "usage or runtime error"},
-                "recommended_invocation": "reviewflow pr <PR_URL> --if-reviewed new",
+                "recommended_invocation": preferred_cli_invocation("pr <PR_URL> --if-reviewed new"),
                 "variants": [
                     {
                         "name": "compatibility",
                         "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
-                        "invocation": "reviewflow pr <PR_URL>",
-                    }
+                        "invocation": preferred_cli_invocation("pr <PR_URL>"),
+                    },
+                    deprecated_alias_variant("pr <PR_URL>"),
                 ],
             },
             {
@@ -3804,7 +3852,8 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
                 "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
-                "recommended_invocation": "reviewflow followup <session_id>",
+                "recommended_invocation": preferred_cli_invocation("followup <session_id>"),
+                "variants": [deprecated_alias_variant("followup <session_id>")],
             },
             {
                 "name": "resume",
@@ -3814,13 +3863,14 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Human-readable progress only.",
                 "exit_codes": {"0": "resume or compatible follow-up completed", "2": "usage or runtime error"},
-                "recommended_invocation": "reviewflow resume <session_id>",
+                "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
                 "variants": [
                     {
                         "name": "pr_url_compatibility",
                         "summary": "PR URL mode preserves the existing special behavior documented in the README.",
-                        "invocation": "reviewflow resume <PR_URL>",
-                    }
+                        "invocation": preferred_cli_invocation("resume <PR_URL>"),
+                    },
+                    deprecated_alias_variant("resume <session_id>"),
                 ],
             },
             {
@@ -3831,7 +3881,8 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Prints the generated zip markdown path on success.",
                 "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
-                "recommended_invocation": "reviewflow zip <PR_URL>",
+                "recommended_invocation": preferred_cli_invocation("zip <PR_URL>"),
+                "variants": [deprecated_alias_variant("zip <PR_URL>")],
             },
             {
                 "name": "clean",
@@ -3841,18 +3892,19 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "Required only for `clean` with no target and `clean closed` without `--yes`.",
                 "stdout": "Structured JSON on `--json`; otherwise human-readable cleanup output.",
                 "exit_codes": {"0": "cleanup query or deletion completed", "2": "usage, lookup, or runtime error"},
-                "recommended_invocation": "reviewflow clean closed --json",
+                "recommended_invocation": preferred_cli_invocation("clean closed --json"),
                 "variants": [
                     {
                         "name": "bulk_execute",
                         "summary": "Execute closed-session cleanup after previewing matches.",
-                        "invocation": "reviewflow clean closed --yes --json",
+                        "invocation": preferred_cli_invocation("clean closed --yes --json"),
                     },
                     {
                         "name": "exact_delete",
                         "summary": "Delete one exact session with a structured result.",
-                        "invocation": "reviewflow clean <session_id> --json",
+                        "invocation": preferred_cli_invocation("clean <session_id> --json"),
                     },
+                    deprecated_alias_variant("clean <session_id>"),
                 ],
             },
             {
@@ -3863,7 +3915,8 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "tty": "No TTY required.",
                 "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
                 "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
-                "recommended_invocation": "reviewflow status <session_id|PR_URL> --json",
+                "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
+                "variants": [deprecated_alias_variant("status <session_id|PR_URL>")],
             },
             {
                 "name": "watch",
@@ -3877,7 +3930,8 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                     "1": "session finished with status=error",
                     "2": "invalid target, lookup failure, or corrupt metadata",
                 },
-                "recommended_invocation": "reviewflow watch <session_id|PR_URL>",
+                "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
+                "variants": [deprecated_alias_variant("watch <session_id|PR_URL>")],
             },
         ],
     }
@@ -3892,6 +3946,9 @@ def commands_flow(args: argparse.Namespace, *, stdout: TextIO | None = None) -> 
     for command in payload["commands"]:
         print(f"{command['name']}: {command['summary']}", file=out)
         print(f"  {command['recommended_invocation']}", file=out)
+        for variant in command.get("variants", []):
+            if isinstance(variant, dict) and str(variant.get("invocation") or "").strip():
+                print(f"    {variant['name']}: {variant['invocation']}", file=out)
     return 0
 
 
@@ -4488,12 +4545,185 @@ def require_gh_auth(host: str) -> None:
     try:
         run_cmd(["gh", "auth", "status", "--hostname", host], check=True)
     except ReviewflowSubprocessError as e:
-        msg = e.stderr.strip() or e.stdout.strip() or str(e)
+        _raise_gh_auth_error(host=host, error=e)
+
+
+def _gh_error_text(error: ReviewflowSubprocessError) -> str:
+    return (error.stderr or error.stdout or str(error)).strip()
+
+
+def _looks_like_gh_auth_error(error: ReviewflowSubprocessError) -> bool:
+    text = _gh_error_text(error).lower()
+    needles = (
+        "gh auth login",
+        "not logged into any github hosts",
+        "not authenticated",
+        "populate the gh_token",
+        "please run:  gh auth login",
+        "please run gh auth login",
+    )
+    return any(needle in text for needle in needles)
+
+
+def _raise_gh_auth_error(*, host: str, error: ReviewflowSubprocessError) -> None:
+    msg = _gh_error_text(error) or str(error)
+    raise ReviewflowError(
+        f"`gh` is not authenticated for {host}.\n"
+        f"- Try: gh auth login -h {host}\n"
+        f"- Details: {msg}"
+    ) from error
+
+
+def _supports_public_github_fallback(host: str) -> bool:
+    return host == "github.com"
+
+
+def _public_github_repo_clone_url(*, host: str, owner: str, repo: str) -> str:
+    if not _supports_public_github_fallback(host):
         raise ReviewflowError(
-            f"`gh` is not authenticated for {host}.\n"
-            f"- Try: gh auth login -h {host}\n"
-            f"- Details: {msg}"
+            f"Unauthenticated public clone fallback is only supported for github.com, got: {host}"
+        )
+    return f"https://github.com/{owner}/{repo}.git"
+
+
+def _github_public_api_json(*, path: str) -> dict[str, Any]:
+    normalized = path if path.startswith("/") else f"/{path}"
+    req = urllib.request.Request(
+        f"https://api.github.com{normalized}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "reviewflow/0.1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise ReviewflowError(
+            f"Public GitHub API request failed ({getattr(e, 'code', '?')}): {normalized}\n{body}"
         ) from e
+    except urllib.error.URLError as e:
+        raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
+    try:
+        payload = json.loads(body)
+    except Exception as e:
+        raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
+    if not isinstance(payload, dict):
+        raise ReviewflowError(f"Public GitHub API returned unexpected payload for {normalized}")
+    return payload
+
+
+def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) -> dict[str, Any]:
+    cmd = ["gh", "api", "--hostname", host, path]
+    try:
+        result = run_cmd(cmd)
+    except ReviewflowSubprocessError as e:
+        if _looks_like_gh_auth_error(e):
+            if allow_public_fallback and _supports_public_github_fallback(host):
+                _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
+                return _github_public_api_json(path=path)
+            _raise_gh_auth_error(host=host, error=e)
+        raise
+    try:
+        payload = json.loads(result.stdout)
+    except Exception as e:
+        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
+    if not isinstance(payload, dict):
+        raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
+    return payload
+
+
+def write_pr_context_file(
+    *,
+    work_dir: Path,
+    pr: PullRequestRef,
+    pr_meta: dict[str, Any],
+) -> Path:
+    path = work_dir / "pr_context.json"
+    base = pr_meta.get("base") if isinstance(pr_meta.get("base"), dict) else {}
+    head = pr_meta.get("head") if isinstance(pr_meta.get("head"), dict) else {}
+    user = pr_meta.get("user") if isinstance(pr_meta.get("user"), dict) else {}
+    write_json(
+        path,
+        {
+            "source": "reviewflow.resolve_pr_meta",
+            "pr": {
+                "host": pr.host,
+                "owner": pr.owner,
+                "repo": pr.repo,
+                "number": pr.number,
+                "url": str(pr_meta.get("html_url") or f"https://{pr.host}/{pr.owner}/{pr.repo}/pull/{pr.number}"),
+                "title": str(pr_meta.get("title") or ""),
+                "body": str(pr_meta.get("body") or ""),
+                "state": str(pr_meta.get("state") or ""),
+                "draft": bool(pr_meta.get("draft", False)),
+                "author": str(user.get("login") or ""),
+                "base_ref": str(base.get("ref") or ""),
+                "head_ref": str(head.get("ref") or ""),
+                "head_sha": str(head.get("sha") or ""),
+            },
+        },
+    )
+    return path
+
+
+def clone_seed_repo(*, host: str, owner: str, repo: str, seed: Path) -> None:
+    cmd = ["gh", "repo", "clone", repo_id_for_gh(host, owner, repo), str(seed)]
+    try:
+        run_cmd(cmd)
+        return
+    except ReviewflowSubprocessError as e:
+        if _looks_like_gh_auth_error(e):
+            if _supports_public_github_fallback(host):
+                _eprint(f"`gh` is not authenticated for {host}; falling back to public git clone.")
+                run_cmd(
+                    [
+                        "git",
+                        "clone",
+                        _public_github_repo_clone_url(host=host, owner=owner, repo=repo),
+                        str(seed),
+                    ]
+                )
+                return
+            _raise_gh_auth_error(host=host, error=e)
+        raise
+
+
+def checkout_pr_in_repo(*, repo_dir: Path, pr: PullRequestRef) -> None:
+    cmd = [
+        "gh",
+        "pr",
+        "checkout",
+        str(pr.number),
+        "-R",
+        pr.gh_repo,
+        "--force",
+    ]
+    try:
+        run_cmd(cmd, cwd=repo_dir)
+        return
+    except ReviewflowSubprocessError as e:
+        if _looks_like_gh_auth_error(e):
+            if _supports_public_github_fallback(pr.host):
+                branch = f"reviewflow_pr__{pr.number}"
+                _eprint(f"`gh` is not authenticated for {pr.host}; falling back to public git fetch for PR #{pr.number}.")
+                run_cmd(
+                    [
+                        "git",
+                        "-C",
+                        str(repo_dir),
+                        "fetch",
+                        "origin",
+                        f"refs/pull/{pr.number}/head:{branch}",
+                    ]
+                )
+                run_cmd(["git", "-C", str(repo_dir), "checkout", "-B", branch, branch])
+                return
+            _raise_gh_auth_error(host=pr.host, error=e)
+        raise
 
 
 @dataclass(frozen=True)
@@ -4716,7 +4946,7 @@ def migrate_storage_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) ->
     _ = args
     _ = paths
     _eprint(
-        "`reviewflow migrate-storage` is deprecated and no longer performs any migration.\n"
+        f"`{PRIMARY_CLI_COMMAND} migrate-storage` is deprecated and no longer performs any migration.\n"
         "Reviewflow now uses generic XDG/home defaults and does not auto-discover legacy workspace paths."
     )
     return 0
@@ -4791,7 +5021,6 @@ def cache_prime(
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
-    require_gh_auth(host)
     effective_config_path = config_path or default_reviewflow_config_path()
     ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
@@ -4808,7 +5037,7 @@ def cache_prime(
         seed.parent.mkdir(parents=True, exist_ok=True)
         with phase(f"cache_seed_sync {owner}/{repo}@{base_ref}", progress=None, quiet=quiet):
             if not seed.exists():
-                run_cmd(["gh", "repo", "clone", repo_id_for_gh(host, owner, repo), str(seed)])
+                clone_seed_repo(host=host, owner=owner, repo=repo, seed=seed)
             else:
                 # Validate it's a git repo before fetching.
                 run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
@@ -4897,7 +5126,7 @@ def cache_prime(
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
-        write_json(meta_path, meta)
+        write_redacted_json(meta_path, meta)
         return meta
 
 
@@ -5268,23 +5497,17 @@ def pr_flow(
         agent_desc = str(args.agent_desc)
 
     pr = parse_pr_url(args.pr_url)
-    require_gh_auth(pr.host)
     ensure_review_config(paths, config_path=effective_config_path)
 
     log(f"PR {pr.owner}/{pr.repo}#{pr.number} ({pr.host})", quiet=quiet)
 
     # PR metadata (base ref name + head SHA).
     with phase("resolve_pr_meta", progress=None, quiet=quiet):
-        pr_api = run_cmd(
-            [
-                "gh",
-                "api",
-                "--hostname",
-                pr.host,
-                f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
-            ]
+        pr_meta = gh_api_json(
+            host=pr.host,
+            path=f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
+            allow_public_fallback=True,
         )
-        pr_meta = json.loads(pr_api.stdout)
         base = pr_meta.get("base")
         head = pr_meta.get("head")
         base_ref = str((base.get("ref") if isinstance(base, dict) else "") or "").strip()
@@ -5414,8 +5637,10 @@ def pr_flow(
     )
     agent_desc_path = session_dir / "agent_desc.txt"
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
+    pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
     progress.meta["chunkhound"] = chunkhound_meta["chunkhound"]
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
+    progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
     progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
     progress.flush()
     # TUI/logging is started after meta.json exists (so the dashboard has something to read).
@@ -5439,6 +5664,8 @@ def pr_flow(
 
     success_markdown_path: Path | None = None
     success_resume_command: str | None = None
+    codex_meta: dict[str, Any] | None = None
+    runtime_policy: dict[str, Any] | None = None
 
     base_cache_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
@@ -5501,7 +5728,7 @@ def pr_flow(
         seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
         if not seed.exists():
             raise ReviewflowError(
-                f"Seed clone missing at {seed}. Try `reviewflow cache prime {pr.owner_repo} --base {base_ref}`."
+                f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {base_ref}`."
             )
 
         with phase("seed_sanity", progress=progress, quiet=quiet):
@@ -5583,7 +5810,7 @@ def pr_flow(
                 "--force",
             ]
             progress.record_cmd(checkout_pr_cmd)
-            run_cmd(checkout_pr_cmd, cwd=repo_dir)
+            checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
             review_head_sha_cmd = ["git", "-C", str(repo_dir), "rev-parse", "HEAD"]
             progress.record_cmd(review_head_sha_cmd)
             review_head_sha = run_cmd(review_head_sha_cmd).stdout.strip()
@@ -6025,7 +6252,7 @@ def pr_flow(
                                     progress.flush()
                             except ReviewflowSubprocessError:
                                 _eprint(
-                                    f"Multipass step failed. To resume: reviewflow resume {session_id}"
+                                    f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}"
                                 )
                                 raise
 
@@ -6141,6 +6368,7 @@ def pr_flow(
                         raise ReviewflowError("No prompt provided and no prompt template could be loaded.")
                     if prompt:
                         prompt_extra_vars = review_intelligence_prompt_vars(review_intelligence_cfg)
+                        prompt_extra_vars["PR_CONTEXT_PATH"] = str(pr_context_path)
                         rendered = render_prompt(
                             prompt,
                             base_ref_for_review=base_ref_for_review,
@@ -6217,6 +6445,7 @@ def pr_flow(
         )
         raise
     finally:
+        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
         if _ACTIVE_OUTPUT is out:
             _ACTIVE_OUTPUT = None
         out.stop()
@@ -6280,7 +6509,7 @@ def resume_flow(
     if not meta_path.is_file():
         raise ReviewflowError(
             f"Session meta.json not found: {meta_path}. "
-            "Tip: run `reviewflow list` to find a session id."
+            f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id."
         )
 
     try:
@@ -6407,6 +6636,7 @@ def resume_flow(
 
     success_markdown_path: Path | None = None
     success_resume_command: str | None = None
+    runtime_policy: dict[str, Any] | None = None
 
     try:
         agent_desc = ""
@@ -6827,6 +7057,7 @@ def resume_flow(
         progress.error({"type": "exception", "message": str(e)})
         raise
     finally:
+        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
         if _ACTIVE_OUTPUT is out:
             _ACTIVE_OUTPUT = None
         out.stop()
@@ -6934,7 +7165,7 @@ def followup_flow(
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
-    write_json(meta_path, meta)
+    write_redacted_json(meta_path, meta)
 
     out = ReviewflowOutput(
         ui_enabled=ui_enabled,
@@ -6948,6 +7179,7 @@ def followup_flow(
     out.start()
 
     success_markdown_path: Path | None = None
+    runtime_policy: dict[str, Any] | None = None
 
     try:
         progress = SessionProgress(meta_path, quiet=True)
@@ -7188,12 +7420,13 @@ def followup_flow(
         if isinstance(followup_llm_meta, dict):
             record_llm_resume(followup_llm_meta, followup_result.resume)
         meta.setdefault("followups", []).append(followup_entry)
-        write_json(meta_path, meta)
+        write_redacted_json(meta_path, meta)
 
         success_markdown_path = followup_md_path
         print(str(followup_md_path))
         return 0
     finally:
+        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
         if _ACTIVE_OUTPUT is out:
             _ACTIVE_OUTPUT = None
         out.stop()
@@ -7443,9 +7676,9 @@ def zip_flow(
         raise ReviewflowError(
             f"zip: no completed non-rejected review artifacts found for PR HEAD {head_sha[:12]}.\n"
             "Run a fresh review or follow-up first:\n"
-            f"  reviewflow pr {pr_url}\n"
+            f"  {PRIMARY_CLI_COMMAND} pr {pr_url}\n"
             "  # or\n"
-            "  reviewflow followup <session_id>"
+            f"  {PRIMARY_CLI_COMMAND} followup <session_id>"
         )
 
     host_session_dir = sources[0].session_dir
@@ -7565,6 +7798,7 @@ def zip_flow(
 
     success_markdown_path: Path | None = None
     success_resume_command: str | None = None
+    runtime_policy: dict[str, Any] | None = None
     try:
         llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
             args,
@@ -7717,7 +7951,7 @@ def zip_flow(
         if isinstance(zip_llm_meta, dict):
             record_llm_resume(zip_llm_meta, zip_result.resume)
         host_meta2.setdefault("zips", []).append(zip_entry)
-        write_json(host_meta_path, host_meta2)
+        write_redacted_json(host_meta_path, host_meta2)
 
         success_markdown_path = output_md_path
         print(str(output_md_path))
@@ -7739,6 +7973,7 @@ def zip_flow(
         zip_progress.error({"type": "exception", "message": str(e)})
         raise
     finally:
+        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
         if _ACTIVE_OUTPUT is out:
             _ACTIVE_OUTPUT = None
         out.stop()
@@ -8162,7 +8397,7 @@ def _resolve_session_verdicts(
         if meta.get("verdicts") != normalized:
             meta["verdicts"] = normalized
             try:
-                write_json(meta_path, meta)
+                write_redacted_json(meta_path, meta)
             except Exception:
                 pass
         return stored
@@ -8172,7 +8407,7 @@ def _resolve_session_verdicts(
         verdicts = ReviewVerdicts(business=legacy, technical=legacy)
         meta["verdicts"] = review_verdicts_to_meta(verdicts)
         try:
-            write_json(meta_path, meta)
+            write_redacted_json(meta_path, meta)
         except Exception:
             pass
         return verdicts
@@ -8181,7 +8416,7 @@ def _resolve_session_verdicts(
     if extracted is not None:
         meta["verdicts"] = review_verdicts_to_meta(extracted)
         try:
-            write_json(meta_path, meta)
+            write_redacted_json(meta_path, meta)
         except Exception:
             pass
     return extracted
@@ -8642,13 +8877,46 @@ def build_interactive_resume_command(
     )
     meta["chunkhound"] = chunkhound_meta["chunkhound"]
 
-    llm_meta = resolve_meta_llm(meta)
-    provider = str(llm_meta.get("provider") or "unknown").strip() or "unknown"
-    if not bool(((llm_meta.get("capabilities") or {}).get("supports_resume"))):
+    saved_llm_meta = resolve_meta_llm(meta)
+    provider = str(saved_llm_meta.get("provider") or "unknown").strip() or "unknown"
+    if not bool(((saved_llm_meta.get("capabilities") or {}).get("supports_resume"))):
         raise ReviewflowError(
             f"interactive is not supported for provider {provider} in v1. "
             "This session is execution-only."
         )
+    saved_resolution_meta = (
+        saved_llm_meta.get("config") if isinstance(saved_llm_meta.get("config"), dict) else {}
+    )
+    llm_meta = dict(saved_llm_meta)
+    llm_resolution_meta = dict(saved_resolution_meta)
+    saved_preset_name = (
+        str(saved_llm_meta.get("selected_name") or "").strip()
+        or str(saved_llm_meta.get("preset") or "").strip()
+        or None
+    )
+    try:
+        llm_meta, llm_resolution_meta = resolve_llm_config(
+            base_codex_config_path=default_codex_base_config_path(),
+            reviewflow_config_path=effective_config_path,
+            cli_preset=saved_preset_name,
+            cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
+            cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
+            cli_plan_effort=(str(saved_llm_meta.get("plan_reasoning_effort") or "").strip() or None),
+            cli_verbosity=(str(saved_llm_meta.get("text_verbosity") or "").strip() or None),
+            cli_max_output_tokens=(
+                int(saved_llm_meta.get("max_output_tokens"))
+                if isinstance(saved_llm_meta.get("max_output_tokens"), int)
+                else None
+            ),
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+    except ReviewflowError:
+        llm_meta = dict(saved_llm_meta)
+        llm_resolution_meta = dict(saved_resolution_meta)
 
     saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
     runtime_policy = prepare_review_agent_runtime(
@@ -8656,7 +8924,7 @@ def build_interactive_resume_command(
             agent_runtime_profile=(saved_runtime_meta.get("profile") if isinstance(saved_runtime_meta, dict) else None)
         ),
         resolved=llm_meta,
-        resolution_meta=(llm_meta.get("config") if isinstance(llm_meta.get("config"), dict) else {}),
+        resolution_meta=llm_resolution_meta,
         reviewflow_config_path=effective_config_path,
         config_enabled=True,
         repo_dir=repo_dir,
@@ -8717,7 +8985,7 @@ def build_interactive_resume_command(
             fallback_command = str((resume_meta or {}).get("command") or "").strip()
             if not fallback_command:
                 raise ReviewflowError(f"Session {session.session_id} is missing codex.resume metadata.")
-            write_json(meta_path, meta)
+            write_redacted_json(meta_path, meta)
             return (fallback_command, env)
 
         command = build_codex_resume_command(
@@ -8745,7 +9013,7 @@ def build_interactive_resume_command(
         )
         meta["llm"] = llm_meta
         meta["codex"] = codex_meta
-        write_json(meta_path, meta)
+        write_redacted_json(meta_path, meta)
         return (command, env)
 
     if provider == "claude":
@@ -8753,7 +9021,7 @@ def build_interactive_resume_command(
             fallback_command = str((llm_resume or {}).get("command") or "").strip()
             if not fallback_command:
                 raise ReviewflowError(f"Session {session.session_id} is missing llm.resume metadata.")
-            write_json(meta_path, meta)
+            write_redacted_json(meta_path, meta)
             return (fallback_command, env)
         command = build_claude_resume_command(
             repo_dir=repo_dir,
@@ -8767,7 +9035,7 @@ def build_interactive_resume_command(
             LlmResumeInfo(provider="claude", session_id=resume_session_id, cwd=repo_dir, command=command),
         )
         meta["llm"] = llm_meta
-        write_json(meta_path, meta)
+        write_redacted_json(meta_path, meta)
         return (command, env)
 
     raise ReviewflowError(
@@ -8828,7 +9096,16 @@ def interactive_flow(
         err_stream.flush()
     except Exception:
         pass
-    return run_interactive_resume_command(resume_command, env=resume_env)
+    try:
+        return run_interactive_resume_command(resume_command, env=resume_env)
+    finally:
+        cleanup_sensitive_staged_paths(
+            {
+                "gh_config_dir": resume_env.get("GH_CONFIG_DIR"),
+                "jira_config_file": resume_env.get("JIRA_CONFIG_FILE"),
+                "netrc": resume_env.get("NETRC"),
+            }
+        )
 
 
 def list_sessions(*, paths: ReviewflowPaths) -> int:
@@ -9027,7 +9304,7 @@ def _render_clean_screen(
     selected = state.selected_sessions()
     selected_size = _format_size_short(state.selected_size_bytes())
     header = (
-        f"reviewflow clean  preset={CLEANUP_PRESET_LABELS.get(state.preset, state.preset)}  "
+        f"{PRIMARY_CLI_COMMAND} clean  preset={CLEANUP_PRESET_LABELS.get(state.preset, state.preset)}  "
         f"sort={state.sort}  visible={len(visible)}/{len(state.sessions)}  "
         f"selected={len(selected)}  reclaim={selected_size}"
     )
@@ -9496,7 +9773,7 @@ def interactive_clean_flow(
     if not is_tty:
         raise ReviewflowError(
             "clean without a session_id requires a TTY on stdin/stderr. "
-            "Use `reviewflow clean <session_id>` for exact deletion."
+            f"Use `{PRIMARY_CLI_COMMAND} clean <session_id>` for exact deletion."
         )
 
     sessions = scan_cleanup_sessions(sandbox_root=paths.sandbox_root)
@@ -9693,7 +9970,7 @@ def jira_smoke_flow(
 
     jira_key = str(args.jira_key).strip()
     if not jira_key:
-        raise ReviewflowError("jira-smoke requires a Jira key (e.g. ABAU-985).")
+        raise ReviewflowError("jira-smoke requires a Jira key (e.g. PROJ-123).")
 
     session_root = paths.sandbox_root
     session_root.mkdir(parents=True, exist_ok=True)
@@ -9762,35 +10039,43 @@ Requirements:
     sleep_seconds = float(getattr(args, "sleep_seconds", 0.0) or 0.0)
     sleep_seconds = max(0.0, sleep_seconds)
 
-    for attempt in range(1, attempts + 1):
-        out_path = session_dir / f"jira_smoke_attempt_{attempt}.md"
-        codex_cmd = build_codex_exec_cmd(
-            repo_dir=repo_dir,
-            codex_flags=codex_flags,
-            codex_config_overrides=codex_overrides,
-            review_md_path=out_path,
-            prompt=prompt,
-            add_dirs=[session_dir],
-            skip_git_repo_check=True,
-        )
-        log(f"Jira smoke attempt {attempt}/{attempts}", quiet=quiet)
-        res = run_cmd(
-            codex_cmd,
-            cwd=repo_dir,
-            env=env,
-            check=False,
-            stream=stream,
-            stream_label="codex",
-        )
-        combined = f"{res.stdout}\n{res.stderr}"
-        ok = ("RF_JIRA_SMOKE_OK" in combined) and ("401 Unauthorized" not in combined)
-        if ok:
-            log(f"Jira smoke PASS (session {session_id})", quiet=quiet)
-            return 0
-        if attempt < attempts and sleep_seconds:
-            time.sleep(sleep_seconds)
+    try:
+        for attempt in range(1, attempts + 1):
+            out_path = session_dir / f"jira_smoke_attempt_{attempt}.md"
+            codex_cmd = build_codex_exec_cmd(
+                repo_dir=repo_dir,
+                codex_flags=codex_flags,
+                codex_config_overrides=codex_overrides,
+                review_md_path=out_path,
+                prompt=prompt,
+                add_dirs=[session_dir],
+                skip_git_repo_check=True,
+            )
+            log(f"Jira smoke attempt {attempt}/{attempts}", quiet=quiet)
+            res = run_cmd(
+                codex_cmd,
+                cwd=repo_dir,
+                env=env,
+                check=False,
+                stream=stream,
+                stream_label="codex",
+            )
+            combined = f"{res.stdout}\n{res.stderr}"
+            ok = ("RF_JIRA_SMOKE_OK" in combined) and ("401 Unauthorized" not in combined)
+            if ok:
+                log(f"Jira smoke PASS (session {session_id})", quiet=quiet)
+                return 0
+            if attempt < attempts and sleep_seconds:
+                time.sleep(sleep_seconds)
 
-    raise ReviewflowError(f"jira-smoke FAILED; inspect: {session_dir}")
+        raise ReviewflowError(f"jira-smoke FAILED; inspect: {session_dir}")
+    finally:
+        cleanup_sensitive_staged_paths(
+            {
+                "jira_config_file": env.get("JIRA_CONFIG_FILE"),
+                "netrc": env.get("NETRC"),
+            }
+        )
 
 CHUNKHOUND_GIT_MAIN_INSTALL_SPEC = "git+https://github.com/chunkhound/chunkhound@main"
 
@@ -10211,14 +10496,14 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--config",
         dest="config_path",
         default=argparse.SUPPRESS,
-        help="Override the reviewflow config path",
+        help="Override the CURe config path (`reviewflow.toml`)",
     )
     parser.add_argument(
         "--no-config",
         dest="no_config",
         action="store_true",
         default=False,
-        help="Disable reading the reviewflow TOML; CLI/env overrides still apply",
+        help="Disable reading the `reviewflow.toml` config; CLI/env overrides still apply",
     )
     parser.add_argument(
         "--sandbox-root",
@@ -10230,7 +10515,7 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--cache-root",
         dest="cache_root",
         default=argparse.SUPPRESS,
-        help="Override the reviewflow cache root",
+        help="Override the CURe cache root",
     )
     parser.add_argument(
         "--codex-config",
@@ -10246,14 +10531,29 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="agent_runtime_profile",
         choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
         default=None,
-        help="Reviewflow-owned CLI coding-agent runtime posture (balanced, strict, permissive)",
+        help="CURe-owned CLI coding-agent runtime posture (balanced, strict, permissive)",
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def resolve_cli_invocation_name(argv0: str | None) -> str:
+    name = Path(str(argv0 or PRIMARY_CLI_COMMAND)).name.strip().lower()
+    if name == DEPRECATED_CLI_ALIAS:
+        return DEPRECATED_CLI_ALIAS
+    if name == PRIMARY_CLI_COMMAND:
+        return PRIMARY_CLI_COMMAND
+    return PRIMARY_CLI_COMMAND
+
+
+def maybe_warn_deprecated_cli_alias(invocation_name: str, *, stderr: TextIO | None = None) -> None:
+    if str(invocation_name or "").strip().lower() != DEPRECATED_CLI_ALIAS:
+        return
+    print(DEPRECATED_ALIAS_WARNING, file=(stderr or sys.stderr))
+
+
+def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     add_runtime_args(runtime_parent)
-    parser = argparse.ArgumentParser(prog="reviewflow", parents=[runtime_parent])
+    parser = argparse.ArgumentParser(prog=prog, parents=[runtime_parent])
     sub = parser.add_subparsers(dest="cmd", required=True)
     codex_help = "Override Codex defaults after LLM preset resolution"
 
@@ -10432,7 +10732,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ins = sub.add_parser(
         "install",
-        help="Install or update ChunkHound so the `chunkhound` CLI is available to reviewflow",
+        help="Install or update ChunkHound so the `chunkhound` CLI is available to CURe",
         parents=[runtime_parent],
     )
     ins.add_argument(
@@ -10452,7 +10752,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     jsp = sub.add_parser("jira-smoke", help="Acceptance smoke test: Jira access via Codex", parents=[runtime_parent])
-    jsp.add_argument("jira_key", help="Jira key to fetch (e.g. ABAU-985)")
+    jsp.add_argument("jira_key", help="Jira key to fetch (e.g. PROJ-123)")
     jsp.add_argument("--attempts", type=int, default=1, help="How many attempts to run")
     jsp.add_argument("--sleep-seconds", type=float, default=0.0, help="Seconds to wait between attempts")
     jsp.add_argument("--quiet", action="store_true", help="Suppress progress output")
@@ -10460,8 +10760,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str]) -> int:
-    args = build_parser().parse_args(argv)
+def main(argv: list[str], *, prog: str = PRIMARY_CLI_COMMAND) -> int:
+    args = build_parser(prog=prog).parse_args(argv)
     runtime = resolve_runtime(args)
     paths = runtime.paths
 
@@ -10551,7 +10851,9 @@ def main(argv: list[str]) -> int:
 
 
 def console_main() -> int:
-    return main(sys.argv[1:])
+    invocation_name = resolve_cli_invocation_name(sys.argv[0] if sys.argv else PRIMARY_CLI_COMMAND)
+    maybe_warn_deprecated_cli_alias(invocation_name)
+    return main(sys.argv[1:], prog=PRIMARY_CLI_COMMAND)
 
 
 if __name__ == "__main__":

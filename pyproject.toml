@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reviewflow"
 version = "0.1.0"
-description = "PR review sandboxes powered by ChunkHound and configurable LLM presets"
+description = "CURe PR review sandboxes powered by ChunkHound and configurable LLM presets"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
+cure = "reviewflow:console_main"
 reviewflow = "reviewflow:console_main"
 
 [tool.setuptools]

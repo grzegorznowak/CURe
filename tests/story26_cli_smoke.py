@@ -136,7 +136,7 @@ raise SystemExit(2)
     gh_path.chmod(0o755)
 
 
-def reviewflow_cmd(binary: Path, sandbox_root: Path, *args: str) -> list[str]:
+def cli_cmd(binary: Path, sandbox_root: Path, *args: str) -> list[str]:
     return [
         str(binary),
         "--no-config",
@@ -283,8 +283,8 @@ def run_pty_watch(
     return int(status_file.read_text(encoding="utf-8").strip())
 
 
-def test_commands(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
-    proc = run_cmd(reviewflow_cmd(binary, sandbox_root, "commands", "--json"), env=env)
+def test_commands(primary_bin: Path, alias_bin: Path, env: dict[str, str], sandbox_root: Path) -> None:
+    proc = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands", "--json"), env=env)
     payload = json.loads(proc.stdout)
     ensure(payload["schema_version"] == 1, "commands schema_version mismatch")
     ensure(payload["kind"] == "reviewflow.commands", "commands kind mismatch")
@@ -304,10 +304,17 @@ def test_commands(binary: Path, env: dict[str, str], sandbox_root: Path) -> None
         ):
             ensure(key in entry, f"missing commands key {key!r}")
 
-    human = run_cmd(reviewflow_cmd(binary, sandbox_root, "commands"), env=env)
-    ensure("reviewflow clean closed --json" in human.stdout, "commands human output missing clean")
-    ensure("reviewflow status <session_id|PR_URL> --json" in human.stdout, "commands human output missing status")
-    ensure("reviewflow watch <session_id|PR_URL>" in human.stdout, "commands human output missing watch")
+    human = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands"), env=env)
+    ensure("cure clean closed --json" in human.stdout, "commands human output missing clean")
+    ensure("cure status <session_id|PR_URL> --json" in human.stdout, "commands human output missing status")
+    ensure("cure watch <session_id|PR_URL>" in human.stdout, "commands human output missing watch")
+    ensure("reviewflow pr <PR_URL>" in human.stdout, "commands human output missing deprecated alias")
+
+    alias_json = run_cmd(cli_cmd(alias_bin, sandbox_root, "commands", "--json"), env=env)
+    ensure("deprecated" in alias_json.stderr.lower(), "alias warning missing from stderr")
+    ensure("cure" in alias_json.stderr, "alias warning should point to cure")
+    alias_payload = json.loads(alias_json.stdout)
+    ensure(alias_payload["kind"] == "reviewflow.commands", "alias commands kind mismatch")
 
 
 def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
@@ -358,7 +365,7 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     corrupt_dir.mkdir(parents=True, exist_ok=True)
     (corrupt_dir / "meta.json").write_text("{not-json", encoding="utf-8")
 
-    exact = run_cmd(reviewflow_cmd(binary, sandbox_root, "status", "running-newer", "--json"), env=env)
+    exact = run_cmd(cli_cmd(binary, sandbox_root, "status", "running-newer", "--json"), env=env)
     exact_payload = json.loads(exact.stdout)
     ensure(exact_payload["resolved_target"]["session_id"] == "running-newer", "exact status mismatch")
     ensure(exact_payload["llm"]["summary"] == "llm=claude-cli/claude-sonnet-4-6/high", "llm summary mismatch")
@@ -366,7 +373,7 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     ensure(exact_payload["latest_artifact"]["path"].endswith("followup-1.md"), "latest artifact mismatch")
 
     pr_running = run_cmd(
-        reviewflow_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/26", "--json"),
+        cli_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/26", "--json"),
         env=env,
     )
     pr_running_payload = json.loads(pr_running.stdout)
@@ -374,7 +381,7 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     ensure(pr_running_payload["resolution_strategy"] == "newest_running", "PR running strategy mismatch")
 
     pr_fallback = run_cmd(
-        reviewflow_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/27", "--json"),
+        cli_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/27", "--json"),
         env=env,
         check=False,
     )
@@ -383,18 +390,18 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     ensure(pr_fallback_payload["resolved_target"]["session_id"] == "resumed-newest", "PR fallback mismatch")
     ensure(pr_fallback_payload["status"] == "error", "PR fallback status mismatch")
 
-    human = run_cmd(reviewflow_cmd(binary, sandbox_root, "status", "running-newer"), env=env)
+    human = run_cmd(cli_cmd(binary, sandbox_root, "status", "running-newer"), env=env)
     ensure("session=running-newer" in human.stdout, "status human output missing session")
     ensure("status=running" in human.stdout, "status human output missing status")
 
-    invalid = run_cmd(reviewflow_cmd(binary, sandbox_root, "status", "/tmp/not-a-session"), env=env, check=False)
+    invalid = run_cmd(cli_cmd(binary, sandbox_root, "status", "/tmp/not-a-session"), env=env, check=False)
     ensure(invalid.returncode != 0, "path-like status target should fail")
-    missing = run_cmd(reviewflow_cmd(binary, sandbox_root, "status", "missing-session"), env=env, check=False)
+    missing = run_cmd(cli_cmd(binary, sandbox_root, "status", "missing-session"), env=env, check=False)
     ensure(missing.returncode != 0, "missing status target should fail")
-    corrupt = run_cmd(reviewflow_cmd(binary, sandbox_root, "status", "corrupt-session"), env=env, check=False)
+    corrupt = run_cmd(cli_cmd(binary, sandbox_root, "status", "corrupt-session"), env=env, check=False)
     ensure(corrupt.returncode != 0, "corrupt session should fail")
     unmatched = run_cmd(
-        reviewflow_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/404"),
+        cli_cmd(binary, sandbox_root, "status", "https://github.com/acme/repo/pull/404"),
         env=env,
         check=False,
     )
@@ -411,7 +418,7 @@ def test_watch(binary: Path, script_bin: Path, env: dict[str, str], sandbox_root
     )
     mutate_terminal_status(running_done / "meta.json", status="done", delay_seconds=0.4)
     proc_done = run_cmd(
-        reviewflow_cmd(
+        cli_cmd(
             binary,
             sandbox_root,
             "watch",
@@ -438,7 +445,7 @@ def test_watch(binary: Path, script_bin: Path, env: dict[str, str], sandbox_root
     )
     mutate_terminal_status(running_error / "meta.json", status="error", delay_seconds=0.4)
     proc_error = run_cmd(
-        reviewflow_cmd(
+        cli_cmd(
             binary,
             sandbox_root,
             "watch",
@@ -511,17 +518,17 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
         completed_at="2026-03-10T09:05:00+00:00",
         number=60,
     )
-    exact = run_cmd(reviewflow_cmd(binary, exact_root, "clean", "exact-clean", "--json"), env=env)
+    exact = run_cmd(cli_cmd(binary, exact_root, "clean", "exact-clean", "--json"), env=env)
     exact_payload = json.loads(exact.stdout)
     ensure(exact_payload["kind"] == "reviewflow.clean.result", "exact clean kind mismatch")
     ensure(exact_payload["deleted"][0]["session_id"] == "exact-clean", "exact clean deleted wrong session")
     ensure(not (exact_root / "exact-clean").exists(), "exact clean did not delete session")
 
-    invalid_exact = run_cmd(reviewflow_cmd(binary, exact_root, "clean", "exact-clean", "--yes"), env=env, check=False)
+    invalid_exact = run_cmd(cli_cmd(binary, exact_root, "clean", "exact-clean", "--yes"), env=env, check=False)
     ensure(invalid_exact.returncode != 0, "clean <session> --yes should fail")
-    invalid_no_target_yes = run_cmd(reviewflow_cmd(binary, exact_root, "clean", "--yes"), env=env, check=False)
+    invalid_no_target_yes = run_cmd(cli_cmd(binary, exact_root, "clean", "--yes"), env=env, check=False)
     ensure(invalid_no_target_yes.returncode != 0, "clean --yes should fail")
-    invalid_no_target_json = run_cmd(reviewflow_cmd(binary, exact_root, "clean", "--json"), env=env, check=False)
+    invalid_no_target_json = run_cmd(cli_cmd(binary, exact_root, "clean", "--json"), env=env, check=False)
     ensure(invalid_no_target_json.returncode != 0, "clean --json should fail")
 
     closed_root = sandbox_root / "closed"
@@ -542,14 +549,14 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
         completed_at="2026-03-10T09:05:00+00:00",
         number=42,
     )
-    preview = run_cmd(reviewflow_cmd(binary, closed_root, "clean", "closed", "--json"), env=env)
+    preview = run_cmd(cli_cmd(binary, closed_root, "clean", "closed", "--json"), env=env)
     preview_payload = json.loads(preview.stdout)
     ensure(preview_payload["kind"] == "reviewflow.clean.preview", "closed preview kind mismatch")
     ensure([item["session_id"] for item in preview_payload["matched"]] == ["closed-clean"], "closed preview mismatch")
     ensure(preview_payload["deleted"] == [], "closed preview should not delete")
     ensure((closed_root / "closed-clean").exists(), "closed preview deleted session")
 
-    execute = run_cmd(reviewflow_cmd(binary, closed_root, "clean", "closed", "--yes", "--json"), env=env)
+    execute = run_cmd(cli_cmd(binary, closed_root, "clean", "closed", "--yes", "--json"), env=env)
     execute_payload = json.loads(execute.stdout)
     ensure(execute_payload["kind"] == "reviewflow.clean.result", "closed execute kind mismatch")
     ensure([item["session_id"] for item in execute_payload["deleted"]] == ["closed-clean"], "closed execute mismatch")
@@ -558,19 +565,22 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
 
     fail_env = dict(env)
     fail_env["RF_FAKE_GH_FAIL_AUTH"] = "1"
-    auth_fail = run_cmd(reviewflow_cmd(binary, closed_root, "clean", "closed", "--json"), env=fail_env, check=False)
+    auth_fail = run_cmd(cli_cmd(binary, closed_root, "clean", "closed", "--json"), env=fail_env, check=False)
     ensure(auth_fail.returncode != 0, "clean closed auth failure should be non-zero")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--reviewflow-bin", required=True)
+    parser.add_argument("--cli-bin", required=True)
+    parser.add_argument("--alias-bin", required=True)
     parser.add_argument("--script-bin", required=True)
     args = parser.parse_args()
 
-    binary = Path(args.reviewflow_bin).resolve()
+    binary = Path(args.cli_bin).resolve()
+    alias_bin = Path(args.alias_bin).resolve()
     script_bin = Path(args.script_bin).resolve()
-    ensure(binary.is_file(), f"missing reviewflow binary: {binary}")
+    ensure(binary.is_file(), f"missing primary CLI binary: {binary}")
+    ensure(alias_bin.is_file(), f"missing alias CLI binary: {alias_bin}")
     ensure(script_bin.is_file(), f"missing script binary: {script_bin}")
 
     with tempfile.TemporaryDirectory(prefix="reviewflow-story26-smoke-") as tmp:
@@ -580,7 +590,7 @@ def main() -> int:
         write_fake_gh(fake_bin)
         env = build_env(tmp_root, fake_bin)
 
-        test_commands(binary, env, tmp_root / "commands")
+        test_commands(binary, alias_bin, env, tmp_root / "commands")
         test_status(binary, env, tmp_root / "status")
         test_watch(binary, script_bin, env, tmp_root / "watch")
         test_clean(binary, env, tmp_root / "clean")
