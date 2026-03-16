@@ -6619,8 +6619,42 @@ class InstallAndDoctorTests(unittest.TestCase):
             )
             bar = lines[0]
             self.assertIn("RUN", bar)
-            self.assertIn("checkout_pr", bar)
-            self.assertIn("v:normal", bar)
+            self.assertIn("phase 1/1: Checkout PR", bar)
+            if w < 100:
+                self.assertNotIn("v:normal", bar)
+            else:
+                self.assertIn("v:normal", bar)
+
+    def test_dashboard_narrow_header_moves_verdicts_to_context(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "2026-03-04T00:00:00+00:00",
+            "status": "done",
+            "completed_at": "2026-03-04T00:05:00+00:00",
+            "phase": "codex_review",
+            "phases": {"codex_review": {"status": "done", "duration_seconds": 10.0}},
+            "verdicts": {"business": "REQUEST CHANGES", "technical": "REQUEST CHANGES"},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=[],
+            no_stream=False,
+            width=90,
+            height=25,
+        )
+        self.assertNotIn("biz=REQUEST CHANGES", lines[0])
+        self.assertNotIn("v:normal", lines[0])
+        self.assertIn("phase 1/1: Generate review", lines[0])
+        joined = "\n".join(lines)
+        self.assertIn("Verdict: biz=REQUEST CHANGES tech=REQUEST CHANGES", joined)
 
     def test_dashboard_narrow_layout_uses_single_column_sections(self) -> None:
         meta = {
@@ -6651,6 +6685,36 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("─ Phases", joined)
         self.assertIn("─ Context", joined)
         self.assertNotIn(" │ ", joined)
+
+    def test_dashboard_error_current_phase_uses_error_marker_and_failure_summary(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "error",
+            "phase": "review_intelligence_preflight",
+            "phases": {"review_intelligence_preflight": {"status": "error", "duration_seconds": 0.1}},
+            "error": {"message": "Jira context is expected but JIRA_CONFIG_FILE is unavailable."},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=["jira me failed"],
+            codex_tail=[],
+            no_stream=False,
+            width=120,
+            height=30,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("✖ Context preflight", joined)
+        self.assertIn("Failure:", joined)
+        self.assertIn("JIRA_CONF", joined)
+        self.assertIn("Support (Preflight) (last 1):", joined)
 
     def test_dashboard_color_mode_emits_ansi_and_preserves_width_math(self) -> None:
         meta = {
@@ -6812,7 +6876,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             color=False,
         )
         joined = "\n".join(lines)
-        m1 = re.search(r"ChunkHound \(last (\d+)\):", joined)
+        m1 = re.search(r"Support \(last (\d+)\):", joined)
         m2 = re.search(r"Codex \(last (\d+)\):", joined)
         self.assertIsNotNone(m1)
         self.assertIsNotNone(m2)
@@ -6850,6 +6914,33 @@ class InstallAndDoctorTests(unittest.TestCase):
         # Ensure at least one actual tail line makes it on screen at short heights.
         self.assertIn("Codex (last ", joined)
         self.assertIn("cx-400", joined)
+
+    def test_dashboard_empty_logs_render_stream_specific_placeholder(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "checkout_pr",
+            "phases": {"checkout_pr": {"status": "running"}},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=[],
+            no_stream=False,
+            width=120,
+            height=20,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("Codex (last 0):", joined)
+        self.assertIn("(no Codex output)", joined)
 
 
 class TuiPrintFinalMarkdownTests(unittest.TestCase):

@@ -273,6 +273,44 @@ KNOWN_PHASE_PREFIX = (
 )
 
 
+_PHASE_LABEL_OVERRIDES = {
+    "resolve_pr_meta": "Resolve PR metadata",
+    "ensure_base_cache": "Base cache",
+    "seed_sanity": "Validate seed",
+    "clone_seed": "Clone seed",
+    "rsync_mtimes": "Sync timestamps",
+    "checkout_pr": "Checkout PR",
+    "prepare_base_ref": "Prepare base ref",
+    "detect_pr_size": "Size PR",
+    "select_prompt_profile": "Prompt profile",
+    "index_topup": "Refresh index",
+    "load_prompt": "Load prompt",
+    "review_intelligence_preflight": "Context preflight",
+    "codex_plan": "Plan review",
+    "codex_review": "Generate review",
+    "codex_synth": "Synthesize review",
+    "followup_update": "Update follow-up",
+    "followup_index": "Refresh index",
+    "followup_review": "Generate follow-up",
+    "zip_resolve_pr_head": "Resolve PR head",
+    "codex_zip": "Generate zip review",
+}
+
+
+def _phase_label(name: str, *, debug: bool = False) -> str:
+    raw = str(name or "").strip() or "?"
+    if raw.startswith("codex_step_"):
+        suffix = raw.removeprefix("codex_step_")
+        label = f"Review step {int(suffix)}" if suffix.isdigit() else "Review step"
+    else:
+        label = _PHASE_LABEL_OVERRIDES.get(raw)
+    if not label:
+        label = raw.replace("_", " ").strip().title() or "?"
+    if debug and raw != label:
+        return f"{label} ({raw})"
+    return label
+
+
 def _ordered_phases(meta: dict) -> tuple[str, dict, list[str]]:
     phase = str(meta.get("phase") or "").strip() or "?"
     phases = meta.get("phases")
@@ -300,6 +338,34 @@ def _ordered_phases(meta: dict) -> tuple[str, dict, list[str]]:
     return (phase, phases, ordered)
 
 
+def _phase_position(meta: dict) -> tuple[int | None, int]:
+    phase, _, ordered = _ordered_phases(meta)
+    if not ordered:
+        return (None, 0)
+    try:
+        return (ordered.index(phase) + 1, len(ordered))
+    except ValueError:
+        return (None, len(ordered))
+
+
+def _display_phase_name(meta: dict) -> str:
+    phase, phases, ordered = _ordered_phases(meta)
+    overall_status = str(meta.get("status") or "").strip().lower()
+    if overall_status in {"done", "completed", "success", "succeeded"}:
+        for candidate in reversed(ordered):
+            entry = phases.get(candidate)
+            entry = entry if isinstance(entry, dict) else {}
+            if str(entry.get("status") or "").strip() == "done":
+                return candidate
+    if overall_status in {"error", "failed", "failure"}:
+        for candidate in reversed(ordered):
+            entry = phases.get(candidate)
+            entry = entry if isinstance(entry, dict) else {}
+            if str(entry.get("status") or "").strip() == "error":
+                return candidate
+    return phase
+
+
 def _spinner_char(ts: float) -> str:
     # Avoid braille/emoji spinners: many terminals/font stacks render them poorly or
     # with ambiguous cell widths, which can cause wraps/misalignment.
@@ -309,7 +375,13 @@ def _spinner_char(ts: float) -> str:
 
 
 def _format_phase_lines(
-    *, meta: dict, max_lines: int, width: int, now_ts: float | None, active: bool
+    *,
+    meta: dict,
+    max_lines: int,
+    width: int,
+    now_ts: float | None,
+    active: bool,
+    debug: bool = False,
 ) -> list[str]:
     max_lines = max(0, int(max_lines))
     width = max(1, int(width))
@@ -321,6 +393,8 @@ def _format_phase_lines(
     entries: list[tuple[str, str, str | None]] = []
     done = 0
     errs = 0
+    overall_status = str(meta.get("status") or "").strip().lower()
+    current_idx, total = _phase_position(meta)
     for p in ordered:
         entry = phases.get(p)
         entry = entry if isinstance(entry, dict) else {}
@@ -329,28 +403,35 @@ def _format_phase_lines(
         dur_txt = None
         if isinstance(dur, (int, float)):
             dur_txt = f"{float(dur):.1f}s"
+        if status == "done":
+            done += 1
+        elif status == "error":
+            errs += 1
         if p == phase:
-            if active and now_ts is not None:
-                mark = f"▶{_spinner_char(now_ts)}"
+            if status == "error" or overall_status in {"error", "failed", "failure"}:
+                mark = "✖"
+            elif status == "done" or overall_status in {"done", "completed", "success", "succeeded"}:
+                mark = "✔"
             else:
                 mark = "▶"
         elif status == "done":
             mark = "✔"
-            done += 1
         elif status == "error":
             mark = "✖"
-            errs += 1
         else:
             mark = "•"
-        entries.append((mark, p, dur_txt))
+        entries.append((mark, _phase_label(p, debug=debug), dur_txt))
 
     # Summary line improves scanability; only include if we have room.
     lines: list[str] = []
     if max_lines >= 3 and ordered:
-        total = len(ordered)
         summary = f"Phases: {done}/{total} done"
         if errs:
             summary += f" • {errs} err"
+        if current_idx is not None and overall_status in {"error", "failed", "failure"}:
+            summary += f" • failed {current_idx}/{total}"
+        elif current_idx is not None and overall_status in {"running", ""}:
+            summary += f" • phase {current_idx}/{total}"
         lines.append(_truncate(summary, width))
 
     remaining = max_lines - len(lines)
@@ -441,6 +522,7 @@ def build_dashboard_lines(
 ) -> list[str]:
     width = max(40, int(width))
     height = max(10, int(height))
+    wide = width >= 100
 
     host = str(meta.get("host") or "").strip()
     owner = str(meta.get("owner") or "").strip()
@@ -462,6 +544,9 @@ def build_dashboard_lines(
 
     status = str(meta.get("status") or "running").strip()
     phase = str(meta.get("phase") or "").strip() or "?"
+    display_phase = _display_phase_name(meta)
+    phase_label = _phase_label(display_phase, debug=snapshot.verbosity is Verbosity.debug)
+    phase_index, phase_total = _phase_position({**meta, "phase": display_phase})
 
     completed_at = str(meta.get("completed_at") or "").strip()
 
@@ -475,13 +560,19 @@ def build_dashboard_lines(
         status_token = "DONE"
 
     active = status_token == "RUN"
-    status_display = f"RUN{_spinner_char(now_ts)}" if active else status_token
+    status_display = f"RUN {_spinner_char(now_ts)}" if active else status_token
 
     verdicts = _format_verdicts(meta)
+    if phase_index is not None and phase_total > 0:
+        phase_display = f"phase {phase_index}/{phase_total}: {phase_label}"
+    else:
+        phase_display = f"phase: {phase_label}"
     right_bits: list[str] = [status_display]
-    if status_token == "DONE" and verdicts:
+    if status_token == "DONE" and verdicts and wide:
         right_bits.append(verdicts)
-    right_bits.extend([phase, elapsed, f"v:{snapshot.verbosity.value}"])
+    right_bits.extend([phase_display, elapsed])
+    if wide or snapshot.verbosity is not Verbosity.normal:
+        right_bits.append(f"v:{snapshot.verbosity.value}")
     if no_stream:
         right_bits.append("stream:off")
     right = " • ".join([b for b in right_bits if b])
@@ -506,7 +597,6 @@ def build_dashboard_lines(
         header_lines.append(mp_line)
 
     # Body panes (progress + dials)
-    wide = width >= 100
     col_sep = " │ "
     if wide:
         min_right = 30
@@ -519,6 +609,13 @@ def build_dashboard_lines(
 
     # Dials
     dials: list[tuple[str, str]] = []
+    error_meta = meta.get("error")
+    error_meta = error_meta if isinstance(error_meta, dict) else {}
+    failure_message = str(error_meta.get("message") or "").strip()
+    if failure_message:
+        dials.append(("Failure", failure_message))
+    if (not wide) and verdicts:
+        dials.append(("Verdict", verdicts))
     base_ref = str(meta.get("base_ref") or "").strip()
     head_sha = str(meta.get("head_sha") or "").strip()
     if base_ref:
@@ -765,6 +862,15 @@ def build_dashboard_lines(
             out.append("stream hidden (--no-stream); see session logs under <session>/work/logs/")
             return out[:budget]
 
+        def _support_log_label(*, phase_name: str) -> str:
+            if phase_name in {"ensure_base_cache", "index_topup", "followup_index"}:
+                return "Support (Index)"
+            if phase_name == "review_intelligence_preflight":
+                return "Support (Preflight)"
+            return "Support"
+
+        support_label = _support_log_label(phase_name=phase)
+
         def _clean_tail(raw_lines: list[str]) -> list[str]:
             cleaned: list[str] = []
             last_blank = False
@@ -788,12 +894,26 @@ def build_dashboard_lines(
         ch_tail = _clean_tail(chunkhound_tail)
         cx_tail = _clean_tail(codex_tail)
 
-        # Prefer showing Codex when space is tight.
-        show_chunkhound = budget >= 5 and bool(ch_tail)
-        show_codex = budget >= 2
+        if ch_tail and not cx_tail:
+            show_chunkhound = True
+            show_codex = False
+        elif cx_tail and not ch_tail:
+            show_chunkhound = False
+            show_codex = True
+        else:
+            # Prefer showing Codex when space is tight.
+            show_chunkhound = budget >= 5 and bool(ch_tail)
+            show_codex = budget >= 2
 
         overhead = 1 + (1 if show_chunkhound else 0) + (1 if show_codex else 0)
         tail_budget = max(0, budget - overhead)
+
+        def _append_section(*, label: str, section_lines: list[str], empty_text: str) -> None:
+            out.append(f"{label} (last {len(section_lines)}):")
+            if section_lines:
+                out.extend(section_lines)
+                return
+            out.append(empty_text)
 
         if show_chunkhound and show_codex:
             ch_show, cx_show = _alloc_tails_compact(
@@ -801,19 +921,20 @@ def build_dashboard_lines(
             )
             ch_lines = ch_tail[-ch_show:] if ch_show > 0 else []
             cx_lines = cx_tail[-cx_show:] if cx_show > 0 else []
-            out.append(f"ChunkHound (last {len(ch_lines)}):")
-            out.extend(ch_lines)
-            out.append(f"Codex (last {len(cx_lines)}):")
-            out.extend(cx_lines)
+            _append_section(label=support_label, section_lines=ch_lines, empty_text="(no support output)")
+            _append_section(label="Codex", section_lines=cx_lines, empty_text="(no Codex output)")
+        elif show_chunkhound:
+            ch_show = min(len(ch_tail), tail_budget)
+            ch_lines = ch_tail[-ch_show:] if ch_show > 0 else []
+            _append_section(label=support_label, section_lines=ch_lines, empty_text="(no support output)")
         else:
             # Codex-only compact mode.
             cx_show = min(len(cx_tail), tail_budget)
             cx_lines = cx_tail[-cx_show:] if cx_show > 0 else []
-            out.append(f"Codex (last {len(cx_lines)}):")
-            out.extend(cx_lines)
+            _append_section(label="Codex", section_lines=cx_lines, empty_text="(no Codex output)")
 
-        # If we had no actual output lines (empty logs), include a placeholder if we can.
-        if len(out) <= 2 and budget >= 3:
+        # If we had no log subsection at all, include a generic placeholder if we can.
+        if len(out) == 1 and budget >= 3:
             out.append("(no output yet)")
         return out[:budget]
 
@@ -860,7 +981,12 @@ def build_dashboard_lines(
         body_rows = min(desired_rows, body_max) if desired_rows else 0
 
         phase_lines = _format_phase_lines(
-            meta=meta, max_lines=body_rows, width=left_w, now_ts=now_ts, active=active
+            meta=meta,
+            max_lines=body_rows,
+            width=left_w,
+            now_ts=now_ts,
+            active=active,
+            debug=snapshot.verbosity is Verbosity.debug,
         )
         context_lines = format_context(max_lines=body_rows, width=right_w)
         body_rows_render = max(len(phase_lines), len(context_lines))
@@ -903,7 +1029,14 @@ def build_dashboard_lines(
             context_h = min(context_desired, max(0, body_content - phase_h))
             lines.append(_divider_segment(label="Phases", width=width))
             lines.extend(
-                _format_phase_lines(meta=meta, max_lines=phase_h, width=width, now_ts=now_ts, active=active)
+                _format_phase_lines(
+                    meta=meta,
+                    max_lines=phase_h,
+                    width=width,
+                    now_ts=now_ts,
+                    active=active,
+                    debug=snapshot.verbosity is Verbosity.debug,
+                )
             )
             lines.append(_divider_segment(label="Context", width=width))
             lines.extend(context_lines_full[:context_h])
@@ -916,6 +1049,7 @@ def build_dashboard_lines(
                     width=width,
                     now_ts=now_ts,
                     active=active,
+                    debug=snapshot.verbosity is Verbosity.debug,
                 )
             )
 
@@ -961,6 +1095,16 @@ def build_dashboard_lines(
     for i, line in enumerate(out):
         if line in footer_set or line.startswith("Keys:") or line.startswith("  "):
             out[i] = wrap(ANSI_DIM, line)
+
+    # Failure summary: red in context to make preflight/runtime failures obvious.
+    for i, line in enumerate(out):
+        if line.startswith("Failure:"):
+            out[i] = wrap(ANSI_RED, line)
+            continue
+        if col_sep in line:
+            prefix, suffix = line.split(col_sep, 1)
+            if suffix.lstrip().startswith("Failure:"):
+                out[i] = prefix + col_sep + wrap(ANSI_RED, suffix)
 
     # Phase markers: colorize phases (left column in wide, full line in narrow).
     if wide:
