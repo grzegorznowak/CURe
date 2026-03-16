@@ -118,7 +118,10 @@ When readiness fails because local runtime config or credentials are incomplete,
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
 - if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
-- for ChunkHound embedding setup, explicitly mention supported env vars when relevant, including `OPENAI_API_KEY` and `VOYAGE_API_KEY`
+- for ChunkHound embedding setup, recommend VoyageAI first unless the operator has already chosen another active config or provider; mention only the env vars relevant to that chosen path, such as `VOYAGE_API_KEY` or `OPENAI_API_KEY`
+- operator owns provider choice: ask them to confirm the default VoyageAI path or point you at the active ChunkHound embedding config before any provider-specific setup
+- do not enumerate all ChunkHound embedding providers
+- do not suggest or install Ollama unless the operator explicitly asks for a local provider path
 - if non-secret config structure is missing, name the exact local file path to edit and show the minimal snippet to add, using placeholders instead of real secret values
 - never ask the operator to paste a secret into chat
 - end with the exact rerun command, usually `cure pr <PR_URL> --if-reviewed new`
@@ -151,29 +154,35 @@ I checked /path/to/project/reviewflow.toml and its [chunkhound].base_config_path
 ```json
 {
   "embedding": {
-    "provider": "openai",
-    "model": "text-embedding-3-small"
+    "provider": "voyage",
+    "model": "voyage-code-3"
   }
 }
 ```
 
-If the file already has top-level keys, merge that `embedding` object into the existing JSON instead of replacing the whole file. If the operator uses Voyage instead of OpenAI, use `"provider": "voyage"` with an appropriate Voyage embedding model such as `"voyage-code-3"`.
+If the file already has top-level keys, merge that `embedding` object into the existing JSON instead of replacing the whole file. Treat VoyageAI as the default recommendation, not an autonomous choice. If the operator points you at a different active embedding config, use that instead. Do not enumerate all ChunkHound providers, and do not suggest or install Ollama unless the operator explicitly asks for a local provider path.
 
 3. Recommend env-first secret placement, never secret values in chat:
-
-```bash
-export OPENAI_API_KEY=<your-openai-api-key>
-```
-
-or
 
 ```bash
 export VOYAGE_API_KEY=<your-voyage-api-key>
 ```
 
+If the operator explicitly selects OpenAI instead, switch the snippet to an OpenAI embedding model such as `"text-embedding-3-small"` and use:
+
+```bash
+export OPENAI_API_KEY=<your-openai-api-key>
+```
+
 For persistence, place the same env var in the operator's shell profile or existing local secret manager. Do not ask them to paste the secret into chat.
 
-4. End with the rerun command:
+4. Before making any provider-specific change, stop and ask:
+
+```text
+Default recommendation: VoyageAI with the snippet above. If you want a different provider or already have an active ChunkHound embedding config, point me at that config now. Which embedding setup should I use?
+```
+
+5. After the operator confirms the provider or points you at the active config, end with the rerun command:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
@@ -193,6 +202,10 @@ Required behavior:
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
 - Inspect the actual active local config files first, especially `reviewflow.toml` and the resolved `chunkhound-base.json` from `[chunkhound].base_config_path`.
 - Ask only for the missing project-specific facts after you have provided the exact local remediation steps for config or secret placement.
+- If embeddings are missing, recommend VoyageAI as the default path, but operator owns provider choice.
+- Do not enumerate all ChunkHound embedding providers.
+- Before any provider-specific setup, ask the operator to confirm VoyageAI or point you at the active ChunkHound embedding config.
+- Do not suggest or install Ollama unless the operator explicitly asks for a local provider path.
 - Do not invent config, assume hidden secrets, ask for secrets in chat, or skip readiness checks.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 - Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
