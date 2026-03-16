@@ -1,6 +1,6 @@
 # CURe
 
-CURe is a CLI for running pull request reviews inside isolated sandboxes, with ChunkHound-backed code search/research and a configurable review agent on top.
+CURe ("Code Under Review") is a CLI for running pull request reviews inside isolated sandboxes, with ChunkHound-backed code search/research and a configurable review agent on top.
 
 It is for two audiences:
 - human operators who want a repeatable way to hand PR review work to agents without letting them mutate the source checkout
