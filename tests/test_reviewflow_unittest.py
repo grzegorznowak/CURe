@@ -583,7 +583,11 @@ class ChunkHoundConfigTests(unittest.TestCase):
         try:
             rf.materialize_chunkhound_env_config(
                 resolved_config={
-                    "embedding": {"provider": "voyage", "api_key": "secret", "model": "voyage-code-3"},
+                    "embedding": {
+                        "provider": "voyage",
+                        "api_key": "secret",  # pragma: allowlist secret
+                        "model": "voyage-code-3",
+                    },
                     "indexing": {"exclude": ["**/.git/**"]},
                 },
                 output_config_path=output,
@@ -605,7 +609,7 @@ class ChunkHoundConfigTests(unittest.TestCase):
                     {
                         "embedding": {
                             "provider": "voyage",
-                            "api_key": "test-key",
+                            "api_key": "test-key",  # pragma: allowlist secret
                             "model": "voyage-code-3",
                         }
                     }
@@ -618,7 +622,7 @@ class ChunkHoundConfigTests(unittest.TestCase):
                 clear=False,
             ):
                 env = rf.chunkhound_env(source_config_path=base_cfg)
-            self.assertEqual(env["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")
+            self.assertEqual(env["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")  # pragma: allowlist secret
         finally:
             base_cfg.unlink(missing_ok=True)
 
@@ -766,7 +770,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         "",
                         "[llm_presets.fast_router]",
                         'preset = "openrouter-responses"',
-                        'api_key = "test-openrouter-key"',
+                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
                         'plan_reasoning_effort = "xhigh"',
@@ -778,7 +782,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "gpt-5.4"',
                         'reasoning_effort = "medium"',
-                        'env = { OPENAI_API_KEY = "test-openai-key" }',
+                        'env = { OPENAI_API_KEY = "test-openai-key" }',  # pragma: allowlist secret
                         "",
                     ]
                 ),
@@ -792,7 +796,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(llm_cfg["presets"]["fast_router"]["headers"]["X-Test"], "1")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["request"]["service_tier"], "flex")
             self.assertEqual(llm_cfg["presets"]["my_codex"]["transport"], "cli")
-            self.assertEqual(llm_cfg["presets"]["my_codex"]["env"]["OPENAI_API_KEY"], "test-openai-key")
+            self.assertEqual(llm_cfg["presets"]["my_codex"]["env"]["OPENAI_API_KEY"], "test-openai-key")  # pragma: allowlist secret
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -939,7 +943,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'provider = "openrouter"',
                         'endpoint = "responses"',
                         'base_url = "https://openrouter.ai/api/v1"',
-                        'api_key = "test-openrouter-key"',
+                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         "",
                     ]
@@ -965,7 +969,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                 "plan_reasoning_effort": "high",
                 "text_verbosity": None,
                 "max_output_tokens": None,
-                "env": {"OPENAI_API_KEY": "test-openai-key"},
+                "env": {"OPENAI_API_KEY": "test-openai-key"},  # pragma: allowlist secret
                 "capabilities": {"supports_resume": True},
             },
             resolution_meta={"runtime_overrides": {}},
@@ -980,9 +984,9 @@ class LlmPresetConfigTests(unittest.TestCase):
             rf.write_redacted_json(
                 path,
                 {
-                    "env": {"OPENAI_API_KEY": "test-openai-key"},
+                    "env": {"OPENAI_API_KEY": "test-openai-key"},  # pragma: allowlist secret
                     "headers": {
-                        "Authorization": "Bearer test-openrouter-key",
+                        "Authorization": "Bearer test-openrouter-key",  # pragma: allowlist secret
                         "HTTP-Referer": "https://example.com",
                     },
                 },
@@ -1419,7 +1423,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 "provider": "openrouter",
                 "endpoint": "responses",
                 "base_url": "https://openrouter.ai/api/v1",
-                "api_key": "test-openrouter-key",
+                "api_key": "test-openrouter-key",  # pragma: allowlist secret
                 "model": "x-ai/grok-4.1-fast",
                 "reasoning_effort": "high",
                 "text_verbosity": None,
@@ -1436,7 +1440,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             prompt="Review this PR.",
         )
         self.assertEqual(request["url"], "https://openrouter.ai/api/v1/responses")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer test-openrouter-key")
+        self.assertEqual(request["headers"]["Authorization"], "Bearer test-openrouter-key")  # pragma: allowlist secret
         self.assertEqual(request["headers"]["HTTP-Referer"], "https://example.com")
         self.assertEqual(request["headers"]["X-OpenRouter-Title"], "cure")
         self.assertEqual(request["json"]["model"], "x-ai/grok-4.1-fast")
@@ -2394,7 +2398,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
                 rc = rf.interactive_flow(argparse.Namespace(), paths=paths, stdin=stdin, stderr=stderr)
@@ -2404,7 +2412,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertIn("codex resume", runner.call_args.args[0])
             self.assertIn("s1", runner.call_args.args[0])
             self.assertNotIn(f"--add-dir {root}", runner.call_args.args[0])
-            self.assertEqual(runner.call_args.kwargs["env"]["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")
+            self.assertEqual(runner.call_args.kwargs["env"]["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")  # pragma: allowlist secret
             self.assertIn("llm=legacy_codex/gpt-5.3-codex/high", stderr.getvalue())
             self.assertIn(str(s1 / "review.md"), stderr.getvalue())
         finally:
@@ -2511,7 +2519,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
@@ -2618,7 +2630,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=9) as runner,
             ):
                 rc = rf.interactive_flow(args, paths=paths, stdin=stdin, stderr=stderr)
@@ -2700,7 +2716,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0),
             ):
                 rc = rf.interactive_flow(argparse.Namespace(), paths=paths, stdin=stdin, stderr=stderr)
@@ -2813,7 +2833,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -2930,7 +2954,11 @@ class InteractiveFlowTests(unittest.TestCase):
                         {},
                     ),
                 ),
-                mock.patch.object(rf, "chunkhound_env", return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
