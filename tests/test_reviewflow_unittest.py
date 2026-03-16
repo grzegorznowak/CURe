@@ -329,6 +329,17 @@ class PublicGitHubFallbackTests(unittest.TestCase):
 
         self.assertEqual(payload["title"], "Public PR")
 
+    def test_gh_api_json_does_not_fallback_for_non_github_hosts_when_gh_is_missing(self) -> None:
+        with mock.patch.object(rf, "run_cmd", side_effect=FileNotFoundError("gh")):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.gh_api_json(
+                    host="ghe.example.com",
+                    path="repos/acme/repo/pulls/1",
+                    allow_public_fallback=True,
+                )
+
+        self.assertIn("`gh` is required for PR metadata resolution on ghe.example.com", str(ctx.exception))
+
     def test_clone_seed_repo_falls_back_to_public_git_clone(self) -> None:
         seed = ROOT / ".tmp_test_public_seed"
         calls: list[list[str]] = []
@@ -3252,18 +3263,6 @@ class ZipFlowTests(unittest.TestCase):
             stderr = StringIO()
             prompts: list[str] = []
 
-            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
-                if cmd[:2] == ["gh", "api"]:
-                    return mock.Mock(
-                        stdout=json.dumps(
-                            {
-                                "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-                                "title": "Zip PR",
-                            }
-                        )
-                    )
-                raise AssertionError(f"unexpected command: {cmd}")
-
             def fake_run_codex_exec(**kwargs: object) -> rf.CodexRunResult:
                 prompt = kwargs["prompt"]
                 assert isinstance(prompt, str)
@@ -3280,8 +3279,15 @@ class ZipFlowTests(unittest.TestCase):
                 return rf.CodexRunResult(resume=None)
 
             with (
-                mock.patch.object(rf, "require_gh_auth"),
-                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(
+                    rf,
+                    "gh_api_json",
+                    return_value={
+                        "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                        "title": "Zip PR",
+                    },
+                ) as gh_api_json,
+                mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("zip should use shared metadata helper")),
                 mock.patch.object(rf, "select_zip_sources_for_pr_head", return_value=sources),
                 mock.patch.object(rf, "resolve_codex_flags", return_value=([], {"resolved": {}})),
                 mock.patch.object(rf, "codex_mcp_overrides_for_reviewflow", return_value=[]),
@@ -3292,6 +3298,11 @@ class ZipFlowTests(unittest.TestCase):
                 rc = rf.zip_flow(args, paths=paths)
 
             self.assertEqual(rc, 0)
+            gh_api_json.assert_called_once_with(
+                host="github.com",
+                path="repos/acme/repo/pulls/9",
+                allow_public_fallback=True,
+            )
             self.assertIn("zip selected 2 input artifact(s) for HEAD bbbbbbbbbbbb", stderr.getvalue())
             self.assertIn(
                 "zip input host-session [review] biz=APPROVE tech=REQUEST CHANGES 2026-03-04T01:00:00+00:00 head bbbbbbbbbbbb",
@@ -3317,6 +3328,237 @@ class ZipFlowTests(unittest.TestCase):
             self.assertIn("`other-session`", text)
             self.assertIn("biz=APPROVE tech=REQUEST CHANGES", text)
             self.assertIn("head `bbbbbbbbbbbb`", text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_zip_flow_non_github_host_still_fails_via_shared_metadata_contract(self) -> None:
+        args = argparse.Namespace(
+            pr_url="https://ghe.example.com/acme/repo/pull/9",
+            codex_model=None,
+            codex_effort=None,
+            codex_plan_effort=None,
+            ui="off",
+            verbosity="normal",
+            no_stream=False,
+        )
+        paths = rf.ReviewflowPaths(
+            sandbox_root=ROOT,
+            cache_root=ROOT,
+            review_chunkhound_config=ROOT / ".tmp_cfg",
+            main_chunkhound_config=ROOT / ".tmp_cfg2",
+        )
+        with (
+            mock.patch.object(
+                rf,
+                "gh_api_json",
+                side_effect=rf.ReviewflowError("`gh` is not authenticated for ghe.example.com."),
+            ) as gh_api_json,
+            mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("zip should not preflight gh auth")),
+        ):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.zip_flow(args, paths=paths)
+
+        gh_api_json.assert_called_once_with(
+            host="ghe.example.com",
+            path="repos/acme/repo/pulls/9",
+            allow_public_fallback=True,
+        )
+        self.assertIn("ghe.example.com", str(ctx.exception))
+
+
+class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
+    def _write_session_meta(
+        self,
+        root: Path,
+        *,
+        session_id: str,
+        host: str = "github.com",
+        supports_resume: bool = True,
+    ) -> Path:
+        session_dir = root / session_id
+        repo_dir = session_dir / "repo"
+        work_dir = session_dir / "work"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "status": "error",
+                    "host": host,
+                    "owner": "acme",
+                    "repo": "repo",
+                    "number": 9,
+                    "pr_url": f"https://{host}/acme/repo/pull/9",
+                    "title": "Session PR",
+                    "base_ref": "main",
+                    "base_ref_for_review": "reviewflow_base__main",
+                    "created_at": "2026-03-10T00:00:00+00:00",
+                    "failed_at": "2026-03-10T00:05:00+00:00",
+                    "llm": {
+                        "provider": "codex",
+                        "capabilities": {"supports_resume": supports_resume},
+                    },
+                    "notes": {"no_index": False},
+                    "paths": {
+                        "repo_dir": str(repo_dir),
+                        "work_dir": str(work_dir),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return session_dir
+
+    def test_resume_flow_does_not_require_gh_auth_before_local_resume_setup(self) -> None:
+        root = ROOT / ".tmp_test_resume_public_auth_root"
+        cfg = ROOT / ".tmp_test_resume_public_auth_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            self._write_session_meta(root, session_id="resume-public")
+            args = argparse.Namespace(
+                session_id="resume-public",
+                from_phase="plan",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=False,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_resume_public_auth_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+
+            with (
+                mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("resume should not preflight gh auth")),
+                mock.patch.object(rf, "ensure_review_config", side_effect=RuntimeError("resume reached local setup")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "resume reached local setup"):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_followup_no_update_does_not_require_gh_auth_before_local_setup(self) -> None:
+        root = ROOT / ".tmp_test_followup_no_update_auth_root"
+        cfg = ROOT / ".tmp_test_followup_no_update_auth_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            self._write_session_meta(root, session_id="followup-no-update")
+            args = argparse.Namespace(
+                session_id="followup-no-update",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=False,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_followup_no_update_auth_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+
+            with (
+                mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("followup --no-update should not preflight gh auth")),
+                mock.patch.object(rf, "ensure_review_config", side_effect=RuntimeError("followup reached local setup")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "followup reached local setup"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_followup_update_uses_checkout_helper_without_preflight_auth(self) -> None:
+        root = ROOT / ".tmp_test_followup_update_checkout_root"
+        cfg = ROOT / ".tmp_test_followup_update_checkout_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+            session_dir = self._write_session_meta(root, session_id="followup-update")
+            args = argparse.Namespace(
+                session_id="followup-update",
+                no_update=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=False,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_followup_update_checkout_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+
+            def fake_run_cmd(cmd: list[str], **_: object) -> mock.Mock:
+                if cmd[:4] == ["git", "-C", str((session_dir / "repo").resolve()), "rev-parse"]:
+                    return mock.Mock(stdout="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+                if cmd[:6] == ["git", "-C", str((session_dir / "repo").resolve()), "fetch", "--prune", "origin"]:
+                    return mock.Mock(stdout="")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with (
+                mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("followup update should not preflight gh auth")),
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
+                mock.patch.object(rf, "materialize_chunkhound_env_config"),
+                mock.patch.object(
+                    rf,
+                    "load_review_intelligence_config",
+                    return_value=(
+                        rf.ReviewIntelligenceConfig(
+                            tool_prompt_fragment="Use GitHub MCP first.",
+                            policy_mode="cure_first_unrestricted",
+                        ),
+                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                    ),
+                ),
+                mock.patch.object(rf, "require_builtin_review_intelligence"),
+                mock.patch.object(rf, "resolve_llm_config_from_args", return_value=({"provider": "openai"}, {})),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {}, "codex_flags": [], "codex_config_overrides": []},
+                ),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(
+                    rf,
+                    "checkout_pr_in_repo",
+                    side_effect=RuntimeError("followup reached checkout helper"),
+                ) as checkout_pr_in_repo,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "followup reached checkout helper"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            checkout_pr_in_repo.assert_called_once()
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)

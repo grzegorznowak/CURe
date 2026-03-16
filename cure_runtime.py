@@ -1820,7 +1820,7 @@ def _doctor_runtime_checks(
         checks.append(
             _doctor_optional_check(
                 name="jira-config",
-                detail=f"missing: {jira_cfg} (optional for `pr` reviews; only needed for Jira-driven workflows)",
+                detail=f"missing: {jira_cfg} (optional for normal PR review lifecycle flows; only needed for Jira-driven workflows)",
             )
         )
     else:
@@ -1851,7 +1851,7 @@ def _doctor_runtime_checks(
                 DoctorCheck(
                     name="gh",
                     status="ok",
-                    detail=f"{gh_check.detail} (not required for public github.com PR startup; anonymous fallback confirmed)",
+                    detail=f"{gh_check.detail} (not required for public github.com PR lifecycle flows such as `pr`, `resume`, `followup`, and `zip`; anonymous fallback confirmed)",
                 )
             )
         else:
@@ -1863,7 +1863,7 @@ def _doctor_runtime_checks(
             checks.append(
                 _doctor_optional_check(
                     name="jira",
-                    detail=f"{jira_check.detail} (optional for `pr` reviews; only needed for Jira-driven workflows)",
+                    detail=f"{jira_check.detail} (optional for normal PR review lifecycle flows; only needed for Jira-driven workflows)",
                 )
             )
 
@@ -1919,7 +1919,7 @@ def _doctor_runtime_checks(
             if gh_check.status == "ok"
             else _doctor_optional_check(
                 name="gh",
-                detail=f"{gh_check.detail} (target-dependent; public github.com PR startup can use fallback)",
+                detail=f"{gh_check.detail} (target-dependent; public github.com PR lifecycle flows can use fallback)",
             )
         )
         checks.append(
@@ -1948,7 +1948,7 @@ def _doctor_runtime_checks(
             if gh_auth.status == "ok"
             else _doctor_optional_check(
                 name="gh-auth",
-                detail=f"{gh_auth.detail} (target-dependent; public github.com PR startup can use fallback)",
+                detail=f"{gh_auth.detail} (target-dependent; public github.com PR lifecycle flows can use fallback)",
             )
         )
     return checks

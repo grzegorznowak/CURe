@@ -72,6 +72,8 @@ cure install
 cure doctor --pr-url <PR_URL> --json
 ```
 
+Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows.
+
 6. If the environment is ready, start the review:
 
 ```bash
@@ -108,7 +110,8 @@ Stop instead of guessing when:
 - `cure doctor --pr-url <PR_URL> --json` reports missing prerequisites
 - the project config is missing
 - the review-intelligence fragment is missing
-- `gh`, Jira, provider auth, or ChunkHound base config are unavailable
+- GitHub access, provider auth, or ChunkHound base config are unavailable in a way that `cure doctor --pr-url <PR_URL> --json` does not clear for the target
+- Jira is unavailable for a Jira-driven workflow
 - the operator has not provided the project-specific values the run needs
 
 ## Canonical Agent Prompt
@@ -121,7 +124,7 @@ Required behavior:
 - If `cure` is installed but not working, diagnose and repair or reinstall it from <CURE_SOURCE>.
 - If `cure` is not installed, install it from <CURE_SOURCE>.
 - After install or repair, run `cure install`.
-- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate.
+- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
 - Ask only for the missing configuration, credentials, or project-specific inputs.
 - Do not invent config, assume hidden secrets, or skip readiness checks.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.

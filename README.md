@@ -38,18 +38,20 @@ cure pr <PR_URL> --if-reviewed new
 
 That is the canonical “start a fresh review” path for both humans and agents.
 
-Use the target-aware readiness gate before a live review:
+Use the target-aware readiness gate before a live review lifecycle command:
 
 ```bash
 cure doctor --pr-url <PR_URL> --json
 ```
+
+For public `github.com` PRs, this readiness check is the preflight for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for normal PR review lifecycle work and is only required for Jira-driven flows.
 
 ## Human + Agent Sync
 
 To make CURe work well with agents, the operator should provide four things:
 - the local CURe checkout path
 - the project config path
-- authenticated external tools where needed
+- authenticated external tools where needed, except where target-aware public `github.com` fallback is explicitly sufficient
 - a clear PR URL to start from
 
 The operator should not need to teach each agent a custom workflow. The goal is that every agent starts from the same CURe contract and the same canonical `cure pr <PR_URL> --if-reviewed new` entrypoint.

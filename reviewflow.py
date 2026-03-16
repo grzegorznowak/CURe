@@ -6247,7 +6247,6 @@ def _resume_flow_impl(
         )
 
     pr = parse_pr_url(pr_url)
-    require_gh_auth(pr.host)
     ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
         config_path=effective_config_path,
@@ -6782,7 +6781,6 @@ def _followup_flow_impl(
     if not pr_url:
         raise ReviewflowError("Session meta missing pr_url.")
     pr = parse_pr_url(pr_url)
-    require_gh_auth(pr.host)
     ensure_review_config(paths, config_path=effective_config_path)
 
     work_tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -6841,6 +6839,7 @@ def _followup_flow_impl(
     out.start()
 
     success_markdown_path: Path | None = None
+    success_resume_command: str | None = None
     runtime_policy: dict[str, Any] | None = None
 
     try:
@@ -6916,16 +6915,7 @@ def _followup_flow_impl(
             with phase("followup_update", progress=None, quiet=quiet):
                 fetch_cmd = ["git", "-C", str(repo_dir), "fetch", "--prune", "origin"]
                 run_cmd(fetch_cmd, stream=stream, stream_label="git")
-                checkout_pr_cmd = [
-                    "gh",
-                    "pr",
-                    "checkout",
-                    str(pr.number),
-                    "-R",
-                    pr.gh_repo,
-                    "--force",
-                ]
-                run_cmd(checkout_pr_cmd, cwd=repo_dir, stream=stream, stream_label="gh")
+                checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
 
                 fetch_base_cmd = ["git", "-C", str(repo_dir), "fetch", "origin", base_ref]
                 run_cmd(fetch_base_cmd, stream=stream, stream_label="git")
@@ -7300,25 +7290,19 @@ def _zip_flow_impl(
     if not pr_url:
         raise ReviewflowError("zip requires a PR URL.")
     pr = parse_pr_url(pr_url)
-    require_gh_auth(pr.host)
 
     with phase("zip_resolve_pr_head", progress=None, quiet=quiet):
-        pr_api = run_cmd(
-            [
-                "gh",
-                "api",
-                "--hostname",
-                pr.host,
-                f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
-            ]
+        pr_meta = gh_api_json(
+            host=pr.host,
+            path=f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
+            allow_public_fallback=True,
         )
-        pr_meta = json.loads(pr_api.stdout)
         head = pr_meta.get("head")
         head_sha = str((head.get("sha") if isinstance(head, dict) else "") or "").strip()
         title = str(pr_meta.get("title") or "").strip()
 
     if not head_sha:
-        raise ReviewflowError("zip: failed to resolve PR head SHA via `gh api`.")
+        raise ReviewflowError("zip: failed to resolve PR head SHA from PR metadata.")
 
     sources = select_zip_sources_for_pr_head(
         sandbox_root=paths.sandbox_root, pr=pr, head_sha=head_sha
