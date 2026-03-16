@@ -1,3 +1,4 @@
+import contextlib
 import argparse
 import json
 import os
@@ -15,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import reviewflow as rf  # noqa: E402
+import cure_commands  # noqa: E402
+import cure_flows  # noqa: E402
+import cure_llm  # noqa: E402
+import cure_runtime  # noqa: E402
 import ui as rui  # noqa: E402
 
 
@@ -1548,7 +1553,7 @@ class PromptTemplateTests(unittest.TestCase):
     def test_zip_template_discourages_file_writes_and_fenced_output(self) -> None:
         zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
         self.assertIn("Do not create, edit, or move any files.", zip_template)
-        self.assertIn("Reviewflow will save your final response", zip_template)
+        self.assertIn("CURe will save your final response", zip_template)
         self.assertIn("Do not wrap the response in a fenced code block.", zip_template)
         self.assertNotIn("Write the final result to:", zip_template)
         self.assertNotIn("```markdown", zip_template)
@@ -3290,6 +3295,7 @@ class ResumeTargetResolutionTests(unittest.TestCase):
                         "created_at": "2026-03-04T00:00:00+00:00",
                         "failed_at": "2026-03-04T01:00:00+00:00",
                         "multipass": {"enabled": True},
+                        "llm": {"capabilities": {"supports_resume": True}},
                         "notes": {"no_index": False},
                         "paths": {"session_dir": str(s_err)},
                     }
@@ -3372,6 +3378,64 @@ class ResumeTargetResolutionTests(unittest.TestCase):
     def test_resolve_resume_target_rejects_path_like_non_pr_target(self) -> None:
         with self.assertRaises(rf.ReviewflowError):
             _ = rf.resolve_resume_target("foo/bar", sandbox_root=ROOT, from_phase="auto")
+
+    def test_resolve_resume_target_ignores_newer_execution_only_session(self) -> None:
+        root = ROOT / ".tmp_test_resume_target_exec_only_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+
+            s_done = root / "s_done"
+            s_done.mkdir()
+            (s_done / "review.md").write_text("**Decision**: APPROVE\n", encoding="utf-8")
+            (s_done / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s_done",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 4,
+                        "created_at": "2026-03-03T00:00:00+00:00",
+                        "completed_at": "2026-03-03T01:00:00+00:00",
+                        "paths": {"review_md": str(s_done / "review.md")},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            s_exec = root / "s_exec"
+            s_exec.mkdir()
+            (s_exec / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s_exec",
+                        "status": "error",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 4,
+                        "created_at": "2026-03-04T00:00:00+00:00",
+                        "failed_at": "2026-03-04T01:00:00+00:00",
+                        "multipass": {"enabled": True},
+                        "llm": {"capabilities": {"supports_resume": False}},
+                        "notes": {"no_index": False},
+                        "paths": {"session_dir": str(s_exec)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            sid, action = rf.resolve_resume_target(
+                "https://github.com/acme/repo/pull/4",
+                sandbox_root=root,
+                from_phase="auto",
+            )
+            self.assertEqual(sid, "s_done")
+            self.assertEqual(action, "followup")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class ListSessionsTests(unittest.TestCase):
@@ -4413,6 +4477,153 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("reviewflow pr <PR_URL>", rendered)
         self.assertNotIn("interactive", rendered)
 
+    def test_reviewflow_reexports_active_extracted_module_surfaces(self) -> None:
+        self.assertIs(rf.render_prompt, cure_flows.render_prompt)
+        self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
+        self.assertIs(rf.commands_flow, cure_commands.commands_flow)
+        self.assertIs(rf.status_flow, cure_commands.status_flow)
+        self.assertIs(rf.watch_flow, cure_commands.watch_flow)
+        self.assertIs(rf.doctor_flow, cure_commands.doctor_flow)
+        self.assertIs(rf.pr_flow, cure_commands.pr_flow)
+        self.assertIs(rf.resume_flow, cure_commands.resume_flow)
+        self.assertIs(rf.followup_flow, cure_commands.followup_flow)
+        self.assertIs(rf.zip_flow, cure_commands.zip_flow)
+        self.assertIs(rf.interactive_flow, cure_commands.interactive_flow)
+        self.assertIs(rf.clean_flow, cure_commands.clean_flow)
+        self.assertIs(rf.jira_smoke_flow, cure_commands.jira_smoke_flow)
+        self.assertFalse(hasattr(rf, "_clean_flow_impl"))
+
+    def test_main_dispatches_pr_through_runtime_and_command_surfaces(self) -> None:
+        args = argparse.Namespace(cmd="pr")
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+        runtime = argparse.Namespace(
+            paths=mock.sentinel.paths,
+            config_path=Path("/tmp/reviewflow.toml"),
+            codex_base_config_path=Path("/tmp/codex.toml"),
+        )
+        with mock.patch.object(rf, "build_parser", return_value=parser), mock.patch.object(
+            cure_runtime, "resolve_runtime", return_value=runtime
+        ) as resolve_runtime_mock, mock.patch.object(
+            cure_commands, "pr_flow", return_value=17
+        ) as pr_flow_mock:
+            rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+        self.assertEqual(rc, 17)
+        resolve_runtime_mock.assert_called_once_with(args)
+        pr_flow_mock.assert_called_once_with(
+            args,
+            paths=mock.sentinel.paths,
+            config_path=Path("/tmp/reviewflow.toml"),
+            codex_base_config_path=Path("/tmp/codex.toml"),
+        )
+
+    def test_main_dispatches_status_through_command_surface(self) -> None:
+        args = argparse.Namespace(cmd="status")
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+        runtime = argparse.Namespace(
+            paths=mock.sentinel.paths,
+            config_path=Path("/tmp/reviewflow.toml"),
+            codex_base_config_path=Path("/tmp/codex.toml"),
+        )
+        with mock.patch.object(rf, "build_parser", return_value=parser), mock.patch.object(
+            cure_runtime, "resolve_runtime", return_value=runtime
+        ) as resolve_runtime_mock, mock.patch.object(
+            cure_commands, "status_flow", return_value=3
+        ) as status_flow_mock:
+            rc = rf.main(["status", "session-123"])
+
+        self.assertEqual(rc, 3)
+        resolve_runtime_mock.assert_called_once_with(args)
+        status_flow_mock.assert_called_once_with(args, paths=mock.sentinel.paths)
+
+    def test_main_dispatches_heavy_commands_through_command_surface(self) -> None:
+        runtime = argparse.Namespace(
+            paths=mock.sentinel.paths,
+            config_path=Path("/tmp/reviewflow.toml"),
+            codex_base_config_path=Path("/tmp/codex.toml"),
+        )
+        cases = (
+            (
+                "pr",
+                "pr_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                    "codex_base_config_path": Path("/tmp/codex.toml"),
+                },
+            ),
+            (
+                "resume",
+                "resume_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                    "codex_base_config_path": Path("/tmp/codex.toml"),
+                },
+            ),
+            (
+                "followup",
+                "followup_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                    "codex_base_config_path": Path("/tmp/codex.toml"),
+                },
+            ),
+            (
+                "zip",
+                "zip_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                    "codex_base_config_path": Path("/tmp/codex.toml"),
+                },
+            ),
+            (
+                "interactive",
+                "interactive_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                },
+            ),
+            (
+                "clean",
+                "clean_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                },
+            ),
+            (
+                "jira-smoke",
+                "jira_smoke_flow",
+                {
+                    "paths": mock.sentinel.paths,
+                    "config_path": Path("/tmp/reviewflow.toml"),
+                    "codex_base_config_path": Path("/tmp/codex.toml"),
+                },
+            ),
+        )
+
+        for command_name, flow_name, expected_kwargs in cases:
+            args = argparse.Namespace(cmd=command_name)
+            parser = mock.Mock()
+            parser.parse_args.return_value = args
+            with self.subTest(command=command_name), mock.patch.object(
+                rf, "build_parser", return_value=parser
+            ), mock.patch.object(
+                cure_runtime, "resolve_runtime", return_value=runtime
+            ) as resolve_runtime_mock, mock.patch.object(
+                cure_commands, flow_name, return_value=29
+            ) as flow_mock:
+                rc = rf.main([command_name])
+
+            self.assertEqual(rc, 29)
+            resolve_runtime_mock.assert_called_once_with(args)
+            flow_mock.assert_called_once_with(args, **expected_kwargs)
+
     def test_status_flow_exact_session_human_output_uses_exact_resolution(self) -> None:
         root = ROOT / ".tmp_test_status_exact_root"
         try:
@@ -4875,6 +5086,17 @@ class TuiDashboardTests(unittest.TestCase):
         rf.maybe_warn_deprecated_cli_alias("cure", stderr=quiet)
         self.assertEqual(quiet.getvalue(), "")
 
+    def test_console_main_warns_for_deprecated_alias_and_dispatches(self) -> None:
+        stderr = StringIO()
+        with mock.patch.object(rf.sys, "argv", ["reviewflow", "commands"]), mock.patch.object(
+            rf, "main", return_value=9
+        ) as main_mock, contextlib.redirect_stderr(stderr):
+            rc = rf.console_main()
+
+        self.assertEqual(rc, 9)
+        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        main_mock.assert_called_once_with(["commands"], prog="cure")
+
     def test_parser_accepts_zip_flags(self) -> None:
         p = rf.build_parser()
         args = p.parse_args(
@@ -5040,6 +5262,75 @@ class RuntimeResolutionTests(unittest.TestCase):
         self.assertEqual(runtime.cache_root_source, "default")
         self.assertEqual(runtime.codex_base_config_path, Path("/home/tester/.codex/config.toml"))
         self.assertEqual(runtime.codex_base_config_source, "default")
+
+
+class ExtractionOwnershipTests(RuntimeResolutionTests):
+    def test_reviewflow_reexports_active_extracted_owners(self) -> None:
+        self.assertIs(rf.resolve_runtime, cure_runtime.resolve_runtime)
+        self.assertIs(rf.render_prompt, cure_flows.render_prompt)
+        self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
+        self.assertIs(rf.commands_flow, cure_commands.commands_flow)
+        self.assertIs(rf.status_flow, cure_commands.status_flow)
+        self.assertIs(rf.watch_flow, cure_commands.watch_flow)
+
+    def _runtime(self) -> rf.ReviewflowRuntime:
+        return rf.ReviewflowRuntime(
+            config_path=Path("/tmp/reviewflow.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+
+    def test_main_dispatches_pr_via_cure_runtime_and_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "pr_flow", return_value=17
+        ) as pr_flow:
+            rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+        self.assertEqual(rc, 17)
+        resolve_runtime.assert_called_once()
+        pr_flow.assert_called_once()
+
+    def test_main_dispatches_status_via_cure_runtime_and_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "status_flow", return_value=3
+        ) as status_flow:
+            rc = rf.main(["status", "session-123"])
+
+        self.assertEqual(rc, 3)
+        resolve_runtime.assert_called_once()
+        status_flow.assert_called_once()
+
+    def test_main_dispatches_doctor_via_cure_runtime_and_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "doctor_flow", return_value=5
+        ) as doctor_flow:
+            rc = rf.main(["doctor"])
+
+        self.assertEqual(rc, 5)
+        resolve_runtime.assert_called_once()
+        doctor_flow.assert_called_once_with(mock.ANY, runtime=runtime)
+
+    def test_console_main_warns_for_reviewflow_alias_and_dispatches_to_main(self) -> None:
+        stderr = StringIO()
+        with mock.patch.object(sys, "argv", ["reviewflow", "commands", "--json"]), contextlib.redirect_stderr(
+            stderr
+        ), mock.patch.object(rf, "main", return_value=9) as main_mock:
+            rc = rf.console_main()
+
+        self.assertEqual(rc, 9)
+        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
 
     def test_resolve_runtime_ignores_relative_xdg_roots(self) -> None:
         args = self._runtime_args()
@@ -6284,6 +6575,445 @@ class EnsureBaseCacheTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_sandbox, ignore_errors=True)
             shutil.rmtree(tmp_cache, ignore_errors=True)
+
+
+class RefactorRegressionTests(unittest.TestCase):
+    def test_load_toml_raises_on_malformed_content(self) -> None:
+        cfg = ROOT / ".tmp_test_malformed_reviewflow.toml"
+        try:
+            cfg.write_text("[paths\nsandbox_root = \"/tmp/x\"\n", encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_toml(cfg)
+            self.assertIn(str(cfg), str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_toml_raises_on_unreadable_file(self) -> None:
+        cfg = ROOT / ".tmp_test_unreadable_reviewflow.toml"
+        try:
+            cfg.write_text("[paths]\n", encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def fake_read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == cfg:
+                    raise PermissionError("denied")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", autospec=True, side_effect=fake_read_text):
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.load_toml(cfg)
+            self.assertIn(str(cfg), str(ctx.exception))
+            self.assertIn("denied", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_scan_completed_sessions_for_pr_matches_case_insensitive_identity(self) -> None:
+        root = ROOT / ".tmp_test_case_insensitive_history"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+
+            session_dir = root / "s1"
+            session_dir.mkdir()
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                encoding="utf-8",
+            )
+            (session_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 11,
+                        "created_at": "2026-03-03T00:00:00+00:00",
+                        "completed_at": "2026-03-03T01:00:00+00:00",
+                        "head_sha": "1111111111111111111111111111111111111111",
+                        "paths": {"review_md": str(review_md)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pr = rf.PullRequestRef(host="GitHub.COM", owner="AcMe", repo="Repo", number=11)
+            sessions = rf.scan_completed_sessions_for_pr(sandbox_root=root, pr=pr)
+
+            self.assertEqual([session.session_id for session in sessions], ["s1"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_select_zip_sources_for_pr_head_matches_case_insensitive_identity(self) -> None:
+        root = ROOT / ".tmp_test_case_insensitive_zip"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+
+            session_dir = root / "zip-session"
+            session_dir.mkdir()
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            (session_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "zip-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 12,
+                        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "review_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "created_at": "2026-03-03T00:00:00+00:00",
+                        "completed_at": "2026-03-03T01:00:00+00:00",
+                        "paths": {"review_md": str(review_md)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pr = rf.PullRequestRef(host="GitHub.COM", owner="AcMe", repo="Repo", number=12)
+            sources = rf.select_zip_sources_for_pr_head(
+                sandbox_root=root,
+                pr=pr,
+                head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+
+            self.assertEqual([source.session_id for source in sources], ["zip-session"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_status_flow_matches_mixed_case_pr_url(self) -> None:
+        root = ROOT / ".tmp_test_case_insensitive_status"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=root / "cache",
+            )
+            session_dir = root / "status-session"
+            session_dir.mkdir()
+            review_md = session_dir / "review.md"
+            review_md.write_text("**Decision**: APPROVE\n", encoding="utf-8")
+            (session_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "status-session",
+                        "status": "done",
+                        "phase": "review",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 13,
+                        "created_at": "2026-03-03T00:00:00+00:00",
+                        "completed_at": "2026-03-03T01:00:00+00:00",
+                        "paths": {"review_md": str(review_md)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(target="https://GitHub.com/AcMe/Repo/pull/13", json_output=True),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["resolved_target"]["session_id"], "status-session")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_no_review_skips_review_only_setup(self) -> None:
+        root = ROOT / ".tmp_test_pr_no_review"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            sandbox_root = root / "sandboxes"
+            cache_root = root / "cache"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            seed = root / "seed"
+            seed.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path = root / "reviewflow.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+            )
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                    return _Result()
+                if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                    return _Result("https://github.com/acme/repo.git\n")
+                if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                    return _Result("true\n")
+                if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd[:3] == ["gh", "pr", "checkout"]:
+                    return _Result()
+                if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_write_pr_context_file(*, work_dir: Path, pr: rf.PullRequestRef, pr_meta: dict[str, object]) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main"},
+                            "head": {"sha": "1111111111111111111111111111111111111111"},
+                            "title": "No review PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file)
+                )
+                stack.enter_context(mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}))
+                stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+                stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+                stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+                stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda self, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        side_effect=AssertionError("review setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        side_effect=AssertionError("multipass defaults should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_prompt_profile",
+                        side_effect=AssertionError("prompt selection should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "require_builtin_review_intelligence",
+                        side_effect=AssertionError("review validation should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        side_effect=AssertionError("llm resolution should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=AssertionError("runtime setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("review execution should be skipped"),
+                    )
+                )
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                stack.enter_context(mock.patch("sys.stderr", stderr))
+                rc = rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+
+            session_dir = Path(stdout.getvalue().strip())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertTrue(session_dir.is_dir())
+            self.assertTrue((session_dir / "work" / "logs" / "reviewflow.log").is_file())
+            self.assertTrue((session_dir / "work" / "chunkhound" / "chunkhound.json").is_file())
+            self.assertTrue(meta["notes"]["no_review"])
+            self.assertEqual(meta["status"], "done")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class ExtractionOwnershipTests(unittest.TestCase):
+    def _runtime(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/reviewflow-sandboxes"),
+                cache_root=Path("/tmp/reviewflow-cache"),
+            ),
+            config_path=Path("/tmp/reviewflow.toml"),
+            codex_base_config_path=Path("/tmp/codex.toml"),
+        )
+
+    def test_reviewflow_reexports_active_extracted_owners(self) -> None:
+        import cure_commands as command_surface  # noqa: E402
+        import cure_flows as flow_surface  # noqa: E402
+
+        self.assertIs(rf.render_prompt, flow_surface.render_prompt)
+        self.assertIs(rf.resolve_prompt_profile, flow_surface.resolve_prompt_profile)
+        self.assertIs(rf.commands_flow, command_surface.commands_flow)
+        self.assertIs(rf.status_flow, command_surface.status_flow)
+        self.assertIs(rf.watch_flow, command_surface.watch_flow)
+        self.assertIs(rf.doctor_flow, command_surface.doctor_flow)
+
+    def test_main_dispatches_pr_through_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch("cure_runtime.resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch(
+            "cure_commands.pr_flow",
+            return_value=23,
+        ) as pr_flow:
+            rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+        self.assertEqual(rc, 23)
+        resolve_runtime.assert_called_once()
+        self.assertEqual(pr_flow.call_count, 1)
+        self.assertEqual(pr_flow.call_args.args[0].pr_url, "https://github.com/acme/repo/pull/1")
+        self.assertEqual(pr_flow.call_args.kwargs["paths"], runtime.paths)
+        self.assertEqual(pr_flow.call_args.kwargs["config_path"], runtime.config_path)
+        self.assertEqual(pr_flow.call_args.kwargs["codex_base_config_path"], runtime.codex_base_config_path)
+
+    def test_main_dispatches_status_through_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch("cure_runtime.resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch(
+            "cure_commands.status_flow",
+            return_value=17,
+        ) as status_flow:
+            rc = rf.main(["status", "session-123", "--json"])
+
+        self.assertEqual(rc, 17)
+        resolve_runtime.assert_called_once()
+        self.assertEqual(status_flow.call_count, 1)
+        self.assertEqual(status_flow.call_args.args[0].target, "session-123")
+        self.assertTrue(status_flow.call_args.args[0].json_output)
+        self.assertEqual(status_flow.call_args.kwargs["paths"], runtime.paths)
+
+    def test_main_dispatches_doctor_through_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch("cure_runtime.resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch(
+            "cure_commands.doctor_flow",
+            return_value=11,
+        ) as doctor_flow:
+            rc = rf.main(["doctor", "--json"])
+
+        self.assertEqual(rc, 11)
+        resolve_runtime.assert_called_once()
+        self.assertEqual(doctor_flow.call_count, 1)
+        self.assertTrue(doctor_flow.call_args.args[0].json_output)
+        self.assertIs(doctor_flow.call_args.kwargs["runtime"], runtime)
+
+    def test_console_main_warns_and_dispatches_for_deprecated_alias(self) -> None:
+        stderr = StringIO()
+        with mock.patch.object(rf, "main", return_value=7) as main_mock, mock.patch.object(
+            sys,
+            "argv",
+            ["reviewflow", "commands", "--json"],
+        ), mock.patch.object(sys, "stderr", stderr):
+            rc = rf.console_main()
+
+        self.assertEqual(rc, 7)
+        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
 
 
 if __name__ == "__main__":

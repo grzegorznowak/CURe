@@ -28,6 +28,27 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
 
+from cure_branding import (
+    DEPRECATED_ALIAS_WARNING,
+    DEPRECATED_CLI_ALIAS,
+    PRIMARY_CLI_COMMAND,
+)
+from cure_errors import ReviewflowError
+from cure_output import (
+    ReviewflowOutput,
+    _eprint,
+    _shell_join,
+    active_output,
+    clear_active_output,
+    log,
+    maybe_print_codex_resume_command,
+    maybe_print_markdown_after_tui,
+    normalize_markdown_artifact,
+    normalize_markdown_local_refs,
+    safe_cmd_for_meta,
+    set_active_output,
+    sha256_text,
+)
 from meta import json_fingerprint, write_json, write_redacted_json
 from paths import (
     DEFAULT_PATHS,
@@ -44,11 +65,7 @@ from paths import (
 )
 from run import ReviewflowSubprocessError, merged_env, run_cmd
 
-from ui import Dashboard, TailBuffer, UiSnapshot, UiState, Verbosity, StreamSink, build_dashboard_lines
-
-
-class ReviewflowError(RuntimeError):
-    pass
+from ui import UiSnapshot, Verbosity, build_dashboard_lines
 
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
@@ -63,371 +80,20 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _eprint(*args: object) -> None:
-    text = " ".join(str(a) for a in args)
-    out = _ACTIVE_OUTPUT
-    if out is not None:
-        out.eprint(text)
-        return
-    print(*args, file=sys.stderr, flush=True)
-
-
-def maybe_print_markdown_after_tui(*, ui_enabled: bool, stderr: TextIO, markdown_path: Path | None) -> None:
-    if not ui_enabled:
-        return
-    if markdown_path is None:
-        return
-    if not markdown_path.is_file():
-        return
-    try:
-        is_tty = bool(stderr.isatty())
-    except Exception:
-        is_tty = False
-    if not is_tty:
-        return
-    try:
-        body = markdown_path.read_text(encoding="utf-8")
-    except Exception:
-        return
-    if not body.endswith("\n"):
-        body += "\n"
-    try:
-        stderr.write("\x1b[2J\x1b[H")
-        stderr.flush()
-        stderr.write(body)
-        stderr.flush()
-    except Exception:
-        return
-
-
-def maybe_print_codex_resume_command(*, stderr: TextIO, command: str | None) -> None:
-    return
-
-
-def _shell_join(args: list[str]) -> str:
-    return " ".join(shlex.quote(str(arg)) for arg in args)
-
-
-def _linecol_suffix(*, line: str | None, col: str | None) -> str:
-    if not line:
-        return ""
-    if col:
-        return f":{line}:{col}"
-    return f":{line}"
-
-
-def _session_relative_display_path(*, session_dir: Path, target_path: Path) -> str | None:
-    session_root = session_dir.resolve(strict=False)
-    repo_root = (session_root / "repo").resolve(strict=False)
-    resolved = target_path.resolve(strict=False)
-    if resolved == repo_root or repo_root in resolved.parents:
-        return resolved.relative_to(repo_root).as_posix()
-    if resolved == session_root or session_root in resolved.parents:
-        rel = resolved.relative_to(session_root).as_posix()
-        return rel or resolved.name
-    return None
-
-
-def _normalize_local_target_ref(raw: str, *, session_dir: Path) -> str | None:
-    text = str(raw or "").strip()
-    if not text.startswith("/"):
-        return None
-
-    line: str | None = None
-    col: str | None = None
-    base = text
-    if "#" in text:
-        maybe_base, maybe_fragment = text.rsplit("#", 1)
-        match = re.fullmatch(r"L(?P<line>\d+)(?:C(?P<col>\d+))?", maybe_fragment)
-        if match:
-            base = maybe_base
-            line = match.group("line")
-            col = match.group("col")
-
-    display = _session_relative_display_path(session_dir=session_dir, target_path=Path(base))
-    if display is None:
-        return None
-    return f"{display}{_linecol_suffix(line=line, col=col)}"
-
-
-def normalize_markdown_local_refs(text: str, *, session_dir: Path) -> str:
-    session_root = session_dir.resolve(strict=False)
-    prefix = re.escape(str(session_root))
-    link_re = re.compile(rf"\[(?P<label>[^\]]+)\]\((?P<target>{prefix}[^\s)]+)\)")
-    raw_re = re.compile(rf"(?P<target>{prefix}[^\s),`]+(?:#L\d+(?:C\d+)?)?)")
-
-    def replace_link(match: re.Match[str]) -> str:
-        display = _normalize_local_target_ref(match.group("target"), session_dir=session_dir)
-        return display or match.group(0)
-
-    def replace_raw(match: re.Match[str]) -> str:
-        display = _normalize_local_target_ref(match.group("target"), session_dir=session_dir)
-        return display or match.group(0)
-
-    rewritten = link_re.sub(replace_link, text)
-    return raw_re.sub(replace_raw, rewritten)
-
-
-def _strip_whole_document_markdown_fence(text: str) -> str:
-    lines = text.splitlines()
-    if len(lines) < 3:
-        return text
-    start = 0
-    end = len(lines) - 1
-    while start <= end and not lines[start].strip():
-        start += 1
-    while end >= start and not lines[end].strip():
-        end -= 1
-    if (end - start + 1) < 3:
-        return text
-    first = lines[start].strip().lower()
-    last = lines[end].strip()
-    if last != "```":
-        return text
-    if first not in {"```", "```markdown", "```md"}:
-        return text
-    body = "\n".join(lines[start + 1 : end]).strip("\n")
-    if not body:
-        return ""
-    return body + "\n"
-
-
-def _normalize_review_subsection_headings(text: str) -> str:
-    heading_map = {
-        "**Strengths**:": "### Strengths",
-        "### Strengths": "### Strengths",
-        "**In Scope Issues**:": "### In Scope Issues",
-        "### In Scope Issues": "### In Scope Issues",
-        "**Out of Scope Issues**:": "### Out of Scope Issues",
-        "### Out of Scope Issues": "### Out of Scope Issues",
-        "**Reusability**:": "### Reusability",
-        "### Reusability": "### Reusability",
-    }
-    lines = text.splitlines()
-    out: list[str] = []
-    changed = False
-    for line in lines:
-        stripped = line.strip()
-        canonical = heading_map.get(stripped)
-        if canonical is None:
-            out.append(line)
-            continue
-        changed = changed or (stripped != canonical)
-        if out and out[-1].strip():
-            out.append("")
-            changed = True
-        out.append(canonical)
-    if not changed:
-        return text
-    normalized = "\n".join(out)
-    if text.endswith("\n"):
-        normalized += "\n"
-    return normalized
-
-
-def normalize_markdown_artifact(*, markdown_path: Path, session_dir: Path) -> None:
-    if not markdown_path.is_file():
-        return
-    original = markdown_path.read_text(encoding="utf-8")
-    normalized = _strip_whole_document_markdown_fence(original)
-    normalized = _normalize_review_subsection_headings(normalized)
-    normalized = normalize_markdown_local_refs(normalized, session_dir=session_dir)
-    if normalized != original:
-        markdown_path.write_text(normalized, encoding="utf-8")
-
-
-def _now_hms_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%H:%M:%S")
-
-
-def log(msg: str, *, quiet: bool) -> None:
-    if quiet:
-        return
-    line = f"{_now_hms_utc()} | {msg}"
-    out = _ACTIVE_OUTPUT
-    if out is not None:
-        out.log(line)
-        return
-    _eprint(line)
-
-
-class ReviewflowOutput:
-    def __init__(
-        self,
-        *,
-        ui_enabled: bool,
-        no_stream: bool,
-        stderr: TextIO,
-        meta_path: Path,
-        logs_dir: Path,
-        verbosity: Verbosity,
-    ) -> None:
-        self.ui_enabled = bool(ui_enabled)
-        self.no_stream = bool(no_stream)
-        self.stderr = stderr
-        self.meta_path = meta_path
-        self.logs_dir = logs_dir
-        self.verbosity = verbosity
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-
-        self.reviewflow_log = (self.logs_dir / "reviewflow.log").open(
-            "a", encoding="utf-8", buffering=1
-        )
-        self.chunkhound_log = (self.logs_dir / "chunkhound.log").open(
-            "a", encoding="utf-8", buffering=1
-        )
-        self.codex_log = (self.logs_dir / "codex.log").open("a", encoding="utf-8", buffering=1)
-
-        self.state = UiState(verbosity=verbosity)
-        self.tails: dict[str, TailBuffer] = {
-            "chunkhound": TailBuffer(max_lines=200),
-            "codex": TailBuffer(max_lines=400),
-        }
-
-        # Stream sinks (run_cmd(stream=True) writes here).
-        # - In UI mode: do not write to terminal (avoid corrupting dashboard).
-        # - In non-UI mode: tee to stderr to preserve existing behavior.
-        also_to = (
-            None
-            if (self.ui_enabled or self.no_stream or self.verbosity is Verbosity.quiet)
-            else self.stderr
-        )
-        self.chunkhound_sink = StreamSink(
-            label="chunkhound",
-            file=self.chunkhound_log,
-            tail=self.tails["chunkhound"],
-            also_to=also_to,
-            on_activity=self.state.ping,
-        )
-        self.codex_sink = StreamSink(
-            label="codex",
-            file=self.codex_log,
-            tail=self.tails["codex"],
-            also_to=also_to,
-            on_activity=self.state.ping,
-        )
-
-        self.dashboard: Dashboard | None = None
-        if self.ui_enabled:
-            self.dashboard = Dashboard(
-                meta_path=self.meta_path,
-                state=self.state,
-                tails=self.tails,
-                stderr=self.stderr,
-                no_stream=self.no_stream,
-                refresh_hz=5.0,
-            )
-
-    def start(self) -> None:
-        if self.dashboard is not None:
-            self.dashboard.start()
-
-    def stop(self) -> None:
-        if self.dashboard is not None:
-            self.dashboard.stop()
-        for fh in (self.reviewflow_log, self.chunkhound_log, self.codex_log):
-            try:
-                fh.flush()
-                fh.close()
-            except Exception:
-                pass
-
-    def log(self, line: str) -> None:
-        try:
-            self.reviewflow_log.write(line + "\n")
-            self.reviewflow_log.flush()
-        except Exception:
-            pass
-        if not self.ui_enabled:
-            self.stderr.write(line + "\n")
-            self.stderr.flush()
-        self.state.ping()
-
-    def eprint(self, line: str) -> None:
-        # In UI mode, avoid printing raw lines that would corrupt the screen; rely on logs + final error.
-        try:
-            self.reviewflow_log.write(line + "\n")
-            self.reviewflow_log.flush()
-        except Exception:
-            pass
-        if not self.ui_enabled:
-            self.stderr.write(line + "\n")
-            self.stderr.flush()
-        self.state.ping()
-
-    def stream_sink(self, kind: str) -> StreamSink:
-        if kind == "chunkhound":
-            return self.chunkhound_sink
-        if kind == "codex":
-            return self.codex_sink
-        raise ReviewflowError(f"Unknown stream kind: {kind}")
-
-    def stream_label(self, kind: str) -> str | None:
-        # In UI mode, keep tails/logs clean (no prefix spam); in non-UI, preserve existing prefixes.
-        return None if self.ui_enabled else kind
-
-    def run_logged_cmd(
-        self,
-        cmd: list[str],
-        *,
-        kind: str,
-        cwd: Path | None,
-        env: dict[str, str] | None,
-        check: bool,
-        stream_requested: bool,
-    ):
-        # In UI mode, always stream so logs are written incrementally and tails update.
-        stream = True if self.ui_enabled else bool(stream_requested)
-        label = self.stream_label(kind) if stream else None
-        if stream:
-            return run_cmd(
-                cmd,
-                cwd=cwd,
-                env=env,
-                check=check,
-                stream=True,
-                stream_to=self.stream_sink(kind),
-                stream_label=label,
-            )
-        res = run_cmd(cmd, cwd=cwd, env=env, check=check, stream=False)
-        try:
-            self.stream_sink(kind).write(res.stdout)
-            self.stream_sink(kind).write(res.stderr)
-        except Exception:
-            pass
-        return res
-
-
-_ACTIVE_OUTPUT: ReviewflowOutput | None = None
-
-
-def safe_cmd_for_meta(cmd: list[str], *, max_arg_chars: int = 200) -> list[str]:
-    safe: list[str] = []
-    for idx, arg in enumerate(cmd):
-        text = str(arg)
-        if cmd and cmd[0] == "codex" and idx == (len(cmd) - 1) and len(text) > max_arg_chars:
-            safe.append(f"<prompt:{len(text)} chars>")
-        elif len(text) > max_arg_chars:
-            safe.append(f"<arg:{len(text)} chars>")
-        else:
-            safe.append(text)
-    return safe
-
-
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def load_toml(path: Path) -> dict[str, Any]:
     disabled = _DISABLED_REVIEWFLOW_CONFIG_PATH
     if disabled is not None and path.resolve(strict=False) == disabled:
         return {}
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except Exception:
-        return {}
+    except (OSError, UnicodeDecodeError) as e:
+        raise ReviewflowError(f"Failed to read TOML at {path}: {e}") from e
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ReviewflowError(f"Failed to parse TOML at {path}: {e}") from e
 
 
 def toml_string(value: str) -> str:
@@ -526,12 +192,6 @@ CURATED_ENV_INHERIT_KEYS = (
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
-PRIMARY_CLI_COMMAND = "cure"
-DEPRECATED_CLI_ALIAS = "reviewflow"
-DEPRECATED_ALIAS_WARNING = (
-    "`reviewflow` is deprecated for this release and will be removed after the alias window. "
-    "Use `cure` instead."
-)
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
 tool_prompt_fragment = \"\"\"
@@ -1855,7 +1515,7 @@ def run_codex_exec(
     )
     progress.record_cmd(cmd)
     try:
-        out = _ACTIVE_OUTPUT
+        out = active_output()
         if out is not None:
             out.run_logged_cmd(
                 cmd,
@@ -1901,7 +1561,7 @@ def run_codex_exec(
                 include_shell_environment_inherit_all=include_shell_environment_inherit_all,
             )
             progress.record_cmd(fallback)
-            out = _ACTIVE_OUTPUT
+            out = active_output()
             if out is not None:
                 out.run_logged_cmd(
                     fallback,
@@ -2038,7 +1698,7 @@ def _run_logged_text_command(
     cwd: Path,
     env: dict[str, str],
 ) -> "CommandResult":
-    out = _ACTIVE_OUTPUT
+    out = active_output()
     if out is not None:
         return out.run_logged_cmd(
             cmd,
@@ -2241,9 +1901,10 @@ def run_http_response_exec(
             stderr=str(e),
         ) from e
 
-    if _ACTIVE_OUTPUT is not None:
+    out = active_output()
+    if out is not None:
         try:
-            _ACTIVE_OUTPUT.stream_sink("codex").write(body)
+            out.stream_sink("codex").write(body)
         except Exception:
             pass
 
@@ -3199,23 +2860,27 @@ def parse_pr_url(pr_url: str) -> PullRequestRef:
         text = "https://" + text
 
     parsed = urlparse(text)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").strip().lower()
     if not host:
         raise ReviewflowError(f"Invalid PR URL (missing host): {pr_url}")
 
     parts = [p for p in (parsed.path or "").split("/") if p]
-    if len(parts) < 4 or parts[2] != "pull":
+    if len(parts) < 4 or parts[2].strip().lower() != "pull":
         raise ReviewflowError(
             f"Invalid PR URL (expected /OWNER/REPO/pull/NUMBER): {pr_url}"
         )
 
-    owner, repo = parts[0], parts[1]
+    owner, repo = parts[0].strip().lower(), parts[1].strip().lower()
     try:
         number = int(parts[3])
     except ValueError as e:
         raise ReviewflowError(f"Invalid PR URL (bad PR number): {pr_url}") from e
 
     return PullRequestRef(host=host, owner=owner, repo=repo, number=number)
+
+
+def _normalize_pr_identity_value(value: object) -> str:
+    return str(value or "").strip().lower()
 
 
 def resolve_resume_target(
@@ -3264,16 +2929,7 @@ def resolve_resume_target(
         meta = _load_session_meta(entry / "meta.json")
         if not meta:
             continue
-        if str(meta.get("host") or "") != pr.host:
-            continue
-        if str(meta.get("owner") or "") != pr.owner:
-            continue
-        if str(meta.get("repo") or "") != pr.repo:
-            continue
-        try:
-            if int(meta.get("number") or 0) != int(pr.number):
-                continue
-        except Exception:
+        if not _meta_matches_pr(meta=meta, pr=pr):
             continue
 
         status = str(meta.get("status") or "").strip()
@@ -3281,8 +2937,10 @@ def resolve_resume_target(
         no_index = bool((notes or {}).get("no_index") or False)
         mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
         mp_enabled = bool((mp or {}).get("enabled") is True)
+        llm_meta = resolve_meta_llm(meta)
+        supports_resume = bool(((llm_meta.get("capabilities") or {}).get("supports_resume")))
 
-        if status in {"running", "error"} and mp_enabled and (not no_index):
+        if status in {"running", "error"} and mp_enabled and (not no_index) and supports_resume:
             resumed_at = str(meta.get("resumed_at") or "").strip() or None
             failed_at = str(meta.get("failed_at") or "").strip() or None
             created_at = str(meta.get("created_at") or "").strip() or None
@@ -3421,11 +3079,11 @@ def _load_session_meta_strict(meta_path: Path, *, command_name: str) -> dict[str
 
 
 def _meta_matches_pr(*, meta: dict[str, Any], pr: PullRequestRef) -> bool:
-    if str(meta.get("host") or "").strip() != pr.host:
+    if _normalize_pr_identity_value(meta.get("host")) != _normalize_pr_identity_value(pr.host):
         return False
-    if str(meta.get("owner") or "").strip() != pr.owner:
+    if _normalize_pr_identity_value(meta.get("owner")) != _normalize_pr_identity_value(pr.owner):
         return False
-    if str(meta.get("repo") or "").strip() != pr.repo:
+    if _normalize_pr_identity_value(meta.get("repo")) != _normalize_pr_identity_value(pr.repo):
         return False
     try:
         return int(meta.get("number") or 0) == int(pr.number)
@@ -3935,91 +3593,6 @@ def build_commands_catalog_payload() -> dict[str, Any]:
             },
         ],
     }
-
-
-def commands_flow(args: argparse.Namespace, *, stdout: TextIO | None = None) -> int:
-    out = stdout or sys.stdout
-    payload = build_commands_catalog_payload()
-    if bool(getattr(args, "json_output", False)):
-        print(json.dumps(payload, indent=2, sort_keys=True), file=out)
-        return 0
-    for command in payload["commands"]:
-        print(f"{command['name']}: {command['summary']}", file=out)
-        print(f"  {command['recommended_invocation']}", file=out)
-        for variant in command.get("variants", []):
-            if isinstance(variant, dict) and str(variant.get("invocation") or "").strip():
-                print(f"    {variant['name']}: {variant['invocation']}", file=out)
-    return 0
-
-
-def status_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    stdout: TextIO | None = None,
-) -> int:
-    out = stdout or sys.stdout
-    payload = build_status_payload(str(getattr(args, "target", "") or ""), sandbox_root=paths.sandbox_root)
-    if bool(getattr(args, "json_output", False)):
-        print(json.dumps(payload, indent=2, sort_keys=True), file=out)
-        return 0
-    print(
-        _watch_line_for_payload(payload),
-        file=out,
-    )
-    return 0
-
-
-def watch_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    stdout: TextIO | None = None,
-    stderr: TextIO | None = None,
-) -> int:
-    out = stdout or sys.stdout
-    err = stderr or sys.stderr
-    target = str(getattr(args, "target", "") or "")
-    resolved = resolve_observation_target(target, sandbox_root=paths.sandbox_root, command_name="watch")
-    interval = max(0.0, float(getattr(args, "interval", 2.0) or 0.0))
-    verbosity = _coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
-
-    try:
-        is_tty = bool(out.isatty()) and bool(err.isatty())
-    except Exception:
-        is_tty = False
-
-    if is_tty:
-        color = _stream_supports_color(out) and (not bool(getattr(args, "no_color", False)))
-        while True:
-            out.write("\x1b[2J\x1b[H")
-            out.flush()
-            status = _render_ui_preview(
-                session_dir=resolved.session_dir,
-                meta_path=resolved.meta_path,
-                verbosity=verbosity,
-                color=color,
-                width=None,
-                height=None,
-                final_newline=False,
-                stdout=out,
-            )
-            if status in {"done", "error"}:
-                return 0 if status == "done" else 1
-            time.sleep(interval if interval > 0 else 0.2)
-
-    last_line = None
-    while True:
-        payload = build_status_payload(resolved.session_id, sandbox_root=paths.sandbox_root, command_name="watch")
-        line = _watch_line_for_payload(payload)
-        if line != last_line:
-            print(line, file=out)
-            out.flush()
-            last_line = line
-        status = str(payload.get("status") or "").strip().lower()
-        if status in {"done", "error"}:
-            return 0 if status == "done" else 1
-        time.sleep(interval if interval > 0 else 0.2)
 
 
 def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
@@ -5088,7 +4661,7 @@ def cache_prime(
         with phase(
             f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
         ):
-            out = _ACTIVE_OUTPUT
+            out = active_output()
             if out is not None:
                 index_result = out.run_logged_cmd(
                     index_cmd,
@@ -5469,14 +5042,13 @@ if __name__ == "__main__":
     return path
 
 
-def pr_flow(
+def _pr_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
     codex_base_config_path: Path | None = None,
 ) -> int:
-    global _ACTIVE_OUTPUT
     effective_config_path = config_path or default_reviewflow_config_path()
     effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
@@ -5652,7 +5224,7 @@ def pr_flow(
         logs_dir=logs_dir,
         verbosity=verbosity,
     )
-    _ACTIVE_OUTPUT = out
+    set_active_output(out)
     progress.meta["logs"] = {
         "reviewflow": str(logs_dir / "reviewflow.log"),
         "chunkhound": str(logs_dir / "chunkhound.log"),
@@ -5673,37 +5245,44 @@ def pr_flow(
     profile_reason: str | None = None
     profile_template_name: str | None = None
     use_multipass = False
-    review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
-        config_path=effective_config_path,
-        require_tool_prompt_fragment=False,
-    )
-    progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
-    multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
-        config_path=effective_config_path
-    )
-    progress.meta["multipass_defaults"] = multipass_defaults_meta
-    cli_max_steps = getattr(args, "multipass_max_steps", None)
-    if cli_max_steps is not None:
-        try:
-            cli_max_steps = int(cli_max_steps)
-        except Exception:
-            raise ReviewflowError("--multipass-max-steps must be an integer.")
-        if cli_max_steps < 1:
-            raise ReviewflowError("--multipass-max-steps must be >= 1.")
-        if cli_max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
-            raise ReviewflowError(
-                f"--multipass-max-steps must be <= {MULTIPASS_MAX_STEPS_HARD_CAP}."
-            )
-        multipass_max_steps = cli_max_steps
-        multipass_max_steps_source = "cli"
+    review_intelligence_cfg: ReviewIntelligenceConfig | None = None
+    multipass_defaults: dict[str, Any] = {}
+    multipass_max_steps: int | None = None
+    if not bool(args.no_review):
+        review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
+            config_path=effective_config_path,
+            require_tool_prompt_fragment=False,
+        )
+        progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
+        multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
+            config_path=effective_config_path
+        )
+        progress.meta["multipass_defaults"] = multipass_defaults_meta
+        cli_max_steps = getattr(args, "multipass_max_steps", None)
+        if cli_max_steps is not None:
+            try:
+                cli_max_steps = int(cli_max_steps)
+            except Exception:
+                raise ReviewflowError("--multipass-max-steps must be an integer.")
+            if cli_max_steps < 1:
+                raise ReviewflowError("--multipass-max-steps must be >= 1.")
+            if cli_max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
+                raise ReviewflowError(
+                    f"--multipass-max-steps must be <= {MULTIPASS_MAX_STEPS_HARD_CAP}."
+                )
+            multipass_max_steps = cli_max_steps
+            multipass_max_steps_source = "cli"
+        else:
+            multipass_max_steps = int(multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS))
+            multipass_max_steps_source = "reviewflow.toml"
     else:
-        multipass_max_steps = int(multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS))
-        multipass_max_steps_source = "reviewflow.toml"
+        multipass_max_steps = DEFAULT_MULTIPASS_MAX_STEPS
+        multipass_max_steps_source = "skipped:no_review"
     progress.meta["multipass"] = {
-        "enabled": None,
+        "enabled": False if bool(args.no_review) else None,
         "max_steps": multipass_max_steps,
         "max_steps_source": multipass_max_steps_source,
-        "mode": None,
+        "mode": ("skipped:no_review" if bool(args.no_review) else None),
         "plan_json_path": str(work_dir / "review_plan.json"),
         "artifacts": {},
         "runs": [],
@@ -5850,7 +5429,46 @@ def pr_flow(
             progress.meta["pr_stats"] = pr_stats
             progress.flush()
 
-        if args.prompt is None and args.prompt_file is None:
+        if bool(args.no_review):
+            progress.meta.setdefault("multipass", {})["enabled"] = False
+            progress.meta.setdefault("multipass", {})["enabled_source"] = "forced_off:no_review"
+            progress.meta.setdefault("multipass", {})["mode"] = "skipped:no_review"
+            progress.flush()
+            log("Skipping review setup and execution (--no-review)", quiet=quiet)
+        else:
+            review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
+                config_path=effective_config_path,
+                require_tool_prompt_fragment=False,
+            )
+            progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
+            multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
+                config_path=effective_config_path
+            )
+            progress.meta["multipass_defaults"] = multipass_defaults_meta
+            cli_max_steps = getattr(args, "multipass_max_steps", None)
+            if cli_max_steps is not None:
+                try:
+                    cli_max_steps = int(cli_max_steps)
+                except Exception:
+                    raise ReviewflowError("--multipass-max-steps must be an integer.")
+                if cli_max_steps < 1:
+                    raise ReviewflowError("--multipass-max-steps must be >= 1.")
+                if cli_max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
+                    raise ReviewflowError(
+                        f"--multipass-max-steps must be <= {MULTIPASS_MAX_STEPS_HARD_CAP}."
+                    )
+                multipass_max_steps = cli_max_steps
+                multipass_max_steps_source = "cli"
+            else:
+                multipass_max_steps = int(
+                    multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS)
+                )
+                multipass_max_steps_source = "reviewflow.toml"
+            progress.meta.setdefault("multipass", {})["max_steps"] = multipass_max_steps
+            progress.meta.setdefault("multipass", {})["max_steps_source"] = multipass_max_steps_source
+            progress.flush()
+
+        if (not bool(args.no_review)) and args.prompt is None and args.prompt_file is None:
             with phase("select_prompt_profile", progress=progress, quiet=quiet):
                 profile_resolved, profile_reason = resolve_prompt_profile(
                     requested=prompt_profile_requested,
@@ -5944,7 +5562,7 @@ def pr_flow(
                     str(chunkhound_cfg_path),
                 ]
                 progress.record_cmd(index_cmd)
-                out = _ACTIVE_OUTPUT
+                out = active_output()
                 if out is not None:
                     out.run_logged_cmd(
                         index_cmd,
@@ -5963,16 +5581,20 @@ def pr_flow(
                         stream_label="chunkhound",
                     )
 
-        # Review phase
-        if args.prompt is not None or args.prompt_file is not None:
-            # Multipass is intentionally only supported for built-in profile prompts (big/auto->big).
-            use_multipass = False
+        if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
-            progress.meta.setdefault("multipass", {})["enabled_source"] = "forced_off:custom_prompt"
-            progress.meta.setdefault("multipass", {})["mode"] = "singlepass"
+            progress.meta.setdefault("multipass", {})["mode"] = "skipped:no_review"
             progress.flush()
+        else:
+            # Review phase
+            if args.prompt is not None or args.prompt_file is not None:
+                # Multipass is intentionally only supported for built-in profile prompts (big/auto->big).
+                use_multipass = False
+                progress.meta.setdefault("multipass", {})["enabled"] = False
+                progress.meta.setdefault("multipass", {})["enabled_source"] = "forced_off:custom_prompt"
+                progress.meta.setdefault("multipass", {})["mode"] = "singlepass"
+                progress.flush()
 
-        if not args.no_review:
             llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
                 args,
                 reviewflow_config_path=effective_config_path,
@@ -6419,10 +6041,12 @@ def pr_flow(
                         record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
                     progress.flush()
 
-        if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
+        if review_md_path.is_file() and (
+            persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
+        ):
             progress.flush()
         progress.done()
-        success_markdown_path = review_md_path
+        success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
         progress.error(
             {
@@ -6446,8 +6070,7 @@ def pr_flow(
         raise
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        if _ACTIVE_OUTPUT is out:
-            _ACTIVE_OUTPUT = None
+        clear_active_output(out)
         out.stop()
         maybe_print_markdown_after_tui(
             ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
@@ -6459,14 +6082,13 @@ def pr_flow(
     return 0
 
 
-def resume_flow(
+def _resume_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
     codex_base_config_path: Path | None = None,
 ) -> int:
-    global _ACTIVE_OUTPUT
     effective_config_path = config_path or default_reviewflow_config_path()
     effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
@@ -6625,7 +6247,7 @@ def resume_flow(
         logs_dir=logs_dir,
         verbosity=verbosity,
     )
-    _ACTIVE_OUTPUT = out
+    set_active_output(out)
     progress.meta["logs"] = {
         "reviewflow": str(logs_dir / "reviewflow.log"),
         "chunkhound": str(logs_dir / "chunkhound.log"),
@@ -7058,8 +6680,7 @@ def resume_flow(
         raise
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        if _ACTIVE_OUTPUT is out:
-            _ACTIVE_OUTPUT = None
+        clear_active_output(out)
         out.stop()
         maybe_print_markdown_after_tui(
             ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
@@ -7067,14 +6688,13 @@ def resume_flow(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
-def followup_flow(
+def _followup_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
     codex_base_config_path: Path | None = None,
 ) -> int:
-    global _ACTIVE_OUTPUT
     effective_config_path = config_path or default_reviewflow_config_path()
     effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
@@ -7175,7 +6795,7 @@ def followup_flow(
         logs_dir=logs_dir,
         verbosity=verbosity,
     )
-    _ACTIVE_OUTPUT = out
+    set_active_output(out)
     out.start()
 
     success_markdown_path: Path | None = None
@@ -7290,7 +6910,7 @@ def followup_flow(
                 "--config",
                 str(chunkhound_cfg_path),
             ]
-            out_obj = _ACTIVE_OUTPUT
+            out_obj = active_output()
             if out_obj is not None:
                 out_obj.run_logged_cmd(
                     index_cmd,
@@ -7427,8 +7047,7 @@ def followup_flow(
         return 0
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        if _ACTIVE_OUTPUT is out:
-            _ACTIVE_OUTPUT = None
+        clear_active_output(out)
         out.stop()
         maybe_print_markdown_after_tui(
             ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
@@ -7543,16 +7162,7 @@ def select_zip_sources_for_pr_head(
             continue
         if str(meta.get("status") or "") != "done":
             continue
-        if str(meta.get("host") or "") != pr.host:
-            continue
-        if str(meta.get("owner") or "") != pr.owner:
-            continue
-        if str(meta.get("repo") or "") != pr.repo:
-            continue
-        try:
-            if int(meta.get("number") or 0) != int(pr.number):
-                continue
-        except Exception:
+        if not _meta_matches_pr(meta=meta, pr=pr):
             continue
 
         session_id = str(meta.get("session_id") or entry.name)
@@ -7629,14 +7239,13 @@ def select_zip_sources_for_pr_head(
     return sources
 
 
-def zip_flow(
+def _zip_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
     codex_base_config_path: Path | None = None,
 ) -> int:
-    global _ACTIVE_OUTPUT
     effective_config_path = config_path or default_reviewflow_config_path()
     effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
     verbosity = resolve_verbosity(args)
@@ -7781,7 +7390,7 @@ def zip_flow(
         logs_dir=zip_logs_dir,
         verbosity=verbosity,
     )
-    _ACTIVE_OUTPUT = out
+    set_active_output(out)
     zip_progress.meta["logs"] = {
         "reviewflow": str(zip_logs_dir / "reviewflow.log"),
         "chunkhound": str(zip_logs_dir / "chunkhound.log"),
@@ -7974,8 +7583,7 @@ def zip_flow(
         raise
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        if _ACTIVE_OUTPUT is out:
-            _ACTIVE_OUTPUT = None
+        clear_active_output(out)
         out.stop()
         maybe_print_markdown_after_tui(
             ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
@@ -8482,16 +8090,7 @@ def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) ->
             continue
         if str(meta.get("status") or "") != "done":
             continue
-        if str(meta.get("host") or "") != pr.host:
-            continue
-        if str(meta.get("owner") or "") != pr.owner:
-            continue
-        if str(meta.get("repo") or "") != pr.repo:
-            continue
-        try:
-            if int(meta.get("number") or 0) != int(pr.number):
-                continue
-        except Exception:
+        if not _meta_matches_pr(meta=meta, pr=pr):
             continue
 
         review_md_path = _resolve_session_review_md_path(session_dir=entry, meta=meta)
@@ -9043,7 +8642,7 @@ def build_interactive_resume_command(
     )
 
 
-def interactive_flow(
+def _interactive_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
@@ -9067,7 +8666,10 @@ def interactive_flow(
         sessions = [
             s
             for s in sessions
-            if s.host == pr.host and s.owner == pr.owner and s.repo == pr.repo and int(s.number) == int(pr.number)
+            if _normalize_pr_identity_value(s.host) == _normalize_pr_identity_value(pr.host)
+            and _normalize_pr_identity_value(s.owner) == _normalize_pr_identity_value(pr.owner)
+            and _normalize_pr_identity_value(s.repo) == _normalize_pr_identity_value(pr.repo)
+            and int(s.number) == int(pr.number)
         ]
     if not sessions:
         if target:
@@ -9872,29 +9474,6 @@ def interactive_clean_flow(
     return 0
 
 
-def clean_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    stdin: TextIO | None = None,
-    stdout: TextIO | None = None,
-    stderr: TextIO | None = None,
-) -> int:
-    session_id = str(getattr(args, "session_id", "") or "").strip()
-    json_output = bool(getattr(args, "json_output", False))
-    auto_yes = bool(getattr(args, "yes", False))
-    out_stream = stdout or sys.stdout
-    if (not session_id) and (json_output or auto_yes):
-        raise ReviewflowError("clean with no target does not accept --yes or --json.")
-    if session_id == "closed":
-        return clean_closed_flow(args, paths=paths, stdin=stdin, stdout=out_stream, stderr=stderr)
-    if session_id:
-        if auto_yes:
-            raise ReviewflowError("clean <session_id> does not accept --yes.")
-        return clean_session(session_id, paths=paths, stdout=out_stream, json_output=json_output)
-    return interactive_clean_flow(args, paths=paths, stdin=stdin, stderr=stderr)
-
-
 def clean_session(
     session_id: str,
     *,
@@ -9955,7 +9534,7 @@ def clean_session(
     return 0
 
 
-def jira_smoke_flow(
+def _jira_smoke_flow_impl(
     args: argparse.Namespace,
     *,
     paths: ReviewflowPaths,
@@ -10467,28 +10046,165 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
     return checks
 
 
-def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
-    checks = _doctor_runtime_checks(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
-    if bool(getattr(args, "json_output", False)):
-        ok_count = sum(1 for item in checks if item.status == "ok")
-        warn_count = sum(1 for item in checks if item.status == "warn")
-        fail_count = sum(1 for item in checks if item.status == "fail")
-        payload = _doctor_runtime_payload(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
-        payload["checks"] = [
-            {"name": item.name, "status": item.status, "detail": item.detail} for item in checks
-        ]
-        payload["summary"] = {"ok": ok_count, "warn": warn_count, "fail": fail_count}
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if fail_count == 0 else 1
-
-    checks = _doctor_runtime_checks(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
-    ok_count = sum(1 for item in checks if item.status == "ok")
-    warn_count = sum(1 for item in checks if item.status == "warn")
-    fail_count = sum(1 for item in checks if item.status == "fail")
-    for item in checks:
-        print(f"[{item.status}] {item.name}: {item.detail}")
-    print(f"summary: ok={ok_count} warn={warn_count} fail={fail_count}")
-    return 0 if fail_count == 0 else 1
+from cure_sessions import (
+    CleanupSession,
+    HistoricalReviewSession,
+    InteractiveReviewSession,
+    PullRequestRef,
+    ResolvedObservationTarget,
+    ReviewVerdicts,
+    ZipSourceArtifact,
+    _load_session_meta,
+    _load_session_meta_strict,
+    _meta_matches_pr,
+    _normalize_pr_identity_value,
+    _observation_activity_dt,
+    _parse_iso_dt,
+    _resolve_latest_session_artifact_path,
+    _resolve_log_path,
+    _resolve_session_id_target,
+    _resolve_session_relative_path,
+    _resolve_session_review_head_sha,
+    _resolve_session_review_md_path,
+    _resolve_session_verdicts,
+    append_zip_inputs_provenance,
+    build_status_payload,
+    build_zip_input_display_lines,
+    extract_review_verdicts_from_markdown,
+    format_review_verdicts_compact,
+    normalize_review_verdict,
+    normalize_review_verdicts,
+    parse_owner_repo,
+    parse_pr_url,
+    persist_review_verdicts_from_markdown,
+    resolve_codex_summary,
+    resolve_meta_llm,
+    resolve_observation_target,
+    resolve_resume_session_id,
+    resolve_resume_target,
+    review_verdicts_include_reject,
+    review_verdicts_to_meta,
+    scan_cleanup_sessions,
+    scan_completed_sessions_for_pr,
+    scan_interactive_review_sessions,
+    select_zip_sources_for_pr_head,
+)
+from cure_runtime import (
+    AGENT_RUNTIME_PROFILE_CHOICES,
+    BUILTIN_LLM_PRESET_IDS,
+    CHUNKHOUND_CONFIG_EXAMPLE,
+    CLI_LLM_PROVIDERS,
+    CODEX_REASONING_EFFORT_CHOICES,
+    DEFAULT_AGENT_RUNTIME_PROFILE,
+    DEFAULT_LEGACY_CODEX_PRESET,
+    DEFAULT_MULTIPASS_ENABLED,
+    DEFAULT_MULTIPASS_MAX_STEPS,
+    DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
+    HTTP_LLM_PROVIDERS,
+    LLM_RESUME_PROVIDERS,
+    LLM_TRANSPORT_CHOICES,
+    MULTIPASS_MAX_STEPS_HARD_CAP,
+    REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
+    DoctorCheck,
+    ReviewIntelligenceConfig,
+    ReviewflowChunkHoundConfig,
+    ReviewflowRuntime,
+    _default_jira_config_path,
+    _doctor_gh_auth_check,
+    _doctor_path_payload,
+    _doctor_runtime_checks,
+    _doctor_runtime_payload,
+    _resolved_doctor_agent_runtime,
+    _set_disabled_reviewflow_config_path,
+    _string_dict,
+    apply_llm_env,
+    build_curated_subprocess_env,
+    build_http_response_request,
+    build_llm_meta,
+    build_review_intelligence_guidance,
+    codex_flags_from_base_config,
+    fingerprint_chunkhound_reviewflow_config,
+    load_chunkhound_runtime_config,
+    load_review_intelligence_config,
+    load_reviewflow_agent_runtime_config,
+    load_reviewflow_chunkhound_config,
+    load_reviewflow_codex_base_config_path,
+    load_reviewflow_codex_defaults,
+    load_reviewflow_llm_config,
+    load_reviewflow_multipass_defaults,
+    load_reviewflow_paths_defaults,
+    load_toml,
+    parse_llm_header_overrides,
+    parse_llm_key_value,
+    parse_llm_request_overrides,
+    require_builtin_review_intelligence,
+    resolve_agent_runtime_profile,
+    resolve_chunkhound_reviewflow_config,
+    resolve_codex_base_config_path,
+    resolve_codex_flags,
+    resolve_llm_config,
+    resolve_llm_config_from_args,
+    resolve_reviewflow_config_path,
+    resolve_runtime,
+    resolve_runtime_paths,
+    resolve_ui_enabled,
+    resolve_verbosity,
+    toml_string,
+)
+from cure_flows import (
+    build_abort_review_markdown,
+    compute_pr_stats,
+    followup_prompt_template_name_for_profile,
+    multipass_prompt_template_names,
+    parse_multipass_plan_json,
+    prompt_template_name_for_profile,
+    render_prompt,
+    resolve_prompt_profile,
+    review_intelligence_prompt_vars,
+)
+from cure_llm import (
+    CodexResumeInfo,
+    CodexRunResult,
+    LlmResumeInfo,
+    LlmRunResult,
+    build_claude_exec_cmd,
+    build_claude_resume_command,
+    build_codex_exec_cmd,
+    build_codex_flags_from_llm_config,
+    build_codex_resume_command,
+    build_gemini_exec_cmd,
+    cleanup_sensitive_staged_paths,
+    codex_mcp_overrides_for_reviewflow,
+    codex_resume_meta_dict,
+    find_codex_resume_info,
+    llm_resume_meta_dict,
+    prepare_review_agent_runtime,
+    record_codex_resume,
+    record_llm_resume,
+    run_claude_exec,
+    run_codex_exec,
+    run_gemini_exec,
+    run_http_response_exec,
+    run_llm_exec,
+)
+from cure_commands import (
+    _watch_line_for_payload,
+    build_commands_catalog_payload,
+    clean_flow,
+    commands_flow,
+    deprecated_alias_variant,
+    deprecated_cli_invocation,
+    doctor_flow,
+    followup_flow,
+    interactive_flow,
+    jira_smoke_flow,
+    pr_flow,
+    preferred_cli_invocation,
+    resume_flow,
+    status_flow,
+    watch_flow,
+    zip_flow,
+)
 
 
 def add_runtime_args(parser: argparse.ArgumentParser) -> None:
@@ -10761,19 +10477,22 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
 
 def main(argv: list[str], *, prog: str = PRIMARY_CLI_COMMAND) -> int:
+    import cure_commands as command_surface
+    import cure_runtime as runtime_surface
+
     args = build_parser(prog=prog).parse_args(argv)
-    runtime = resolve_runtime(args)
+    runtime = runtime_surface.resolve_runtime(args)
     paths = runtime.paths
 
     try:
         if args.cmd == "install":
             return install_flow(args)
         if args.cmd == "doctor":
-            return doctor_flow(args, runtime=runtime)
+            return command_surface.doctor_flow(args, runtime=runtime)
         if args.cmd == "commands":
-            return commands_flow(args)
+            return command_surface.commands_flow(args)
         if args.cmd == "pr":
-            return pr_flow(
+            return command_surface.pr_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,
@@ -10782,13 +10501,13 @@ def main(argv: list[str], *, prog: str = PRIMARY_CLI_COMMAND) -> int:
         if args.cmd == "ui-preview":
             return ui_preview_flow(args, paths=paths)
         if args.cmd == "status":
-            return status_flow(args, paths=paths)
+            return command_surface.status_flow(args, paths=paths)
         if args.cmd == "watch":
-            return watch_flow(args, paths=paths)
+            return command_surface.watch_flow(args, paths=paths)
         if args.cmd == "cache":
             host, owner, repo = parse_owner_repo(args.owner_repo)
             if args.cache_cmd == "prime":
-                cache_prime(
+                command_surface.cache_prime(
                     paths=paths,
                     config_path=runtime.config_path,
                     host=host,
@@ -10801,38 +10520,44 @@ def main(argv: list[str], *, prog: str = PRIMARY_CLI_COMMAND) -> int:
                 )
                 return 0
             if args.cache_cmd == "status":
-                return cache_status(paths=paths, host=host, owner=owner, repo=repo, base_ref=str(args.base))
+                return command_surface.cache_status(
+                    paths=paths,
+                    host=host,
+                    owner=owner,
+                    repo=repo,
+                    base_ref=str(args.base),
+                )
         if args.cmd == "list":
             return list_sessions(paths=paths)
         if args.cmd == "interactive":
-            return interactive_flow(args, paths=paths, config_path=runtime.config_path)
+            return command_surface.interactive_flow(args, paths=paths, config_path=runtime.config_path)
         if args.cmd == "clean":
-            return clean_flow(args, paths=paths)
+            return command_surface.clean_flow(args, paths=paths)
         if args.cmd == "migrate-storage":
             return migrate_storage_flow(args, paths=paths)
         if args.cmd == "resume":
-            return resume_flow(
+            return command_surface.resume_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,
                 codex_base_config_path=runtime.codex_base_config_path,
             )
         if args.cmd == "followup":
-            return followup_flow(
+            return command_surface.followup_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,
                 codex_base_config_path=runtime.codex_base_config_path,
             )
         if args.cmd == "zip":
-            return zip_flow(
+            return command_surface.zip_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,
                 codex_base_config_path=runtime.codex_base_config_path,
             )
         if args.cmd == "jira-smoke":
-            return jira_smoke_flow(
+            return command_surface.jira_smoke_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,
