@@ -11,11 +11,11 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-cure = "reviewflow:console_main"
+cure = "cure:console_main"
 reviewflow = "reviewflow:console_main"
 
 [tool.setuptools]
-py-modules = ["reviewflow", "paths", "run", "meta", "ui"]
+py-modules = ["cure", "reviewflow", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_flows", "cure_commands"]
 packages = ["prompts"]
 include-package-data = true
 

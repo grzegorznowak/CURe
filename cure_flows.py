@@ -39,6 +39,7 @@ from run import ReviewflowSubprocessError, merged_env, run_cmd
 
 
 def _reviewflow():
+    # Keep reviewflow as the late-bound patch surface for compatibility tests.
     import reviewflow as rf
 
     return rf

@@ -5,3 +5,5 @@ dist/
 .chunkhound.json
 .chunkhound/
 .codex/
+.tmp*
+.tmp*/

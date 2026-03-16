@@ -1,4 +1,4 @@
-"""Legacy reviewflow compatibility module; the canonical shell lives in cure.py."""
+"""Canonical CURe shell and public implementation surface."""
 
 from __future__ import annotations
 
@@ -10254,27 +10254,333 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def resolve_cli_invocation_name(argv0: str | None) -> str:
-    import cure as canonical_cure
-
-    return canonical_cure.resolve_cli_invocation_name(argv0)
+    name = Path(str(argv0 or PRIMARY_CLI_COMMAND)).name.strip().lower()
+    if name == DEPRECATED_CLI_ALIAS:
+        return DEPRECATED_CLI_ALIAS
+    if name == PRIMARY_CLI_COMMAND:
+        return PRIMARY_CLI_COMMAND
+    return PRIMARY_CLI_COMMAND
 
 
 def maybe_warn_deprecated_cli_alias(invocation_name: str, *, stderr: TextIO | None = None) -> None:
-    import cure as canonical_cure
-
-    canonical_cure.maybe_warn_deprecated_cli_alias(invocation_name, stderr=stderr)
+    if str(invocation_name or "").strip().lower() != DEPRECATED_CLI_ALIAS:
+        return
+    print(DEPRECATED_ALIAS_WARNING, file=(stderr or sys.stderr))
 
 
 def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
-    import cure as canonical_cure
+    runtime_parent = argparse.ArgumentParser(add_help=False)
+    add_runtime_args(runtime_parent)
+    parser = argparse.ArgumentParser(prog=prog, parents=[runtime_parent])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    codex_help = "Override Codex defaults after LLM preset resolution"
 
-    return canonical_cure.build_parser(prog=prog)
+    prp = sub.add_parser("pr", help="Create PR sandbox, index, and run review", parents=[runtime_parent])
+    prp.add_argument("pr_url", help="GitHub PR URL")
+    prp.add_argument(
+        "--if-reviewed",
+        dest="if_reviewed",
+        choices=["prompt", "new", "list", "latest"],
+        default="prompt",
+        help="If a completed review exists for this PR, prompt (TTY), create new, list, or show latest (default: prompt)",
+    )
+    prp.add_argument("--prompt", help="Inline review prompt", default=None)
+    prp.add_argument("--prompt-file", help="Path to prompt file", default=None)
+    prp.add_argument(
+        "--prompt-profile",
+        choices=["auto", "normal", "big", "default"],
+        default="auto",
+        help="Prompt profile to use when no --prompt/--prompt-file is provided (default: auto)",
+    )
+    prp.add_argument("--big-if-files", type=int, default=30, help="Auto-select big prompt if changed files >= N")
+    prp.add_argument(
+        "--big-if-lines",
+        type=int,
+        default=1500,
+        help="Auto-select big prompt if additions+deletions >= N",
+    )
+    prp.add_argument("--agent-desc", help="Extra contributor context ($AGENT_DESC)", default=None)
+    prp.add_argument("--agent-desc-file", help="Path to file containing extra contributor context", default=None)
+    prp.add_argument("--refresh-base", action="store_true", help="Force base cache refresh")
+    prp.add_argument("--base-ttl-hours", type=int, default=24, help="Base cache TTL in hours")
+    add_llm_override_args(prp)
+    add_agent_runtime_args(prp)
+    prp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    prp.add_argument(
+        "--codex-effort",
+        dest="codex_effort",
+        choices=CODEX_REASONING_EFFORT_CHOICES,
+        default=None,
+        help=codex_help,
+    )
+    prp.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        choices=CODEX_REASONING_EFFORT_CHOICES,
+        default=None,
+        help=codex_help,
+    )
+    mpg = prp.add_mutually_exclusive_group()
+    mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
+    mpg.add_argument("--no-multipass", dest="multipass", action="store_false", default=None, help="Disable multipass review")
+    prp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
+    prp.add_argument("--no-index", action="store_true", help="Skip ChunkHound indexing")
+    prp.add_argument("--no-review", action="store_true", help="Skip running codex review")
+    prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    prp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
+    prp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
+    cachep = sub.add_parser("cache", help="Manage base cache", parents=[runtime_parent])
+    cachesub = cachep.add_subparsers(dest="cache_cmd", required=True)
+    prime = cachesub.add_parser("prime", help="Prime/update base cache for a repo/base branch", parents=[runtime_parent])
+    prime.add_argument("owner_repo", help="OWNER/REPO or HOST/OWNER/REPO")
+    prime.add_argument("--base", required=True, help="Base branch/ref to index")
+    prime.add_argument("--force", action="store_true", help="Force reindex of all files")
+    prime.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    prime.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound output")
+
+    status = cachesub.add_parser("status", help="Show cache metadata JSON", parents=[runtime_parent])
+    status.add_argument("owner_repo", help="OWNER/REPO or HOST/OWNER/REPO")
+    status.add_argument("--base", required=True, help="Base branch/ref")
+
+    cdp = sub.add_parser("commands", help="Show the curated workflow command catalog", parents=[runtime_parent])
+    cdp.add_argument("--json", dest="json_output", action="store_true", help="Print structured command catalog JSON")
+
+    sub.add_parser("list", help="List existing review sandboxes", parents=[runtime_parent])
+
+    ip = sub.add_parser("interactive", help="Pick a past review and resume it when supported", parents=[runtime_parent])
+    ip.add_argument("target", nargs="?", help="Optional PR URL to filter the picker")
+
+    cp = sub.add_parser(
+        "clean",
+        help="Delete one review sandbox session, clean closed/merged PR sessions, or open the interactive cleaner",
+        parents=[runtime_parent],
+    )
+    cp.add_argument("session_id", nargs="?", help="Session id (folder name), or the reserved target `closed`")
+    cp.add_argument("--yes", action="store_true", help="Execute bulk closed-session cleanup without confirmation")
+    cp.add_argument("--json", dest="json_output", action="store_true", help="Print structured cleanup JSON")
+
+    mp = sub.add_parser(
+        "migrate-storage",
+        help="Show the storage-migration deprecation notice",
+        parents=[runtime_parent],
+    )
+    mp.add_argument("--apply", action="store_true", help="Accepted for compatibility; no migration is performed")
+
+    rp = sub.add_parser(
+        "resume",
+        help="Resume a multipass review session (PR URL: runs follow-up if already completed)",
+        parents=[runtime_parent],
+    )
+    rp.add_argument("session_id", help="Session id (folder name) or PR URL")
+    rp.add_argument("--from", dest="from_phase", choices=["auto", "plan", "steps", "synth"], default="auto")
+    add_llm_override_args(rp)
+    add_agent_runtime_args(rp)
+    rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    rp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    rp.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        choices=CODEX_REASONING_EFFORT_CHOICES,
+        default=None,
+        help=codex_help,
+    )
+    rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
+    rp.add_argument("--no-index", action="store_true", help="Disable ChunkHound MCP for resume")
+    rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    rp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
+    fup = sub.add_parser("followup", help="Run a follow-up review for an existing session sandbox", parents=[runtime_parent])
+    fup.add_argument("session_id", help="Session id (folder name)")
+    fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
+    add_llm_override_args(fup)
+    add_agent_runtime_args(fup)
+    fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    fup.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    fup.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        choices=CODEX_REASONING_EFFORT_CHOICES,
+        default=None,
+        help=codex_help,
+    )
+    fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    fup.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
+    zp = sub.add_parser("zip", help="Synthesize a final review from the latest generated reviews for a PR", parents=[runtime_parent])
+    zp.add_argument("pr_url", help="GitHub PR URL")
+    add_llm_override_args(zp)
+    add_agent_runtime_args(zp)
+    zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    zp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    zp.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        choices=CODEX_REASONING_EFFORT_CHOICES,
+        default=None,
+        help=codex_help,
+    )
+    zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    zp.add_argument("--no-stream", action="store_true", help="Do not stream codex output")
+    zp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
+    zp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
+    upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
+    upp.add_argument("session_id", help="Session id (folder name)")
+    upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
+    upp.add_argument("--width", type=int, default=None, help="Terminal width")
+    upp.add_argument("--height", type=int, default=None, help="Terminal height")
+    upp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+    upp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
+
+    sp = sub.add_parser("status", help="Show run status for a session id or PR URL", parents=[runtime_parent])
+    sp.add_argument("target", help="Session id (folder name) or PR URL")
+    sp.add_argument("--json", dest="json_output", action="store_true", help="Print structured status JSON")
+
+    wp = sub.add_parser("watch", help="Follow run status for a session id or PR URL", parents=[runtime_parent])
+    wp.add_argument("target", help="Session id (folder name) or PR URL")
+    wp.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds (default: 2.0)")
+    wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+    wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
+
+    ins = sub.add_parser(
+        "install",
+        help="Install or update ChunkHound so the `chunkhound` CLI is available to CURe",
+        parents=[runtime_parent],
+    )
+    ins.add_argument(
+        "--chunkhound-source",
+        choices=["release", "git-main"],
+        default="release",
+        help="ChunkHound source to install (default: release)",
+    )
+
+    dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
+    add_agent_runtime_args(dp)
+    dp.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Print structured doctor output as JSON",
+    )
+
+    jsp = sub.add_parser("jira-smoke", help="Acceptance smoke test: Jira access via Codex", parents=[runtime_parent])
+    jsp.add_argument("jira_key", help="Jira key to fetch (e.g. PROJ-123)")
+    jsp.add_argument("--attempts", type=int, default=1, help="How many attempts to run")
+    jsp.add_argument("--sleep-seconds", type=float, default=0.0, help="Seconds to wait between attempts")
+    jsp.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    jsp.add_argument("--no-stream", action="store_true", help="Do not stream codex output")
+    return parser
 
 
-def main(argv: list[str], *, prog: str = PRIMARY_CLI_COMMAND) -> int:
-    import cure as canonical_cure
+def main(
+    argv: list[str],
+    *,
+    prog: str = PRIMARY_CLI_COMMAND,
+    _shell_module: Any | None = None,
+) -> int:
+    import cure_commands as command_surface
+    import cure_runtime as runtime_surface
 
-    return canonical_cure.main(argv, prog=prog, _shell_module=sys.modules[__name__])
+    parser_builder = getattr(_shell_module, "build_parser", build_parser)
+    args = parser_builder(prog=prog).parse_args(argv)
+    runtime = runtime_surface.resolve_runtime(args)
+    paths = runtime.paths
+
+    try:
+        if args.cmd == "install":
+            return install_flow(args)
+        if args.cmd == "doctor":
+            return command_surface.doctor_flow(args, runtime=runtime)
+        if args.cmd == "commands":
+            return command_surface.commands_flow(args)
+        if args.cmd == "pr":
+            return command_surface.pr_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "ui-preview":
+            return ui_preview_flow(args, paths=paths)
+        if args.cmd == "status":
+            return command_surface.status_flow(args, paths=paths)
+        if args.cmd == "watch":
+            return command_surface.watch_flow(args, paths=paths)
+        if args.cmd == "cache":
+            host, owner, repo = parse_owner_repo(args.owner_repo)
+            if args.cache_cmd == "prime":
+                command_surface.cache_prime(
+                    paths=paths,
+                    config_path=runtime.config_path,
+                    host=host,
+                    owner=owner,
+                    repo=repo,
+                    base_ref=str(args.base),
+                    force=bool(args.force),
+                    quiet=bool(getattr(args, "quiet", False)),
+                    no_stream=bool(getattr(args, "no_stream", False)),
+                )
+                return 0
+            if args.cache_cmd == "status":
+                return command_surface.cache_status(
+                    paths=paths,
+                    host=host,
+                    owner=owner,
+                    repo=repo,
+                    base_ref=str(args.base),
+                )
+        if args.cmd == "list":
+            return list_sessions(paths=paths)
+        if args.cmd == "interactive":
+            return command_surface.interactive_flow(args, paths=paths, config_path=runtime.config_path)
+        if args.cmd == "clean":
+            return command_surface.clean_flow(args, paths=paths)
+        if args.cmd == "migrate-storage":
+            return migrate_storage_flow(args, paths=paths)
+        if args.cmd == "resume":
+            return command_surface.resume_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "followup":
+            return command_surface.followup_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "zip":
+            return command_surface.zip_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "jira-smoke":
+            return command_surface.jira_smoke_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+    except ReviewflowError as e:
+        _eprint(str(e))
+        return 2
+    except ReviewflowSubprocessError as e:
+        _eprint(str(e))
+        if e.stderr.strip():
+            _eprint(e.stderr.strip())
+        return int(e.exit_code) or 2
+
+    raise AssertionError("Unhandled command")
 
 
 def console_main() -> int:

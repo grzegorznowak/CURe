@@ -16,10 +16,11 @@ from cure_sessions import build_status_payload, resolve_observation_target
 from paths import ReviewflowPaths
 
 if TYPE_CHECKING:
-    from reviewflow import ReviewflowRuntime
+    from cure_runtime import ReviewflowRuntime
 
 
 def _reviewflow():
+    # Compatibility flows still patch reviewflow.* directly in tests and adapters.
     import reviewflow as rf
 
     return rf

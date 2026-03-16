@@ -139,29 +139,31 @@ def _set_disabled_reviewflow_config_path(path: Path | None) -> None:
     _DISABLED_REVIEWFLOW_CONFIG_PATH = path.resolve(strict=False) if path is not None else None
 
 
-def _reviewflow():
+def _loaded_shell_module():
     import sys as _sys
 
-    return _sys.modules.get("reviewflow")
+    # Prefer the legacy shim when present so existing reviewflow.* monkeypatches
+    # remain effective; otherwise fall back to the canonical cure shell.
+    return _sys.modules.get("reviewflow") or _sys.modules.get("cure")
 
 
 def _default_reviewflow_config_path() -> Path:
-    rf = _reviewflow()
+    rf = _loaded_shell_module()
     return rf.default_reviewflow_config_path() if rf is not None else default_reviewflow_config_path()
 
 
 def _default_codex_base_config_path() -> Path:
-    rf = _reviewflow()
+    rf = _loaded_shell_module()
     return rf.default_codex_base_config_path() if rf is not None else default_codex_base_config_path()
 
 
 def _default_sandbox_root() -> Path:
-    rf = _reviewflow()
+    rf = _loaded_shell_module()
     return rf.default_sandbox_root() if rf is not None else default_sandbox_root()
 
 
 def _default_cache_root() -> Path:
-    rf = _reviewflow()
+    rf = _loaded_shell_module()
     return rf.default_cache_root() if rf is not None else default_cache_root()
 
 
@@ -1463,7 +1465,7 @@ def _doctor_executable_check(name: str) -> DoctorCheck:
 
 
 def _default_jira_config_path() -> Path:
-    rf = _reviewflow()
+    rf = _loaded_shell_module()
     if rf is not None:
         candidate = getattr(rf, "_default_jira_config_path", None)
         if callable(candidate) and candidate is not _default_jira_config_path:

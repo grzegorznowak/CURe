@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import tomllib
 import unittest
 from io import StringIO
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import reviewflow as rf  # noqa: E402
+import cure  # noqa: E402
 import cure_commands  # noqa: E402
 import cure_flows  # noqa: E402
 import cure_llm  # noqa: E402
@@ -5264,7 +5266,14 @@ class RuntimeResolutionTests(unittest.TestCase):
         self.assertEqual(runtime.codex_base_config_source, "default")
 
 
-class ExtractionOwnershipTests(RuntimeResolutionTests):
+class CanonicalShellOwnershipTests(RuntimeResolutionTests):
+    def test_cure_is_the_canonical_shell_surface(self) -> None:
+        self.assertIs(cure.render_prompt, cure_flows.render_prompt)
+        self.assertIs(cure.run_llm_exec, cure_llm.run_llm_exec)
+        self.assertIs(cure.commands_flow, cure_commands.commands_flow)
+        self.assertIs(cure.status_flow, cure_commands.status_flow)
+        self.assertIs(cure.watch_flow, cure_commands.watch_flow)
+
     def test_reviewflow_reexports_active_extracted_owners(self) -> None:
         self.assertIs(rf.resolve_runtime, cure_runtime.resolve_runtime)
         self.assertIs(rf.render_prompt, cure_flows.render_prompt)
@@ -5272,6 +5281,40 @@ class ExtractionOwnershipTests(RuntimeResolutionTests):
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
         self.assertIs(rf.status_flow, cure_commands.status_flow)
         self.assertIs(rf.watch_flow, cure_commands.watch_flow)
+
+    def test_cure_main_uses_canonical_build_parser(self) -> None:
+        args = argparse.Namespace(cmd="commands", json_output=True)
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+        runtime = self._runtime()
+        with mock.patch.object(cure, "build_parser", return_value=parser) as build_parser, mock.patch.object(
+            cure_runtime, "resolve_runtime", return_value=runtime
+        ) as resolve_runtime, mock.patch.object(
+            cure_commands, "commands_flow", return_value=13
+        ) as commands_flow:
+            rc = cure.main(["commands", "--json"])
+
+        self.assertEqual(rc, 13)
+        build_parser.assert_called_once_with(prog="cure")
+        resolve_runtime.assert_called_once_with(args)
+        commands_flow.assert_called_once_with(args)
+
+    def test_reviewflow_main_forwards_to_cure_main(self) -> None:
+        with mock.patch.object(cure, "main", return_value=19) as cure_main:
+            rc = rf.main(["commands", "--json"])
+
+        self.assertEqual(rc, 19)
+        cure_main.assert_called_once()
+        self.assertEqual(cure_main.call_args.args[0], ["commands", "--json"])
+        self.assertEqual(cure_main.call_args.kwargs["prog"], "cure")
+        self.assertIs(cure_main.call_args.kwargs["_shell_module"], rf)
+
+    def test_pyproject_points_cure_script_to_cure_console_main(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(pyproject["project"]["scripts"]["cure"], "cure:console_main")
+        self.assertEqual(pyproject["project"]["scripts"]["reviewflow"], "reviewflow:console_main")
+        self.assertIn("cure", pyproject["tool"]["setuptools"]["py-modules"])
 
     def _runtime(self) -> rf.ReviewflowRuntime:
         return rf.ReviewflowRuntime(

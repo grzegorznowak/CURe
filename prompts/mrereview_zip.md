@@ -29,7 +29,7 @@ $ZIP_INPUTS
 9. The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 10. Out-of-scope issues may still downgrade a verdict when materially important.
 11. Use `- None.` when a scope bucket is empty.
-12. Do not create, edit, or move any files. Do not use `apply_patch`. Reviewflow will save your final response as the zip artifact.
+12. Do not create, edit, or move any files. Do not use `apply_patch`. CURe will save your final response as the zip artifact.
 
 ## Output format
 Return plain markdown exactly in this shape.
