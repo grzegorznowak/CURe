@@ -276,6 +276,18 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
         self.assertNotIn("codebase-under-review (CURe)", guidance)
         self.assertNotIn("rf-fetch-url", guidance)
 
+    def test_review_intelligence_prompt_vars_include_guidance(self) -> None:
+        cfg = rf.ReviewIntelligenceConfig(
+            tool_prompt_fragment="Use GitHub MCP first.",
+            policy_mode="cure_first_unrestricted",
+        )
+
+        prompt_vars = rf.review_intelligence_prompt_vars(cfg)
+
+        self.assertIn("REVIEW_INTELLIGENCE_GUIDANCE", prompt_vars)
+        self.assertIn("Use GitHub MCP first.", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+        self.assertIn("Code under review first policy", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+
 
 class PublicGitHubFallbackTests(unittest.TestCase):
     def _gh_auth_error(self, cmd: list[str]) -> rf.ReviewflowSubprocessError:
@@ -5949,12 +5961,30 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("uv tool install --editable /path/to/cure", skill)
         self.assertIn("cure install", skill)
         self.assertIn("`cure install` provisions ChunkHound only", skill)
-        self.assertIn("Ask only for the missing configuration, credentials, or project-specific inputs.", skill)
-        self.assertIn("Do not invent config, assume hidden secrets, or skip readiness checks.", skill)
-        self.assertIn("If the environment is not ready for a live review, stop and report the exact missing prerequisites.", skill)
+        self.assertIn("Inspect the actual active local config files first", skill)
+        self.assertIn("Do not invent config, assume hidden secrets, ask for secrets in chat, or skip readiness checks.", skill)
+        self.assertIn("first provide the exact local remediation steps for config or secret placement", skill)
         self.assertNotIn("reviewflow", readme.lower())
-        self.assertNotIn("reviewflow", skill.lower())
         self.assertNotIn("pip install", readme)
+
+    def test_skill_documents_proactive_secret_and_config_remediation(self) -> None:
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("reviewflow.toml", skill)
+        self.assertIn("chunkhound-base.json", skill)
+        self.assertIn("Before stopping, turn the diagnosis into an exact local remediation recipe:", skill)
+        self.assertIn("prefer a current-shell export for the immediate retry", skill)
+        self.assertIn("shell profile or existing local secret manager for persistence", skill)
+        self.assertIn("OPENAI_API_KEY", skill)
+        self.assertIn("VOYAGE_API_KEY", skill)
+        self.assertIn("never ask the operator to paste a secret into chat", skill)
+        self.assertIn("name the exact local file path to edit and show the minimal snippet to add", skill)
+        self.assertIn("Error: No embedding provider configured", skill)
+        self.assertIn("I checked /path/to/project/reviewflow.toml", skill)
+        self.assertIn("\"provider\": \"openai\"", skill)
+        self.assertIn("\"model\": \"text-embedding-3-small\"", skill)
+        self.assertIn("merge that `embedding` object into the existing JSON", skill)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
+        self.assertIn("then stop if the operator still needs to supply the secret value or make the local change", skill)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
         reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")
@@ -7412,6 +7442,228 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertTrue((session_dir / "work" / "chunkhound" / "chunkhound.json").is_file())
             self.assertTrue(meta["notes"]["no_review"])
             self.assertEqual(meta["status"], "done")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_review_renders_review_intelligence_guidance(self) -> None:
+        root = ROOT / ".tmp_test_pr_review_guidance"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            sandbox_root = root / "sandboxes"
+            cache_root = root / "cache"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            seed = root / "seed"
+            seed.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path = root / "reviewflow.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+            )
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                    return _Result()
+                if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                    return _Result("https://github.com/acme/repo.git\n")
+                if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                    return _Result("true\n")
+                if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd[:3] == ["gh", "pr", "checkout"]:
+                    return _Result()
+                if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_write_pr_context_file(
+                *,
+                work_dir: Path,
+                pr: rf.PullRequestRef,
+                pr_meta: dict[str, object],
+            ) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            captured: dict[str, str] = {}
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.CodexRunResult:
+                prompt = kwargs["prompt"]
+                assert isinstance(prompt, str)
+                captured["prompt"] = prompt
+                raise RuntimeError("stop after prompt render")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main"},
+                            "head": {"sha": "1111111111111111111111111111111111111111"},
+                            "title": "Guided review PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file)
+                )
+                stack.enter_context(mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}))
+                stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+                stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+                stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+                stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda self, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            rf.ReviewIntelligenceConfig(
+                                tool_prompt_fragment="Use GitHub MCP first.",
+                                policy_mode="cure_first_unrestricted",
+                            ),
+                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {"enabled": False, "max_steps": 20},
+                            {"enabled": False, "max_steps": 20},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_prompt_profile",
+                        return_value=("normal", "forced:test"),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "openai", "preset": "test-openai"},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value={
+                            "env": {},
+                            "metadata": {},
+                            "staged_paths": {},
+                            "add_dirs": [],
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_builtin_prompt_text",
+                        return_value=(
+                            "Prompt header\n"
+                            "$REVIEW_INTELLIGENCE_GUIDANCE\n"
+                            "Context: $PR_CONTEXT_PATH\n"
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                with self.assertRaisesRegex(RuntimeError, "stop after prompt render"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+
+            self.assertIn("Use GitHub MCP first.", captured["prompt"])
+            self.assertIn("Code under review first policy", captured["prompt"])
+            self.assertIn("Context: ", captured["prompt"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

@@ -112,13 +112,72 @@ cure clean closed --json
 
 ## When To Stop And Ask
 
-Stop instead of guessing when:
+When readiness fails because local runtime config or credentials are incomplete, inspect the actual active local files you already know about before you stop:
+- the project's `reviewflow.toml`
+- the JSON file resolved from `[chunkhound].base_config_path`
+
+Before stopping, turn the diagnosis into an exact local remediation recipe:
+- if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
+- for ChunkHound embedding setup, explicitly mention supported env vars when relevant, including `OPENAI_API_KEY` and `VOYAGE_API_KEY`
+- if non-secret config structure is missing, name the exact local file path to edit and show the minimal snippet to add, using placeholders instead of real secret values
+- never ask the operator to paste a secret into chat
+- end with the exact rerun command, usually `cure pr <PR_URL> --if-reviewed new`
+
+Stop instead of guessing only after you have provided the exact local remediation steps for config or secret placement when:
 - `cure doctor --pr-url <PR_URL> --json` reports missing prerequisites
 - the project config is missing
 - the review-intelligence fragment is missing
 - GitHub access, provider auth, or ChunkHound base config are unavailable in a way that `cure doctor --pr-url <PR_URL> --json` does not clear for the target
 - Jira is unavailable for a Jira-driven workflow
 - the operator has not provided the project-specific values the run needs
+
+Ask only for the truly missing fact when you cannot infer it from the active local files. Distinguish:
+- missing secret values: provide placement guidance first, then stop for the operator to supply the value locally
+- missing non-secret config structure: provide the exact file path and snippet first, then stop for the operator to make the local edit
+- missing project/operator facts: report what you inspected locally, then ask for only that fact
+
+## Example: ChunkHound Embedding Not Configured
+
+If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails with `Error: No embedding provider configured`, respond in this shape:
+
+1. Identify the active config path you inspected:
+
+```text
+I checked /path/to/project/reviewflow.toml and its [chunkhound].base_config_path points to /path/to/project/chunkhound-base.json.
+```
+
+2. Show the exact non-secret block to add to the active ChunkHound base config:
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small"
+  }
+}
+```
+
+If the file already has top-level keys, merge that `embedding` object into the existing JSON instead of replacing the whole file. If the operator uses Voyage instead of OpenAI, use `"provider": "voyage"` with an appropriate Voyage embedding model such as `"voyage-code-3"`.
+
+3. Recommend env-first secret placement, never secret values in chat:
+
+```bash
+export OPENAI_API_KEY=<your-openai-api-key>
+```
+
+or
+
+```bash
+export VOYAGE_API_KEY=<your-voyage-api-key>
+```
+
+For persistence, place the same env var in the operator's shell profile or existing local secret manager. Do not ask them to paste the secret into chat.
+
+4. End with the rerun command:
+
+```bash
+cure pr <PR_URL> --if-reviewed new
+```
 
 ## Canonical Agent Prompt
 
@@ -132,9 +191,10 @@ Required behavior:
 - If `cure` is not installed, install it from <CURE_SOURCE>.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
-- Ask only for the missing configuration, credentials, or project-specific inputs.
-- Do not invent config, assume hidden secrets, or skip readiness checks.
+- Inspect the actual active local config files first, especially `reviewflow.toml` and the resolved `chunkhound-base.json` from `[chunkhound].base_config_path`.
+- Ask only for the missing project-specific facts after you have provided the exact local remediation steps for config or secret placement.
+- Do not invent config, assume hidden secrets, ask for secrets in chat, or skip readiness checks.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 - Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
-- If the environment is not ready for a live review, stop and report the exact missing prerequisites.
+- If the environment is not ready for a live review, first provide the exact local remediation steps for config or secret placement, including the file path to edit, a minimal snippet, the supported env vars to place locally, and the rerun command; then stop if the operator still needs to supply the secret value or make the local change.
 ```
