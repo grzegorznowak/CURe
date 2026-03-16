@@ -46,7 +46,13 @@ https://docs.astral.sh/uv/getting-started/installation/
 git clone <CURE_REPO_URL> /path/to/cure
 ```
 
-3. Install CURe from that local checkout:
+3. Refresh that local checkout before using it for reviews:
+
+```bash
+git -C /path/to/cure pull --ff-only
+```
+
+4. Install CURe from that local checkout:
 
 ```bash
 uv tool install /path/to/cure
@@ -58,7 +64,7 @@ For local iteration from the checkout:
 uv tool install --editable /path/to/cure
 ```
 
-4. Provision ChunkHound:
+5. Provision ChunkHound:
 
 ```bash
 cure install
@@ -66,7 +72,7 @@ cure install
 
 `cure install` provisions ChunkHound only.
 
-5. Confirm readiness:
+6. Confirm readiness:
 
 ```bash
 cure doctor --pr-url <PR_URL> --json
@@ -74,13 +80,13 @@ cure doctor --pr-url <PR_URL> --json
 
 Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows.
 
-6. If the environment is ready, start the review:
+7. If the environment is ready, start the review:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
 ```
 
-7. Observe progress:
+8. Observe progress:
 
 ```bash
 cure status <session_id|PR_URL> --json
@@ -120,8 +126,9 @@ Stop instead of guessing when:
 Use CURe from <CURE_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.
 
 Required behavior:
-- If `cure` is already installed and working, use it.
-- If `cure` is installed but not working, diagnose and repair or reinstall it from <CURE_SOURCE>.
+- Before using CURe, refresh `<CURE_SOURCE>` with `git -C <CURE_SOURCE> pull --ff-only` when it is a git checkout.
+- If `cure` is already installed and working, use the refreshed checkout.
+- If `cure` is installed but not working, diagnose and repair or reinstall it from the refreshed `<CURE_SOURCE>`.
 - If `cure` is not installed, install it from <CURE_SOURCE>.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.

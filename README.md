@@ -26,9 +26,10 @@ CURe is an external tool that sits beside a project.
 The operator workflow is:
 1. Install `uv` once.
 2. Check out CURe to a local path.
-3. Install CURe from that path.
-4. Make sure the project-specific config and external auth are available.
-5. Hand the agent a PR URL and the CURe path.
+3. Refresh that checkout before review work.
+4. Install CURe from that path.
+5. Make sure the project-specific config and external auth are available.
+6. Hand the agent a PR URL and the CURe path.
 
 If you only remember one command, it is:
 
@@ -53,6 +54,8 @@ To make CURe work well with agents, the operator should provide four things:
 - the project config path
 - authenticated external tools where needed, except where target-aware public `github.com` fallback is explicitly sufficient
 - a clear PR URL to start from
+
+Agents should prefer a fast-forward refresh of the CURe checkout before review work, for example `git -C <CURE_SOURCE> pull --ff-only`, so they do not keep running against a stalled local copy.
 
 The operator should not need to teach each agent a custom workflow. The goal is that every agent starts from the same CURe contract and the same canonical `cure pr <PR_URL> --if-reviewed new` entrypoint.
 
