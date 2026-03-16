@@ -115,7 +115,7 @@ class ReviewflowOutput:
         self.state.ping()
 
     def stream_sink(self, kind: str) -> StreamSink:
-        if kind == "chunkhound":
+        if kind in {"chunkhound", "jira"}:
             return self.chunkhound_sink
         if kind == "codex":
             return self.codex_sink

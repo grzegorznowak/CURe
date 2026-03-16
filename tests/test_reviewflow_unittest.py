@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import tomllib
 import unittest
 from io import StringIO
@@ -1128,7 +1129,18 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             repo.mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
 
-            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            with (
+                mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_THREAD_ID": "thread-123",
+                        "CODEX_HOME": "/tmp/codex-home",
+                        "CLAUDE_CODE_SESSION": "ignore-me",
+                    },
+                    clear=False,
+                ),
+            ):
                 balanced = rf.prepare_review_agent_runtime(
                     args=self._runtime_args(profile="balanced"),
                     resolved=self._llm_resolved("codex"),
@@ -1151,6 +1163,10 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 self.assertEqual(balanced["sandbox_mode"], "workspace-write")
                 self.assertEqual(balanced["approval_policy"], "never")
                 self.assertFalse(balanced["dangerously_bypass_approvals_and_sandbox"])
+                self.assertEqual(balanced["env"]["CODEX_THREAD_ID"], "thread-123")
+                self.assertEqual(balanced["env"]["CODEX_HOME"], "/tmp/codex-home")
+                self.assertNotIn("CLAUDE_CODE_SESSION", balanced["env"])
+                self.assertIn("CODEX_THREAD_ID", balanced["metadata"]["env_keys"])
                 self.assertIn("--sandbox", balanced["codex_flags"])
                 self.assertIn("workspace-write", balanced["codex_flags"])
 
@@ -1208,7 +1224,18 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             repo.mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
 
-            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            with (
+                mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CLAUDE_CODE_SESSION": "claude-session-123",
+                        "CLAUDE_HOME": "/tmp/claude-home",
+                        "CODEX_THREAD_ID": "ignore-me",
+                    },
+                    clear=False,
+                ),
+            ):
                 runtime = rf.prepare_review_agent_runtime(
                     args=self._runtime_args(profile="balanced"),
                     resolved=self._llm_resolved("claude"),
@@ -1229,6 +1256,10 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertEqual(runtime["profile"], "balanced")
             self.assertEqual(runtime["permission_mode"], "dontAsk")
             self.assertFalse(runtime["dangerously_skip_permissions"])
+            self.assertEqual(runtime["env"]["CLAUDE_CODE_SESSION"], "claude-session-123")
+            self.assertEqual(runtime["env"]["CLAUDE_HOME"], "/tmp/claude-home")
+            self.assertNotIn("CODEX_THREAD_ID", runtime["env"])
+            self.assertIn("CLAUDE_CODE_SESSION", runtime["metadata"]["env_keys"])
             self.assertTrue(Path(runtime["staged_paths"]["claude_settings"]).is_file())
             self.assertTrue(Path(runtime["staged_paths"]["claude_mcp_config"]).is_file())
             cmd = rf.build_claude_exec_cmd(
@@ -4840,7 +4871,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIs(rf.zip_flow, cure_commands.zip_flow)
         self.assertIs(rf.interactive_flow, cure_commands.interactive_flow)
         self.assertIs(rf.clean_flow, cure_commands.clean_flow)
-        self.assertIs(rf.jira_smoke_flow, cure_commands.jira_smoke_flow)
+        self.assertFalse(hasattr(rf, "jira_smoke_flow"))
         self.assertFalse(hasattr(rf, "_clean_flow_impl"))
 
     def test_main_dispatches_pr_through_runtime_and_command_surfaces(self) -> None:
@@ -4946,15 +4977,6 @@ class WorkflowContractTests(unittest.TestCase):
                     "paths": mock.sentinel.paths,
                 },
             ),
-            (
-                "jira-smoke",
-                "jira_smoke_flow",
-                {
-                    "paths": mock.sentinel.paths,
-                    "config_path": Path("/tmp/reviewflow.toml"),
-                    "codex_base_config_path": Path("/tmp/codex.toml"),
-                },
-            ),
         )
 
         for command_name, flow_name, expected_kwargs in cases:
@@ -4973,6 +4995,77 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertEqual(rc, 29)
             resolve_runtime_mock.assert_called_once_with(args)
             flow_mock.assert_called_once_with(args, **expected_kwargs)
+
+    def test_review_intelligence_preflight_skips_when_jira_is_not_in_play(self) -> None:
+        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use GitHub only.")
+        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
+            rf, "active_output", return_value=None
+        ):
+            rf._run_review_intelligence_preflight(
+                repo_dir=Path("/tmp/repo"),
+                env={},
+                runtime_policy={"staged_paths": {}},
+                review_intelligence_cfg=cfg,
+                stream=False,
+            )
+        run_cmd.assert_not_called()
+
+    def test_review_intelligence_preflight_fails_fast_when_jira_is_required_without_config(self) -> None:
+        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use Jira ticket context first.")
+        with self.assertRaises(rf.ReviewflowError) as ctx:
+            rf._run_review_intelligence_preflight(
+                repo_dir=Path("/tmp/repo"),
+                env={},
+                runtime_policy={"staged_paths": {}},
+                review_intelligence_cfg=cfg,
+                stream=False,
+            )
+        self.assertIn("JIRA_CONFIG_FILE", str(ctx.exception))
+
+    def test_review_intelligence_preflight_runs_rf_jira_me_before_review(self) -> None:
+        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use Jira when available.")
+        progress = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir()
+            helper = repo_dir / "rf-jira"
+            helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            helper.chmod(0o755)
+            with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
+                rf, "active_output", return_value=None
+            ):
+                rf._run_review_intelligence_preflight(
+                    repo_dir=repo_dir,
+                    env={"JIRA_CONFIG_FILE": str(repo_dir / "jira.yml")},
+                    runtime_policy={"staged_paths": {"rf_jira": str(helper)}},
+                    review_intelligence_cfg=cfg,
+                    stream=True,
+                    progress=progress,
+                )
+        progress.record_cmd.assert_called_once_with([str(helper), "me"])
+        run_cmd.assert_called_once_with(
+            [str(helper), "me"],
+            cwd=repo_dir,
+            env={"JIRA_CONFIG_FILE": str(repo_dir / "jira.yml")},
+            check=True,
+            stream=True,
+            stream_label="jira",
+        )
+
+    def test_reviewflow_output_accepts_jira_stream_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = rf.ReviewflowOutput(
+                ui_enabled=False,
+                no_stream=False,
+                stderr=StringIO(),
+                meta_path=Path(tmp) / "meta.json",
+                logs_dir=Path(tmp) / "logs",
+                verbosity=rui.Verbosity.normal,
+            )
+            try:
+                self.assertIs(out.stream_sink("jira"), out.chunkhound_sink)
+            finally:
+                out.stop()
 
     def test_status_flow_exact_session_human_output_uses_exact_resolution(self) -> None:
         root = ROOT / ".tmp_test_status_exact_root"

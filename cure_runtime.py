@@ -72,6 +72,10 @@ CURATED_ENV_INHERIT_KEYS = (
     "USER",
     "VOYAGE_API_KEY",
 )
+CLI_PROVIDER_SESSION_ENV_PREFIXES = {
+    "codex": ("CODEX_",),
+    "claude": ("CLAUDE_",),
+}
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
@@ -494,6 +498,26 @@ def build_curated_subprocess_env(
     if extra_env:
         env.update({str(k): str(v) for k, v in extra_env.items() if str(v)})
     return env
+
+
+def augment_cli_provider_session_env(
+    *,
+    env: dict[str, str],
+    provider: str,
+    inherited_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    prefixes = CLI_PROVIDER_SESSION_ENV_PREFIXES.get(str(provider or "").strip().lower())
+    if not prefixes:
+        return env
+    source = inherited_env if inherited_env is not None else os.environ
+    merged = dict(env)
+    for key, raw_value in source.items():
+        if not any(key.startswith(prefix) for prefix in prefixes):
+            continue
+        value = str(raw_value or "").strip()
+        if value:
+            merged[key] = value
+    return merged
 
 
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
@@ -1959,6 +1983,7 @@ __all__ = [
     "BUILTIN_LLM_PRESET_IDS",
     "CHUNKHOUND_CONFIG_EXAMPLE",
     "CLI_LLM_PROVIDERS",
+    "CLI_PROVIDER_SESSION_ENV_PREFIXES",
     "CODEX_REASONING_EFFORT_CHOICES",
     "CURATED_ENV_INHERIT_KEYS",
     "DEFAULT_AGENT_RUNTIME_PROFILE",
@@ -1983,6 +2008,7 @@ __all__ = [
     "_set_disabled_reviewflow_config_path",
     "_string_dict",
     "_string_list",
+    "augment_cli_provider_session_env",
     "apply_llm_env",
     "build_curated_subprocess_env",
     "build_http_response_request",

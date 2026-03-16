@@ -20,6 +20,7 @@ from cure_output import _eprint, active_output, log
 from cure_runtime import (
     ReviewIntelligenceConfig,
     ReviewflowChunkHoundConfig,
+    build_review_intelligence_guidance,
     fingerprint_chunkhound_reviewflow_config,
     load_chunkhound_runtime_config,
     load_review_intelligence_config,

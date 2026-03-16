@@ -398,22 +398,6 @@ def clean_flow(
     return rf.interactive_clean_flow(args, paths=paths, stdin=stdin, stderr=stderr)
 
 
-def jira_smoke_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    config_path: Path | None = None,
-    codex_base_config_path: Path | None = None,
-) -> int:
-    rf = _reviewflow()
-    return rf._jira_smoke_flow_impl(
-        args,
-        paths=paths,
-        config_path=config_path,
-        codex_base_config_path=codex_base_config_path,
-    )
-
-
 def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
     pr_url = str(getattr(args, "pr_url", "") or "").strip() or None
     checks = _doctor_runtime_checks(
@@ -455,7 +439,6 @@ __all__ = [
     "doctor_flow",
     "followup_flow",
     "interactive_flow",
-    "jira_smoke_flow",
     "pr_flow",
     "preferred_cli_invocation",
     "resume_flow",

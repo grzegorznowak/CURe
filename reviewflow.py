@@ -5084,6 +5084,66 @@ if __name__ == "__main__":
     return path
 
 
+def _review_intelligence_requires_jira(cfg: ReviewIntelligenceConfig) -> bool:
+    text = str(getattr(cfg, "tool_prompt_fragment", "") or "").lower()
+    return ("jira" in text) or ("rf-jira" in text)
+
+
+def _run_review_intelligence_preflight(
+    *,
+    repo_dir: Path,
+    env: dict[str, str],
+    runtime_policy: dict[str, Any],
+    review_intelligence_cfg: ReviewIntelligenceConfig,
+    stream: bool,
+    progress: SessionProgress | None = None,
+) -> None:
+    staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
+    rf_jira_raw = str((staged_paths or {}).get("rf_jira") or "").strip()
+    jira_cfg = str(env.get("JIRA_CONFIG_FILE") or "").strip()
+    if not (jira_cfg or rf_jira_raw or _review_intelligence_requires_jira(review_intelligence_cfg)):
+        return
+    if not jira_cfg:
+        raise ReviewflowError(
+            "Review-intelligence preflight failed before review generation: "
+            "Jira context is expected but JIRA_CONFIG_FILE is unavailable."
+        )
+    if not rf_jira_raw:
+        raise ReviewflowError(
+            "Review-intelligence preflight failed before review generation: "
+            "rf-jira helper is unavailable."
+        )
+    rf_jira = Path(rf_jira_raw).resolve()
+    if not rf_jira.is_file():
+        raise ReviewflowError(
+            "Review-intelligence preflight failed before review generation: "
+            f"rf-jira helper is missing at {rf_jira}."
+        )
+
+    cmd = [str(rf_jira), "me"]
+    if progress is not None:
+        progress.record_cmd(cmd)
+    out = active_output()
+    if out is not None:
+        out.run_logged_cmd(
+            cmd,
+            kind="jira",
+            cwd=repo_dir,
+            env=env,
+            check=True,
+            stream_requested=stream,
+        )
+    else:
+        run_cmd(
+            cmd,
+            cwd=repo_dir,
+            env=env,
+            check=True,
+            stream=stream,
+            stream_label="jira",
+        )
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -5704,6 +5764,16 @@ def _pr_flow_impl(
                 helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
             )
             progress.flush()
+
+            with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
+                _run_review_intelligence_preflight(
+                    repo_dir=repo_dir,
+                    env=env,
+                    runtime_policy=runtime_policy,
+                    review_intelligence_cfg=review_intelligence_cfg,
+                    stream=stream,
+                    progress=progress,
+                )
 
             add_dirs = list(runtime_policy.get("add_dirs") or [])
             if str(llm_resolved.get("provider") or "") == "codex":
@@ -6398,6 +6468,16 @@ def _resume_flow_impl(
         )
         progress.flush()
 
+        with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
+            _run_review_intelligence_preflight(
+                repo_dir=repo_dir,
+                env=env,
+                runtime_policy=runtime_policy,
+                review_intelligence_cfg=review_intelligence_cfg,
+                stream=stream,
+                progress=progress,
+            )
+
         add_dirs = list(runtime_policy.get("add_dirs") or [])
         if str(llm_resolved.get("provider") or "") == "codex":
             if not no_index:
@@ -6891,6 +6971,14 @@ def _followup_flow_impl(
             paths=paths,
         )
         env = dict(runtime_policy["env"])
+        with phase("review_intelligence_preflight", progress=None, quiet=quiet):
+            _run_review_intelligence_preflight(
+                repo_dir=repo_dir,
+                env=env,
+                runtime_policy=runtime_policy,
+                review_intelligence_cfg=review_intelligence_cfg,
+                stream=stream,
+            )
         codex_meta: dict[str, Any] | None = None
         codex_flags = list(runtime_policy.get("codex_flags") or [])
         if str(llm_resolved.get("provider") or "") == "codex":
@@ -9558,130 +9646,6 @@ def clean_session(
     if json_output and payload is not None:
         print(json.dumps(payload, indent=2, sort_keys=True), file=(stdout or sys.stdout))
     return 0
-
-
-def _jira_smoke_flow_impl(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    config_path: Path | None = None,
-    codex_base_config_path: Path | None = None,
-) -> int:
-    effective_config_path = config_path or default_reviewflow_config_path()
-    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
-    quiet = bool(getattr(args, "quiet", False))
-    no_stream = bool(getattr(args, "no_stream", False))
-    stream = (not quiet) and (not no_stream)
-
-    jira_key = str(args.jira_key).strip()
-    if not jira_key:
-        raise ReviewflowError("jira-smoke requires a Jira key (e.g. PROJ-123).")
-
-    session_root = paths.sandbox_root
-    session_root.mkdir(parents=True, exist_ok=True)
-    session_id = (
-        "jira-smoke-"
-        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
-        f"{secrets.token_hex(2)}"
-    )
-    session_dir = session_root / session_id
-    repo_dir = session_dir / "repo"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    work_dir = session_dir / "work"
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    # Prepare sandbox-local Jira config + helper.
-    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-    if not jira_cfg:
-        raise ReviewflowError(
-            "jira-smoke: Jira config not found. Ensure Jira CLI is initialized (e.g. `jira init`) "
-            "and/or `JIRA_CONFIG_FILE` is set."
-        )
-    _ = write_rf_jira(repo_dir=repo_dir)
-
-    env = merged_env({})
-    env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-    env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-    netrc = real_user_home_dir() / ".netrc"
-    if netrc.is_file():
-        env["NETRC"] = str(netrc)
-
-    codex_flags, _ = resolve_codex_flags(
-        base_config_path=effective_codex_base_config_path,
-        reviewflow_config_path=effective_config_path,
-        cli_model=None,
-        cli_effort=None,
-        cli_plan_effort=None,
-    )
-    codex_overrides = codex_mcp_overrides_for_reviewflow(
-        enable_sandbox_chunkhound=False,
-        sandbox_repo_dir=repo_dir,
-        paths=paths,
-    )
-
-    smoke_cmd = (
-        "set -uo pipefail; "
-        "if ./rf-jira me >/dev/null && "
-        f"./rf-jira issue view {jira_key} --plain --comments 1 >/dev/null; "
-        "then echo RF_JIRA_SMOKE_OK; "
-        "else echo RF_JIRA_SMOKE_FAIL; exit 1; fi"
-    )
-    prompt = f"""You are running an automated smoke test for Jira access inside Codex.
-
-Do exactly ONE command and then stop:
-
-/bin/bash -lc {toml_string(smoke_cmd)}
-
-Requirements:
-- If the command succeeds, its output must include: RF_JIRA_SMOKE_OK
-- If the command fails for any reason, output must include: RF_JIRA_SMOKE_FAIL
-- Do not do anything else.
-"""
-
-    attempts = int(getattr(args, "attempts", 1) or 1)
-    attempts = max(1, attempts)
-    sleep_seconds = float(getattr(args, "sleep_seconds", 0.0) or 0.0)
-    sleep_seconds = max(0.0, sleep_seconds)
-
-    try:
-        for attempt in range(1, attempts + 1):
-            out_path = session_dir / f"jira_smoke_attempt_{attempt}.md"
-            codex_cmd = build_codex_exec_cmd(
-                repo_dir=repo_dir,
-                codex_flags=codex_flags,
-                codex_config_overrides=codex_overrides,
-                review_md_path=out_path,
-                prompt=prompt,
-                add_dirs=[session_dir],
-                skip_git_repo_check=True,
-            )
-            log(f"Jira smoke attempt {attempt}/{attempts}", quiet=quiet)
-            res = run_cmd(
-                codex_cmd,
-                cwd=repo_dir,
-                env=env,
-                check=False,
-                stream=stream,
-                stream_label="codex",
-            )
-            combined = f"{res.stdout}\n{res.stderr}"
-            ok = ("RF_JIRA_SMOKE_OK" in combined) and ("401 Unauthorized" not in combined)
-            if ok:
-                log(f"Jira smoke PASS (session {session_id})", quiet=quiet)
-                return 0
-            if attempt < attempts and sleep_seconds:
-                time.sleep(sleep_seconds)
-
-        raise ReviewflowError(f"jira-smoke FAILED; inspect: {session_dir}")
-    finally:
-        cleanup_sensitive_staged_paths(
-            {
-                "jira_config_file": env.get("JIRA_CONFIG_FILE"),
-                "netrc": env.get("NETRC"),
-            }
-        )
-
 CHUNKHOUND_GIT_MAIN_INSTALL_SPEC = "git+https://github.com/chunkhound/chunkhound@main"
 
 
@@ -10223,7 +10187,6 @@ from cure_commands import (
     doctor_flow,
     followup_flow,
     interactive_flow,
-    jira_smoke_flow,
     pr_flow,
     preferred_cli_invocation,
     resume_flow,

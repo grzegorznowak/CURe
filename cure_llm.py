@@ -19,6 +19,7 @@ from cure_runtime import (
     HTTP_LLM_PROVIDERS,
     _dedupe_paths,
     _string_dict,
+    augment_cli_provider_session_env,
     build_curated_subprocess_env,
     build_http_response_request,
     load_chunkhound_runtime_config,
@@ -738,6 +739,7 @@ def prepare_review_agent_runtime(
         config_enabled=config_enabled,
     )
     env = build_curated_subprocess_env(extra_env=base_env)
+    env = augment_cli_provider_session_env(env=env, provider=provider)
     env.update(_string_dict(resolved.get("env")))
     env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
     add_dirs = _dedupe_paths([session_dir, work_dir])
