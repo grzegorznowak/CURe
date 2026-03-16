@@ -2450,6 +2450,99 @@ class InteractiveFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+    def test_interactive_flow_recovers_when_only_llm_resume_metadata_exists(self) -> None:
+        root = ROOT / ".tmp_test_interactive_flow_llm_resume_root"
+        cfg = ROOT / ".tmp_test_interactive_flow_llm_resume_cfg.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("{}", encoding="utf-8")
+
+            s1 = root / "s1"
+            s1.mkdir()
+            (s1 / "repo").mkdir()
+            (s1 / "work").mkdir()
+            review_md = s1 / "review.md"
+            review_md.write_text("**Decision**: APPROVE\n", encoding="utf-8")
+            meta_path = s1 / "meta.json"
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 1,
+                        "created_at": "2026-03-04T00:00:00+00:00",
+                        "completed_at": "2026-03-04T01:00:00+00:00",
+                        "decision": "APPROVE",
+                        "paths": {
+                            "repo_dir": str(s1 / "repo"),
+                            "work_dir": str(s1 / "work"),
+                            "review_md": str(review_md),
+                        },
+                        "llm": {
+                            "provider": "codex",
+                            "capabilities": {"supports_resume": True},
+                            "resume": {
+                                "command": "cd /tmp/s1 && codex resume s1",
+                                "session_id": "s1",
+                                "cwd": str(s1 / "repo"),
+                            },
+                        },
+                        "codex": {
+                            "config": {
+                                "resolved": {
+                                    "model": "gpt-5.3-codex",
+                                    "model_reasoning_effort": "high",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=root,
+                cache_root=ROOT / ".tmp_test_interactive_flow_llm_resume_cache",
+                review_chunkhound_config=cfg,
+                main_chunkhound_config=cfg,
+            )
+            stdin = self._FakeTty("1\n")
+            stderr = self._FakeTty()
+
+            with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=cfg),
+                        {"chunkhound": {"base_config_path": str(cfg)}},
+                        {},
+                    ),
+                ),
+                mock.patch.object(
+                    rf,
+                    "chunkhound_env",
+                    return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
+                mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
+            ):
+                rc = rf.interactive_flow(argparse.Namespace(), paths=paths, stdin=stdin, stderr=stderr)
+
+            self.assertEqual(rc, 0)
+            runner.assert_called_once()
+            self.assertIn("codex resume", runner.call_args.args[0])
+            repaired = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(repaired["codex"]["resume"]["session_id"], "s1")
+            self.assertIn("codex resume", repaired["codex"]["resume"]["command"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
     def test_interactive_flow_repairs_saved_subagent_resume_to_parent_session(self) -> None:
         root = ROOT / ".tmp_test_interactive_subagent_resume_root"
         cfg = ROOT / ".tmp_test_interactive_subagent_resume_cfg.json"

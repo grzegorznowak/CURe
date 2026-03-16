@@ -5715,6 +5715,7 @@ def _pr_flow_impl(
                     },
                     "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
                 }
+                codex_meta = progress.meta["codex"]
             progress.meta["agent_runtime"] = runtime_policy["metadata"]
             progress.meta["llm"] = build_llm_meta(
                 resolved=llm_resolved,
@@ -8614,6 +8615,10 @@ def build_interactive_resume_command(
     env = dict(runtime_policy["env"])
 
     llm_resume = llm_meta.get("resume") if isinstance(llm_meta.get("resume"), dict) else {}
+    if not llm_resume:
+        llm_resume = (
+            saved_llm_meta.get("resume") if isinstance(saved_llm_meta.get("resume"), dict) else {}
+        )
     resume_session_id = str((llm_resume or {}).get("session_id") or "").strip()
     meta_paths = dict(meta_paths or {})
     meta_paths["work_dir"] = str(work_dir)
@@ -8628,7 +8633,7 @@ def build_interactive_resume_command(
     if provider == "codex":
         codex_meta = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
         resume_meta = codex_meta.get("resume") if isinstance(codex_meta.get("resume"), dict) else {}
-        resume_session_id = str((resume_meta or {}).get("session_id") or "").strip()
+        resume_session_id = str((resume_meta or {}).get("session_id") or resume_session_id or "").strip()
         resume_session_id = _resolve_top_level_codex_session_id(
             codex_root=real_user_home_dir() / ".codex",
             session_id=resume_session_id,
@@ -8654,10 +8659,12 @@ def build_interactive_resume_command(
                 f"{session.latest_artifact_path}"
             )
 
+        fallback_command = str((resume_meta or {}).get("command") or (llm_resume or {}).get("command") or "").strip()
         if not resume_session_id:
-            fallback_command = str((resume_meta or {}).get("command") or "").strip()
             if not fallback_command:
-                raise ReviewflowError(f"Session {session.session_id} is missing codex.resume metadata.")
+                raise ReviewflowError(
+                    f"Session {session.session_id} is missing codex.resume and llm.resume metadata."
+                )
             write_redacted_json(meta_path, meta)
             return (fallback_command, env)
 
