@@ -10,8 +10,11 @@ import shutil
 import sys
 import tomllib
 from typing import Any
+import urllib.error
+import urllib.request
 
 from cure_errors import ReviewflowError
+from cure_sessions import PullRequestRef, parse_pr_url
 from meta import json_fingerprint
 from paths import (
     ReviewflowPaths,
@@ -132,6 +135,15 @@ class DoctorCheck:
     name: str
     status: str
     detail: str
+
+
+@dataclass(frozen=True)
+class DoctorTargetContext:
+    pr_url: str
+    pr: PullRequestRef
+    public_fallback_supported: bool
+    public_pr_metadata_reachable: bool
+    public_pr_metadata_detail: str
 
 
 def _set_disabled_reviewflow_config_path(path: Path | None) -> None:
@@ -1476,15 +1488,107 @@ def _default_jira_config_path() -> Path:
     return (Path.home() / ".config" / ".jira" / ".config.yml").resolve(strict=False)
 
 
-def _doctor_gh_auth_check() -> DoctorCheck:
+def _doctor_gh_auth_check(*, host: str = "github.com") -> DoctorCheck:
     if shutil.which("gh") is None:
         return DoctorCheck(name="gh-auth", status="fail", detail="`gh` is not installed")
     try:
-        run_cmd(["gh", "auth", "status", "--hostname", "github.com"], check=True)
+        run_cmd(["gh", "auth", "status", "--hostname", host], check=True)
     except ReviewflowSubprocessError as e:
         msg = e.stderr.strip() or e.stdout.strip() or "not authenticated"
         return DoctorCheck(name="gh-auth", status="fail", detail=msg)
-    return DoctorCheck(name="gh-auth", status="ok", detail="authenticated for github.com")
+    return DoctorCheck(name="gh-auth", status="ok", detail=f"authenticated for {host}")
+
+
+def _supports_public_github_fallback(host: str) -> bool:
+    return host == "github.com"
+
+
+def _doctor_public_pr_probe(pr: PullRequestRef) -> tuple[bool, str]:
+    if not _supports_public_github_fallback(pr.host):
+        return False, f"anonymous public fallback is not supported for {pr.host}"
+    path = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"
+    req = urllib.request.Request(
+        f"https://api.github.com{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "reviewflow/0.1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        return False, f"anonymous public PR metadata probe failed ({e.code}): {body.strip() or path}"
+    except urllib.error.URLError as e:
+        return False, f"anonymous public PR metadata probe failed: {e}"
+    try:
+        payload = json.loads(body)
+    except Exception as e:
+        return False, f"anonymous public PR metadata probe returned invalid JSON: {e}"
+    if not isinstance(payload, dict):
+        return False, "anonymous public PR metadata probe returned an unexpected payload"
+    return True, "anonymous public GitHub PR metadata is reachable"
+
+
+def _resolve_doctor_target_context(pr_url: str | None) -> DoctorTargetContext | None:
+    text = str(pr_url or "").strip()
+    if not text:
+        return None
+    pr = parse_pr_url(text)
+    public_fallback_supported = _supports_public_github_fallback(pr.host)
+    public_reachable = False
+    public_detail = f"anonymous public fallback is not supported for {pr.host}"
+    if public_fallback_supported:
+        public_reachable, public_detail = _doctor_public_pr_probe(pr)
+    return DoctorTargetContext(
+        pr_url=text,
+        pr=pr,
+        public_fallback_supported=public_fallback_supported,
+        public_pr_metadata_reachable=public_reachable,
+        public_pr_metadata_detail=public_detail,
+    )
+
+
+def _doctor_optional_check(*, name: str, detail: str) -> DoctorCheck:
+    return DoctorCheck(name=name, status="warn", detail=detail)
+
+
+def _doctor_acknowledged_sources(*, target: DoctorTargetContext | None) -> dict[str, Any]:
+    gh = _doctor_executable_check("gh")
+    git = _doctor_executable_check("git")
+    jira = _doctor_executable_check("jira")
+    target_host = (target.pr.host if target is not None else "github.com")
+    gh_auth = _doctor_gh_auth_check(host=target_host)
+    jira_cfg = _default_jira_config_path()
+    payload: dict[str, Any] = {
+        "github": {
+            "host": target_host,
+            "gh_cli": {"status": gh.status, "detail": gh.detail},
+            "gh_auth": {"status": gh_auth.status, "detail": gh_auth.detail},
+            "git": {"status": git.status, "detail": git.detail},
+        },
+        "jira": {
+            "required_for_pr_reviews": False,
+            "config": {
+                "status": ("ok" if jira_cfg.is_file() else "warn"),
+                "detail": (str(jira_cfg) if jira_cfg.is_file() else f"missing: {jira_cfg}"),
+            },
+            "cli": {
+                "status": ("ok" if jira.status == "ok" else "warn"),
+                "detail": jira.detail,
+            },
+        },
+    }
+    if target is not None:
+        payload["github"]["public_fallback"] = {
+            "supported": target.public_fallback_supported,
+            "status": ("ok" if target.public_pr_metadata_reachable else "warn"),
+            "detail": target.public_pr_metadata_detail,
+        }
+    return payload
 
 
 def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool = True) -> dict[str, Any]:
@@ -1575,7 +1679,13 @@ def _resolved_doctor_agent_runtime(
     return payload
 
 
-def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> dict[str, Any]:
+def _doctor_runtime_payload(
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    pr_url: str | None = None,
+) -> dict[str, Any]:
+    target = _resolve_doctor_target_context(pr_url)
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
         "reviewflow_config": _doctor_path_payload(
@@ -1600,7 +1710,20 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | No
             exists=runtime.codex_base_config_path.is_file(),
         ),
         "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
+        "acknowledged_sources": _doctor_acknowledged_sources(target=target),
     }
+    if target is not None:
+        payload["target"] = {
+            "kind": "pull_request",
+            "pr_url": target.pr_url,
+            "host": target.pr.host,
+            "owner": target.pr.owner,
+            "repo": target.pr.repo,
+            "number": target.pr.number,
+            "public_fallback_supported": target.public_fallback_supported,
+            "public_pr_metadata_reachable": target.public_pr_metadata_reachable,
+            "public_pr_metadata_detail": target.public_pr_metadata_detail,
+        }
 
     if not runtime.config_enabled:
         payload["chunkhound_base_config"] = {
@@ -1631,8 +1754,14 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | No
     return payload
 
 
-def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> list[DoctorCheck]:
+def _doctor_runtime_checks(
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    pr_url: str | None = None,
+) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
+    target = _resolve_doctor_target_context(pr_url)
     agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
@@ -1675,18 +1804,133 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
             else:
                 checks.append(DoctorCheck(name="chunkhound-config", status="fail", detail=f"missing base_config_path: {chunkhound_detail}"))
 
+    if target is not None:
+        checks.append(
+            DoctorCheck(
+                name="review-target",
+                status="ok",
+                detail=f"{target.pr.owner}/{target.pr.repo}#{target.pr.number} ({target.pr.host})",
+            )
+        )
+
     jira_cfg = _default_jira_config_path()
     if jira_cfg.is_file():
         checks.append(DoctorCheck(name="jira-config", status="ok", detail=str(jira_cfg)))
+    elif target is not None:
+        checks.append(
+            _doctor_optional_check(
+                name="jira-config",
+                detail=f"missing: {jira_cfg} (optional for `pr` reviews; only needed for Jira-driven workflows)",
+            )
+        )
     else:
-        checks.append(DoctorCheck(name="jira-config", status="fail", detail=f"missing: {jira_cfg}"))
+        checks.append(
+            _doctor_optional_check(
+                name="jira-config",
+                detail=f"missing: {jira_cfg} (target-dependent; not required for all review flows)",
+            )
+        )
 
     if runtime.codex_base_config_path.is_file():
         checks.append(DoctorCheck(name="codex-config", status="ok", detail=f"{runtime.codex_base_config_path} (source={runtime.codex_base_config_source})"))
     else:
         checks.append(DoctorCheck(name="codex-config", status="warn", detail=f"missing: {runtime.codex_base_config_path} (source={runtime.codex_base_config_source})"))
 
-    checks.extend(_doctor_executable_check(name) for name in ("chunkhound", "gh", "jira", "codex"))
+    checks.append(_doctor_executable_check("chunkhound"))
+    gh_check = _doctor_executable_check("gh")
+    jira_check = _doctor_executable_check("jira")
+    codex_check = _doctor_executable_check("codex")
+    if target is not None:
+        git_check = _doctor_executable_check("git")
+        checks.append(git_check)
+        public_ok = target.public_fallback_supported and target.public_pr_metadata_reachable
+        if gh_check.status == "ok":
+            checks.append(gh_check)
+        elif public_ok and git_check.status == "ok":
+            checks.append(
+                DoctorCheck(
+                    name="gh",
+                    status="ok",
+                    detail=f"{gh_check.detail} (not required for public github.com PR startup; anonymous fallback confirmed)",
+                )
+            )
+        else:
+            checks.append(gh_check)
+
+        if jira_check.status == "ok":
+            checks.append(jira_check)
+        else:
+            checks.append(
+                _doctor_optional_check(
+                    name="jira",
+                    detail=f"{jira_check.detail} (optional for `pr` reviews; only needed for Jira-driven workflows)",
+                )
+            )
+
+        gh_auth = _doctor_gh_auth_check(host=target.pr.host)
+        if gh_auth.status == "ok":
+            checks.append(gh_auth)
+        elif public_ok and git_check.status == "ok":
+            checks.append(
+                DoctorCheck(
+                    name="gh-auth",
+                    status="ok",
+                    detail=f"{gh_auth.detail} (anonymous public github.com fallback confirmed)",
+                )
+            )
+        else:
+            checks.append(gh_auth)
+
+        if git_check.status != "ok":
+            checks.append(
+                DoctorCheck(
+                    name="github-pr-access",
+                    status="fail",
+                    detail="`git` is required for PR clone/checkout.",
+                )
+            )
+        elif gh_auth.status == "ok":
+            checks.append(
+                DoctorCheck(
+                    name="github-pr-access",
+                    status="ok",
+                    detail=f"authenticated GitHub access is available for {target.pr.host}",
+                )
+            )
+        elif public_ok:
+            checks.append(
+                DoctorCheck(
+                    name="github-pr-access",
+                    status="ok",
+                    detail=target.public_pr_metadata_detail,
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    name="github-pr-access",
+                    status="fail",
+                    detail=f"no usable GitHub PR source of truth for {target.pr.owner}/{target.pr.repo}#{target.pr.number}",
+                )
+            )
+    else:
+        checks.append(
+            gh_check
+            if gh_check.status == "ok"
+            else _doctor_optional_check(
+                name="gh",
+                detail=f"{gh_check.detail} (target-dependent; public github.com PR startup can use fallback)",
+            )
+        )
+        checks.append(
+            jira_check
+            if jira_check.status == "ok"
+            else _doctor_optional_check(
+                name="jira",
+                detail=f"{jira_check.detail} (target-dependent; only needed for Jira-driven workflows)",
+            )
+        )
+    checks.append(codex_check)
     provider = str(agent_runtime.get("provider") or "").strip().lower()
     command = str(agent_runtime.get("command") or "").strip()
     if bool(agent_runtime.get("supported")) and provider and command and (provider != "codex"):
@@ -1697,7 +1941,16 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
             checks.append(DoctorCheck(name="agent-runtime", status="ok", detail="gemini strict runtime backend configured"))
         else:
             checks.append(DoctorCheck(name="agent-runtime", status="fail", detail="gemini strict runtime requires [agent_runtime.gemini].sandbox"))
-    checks.append(_doctor_gh_auth_check())
+    if target is None:
+        gh_auth = _doctor_gh_auth_check()
+        checks.append(
+            gh_auth
+            if gh_auth.status == "ok"
+            else _doctor_optional_check(
+                name="gh-auth",
+                detail=f"{gh_auth.detail} (target-dependent; public github.com PR startup can use fallback)",
+            )
+        )
     return checks
 
 

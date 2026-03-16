@@ -38,6 +38,12 @@ cure pr <PR_URL> --if-reviewed new
 
 That is the canonical “start a fresh review” path for both humans and agents.
 
+Use the target-aware readiness gate before a live review:
+
+```bash
+cure doctor --pr-url <PR_URL> --json
+```
+
 ## Human + Agent Sync
 
 To make CURe work well with agents, the operator should provide four things:

@@ -312,6 +312,23 @@ class PublicGitHubFallbackTests(unittest.TestCase):
         self.assertEqual(payload["base"]["ref"], "main")
         self.assertEqual(payload["head"]["sha"], "abc123")
 
+    def test_gh_api_json_falls_back_to_public_github_api_when_gh_is_missing(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({"title": "Public PR"}).encode("utf-8")
+        with mock.patch.object(rf, "run_cmd", side_effect=FileNotFoundError("gh")), mock.patch.object(
+            rf.urllib.request,
+            "urlopen",
+            return_value=response,
+        ):
+            payload = rf.gh_api_json(
+                host="github.com",
+                path="repos/acme/repo/pulls/1",
+                allow_public_fallback=True,
+            )
+
+        self.assertEqual(payload["title"], "Public PR")
+
     def test_clone_seed_repo_falls_back_to_public_git_clone(self) -> None:
         seed = ROOT / ".tmp_test_public_seed"
         calls: list[list[str]] = []
@@ -320,6 +337,25 @@ class PublicGitHubFallbackTests(unittest.TestCase):
             calls.append(cmd)
             if cmd[:3] == ["gh", "repo", "clone"]:
                 raise self._gh_auth_error(cmd)
+            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
+
+        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
+            rf.clone_seed_repo(host="github.com", owner="chunkhound", repo="chunkhound", seed=seed)
+
+        self.assertEqual(calls[0], ["gh", "repo", "clone", "chunkhound/chunkhound", str(seed)])
+        self.assertEqual(
+            calls[1],
+            ["git", "clone", "https://github.com/chunkhound/chunkhound.git", str(seed)],
+        )
+
+    def test_clone_seed_repo_falls_back_to_public_git_clone_when_gh_is_missing(self) -> None:
+        seed = ROOT / ".tmp_test_public_seed_missing_gh"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "repo", "clone"]:
+                raise FileNotFoundError("gh")
             return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
 
         with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
@@ -370,6 +406,36 @@ class PublicGitHubFallbackTests(unittest.TestCase):
                 "-B",
                 "reviewflow_pr__219",
                 "reviewflow_pr__219",
+            ],
+        )
+
+    def test_checkout_pr_in_repo_falls_back_to_public_git_fetch_when_gh_is_missing(self) -> None:
+        repo_dir = ROOT / ".tmp_test_public_checkout_missing_gh"
+        pr = rf.PullRequestRef(host="github.com", owner="chunkhound", repo="chunkhound", number=220)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "checkout"]:
+                raise FileNotFoundError("gh")
+            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
+
+        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
+            rf.checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
+
+        self.assertEqual(
+            calls[0],
+            ["gh", "pr", "checkout", "220", "-R", "chunkhound/chunkhound", "--force"],
+        )
+        self.assertEqual(
+            calls[1],
+            [
+                "git",
+                "-C",
+                str(repo_dir),
+                "fetch",
+                "origin",
+                "refs/pull/220/head:reviewflow_pr__220",
             ],
         )
 
@@ -5072,6 +5138,9 @@ class TuiDashboardTests(unittest.TestCase):
         args3 = p.parse_args(["doctor", "--no-config", "--json"])
         self.assertTrue(args3.no_config)
         self.assertTrue(args3.json_output)
+        args4 = p.parse_args(["doctor", "--pr-url", "https://github.com/acme/repo/pull/1", "--json"])
+        self.assertEqual(args4.pr_url, "https://github.com/acme/repo/pull/1")
+        self.assertTrue(args4.json_output)
 
     def test_parser_accepts_install_command(self) -> None:
         p = rf.build_parser()
@@ -5600,45 +5669,46 @@ class InstallAndDoctorTests(unittest.TestCase):
 
     def test_readme_documents_uv_tool_install_flow(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("What CURe Is For", readme)
         self.assertIn("Human Snapshot", readme)
-        self.assertIn("Agent Skill", readme)
         self.assertIn("Human + Agent Sync", readme)
         self.assertIn("Minimal Config", readme)
         self.assertIn("Core Commands", readme)
         self.assertIn("What CURe Produces", readme)
         self.assertIn("Practical Premise", readme)
-        self.assertIn("When To Use CURe", readme)
-        self.assertIn("Inputs The Agent Needs", readme)
-        self.assertIn("Bootstrap From A Pristine Environment", readme)
-        self.assertIn("What Success Looks Like", readme)
-        self.assertIn("When To Stop And Ask", readme)
-        self.assertIn("Canonical Agent Prompt", readme)
         self.assertIn("If you only remember one command", readme)
-        self.assertIn("Use CURe from <CURE_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.", readme)
-        self.assertIn("If `cure` is already installed and working, use it.", readme)
-        self.assertIn("If `cure` is installed but not working", readme)
-        self.assertIn("If `cure` is not installed, install it from <CURE_SOURCE>.", readme)
-        self.assertIn("curl -LsSf https://astral.sh/uv/install.sh | sh", readme)
-        self.assertIn("https://docs.astral.sh/uv/getting-started/installation/", readme)
-        self.assertIn("uv tool install /path/to/cure", readme)
-        self.assertIn("uv tool install --editable /path/to/cure", readme)
-        self.assertIn("cure install", readme)
-        self.assertIn("cure doctor --json", readme)
+        self.assertIn("start with [SKILL.md](SKILL.md)", readme)
+        self.assertIn("cure doctor --pr-url <PR_URL> --json", readme)
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
         self.assertIn("cure watch <session_id|PR_URL>", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
-        self.assertIn("`cure install` provisions ChunkHound only", readme)
-        self.assertIn("Treat this section as a portable remote skill", readme)
-        self.assertIn("Ask only for the missing configuration, credentials, or project-specific inputs.", readme)
-        self.assertIn("Do not invent config, assume hidden secrets, or skip readiness checks.", readme)
-        self.assertIn("If the environment is not ready for a live review, stop and report the exact missing prerequisites.", readme)
         self.assertIn("the local CURe checkout path", readme)
         self.assertIn("the project config path", readme)
         self.assertIn("the project checkout stays untouched", readme)
         self.assertIn("./selftest.sh", readme)
+        self.assertIn("When To Use CURe", skill)
+        self.assertIn("Inputs The Agent Needs", skill)
+        self.assertIn("Bootstrap From A Pristine Environment", skill)
+        self.assertIn("What Success Looks Like", skill)
+        self.assertIn("When To Stop And Ask", skill)
+        self.assertIn("Canonical Agent Prompt", skill)
+        self.assertIn("Use CURe from <CURE_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.", skill)
+        self.assertIn("If `cure` is already installed and working, use it.", skill)
+        self.assertIn("If `cure` is installed but not working", skill)
+        self.assertIn("If `cure` is not installed, install it from <CURE_SOURCE>.", skill)
+        self.assertIn("curl -LsSf https://astral.sh/uv/install.sh | sh", skill)
+        self.assertIn("https://docs.astral.sh/uv/getting-started/installation/", skill)
+        self.assertIn("uv tool install /path/to/cure", skill)
+        self.assertIn("uv tool install --editable /path/to/cure", skill)
+        self.assertIn("cure install", skill)
+        self.assertIn("`cure install` provisions ChunkHound only", skill)
+        self.assertIn("Ask only for the missing configuration, credentials, or project-specific inputs.", skill)
+        self.assertIn("Do not invent config, assume hidden secrets, or skip readiness checks.", skill)
+        self.assertIn("If the environment is not ready for a live review, stop and report the exact missing prerequisites.", skill)
         self.assertNotIn("reviewflow", readme.lower())
+        self.assertNotIn("reviewflow", skill.lower())
         self.assertNotIn("pip install", readme)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
@@ -5776,7 +5846,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         text = stdout.getvalue()
         self.assertIn("[fail] reviewflow-config", text)
         self.assertIn("[fail] chunkhound", text)
-        self.assertIn("[fail] jira-config", text)
+        self.assertIn("[warn] jira-config", text)
         self.assertIn("[warn] codex-config", text)
 
     def test_doctor_flow_json_reports_sources(self) -> None:
@@ -5842,6 +5912,129 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(by_name["reviewflow-config"].status, "warn")
             self.assertEqual(by_name["chunkhound-config"].status, "warn")
             self.assertIn("disabled by --no-config", by_name["reviewflow-config"].detail)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_public_pr_allows_missing_gh_auth_and_jira(self) -> None:
+        root = ROOT / ".tmp_test_doctor_public_pr"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({"title": "Public PR"}).encode("utf-8")
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": "/usr/bin/chunkhound",
+                    "codex": "/usr/bin/codex",
+                    "git": "/usr/bin/git",
+                }.get(name)
+
+            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response), mock.patch(
+                "sys.stdout",
+                stdout,
+            ):
+                rc = rf.doctor_flow(
+                    argparse.Namespace(
+                        json_output=True,
+                        pr_url="https://github.com/acme/repo/pull/1",
+                    ),
+                    runtime=runtime,
+                )
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            by_name = {item["name"]: item for item in payload["checks"]}
+            self.assertEqual(by_name["gh"]["status"], "ok")
+            self.assertEqual(by_name["gh-auth"]["status"], "ok")
+            self.assertEqual(by_name["jira-config"]["status"], "warn")
+            self.assertEqual(by_name["jira"]["status"], "warn")
+            self.assertEqual(by_name["git"]["status"], "ok")
+            self.assertEqual(by_name["github-pr-access"]["status"], "ok")
+            self.assertEqual(payload["summary"]["fail"], 0)
+            self.assertTrue(payload["target"]["public_pr_metadata_reachable"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_private_host_still_requires_authenticated_gh(self) -> None:
+        root = ROOT / ".tmp_test_doctor_private_host"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": "/usr/bin/chunkhound",
+                    "codex": "/usr/bin/codex",
+                    "git": "/usr/bin/git",
+                }.get(name)
+
+            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(
+                    argparse.Namespace(
+                        json_output=True,
+                        pr_url="https://git.example.com/acme/repo/pull/1",
+                    ),
+                    runtime=runtime,
+                )
+
+            self.assertEqual(rc, 1)
+            payload = json.loads(stdout.getvalue())
+            by_name = {item["name"]: item for item in payload["checks"]}
+            self.assertEqual(by_name["gh"]["status"], "fail")
+            self.assertEqual(by_name["gh-auth"]["status"], "fail")
+            self.assertEqual(by_name["github-pr-access"]["status"], "fail")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

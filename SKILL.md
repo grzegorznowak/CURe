@@ -69,7 +69,7 @@ cure install
 5. Confirm readiness:
 
 ```bash
-cure doctor --json
+cure doctor --pr-url <PR_URL> --json
 ```
 
 6. If the environment is ready, start the review:
@@ -105,7 +105,7 @@ cure clean closed --json
 ## When To Stop And Ask
 
 Stop instead of guessing when:
-- `cure doctor --json` reports missing prerequisites
+- `cure doctor --pr-url <PR_URL> --json` reports missing prerequisites
 - the project config is missing
 - the review-intelligence fragment is missing
 - `gh`, Jira, provider auth, or ChunkHound base config are unavailable
@@ -121,7 +121,7 @@ Required behavior:
 - If `cure` is installed but not working, diagnose and repair or reinstall it from <CURE_SOURCE>.
 - If `cure` is not installed, install it from <CURE_SOURCE>.
 - After install or repair, run `cure install`.
-- Then run `cure doctor --json` and use it as the readiness gate.
+- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate.
 - Ask only for the missing configuration, credentials, or project-specific inputs.
 - Do not invent config, assume hidden secrets, or skip readiness checks.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.

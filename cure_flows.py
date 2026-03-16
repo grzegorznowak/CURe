@@ -391,6 +391,15 @@ def _raise_gh_auth_error(*, host: str, error: ReviewflowSubprocessError) -> None
         f"- Details: {msg}"
     ) from error
 
+
+def _handle_missing_gh(*, host: str, action: str, allow_public_fallback: bool) -> None:
+    if allow_public_fallback and _supports_public_github_fallback(host):
+        return
+    raise ReviewflowError(
+        f"`gh` is required for {action} on {host}. Install GitHub CLI or use github.com with public fallback."
+    )
+
+
 def _supports_public_github_fallback(host: str) -> bool:
     return host == "github.com"
 
@@ -434,6 +443,10 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
     cmd = ["gh", "api", "--hostname", host, path]
     try:
         result = _run_cmd(cmd)
+    except FileNotFoundError:
+        _handle_missing_gh(host=host, action="PR metadata resolution", allow_public_fallback=allow_public_fallback)
+        _eprint(f"`gh` is not installed; falling back to the public GitHub API for {host}.")
+        return _github_public_api_json(path=path)
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
             if allow_public_fallback and _supports_public_github_fallback(host):
@@ -487,6 +500,18 @@ def clone_seed_repo(*, host: str, owner: str, repo: str, seed: Path) -> None:
     try:
         _run_cmd(cmd)
         return
+    except FileNotFoundError:
+        _handle_missing_gh(host=host, action="seed clone", allow_public_fallback=True)
+        _eprint(f"`gh` is not installed; falling back to public git clone for {host}.")
+        _run_cmd(
+            [
+                "git",
+                "clone",
+                _public_github_repo_clone_url(host=host, owner=owner, repo=repo),
+                str(seed),
+            ]
+        )
+        return
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
             if _supports_public_github_fallback(host):
@@ -515,6 +540,22 @@ def checkout_pr_in_repo(*, repo_dir: Path, pr: PullRequestRef) -> None:
     ]
     try:
         _run_cmd(cmd, cwd=repo_dir)
+        return
+    except FileNotFoundError:
+        _handle_missing_gh(host=pr.host, action="PR checkout", allow_public_fallback=True)
+        branch = f"reviewflow_pr__{pr.number}"
+        _eprint(f"`gh` is not installed; falling back to public git fetch for PR #{pr.number}.")
+        _run_cmd(
+            [
+                "git",
+                "-C",
+                str(repo_dir),
+                "fetch",
+                "origin",
+                f"refs/pull/{pr.number}/head:{branch}",
+            ]
+        )
+        _run_cmd(["git", "-C", str(repo_dir), "checkout", "-B", branch, branch])
         return
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):

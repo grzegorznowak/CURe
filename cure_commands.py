@@ -415,12 +415,21 @@ def jira_smoke_flow(
 
 
 def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
-    checks = _doctor_runtime_checks(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
+    pr_url = str(getattr(args, "pr_url", "") or "").strip() or None
+    checks = _doctor_runtime_checks(
+        runtime,
+        cli_profile=getattr(args, "agent_runtime_profile", None),
+        pr_url=pr_url,
+    )
     if bool(getattr(args, "json_output", False)):
         ok_count = sum(1 for item in checks if item.status == "ok")
         warn_count = sum(1 for item in checks if item.status == "warn")
         fail_count = sum(1 for item in checks if item.status == "fail")
-        payload = _doctor_runtime_payload(runtime, cli_profile=getattr(args, "agent_runtime_profile", None))
+        payload = _doctor_runtime_payload(
+            runtime,
+            cli_profile=getattr(args, "agent_runtime_profile", None),
+            pr_url=pr_url,
+        )
         payload["checks"] = [
             {"name": item.name, "status": item.status, "detail": item.detail} for item in checks
         ]

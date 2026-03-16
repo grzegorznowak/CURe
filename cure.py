@@ -10468,6 +10468,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         action="store_true",
         help="Print structured doctor output as JSON",
     )
+    dp.add_argument(
+        "--pr-url",
+        dest="pr_url",
+        default=None,
+        help="Evaluate readiness for starting a review of this PR URL",
+    )
 
     jsp = sub.add_parser("jira-smoke", help="Acceptance smoke test: Jira access via Codex", parents=[runtime_parent])
     jsp.add_argument("jira_key", help="Jira key to fetch (e.g. PROJ-123)")
