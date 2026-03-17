@@ -6,62 +6,79 @@ It is for two audiences:
 - human operators who want a repeatable way to hand PR review work to agents without letting them mutate the source checkout
 - agentic sessions that need a clear, reusable bootstrap contract from a pristine environment
 
-If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md). This README is the human/operator overview.
+If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
 
 ## What CURe Is For
 
 Use CURe when you want to:
 - review a GitHub PR from a disposable sandbox instead of the working repo
 - standardize how humans and agents start, observe, resume, and clean review runs
-- give an agent a single documented path from “nothing installed” to “review in progress”
+- give an agent a single documented path from "nothing installed" to "review in progress"
 
 CURe is not for:
 - ad-hoc in-place repo review where the agent should work directly in the project checkout
 - environments that cannot install tools or authenticate the required external systems
 
-## Human Snapshot
+## Operator Kickoff
 
-CURe is an external tool that sits beside a project.
+For a human operator, the default kickoff is one sentence:
 
-The operator workflow is:
-1. Install `uv` once.
-2. Check out CURe to a local path.
-3. Refresh that checkout before review work.
-4. Install CURe from that path.
-5. Make sure the project-specific config and external auth are available.
-6. Hand the agent a PR URL and the CURe path.
-
-If you only remember one command, it is:
-
-```bash
-cure pr <PR_URL> --if-reviewed new
+```text
+use <CURE_REPO_URL> to review <PR_URL>
 ```
 
-That is the canonical “start a fresh review” path for both humans and agents.
+Example:
 
-Use the target-aware readiness gate before a live review lifecycle command:
-
-```bash
-cure doctor --pr-url <PR_URL> --json
+```text
+use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220
 ```
 
-For public `github.com` PRs, this readiness check is the preflight for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for normal PR review lifecycle work and is only required for Jira-driven flows.
+That should be enough to start the CURe system. The operator should not need to provide a local checkout path, a config path, or a handwritten bootstrap recipe in the primary flow.
 
-## Human + Agent Sync
+If the operator asked to use CURe, the agent should bootstrap CURe and run `cure`. It should not do a manual review outside CURe.
 
-To make CURe work well with agents, the operator should provide four things:
-- the local CURe checkout path
-- the project config path
-- authenticated external tools where needed, except where target-aware public `github.com` fallback is explicitly sufficient
-- a clear PR URL to start from
+## Agent Bootstrap From That Prompt
 
-Agents should prefer a fast-forward refresh of the CURe checkout before review work, for example `git -C <CURE_SOURCE> pull --ff-only`, so they do not keep running against a stalled local copy.
+When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent should:
+1. Ensure the local environment has `git`, `curl`, and `ca-certificates`. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
+2. Install `uv` if it is missing.
+3. Clone CURe to a disposable local path, or refresh an existing local checkout with `git -C <CURE_SOURCE> pull --ff-only`.
+4. Install CURe from that local checkout with `uv tool install /path/to/cure`.
+5. Create the default local non-secret config files if they are missing:
 
-The operator should not need to teach each agent a custom workflow. The goal is that every agent starts from the same CURe contract and the same canonical `cure pr <PR_URL> --if-reviewed new` entrypoint.
+```text
+~/.config/reviewflow/reviewflow.toml
+~/.config/reviewflow/chunkhound-base.json
+```
 
-Wrappers are optional. Use them only when they simplify handoff; do not hide the core `cure` contract behind project-specific magic.
+6. If `VOYAGE_API_KEY` already exists, write a Voyage embedding block into the active ChunkHound base config and continue.
+7. Otherwise, if `OPENAI_API_KEY` already exists, write an OpenAI embedding block into the active ChunkHound base config and continue.
+8. Otherwise, stop only after writing the exact local config path, the minimal snippet to add, the required env var name, and the rerun command.
+9. Run `cure install`.
+10. Run `cure doctor --pr-url <PR_URL> --json`.
+11. If ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
+
+For public `github.com` PRs, `cure doctor --pr-url <PR_URL> --json` is the readiness gate for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those flows, and `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required for PR checkout.
+
+## Advanced / Pre-Provisioned Environments
+
+Teams that already manage a local CURe checkout can keep using that flow:
+- keep CURe in a stable local path
+- refresh it with `git -C <CURE_SOURCE> pull --ff-only`
+- install it with `uv tool install /path/to/cure`
+- keep any project-specific wrappers or config beside that checkout
+
+Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
 
 ## Minimal Config
+
+Default config path:
+
+```text
+~/.config/reviewflow/reviewflow.toml
+```
+
+Minimal config:
 
 ```toml
 [review_intelligence]
@@ -73,8 +90,16 @@ Preferred review-intelligence tools:
 """
 
 [chunkhound]
-base_config_path = "/absolute/path/to/chunkhound-base.json"
+base_config_path = "~/.config/reviewflow/chunkhound-base.json"
 ```
+
+Default ChunkHound base config path:
+
+```text
+~/.config/reviewflow/chunkhound-base.json
+```
+
+If an embedding key is already present in the environment, the agent should add the matching embedding block and continue. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.
 
 ## Core Commands
 
@@ -137,8 +162,8 @@ Review output uses two independent lenses:
 ## Practical Premise
 
 The value proposition is simple:
-- humans keep control of project setup, config, and credentials
-- agents get a stable, safe review workflow
+- humans should only need a short kickoff prompt
+- agents bootstrap the review workflow instead of improvising one
 - the project checkout stays untouched
 - reviews become repeatable instead of prompt-by-prompt improvisation
 

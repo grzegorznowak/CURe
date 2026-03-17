@@ -11,6 +11,10 @@ Use this file as the standalone agent skill for CURe.
 
 CURe ("Code Under Review") is a CLI for running pull request reviews inside isolated sandboxes, with ChunkHound-backed code search/research and a configurable review agent on top.
 
+## Hard Rule
+
+If the operator asked to use CURe, do not perform a manual review outside CURe. Bootstrap CURe and run `cure`.
+
 ## When To Use CURe
 
 Use CURe when:
@@ -18,17 +22,29 @@ Use CURe when:
 - you need a stable start command and observable session state
 - you need to bootstrap from a pristine environment with explicit readiness checks
 
-## Inputs The Agent Needs
+## Primary Inputs
 
-Before starting, gather:
+The default operator kickoff is:
+
+```text
+use <CURE_REPO_URL> to review <PR_URL>
+```
+
+Treat these as the primary inputs:
+- `CURE_REPO_URL`
 - `PR_URL`
-- `<CURE_SOURCE>`: the local path where the CURe project is checked out
-- `<PROJECT_PATH>` when the operator expects project-local wrappers or adjacent config
-- the project's CURe config file, or the exact missing values needed to create it
+
+Optional inputs:
+- `<CURE_SOURCE>` if a usable local checkout already exists
+- `<PROJECT_PATH>` only when the operator explicitly expects project-local wrappers or adjacent config
+
+Do not require the operator to provide a local checkout path or a config path in the primary flow.
 
 ## Bootstrap From A Pristine Environment
 
-1. Install `uv` if it is missing.
+1. Ensure `git`, `curl`, and `ca-certificates` are present. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
+
+2. Install `uv` if it is missing.
 
 macOS / Linux:
 ```bash
@@ -40,14 +56,14 @@ Official install docs:
 https://docs.astral.sh/uv/getting-started/installation/
 ```
 
-2. Check out CURe to a local path such as:
+3. Materialize a local CURe checkout.
 
+If no usable local checkout exists:
 ```bash
 git clone <CURE_REPO_URL> /path/to/cure
 ```
 
-3. Refresh that local checkout before using it for reviews:
-
+If a local checkout already exists:
 ```bash
 git -C /path/to/cure pull --ff-only
 ```
@@ -64,7 +80,57 @@ For local iteration from the checkout:
 uv tool install --editable /path/to/cure
 ```
 
-5. Provision ChunkHound:
+5. Create the default local non-secret config files if they are missing:
+
+```text
+~/.config/reviewflow/reviewflow.toml
+~/.config/reviewflow/chunkhound-base.json
+```
+
+Minimal `~/.config/reviewflow/reviewflow.toml`:
+
+```toml
+[review_intelligence]
+tool_prompt_fragment = """
+Preferred review-intelligence tools:
+- Use GitHub MCP for PR context when available.
+- Otherwise use gh CLI / gh api.
+- Use any additional tools or sources that materially improve understanding of the code under review.
+"""
+
+[chunkhound]
+base_config_path = "~/.config/reviewflow/chunkhound-base.json"
+```
+
+If `~/.config/reviewflow/chunkhound-base.json` is missing, create it with `{}` first, then layer the embedding config below.
+
+6. Auto-wire embeddings from the current environment when possible.
+
+If `VOYAGE_API_KEY` exists, write:
+
+```json
+{
+  "embedding": {
+    "provider": "voyage",
+    "model": "voyage-code-3"
+  }
+}
+```
+
+If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, write:
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small"
+  }
+}
+```
+
+If the file already has top-level keys, merge the `embedding` object into the existing JSON instead of replacing the whole file.
+
+7. Provision ChunkHound:
 
 ```bash
 cure install
@@ -72,21 +138,21 @@ cure install
 
 `cure install` provisions ChunkHound only.
 
-6. Confirm readiness:
+8. Confirm readiness:
 
 ```bash
 cure doctor --pr-url <PR_URL> --json
 ```
 
-Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows.
+Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
-7. If the environment is ready, start the review:
+9. If the environment is ready, start the review:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
 ```
 
-8. Observe progress:
+10. Observe progress:
 
 ```bash
 cure status <session_id|PR_URL> --json
@@ -112,44 +178,40 @@ cure clean closed --json
 
 ## When To Stop And Ask
 
-When readiness fails because local runtime config or credentials are incomplete, inspect the actual active local files you already know about before you stop:
-- the project's `reviewflow.toml`
+Bootstrap everything non-secret before you stop:
+- create `~/.config/reviewflow/reviewflow.toml` if it is missing
+- create `~/.config/reviewflow/chunkhound-base.json` if it is missing
+- auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists
+
+When readiness still fails because a required secret is missing, inspect the actual active local files you already know about before you stop:
+- the active `reviewflow.toml`
 - the JSON file resolved from `[chunkhound].base_config_path`
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
 - if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
-- for ChunkHound embedding setup, recommend VoyageAI first unless the operator has already chosen another active config or provider; mention only the env vars relevant to that chosen path, such as `VOYAGE_API_KEY` or `OPENAI_API_KEY`
-- operator owns provider choice: ask them to confirm the default VoyageAI path or point you at the active ChunkHound embedding config before any provider-specific setup
-- do not enumerate all ChunkHound embedding providers
-- do not suggest or install Ollama unless the operator explicitly asks for a local provider path
-- if non-secret config structure is missing, name the exact local file path to edit and show the minimal snippet to add, using placeholders instead of real secret values
+- mention only the env vars relevant to the active or auto-selected path, such as `VOYAGE_API_KEY` or `OPENAI_API_KEY`
+- if non-secret config structure is missing, create it yourself instead of stopping
 - never ask the operator to paste a secret into chat
 - end with the exact rerun command, usually `cure pr <PR_URL> --if-reviewed new`
 
-Stop instead of guessing only after you have provided the exact local remediation steps for config or secret placement when:
-- `cure doctor --pr-url <PR_URL> --json` reports missing prerequisites
-- the project config is missing
-- the review-intelligence fragment is missing
-- GitHub access, provider auth, or ChunkHound base config are unavailable in a way that `cure doctor --pr-url <PR_URL> --json` does not clear for the target
+Stop instead of guessing only after you have already created the non-secret config structure and then:
+- `cure doctor --pr-url <PR_URL> --json` still reports missing prerequisites
+- no supported embedding key is present in the environment
+- GitHub access or ChunkHound base config are unavailable in a way that `cure doctor --pr-url <PR_URL> --json` does not clear for the target
 - Jira is unavailable for a Jira-driven workflow
-- the operator has not provided the project-specific values the run needs
+- the operator has not provided a truly missing project-specific fact that cannot be inferred from the local files
 
-Ask only for the truly missing fact when you cannot infer it from the active local files. Distinguish:
-- missing secret values: provide placement guidance first, then stop for the operator to supply the value locally
-- missing non-secret config structure: provide the exact file path and snippet first, then stop for the operator to make the local edit
-- missing project/operator facts: report what you inspected locally, then ask for only that fact
+## Example: Missing Embedding Secret
 
-## Example: ChunkHound Embedding Not Configured
-
-If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails with `Error: No embedding provider configured`, respond in this shape:
+If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails because neither `VOYAGE_API_KEY` nor `OPENAI_API_KEY` is present, respond in this shape:
 
 1. Identify the active config path you inspected:
 
 ```text
-I checked /path/to/project/reviewflow.toml and its [chunkhound].base_config_path points to /path/to/project/chunkhound-base.json.
+I checked ~/.config/reviewflow/reviewflow.toml and its [chunkhound].base_config_path points to ~/.config/reviewflow/chunkhound-base.json.
 ```
 
-2. Show the exact non-secret block to add to the active ChunkHound base config:
+2. Show the exact non-secret block already written or ready to write to the active ChunkHound base config:
 
 ```json
 {
@@ -160,29 +222,19 @@ I checked /path/to/project/reviewflow.toml and its [chunkhound].base_config_path
 }
 ```
 
-If the file already has top-level keys, merge that `embedding` object into the existing JSON instead of replacing the whole file. Treat VoyageAI as the default recommendation, not an autonomous choice. If the operator points you at a different active embedding config, use that instead. Do not enumerate all ChunkHound providers, and do not suggest or install Ollama unless the operator explicitly asks for a local provider path.
-
 3. Recommend env-first secret placement, never secret values in chat:
 
 ```bash
 export VOYAGE_API_KEY=<your-voyage-api-key>
 ```
 
-If the operator explicitly selects OpenAI instead, switch the snippet to an OpenAI embedding model such as `"text-embedding-3-small"` and use:
+If the operator prefers OpenAI instead, switch the snippet to the OpenAI embedding model above and use:
 
 ```bash
 export OPENAI_API_KEY=<your-openai-api-key>
 ```
 
-For persistence, place the same env var in the operator's shell profile or existing local secret manager. Do not ask them to paste the secret into chat.
-
-4. Before making any provider-specific change, stop and ask:
-
-```text
-Default recommendation: VoyageAI with the snippet above. If you want a different provider or already have an active ChunkHound embedding config, point me at that config now. Which embedding setup should I use?
-```
-
-5. After the operator confirms the provider or points you at the active config, end with the rerun command:
+4. End with the rerun command:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
@@ -191,23 +243,20 @@ cure pr <PR_URL> --if-reviewed new
 ## Canonical Agent Prompt
 
 ```text
-Use CURe from <CURE_SOURCE> to review the project at <PROJECT_PATH> for <PR_URL>.
+Use CURe from <CURE_REPO_URL> to review <PR_URL>.
 
 Required behavior:
-- Before using CURe, refresh `<CURE_SOURCE>` with `git -C <CURE_SOURCE> pull --ff-only` when it is a git checkout.
-- If `cure` is already installed and working, use the refreshed checkout.
-- If `cure` is installed but not working, diagnose and repair or reinstall it from the refreshed `<CURE_SOURCE>`.
-- If `cure` is not installed, install it from <CURE_SOURCE>.
+- If the operator asked to use CURe, do not perform a manual review outside CURe.
+- Materialize a local CURe checkout from `<CURE_REPO_URL>` if one is not already available, or refresh the existing checkout with `git -C <CURE_SOURCE> pull --ff-only`.
+- If `cure` is already installed and working, use it.
+- If `cure` is installed but not working, diagnose and repair or reinstall it from the local CURe checkout.
+- If `cure` is not installed, install it from the local CURe checkout.
+- Create the default non-secret config files under `~/.config/reviewflow/` when they are missing.
+- If `VOYAGE_API_KEY` is present, configure Voyage embeddings automatically.
+- Otherwise, if `OPENAI_API_KEY` is present, configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
-- Inspect the actual active local config files first, especially `reviewflow.toml` and the resolved `chunkhound-base.json` from `[chunkhound].base_config_path`.
-- Ask only for the missing project-specific facts after you have provided the exact local remediation steps for config or secret placement.
-- If embeddings are missing, recommend VoyageAI as the default path, but operator owns provider choice.
-- Do not enumerate all ChunkHound embedding providers.
-- Before any provider-specific setup, ask the operator to confirm VoyageAI or point you at the active ChunkHound embedding config.
-- Do not suggest or install Ollama unless the operator explicitly asks for a local provider path.
-- Do not invent config, assume hidden secrets, ask for secrets in chat, or skip readiness checks.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 - Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
-- If the environment is not ready for a live review, first provide the exact local remediation steps for config or secret placement, including the file path to edit, a minimal snippet, the supported env vars to place locally, and the rerun command; then stop if the operator still needs to supply the secret value or make the local change.
+- If a required embedding secret is still missing, provide the exact local remediation steps for secret placement and the rerun command, then stop.
 ```
