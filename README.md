@@ -8,18 +8,7 @@ It is for two audiences:
 
 If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
 
-## What CURe Is For
-
-Use CURe when you want to:
-- review a GitHub PR from a disposable sandbox instead of the working repo
-- standardize how humans and agents start, observe, resume, and clean review runs
-- give an agent a single documented path from "nothing installed" to "review in progress"
-
-CURe is not for:
-- ad-hoc in-place repo review where the agent should work directly in the project checkout
-- environments that cannot install tools or authenticate the required external systems
-
-## Operator Kickoff
+## Quickstart
 
 For a human operator, the default kickoff is one sentence:
 
@@ -37,6 +26,17 @@ That should be enough to start the CURe system. The operator should not need to 
 
 If the operator asked to use CURe, the agent should bootstrap CURe and run `cure`. It should not do a manual review outside CURe.
 
+## What CURe Is For
+
+Use CURe when you want to:
+- review a GitHub PR from a disposable sandbox instead of the working repo
+- standardize how humans and agents start, observe, resume, and clean review runs
+- give an agent a single documented path from "nothing installed" to "review in progress"
+
+CURe is not for:
+- ad-hoc in-place repo review where the agent should work directly in the project checkout
+- environments that cannot install tools or authenticate the required external systems
+
 ## Agent Bootstrap From That Prompt
 
 When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent should:
@@ -47,8 +47,8 @@ When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent
 5. Create the default local non-secret config files if they are missing:
 
 ```text
-~/.config/reviewflow/reviewflow.toml
-~/.config/reviewflow/chunkhound-base.json
+~/.config/cure/cure.toml
+~/.config/cure/chunkhound-base.json
 ```
 
 6. If `VOYAGE_API_KEY` already exists, write a Voyage embedding block into the active ChunkHound base config and continue.
@@ -75,7 +75,7 @@ Those details are secondary. The primary operator contract stays `use <CURE_REPO
 Default config path:
 
 ```text
-~/.config/reviewflow/reviewflow.toml
+~/.config/cure/cure.toml
 ```
 
 Minimal config:
@@ -90,13 +90,13 @@ Preferred review-intelligence tools:
 """
 
 [chunkhound]
-base_config_path = "~/.config/reviewflow/chunkhound-base.json"
+base_config_path = "~/.config/cure/chunkhound-base.json"
 ```
 
 Default ChunkHound base config path:
 
 ```text
-~/.config/reviewflow/chunkhound-base.json
+~/.config/cure/chunkhound-base.json
 ```
 
 If an embedding key is already present in the environment, the agent should add the matching embedding block and continue. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.

@@ -22,6 +22,9 @@ from paths import (
     default_codex_base_config_path,
     default_reviewflow_config_path,
     default_sandbox_root,
+    legacy_default_cache_root,
+    legacy_default_reviewflow_config_path,
+    legacy_default_sandbox_root,
 )
 from run import ReviewflowSubprocessError, run_cmd
 from ui import Verbosity
@@ -168,6 +171,12 @@ def _default_reviewflow_config_path() -> Path:
     return rf.default_reviewflow_config_path() if rf is not None else default_reviewflow_config_path()
 
 
+def _legacy_default_reviewflow_config_path() -> Path:
+    rf = _loaded_shell_module()
+    fn = getattr(rf, "legacy_default_reviewflow_config_path", None) if rf is not None else None
+    return fn() if callable(fn) else legacy_default_reviewflow_config_path()
+
+
 def _default_codex_base_config_path() -> Path:
     rf = _loaded_shell_module()
     return rf.default_codex_base_config_path() if rf is not None else default_codex_base_config_path()
@@ -178,9 +187,21 @@ def _default_sandbox_root() -> Path:
     return rf.default_sandbox_root() if rf is not None else default_sandbox_root()
 
 
+def _legacy_default_sandbox_root() -> Path:
+    rf = _loaded_shell_module()
+    fn = getattr(rf, "legacy_default_sandbox_root", None) if rf is not None else None
+    return fn() if callable(fn) else legacy_default_sandbox_root()
+
+
 def _default_cache_root() -> Path:
     rf = _loaded_shell_module()
     return rf.default_cache_root() if rf is not None else default_cache_root()
+
+
+def _legacy_default_cache_root() -> Path:
+    rf = _loaded_shell_module()
+    fn = getattr(rf, "legacy_default_cache_root", None) if rf is not None else None
+    return fn() if callable(fn) else legacy_default_cache_root()
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -276,6 +297,22 @@ def _select_path_with_source(
     return default_value.resolve(strict=False), "default"
 
 
+def _select_env_path_with_source(*, env_names: tuple[str, ...], base_dir: Path | None = None) -> tuple[Path, str] | None:
+    for idx, env_name in enumerate(env_names):
+        env_path = _resolve_optional_path(os.environ.get(env_name), base_dir=base_dir)
+        if env_path is not None:
+            return env_path, ("env" if idx == 0 else "legacy-env")
+    return None
+
+
+def _select_default_with_legacy_fallback(*, default_value: Path, legacy_default_value: Path) -> tuple[Path, str]:
+    default_path = default_value.resolve(strict=False)
+    legacy_path = legacy_default_value.resolve(strict=False)
+    if not default_path.exists() and legacy_path.exists():
+        return legacy_path, "legacy-default"
+    return default_path, "default"
+
+
 def load_reviewflow_paths_defaults(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, Path | None], dict[str, Any]]:
@@ -307,12 +344,18 @@ def load_reviewflow_codex_base_config_path(*, config_path: Path | None = None) -
 
 
 def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str, bool]:
-    config_path, config_source = _select_path_with_source(
-        cli_value=getattr(args, "config_path", None),
-        env_value=os.environ.get("REVIEWFLOW_CONFIG"),
-        config_value=None,
-        default_value=_default_reviewflow_config_path(),
-    )
+    cli_path = _resolve_optional_path(getattr(args, "config_path", None))
+    if cli_path is not None:
+        config_path, config_source = cli_path, "cli"
+    else:
+        env_path = _select_env_path_with_source(env_names=("CURE_CONFIG", "REVIEWFLOW_CONFIG"))
+        if env_path is not None:
+            config_path, config_source = env_path
+        else:
+            config_path, config_source = _select_default_with_legacy_fallback(
+                default_value=_default_reviewflow_config_path(),
+                legacy_default_value=_legacy_default_reviewflow_config_path(),
+            )
     config_enabled = not bool(getattr(args, "no_config", False))
     _set_disabled_reviewflow_config_path(None if config_enabled else config_path)
     return config_path, config_source, config_enabled
@@ -320,28 +363,49 @@ def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str,
 
 def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tuple[ReviewflowPaths, str, str]:
     path_defaults, _ = load_reviewflow_paths_defaults(config_path=config_path)
-    sandbox_root, sandbox_root_source = _select_path_with_source(
-        cli_value=getattr(args, "sandbox_root", None),
-        env_value=os.environ.get("REVIEWFLOW_SANDBOX_ROOT"),
-        config_value=path_defaults.get("sandbox_root"),
-        default_value=_default_sandbox_root(),
-    )
-    cache_root, cache_root_source = _select_path_with_source(
-        cli_value=getattr(args, "cache_root", None),
-        env_value=os.environ.get("REVIEWFLOW_CACHE_ROOT"),
-        config_value=path_defaults.get("cache_root"),
-        default_value=_default_cache_root(),
-    )
+    sandbox_root = _resolve_optional_path(getattr(args, "sandbox_root", None))
+    if sandbox_root is not None:
+        sandbox_root_source = "cli"
+    else:
+        sandbox_env = _select_env_path_with_source(env_names=("CURE_SANDBOX_ROOT", "REVIEWFLOW_SANDBOX_ROOT"))
+        if sandbox_env is not None:
+            sandbox_root, sandbox_root_source = sandbox_env
+        elif path_defaults.get("sandbox_root") is not None:
+            sandbox_root, sandbox_root_source = path_defaults["sandbox_root"], "config"
+        else:
+            sandbox_root, sandbox_root_source = _select_default_with_legacy_fallback(
+                default_value=_default_sandbox_root(),
+                legacy_default_value=_legacy_default_sandbox_root(),
+            )
+
+    cache_root = _resolve_optional_path(getattr(args, "cache_root", None))
+    if cache_root is not None:
+        cache_root_source = "cli"
+    else:
+        cache_env = _select_env_path_with_source(env_names=("CURE_CACHE_ROOT", "REVIEWFLOW_CACHE_ROOT"))
+        if cache_env is not None:
+            cache_root, cache_root_source = cache_env
+        elif path_defaults.get("cache_root") is not None:
+            cache_root, cache_root_source = path_defaults["cache_root"], "config"
+        else:
+            cache_root, cache_root_source = _select_default_with_legacy_fallback(
+                default_value=_default_cache_root(),
+                legacy_default_value=_legacy_default_cache_root(),
+            )
     return ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root), sandbox_root_source, cache_root_source
 
 
 def resolve_codex_base_config_path(args: argparse.Namespace, *, config_path: Path) -> tuple[Path, str]:
-    return _select_path_with_source(
-        cli_value=getattr(args, "codex_config_path", None),
-        env_value=os.environ.get("REVIEWFLOW_CODEX_CONFIG"),
-        config_value=load_reviewflow_codex_base_config_path(config_path=config_path),
-        default_value=_default_codex_base_config_path(),
-    )
+    cli_path = _resolve_optional_path(getattr(args, "codex_config_path", None))
+    if cli_path is not None:
+        return cli_path, "cli"
+    env_path = _select_env_path_with_source(env_names=("CURE_CODEX_CONFIG", "REVIEWFLOW_CODEX_CONFIG"))
+    if env_path is not None:
+        return env_path
+    config_value = load_reviewflow_codex_base_config_path(config_path=config_path)
+    if config_value is not None:
+        return config_value, "config"
+    return _default_codex_base_config_path(), "default"
 
 
 def resolve_runtime(args: argparse.Namespace) -> ReviewflowRuntime:

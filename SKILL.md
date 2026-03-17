@@ -83,11 +83,11 @@ uv tool install --editable /path/to/cure
 5. Create the default local non-secret config files if they are missing:
 
 ```text
-~/.config/reviewflow/reviewflow.toml
-~/.config/reviewflow/chunkhound-base.json
+~/.config/cure/cure.toml
+~/.config/cure/chunkhound-base.json
 ```
 
-Minimal `~/.config/reviewflow/reviewflow.toml`:
+Minimal `~/.config/cure/cure.toml`:
 
 ```toml
 [review_intelligence]
@@ -99,10 +99,10 @@ Preferred review-intelligence tools:
 """
 
 [chunkhound]
-base_config_path = "~/.config/reviewflow/chunkhound-base.json"
+base_config_path = "~/.config/cure/chunkhound-base.json"
 ```
 
-If `~/.config/reviewflow/chunkhound-base.json` is missing, create it with `{}` first, then layer the embedding config below.
+If `~/.config/cure/chunkhound-base.json` is missing, create it with `{}` first, then layer the embedding config below.
 
 6. Auto-wire embeddings from the current environment when possible.
 
@@ -179,12 +179,12 @@ cure clean closed --json
 ## When To Stop And Ask
 
 Bootstrap everything non-secret before you stop:
-- create `~/.config/reviewflow/reviewflow.toml` if it is missing
-- create `~/.config/reviewflow/chunkhound-base.json` if it is missing
+- create `~/.config/cure/cure.toml` if it is missing
+- create `~/.config/cure/chunkhound-base.json` if it is missing
 - auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists
 
 When readiness still fails because a required secret is missing, inspect the actual active local files you already know about before you stop:
-- the active `reviewflow.toml`
+- the active `cure.toml`
 - the JSON file resolved from `[chunkhound].base_config_path`
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
@@ -208,7 +208,7 @@ If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails becaus
 1. Identify the active config path you inspected:
 
 ```text
-I checked ~/.config/reviewflow/reviewflow.toml and its [chunkhound].base_config_path points to ~/.config/reviewflow/chunkhound-base.json.
+I checked ~/.config/cure/cure.toml and its [chunkhound].base_config_path points to ~/.config/cure/chunkhound-base.json.
 ```
 
 2. Show the exact non-secret block already written or ready to write to the active ChunkHound base config:
@@ -251,7 +251,7 @@ Required behavior:
 - If `cure` is already installed and working, use it.
 - If `cure` is installed but not working, diagnose and repair or reinstall it from the local CURe checkout.
 - If `cure` is not installed, install it from the local CURe checkout.
-- Create the default non-secret config files under `~/.config/reviewflow/` when they are missing.
+- Create the default non-secret config files under `~/.config/cure/` when they are missing.
 - If `VOYAGE_API_KEY` is present, configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.

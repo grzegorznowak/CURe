@@ -61,6 +61,9 @@ from paths import (
     default_codex_base_config_path,
     default_reviewflow_config_path,
     default_sandbox_root,
+    legacy_default_cache_root,
+    legacy_default_reviewflow_config_path,
+    legacy_default_sandbox_root,
     repo_id_for_gh,
     real_user_home_dir,
     safe_ref_slug,
@@ -10229,14 +10232,14 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--config",
         dest="config_path",
         default=argparse.SUPPRESS,
-        help="Override the CURe config path (`reviewflow.toml`)",
+        help="Override the CURe config path (`cure.toml`)",
     )
     parser.add_argument(
         "--no-config",
         dest="no_config",
         action="store_true",
         default=False,
-        help="Disable reading the `reviewflow.toml` config; CLI/env overrides still apply",
+        help="Disable reading the `cure.toml` config; CLI/env overrides still apply",
     )
     parser.add_argument(
         "--sandbox-root",

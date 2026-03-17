@@ -60,6 +60,9 @@ from paths import (
     default_codex_base_config_path,
     default_reviewflow_config_path,
     default_sandbox_root,
+    legacy_default_cache_root,
+    legacy_default_reviewflow_config_path,
+    legacy_default_sandbox_root,
     repo_id_for_gh,
     real_user_home_dir,
     safe_ref_slug,
@@ -261,6 +264,22 @@ def _select_path_with_source(
     return default_value.resolve(strict=False), "default"
 
 
+def _select_env_path_with_source(*, env_names: tuple[str, ...], base_dir: Path | None = None) -> tuple[Path, str] | None:
+    for idx, env_name in enumerate(env_names):
+        env_path = _resolve_optional_path(os.environ.get(env_name), base_dir=base_dir)
+        if env_path is not None:
+            return env_path, ("env" if idx == 0 else "legacy-env")
+    return None
+
+
+def _select_default_with_legacy_fallback(*, default_value: Path, legacy_default_value: Path) -> tuple[Path, str]:
+    default_path = default_value.resolve(strict=False)
+    legacy_path = legacy_default_value.resolve(strict=False)
+    if not default_path.exists() and legacy_path.exists():
+        return legacy_path, "legacy-default"
+    return default_path, "default"
+
+
 def load_reviewflow_paths_defaults(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, Path | None], dict[str, Any]]:
@@ -292,12 +311,18 @@ def load_reviewflow_codex_base_config_path(*, config_path: Path | None = None) -
 
 
 def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str, bool]:
-    config_path, config_source = _select_path_with_source(
-        cli_value=getattr(args, "config_path", None),
-        env_value=os.environ.get("REVIEWFLOW_CONFIG"),
-        config_value=None,
-        default_value=default_reviewflow_config_path(),
-    )
+    cli_path = _resolve_optional_path(getattr(args, "config_path", None))
+    if cli_path is not None:
+        config_path, config_source = cli_path, "cli"
+    else:
+        env_path = _select_env_path_with_source(env_names=("CURE_CONFIG", "REVIEWFLOW_CONFIG"))
+        if env_path is not None:
+            config_path, config_source = env_path
+        else:
+            config_path, config_source = _select_default_with_legacy_fallback(
+                default_value=default_reviewflow_config_path(),
+                legacy_default_value=legacy_default_reviewflow_config_path(),
+            )
     config_enabled = not bool(getattr(args, "no_config", False))
     _set_disabled_reviewflow_config_path(None if config_enabled else config_path)
     return config_path, config_source, config_enabled
@@ -305,28 +330,48 @@ def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str,
 
 def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tuple[ReviewflowPaths, str, str]:
     path_defaults, _ = load_reviewflow_paths_defaults(config_path=config_path)
-    sandbox_root, sandbox_root_source = _select_path_with_source(
-        cli_value=getattr(args, "sandbox_root", None),
-        env_value=os.environ.get("REVIEWFLOW_SANDBOX_ROOT"),
-        config_value=path_defaults.get("sandbox_root"),
-        default_value=default_sandbox_root(),
-    )
-    cache_root, cache_root_source = _select_path_with_source(
-        cli_value=getattr(args, "cache_root", None),
-        env_value=os.environ.get("REVIEWFLOW_CACHE_ROOT"),
-        config_value=path_defaults.get("cache_root"),
-        default_value=default_cache_root(),
-    )
+    sandbox_root = _resolve_optional_path(getattr(args, "sandbox_root", None))
+    if sandbox_root is not None:
+        sandbox_root_source = "cli"
+    else:
+        sandbox_env = _select_env_path_with_source(env_names=("CURE_SANDBOX_ROOT", "REVIEWFLOW_SANDBOX_ROOT"))
+        if sandbox_env is not None:
+            sandbox_root, sandbox_root_source = sandbox_env
+        elif path_defaults.get("sandbox_root") is not None:
+            sandbox_root, sandbox_root_source = path_defaults["sandbox_root"], "config"
+        else:
+            sandbox_root, sandbox_root_source = _select_default_with_legacy_fallback(
+                default_value=default_sandbox_root(),
+                legacy_default_value=legacy_default_sandbox_root(),
+            )
+    cache_root = _resolve_optional_path(getattr(args, "cache_root", None))
+    if cache_root is not None:
+        cache_root_source = "cli"
+    else:
+        cache_env = _select_env_path_with_source(env_names=("CURE_CACHE_ROOT", "REVIEWFLOW_CACHE_ROOT"))
+        if cache_env is not None:
+            cache_root, cache_root_source = cache_env
+        elif path_defaults.get("cache_root") is not None:
+            cache_root, cache_root_source = path_defaults["cache_root"], "config"
+        else:
+            cache_root, cache_root_source = _select_default_with_legacy_fallback(
+                default_value=default_cache_root(),
+                legacy_default_value=legacy_default_cache_root(),
+            )
     return ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root), sandbox_root_source, cache_root_source
 
 
 def resolve_codex_base_config_path(args: argparse.Namespace, *, config_path: Path) -> tuple[Path, str]:
-    return _select_path_with_source(
-        cli_value=getattr(args, "codex_config_path", None),
-        env_value=os.environ.get("REVIEWFLOW_CODEX_CONFIG"),
-        config_value=load_reviewflow_codex_base_config_path(config_path=config_path),
-        default_value=default_codex_base_config_path(),
-    )
+    cli_path = _resolve_optional_path(getattr(args, "codex_config_path", None))
+    if cli_path is not None:
+        return cli_path, "cli"
+    env_path = _select_env_path_with_source(env_names=("CURE_CODEX_CONFIG", "REVIEWFLOW_CODEX_CONFIG"))
+    if env_path is not None:
+        return env_path
+    config_value = load_reviewflow_codex_base_config_path(config_path=config_path)
+    if config_value is not None:
+        return config_value, "config"
+    return default_codex_base_config_path(), "default"
 
 
 def resolve_runtime(args: argparse.Namespace) -> ReviewflowRuntime:
@@ -10168,14 +10213,14 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--config",
         dest="config_path",
         default=argparse.SUPPRESS,
-        help="Override the CURe config path (`reviewflow.toml`)",
+        help="Override the CURe config path (`cure.toml`)",
     )
     parser.add_argument(
         "--no-config",
         dest="no_config",
         action="store_true",
         default=False,
-        help="Disable reading the `reviewflow.toml` config; CLI/env overrides still apply",
+        help="Disable reading the `cure.toml` config; CLI/env overrides still apply",
     )
     parser.add_argument(
         "--sandbox-root",

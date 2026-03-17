@@ -1486,8 +1486,8 @@ class AgentRuntimePolicyTests(unittest.TestCase):
 class StorageMigrationTests(unittest.TestCase):
     def test_default_paths_use_generic_home_fallbacks(self) -> None:
         home = rf.real_user_home_dir()
-        self.assertEqual(rf.DEFAULT_PATHS.sandbox_root, (home / ".local/state/reviewflow/sandboxes").resolve())
-        self.assertEqual(rf.DEFAULT_PATHS.cache_root, (home / ".cache/reviewflow").resolve())
+        self.assertEqual(rf.DEFAULT_PATHS.sandbox_root, (home / ".local/state/cure/sandboxes").resolve())
+        self.assertEqual(rf.DEFAULT_PATHS.cache_root, (home / ".cache/cure").resolve())
 
     def test_migrate_storage_flow_is_deprecation_stub(self) -> None:
         paths = rf.ReviewflowPaths(
@@ -6100,16 +6100,30 @@ class RuntimeResolutionTests(unittest.TestCase):
 
     def test_resolve_reviewflow_config_path_prefers_cli_then_env(self) -> None:
         args = self._runtime_args(config_path="/tmp/cli.toml")
-        with mock.patch.dict(os.environ, {"REVIEWFLOW_CONFIG": "/tmp/env.toml"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CURE_CONFIG": "/tmp/cure-env.toml",
+                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
+            },
+            clear=False,
+        ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
                 (Path("/tmp/cli.toml"), "cli", True),
             )
         args = self._runtime_args()
-        with mock.patch.dict(os.environ, {"REVIEWFLOW_CONFIG": "/tmp/env.toml"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CURE_CONFIG": "/tmp/cure-env.toml",
+                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
+            },
+            clear=False,
+        ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/env.toml"), "env", True),
+                (Path("/tmp/cure-env.toml"), "env", True),
             )
 
     def test_resolve_reviewflow_config_path_uses_xdg_default(self) -> None:
@@ -6117,6 +6131,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
+                "CURE_CONFIG": "",
                 "REVIEWFLOW_CONFIG": "",
                 "XDG_CONFIG_HOME": "/tmp/xdg-config",
             },
@@ -6124,7 +6139,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/xdg-config/reviewflow/reviewflow.toml"), "default", True),
+                (Path("/tmp/xdg-config/cure/cure.toml"), "default", True),
             )
 
     def test_resolve_reviewflow_config_path_marks_selected_file_disabled(self) -> None:
@@ -6133,6 +6148,43 @@ class RuntimeResolutionTests(unittest.TestCase):
             rf.resolve_reviewflow_config_path(args),
             (Path("/tmp/cli.toml"), "cli", False),
         )
+
+    def test_resolve_reviewflow_config_path_falls_back_to_legacy_env(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CURE_CONFIG": "",
+                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                rf.resolve_reviewflow_config_path(args),
+                (Path("/tmp/legacy-env.toml"), "legacy-env", True),
+            )
+
+    def test_resolve_reviewflow_config_path_falls_back_to_legacy_default_if_present(self) -> None:
+        root = ROOT / ".tmp_test_legacy_config_default"
+        cure_cfg = root / "cure" / "cure.toml"
+        legacy_cfg = root / "reviewflow" / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            legacy_cfg.parent.mkdir(parents=True, exist_ok=True)
+            legacy_cfg.write_text("", encoding="utf-8")
+            args = self._runtime_args()
+            with mock.patch.object(rf, "default_reviewflow_config_path", return_value=cure_cfg), mock.patch.object(
+                rf,
+                "legacy_default_reviewflow_config_path",
+                return_value=legacy_cfg,
+                create=True,
+            ):
+                self.assertEqual(
+                    rf.resolve_reviewflow_config_path(args),
+                    (legacy_cfg, "legacy-default", True),
+                )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_resolve_runtime_uses_xdg_defaults_when_unset(self) -> None:
         args = self._runtime_args()
@@ -6143,6 +6195,10 @@ class RuntimeResolutionTests(unittest.TestCase):
         ), mock.patch.dict(
             os.environ,
             {
+                "CURE_CONFIG": "",
+                "CURE_SANDBOX_ROOT": "",
+                "CURE_CACHE_ROOT": "",
+                "CURE_CODEX_CONFIG": "",
                 "REVIEWFLOW_CONFIG": "",
                 "REVIEWFLOW_SANDBOX_ROOT": "",
                 "REVIEWFLOW_CACHE_ROOT": "",
@@ -6154,15 +6210,45 @@ class RuntimeResolutionTests(unittest.TestCase):
             clear=False,
         ):
             runtime = rf.resolve_runtime(args)
-        self.assertEqual(runtime.config_path, Path("/tmp/xdg-config/reviewflow/reviewflow.toml"))
+        self.assertEqual(runtime.config_path, Path("/tmp/xdg-config/cure/cure.toml"))
         self.assertEqual(runtime.config_source, "default")
         self.assertTrue(runtime.config_enabled)
-        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/xdg-state/reviewflow/sandboxes"))
+        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/xdg-state/cure/sandboxes"))
         self.assertEqual(runtime.sandbox_root_source, "default")
-        self.assertEqual(runtime.paths.cache_root, Path("/tmp/xdg-cache/reviewflow"))
+        self.assertEqual(runtime.paths.cache_root, Path("/tmp/xdg-cache/cure"))
         self.assertEqual(runtime.cache_root_source, "default")
         self.assertEqual(runtime.codex_base_config_path, Path("/home/tester/.codex/config.toml"))
         self.assertEqual(runtime.codex_base_config_source, "default")
+
+    def test_resolve_runtime_prefers_cure_env_over_legacy_env(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.object(
+            rf,
+            "default_codex_base_config_path",
+            return_value=Path("/home/tester/.codex/config.toml"),
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "CURE_CONFIG": "/tmp/cure-env.toml",
+                "CURE_SANDBOX_ROOT": "/tmp/cure-sandboxes",
+                "CURE_CACHE_ROOT": "/tmp/cure-cache",
+                "CURE_CODEX_CONFIG": "/tmp/cure-codex.toml",
+                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
+                "REVIEWFLOW_SANDBOX_ROOT": "/tmp/legacy-sandboxes",
+                "REVIEWFLOW_CACHE_ROOT": "/tmp/legacy-cache",
+                "REVIEWFLOW_CODEX_CONFIG": "/tmp/legacy-codex.toml",
+            },
+            clear=False,
+        ):
+            runtime = rf.resolve_runtime(args)
+        self.assertEqual(runtime.config_path, Path("/tmp/cure-env.toml"))
+        self.assertEqual(runtime.config_source, "env")
+        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/cure-sandboxes"))
+        self.assertEqual(runtime.sandbox_root_source, "env")
+        self.assertEqual(runtime.paths.cache_root, Path("/tmp/cure-cache"))
+        self.assertEqual(runtime.cache_root_source, "env")
+        self.assertEqual(runtime.codex_base_config_path, Path("/tmp/cure-codex.toml"))
+        self.assertEqual(runtime.codex_base_config_source, "env")
 
 
 class CanonicalShellOwnershipTests(RuntimeResolutionTests):
@@ -6283,6 +6369,10 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         ), mock.patch.dict(
             os.environ,
             {
+                "CURE_CONFIG": "",
+                "CURE_SANDBOX_ROOT": "",
+                "CURE_CACHE_ROOT": "",
+                "CURE_CODEX_CONFIG": "",
                 "REVIEWFLOW_CONFIG": "",
                 "REVIEWFLOW_SANDBOX_ROOT": "",
                 "REVIEWFLOW_CACHE_ROOT": "",
@@ -6292,19 +6382,34 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
                 "XDG_CACHE_HOME": "relative-cache",
             },
             clear=False,
-        ), mock.patch.object(rf, "default_reviewflow_config_path", return_value=Path("/home/tester/.config/reviewflow/reviewflow.toml")), mock.patch.object(
+        ), mock.patch.object(rf, "default_reviewflow_config_path", return_value=Path("/home/tester/.config/cure/cure.toml")), mock.patch.object(
+            rf,
+            "legacy_default_reviewflow_config_path",
+            return_value=Path("/home/tester/.config/reviewflow/reviewflow.toml"),
+            create=True,
+        ), mock.patch.object(
             rf,
             "default_sandbox_root",
+            return_value=Path("/home/tester/.local/state/cure/sandboxes"),
+        ), mock.patch.object(
+            rf,
+            "legacy_default_sandbox_root",
             return_value=Path("/home/tester/.local/state/reviewflow/sandboxes"),
+            create=True,
         ), mock.patch.object(
             rf,
             "default_cache_root",
+            return_value=Path("/home/tester/.cache/cure"),
+        ), mock.patch.object(
+            rf,
+            "legacy_default_cache_root",
             return_value=Path("/home/tester/.cache/reviewflow"),
+            create=True,
         ):
             runtime = rf.resolve_runtime(args)
-        self.assertEqual(runtime.config_path, Path("/home/tester/.config/reviewflow/reviewflow.toml"))
-        self.assertEqual(runtime.paths.sandbox_root, Path("/home/tester/.local/state/reviewflow/sandboxes"))
-        self.assertEqual(runtime.paths.cache_root, Path("/home/tester/.cache/reviewflow"))
+        self.assertEqual(runtime.config_path, Path("/home/tester/.config/cure/cure.toml"))
+        self.assertEqual(runtime.paths.sandbox_root, Path("/home/tester/.local/state/cure/sandboxes"))
+        self.assertEqual(runtime.paths.cache_root, Path("/home/tester/.cache/cure"))
 
     def test_resolve_runtime_prefers_cli_over_env_and_config(self) -> None:
         root = ROOT / ".tmp_test_runtime_resolution_cli"
@@ -6367,8 +6472,10 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "REVIEWFLOW_SANDBOX_ROOT": str(root / "env-sandboxes"),
-                    "REVIEWFLOW_CACHE_ROOT": str(root / "env-cache"),
+                    "CURE_SANDBOX_ROOT": str(root / "env-sandboxes"),
+                    "CURE_CACHE_ROOT": str(root / "env-cache"),
+                    "REVIEWFLOW_SANDBOX_ROOT": str(root / "legacy-sandboxes"),
+                    "REVIEWFLOW_CACHE_ROOT": str(root / "legacy-cache"),
                 },
                 clear=False,
             ):
@@ -6402,7 +6509,19 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             )
             args = self._runtime_args(config_path=str(cfg), no_config=True)
             with mock.patch.object(rf, "default_sandbox_root", return_value=root / "default-sandboxes"), mock.patch.object(
-                rf, "default_cache_root", return_value=root / "default-cache"
+                rf,
+                "legacy_default_sandbox_root",
+                return_value=root / "legacy-sandboxes",
+                create=True,
+            ), mock.patch.object(
+                rf,
+                "default_cache_root",
+                return_value=root / "default-cache",
+            ), mock.patch.object(
+                rf,
+                "legacy_default_cache_root",
+                return_value=root / "legacy-cache",
+                create=True,
             ), mock.patch.object(
                 rf,
                 "default_codex_base_config_path",
@@ -6501,7 +6620,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("What CURe Is For", readme)
-        self.assertIn("Operator Kickoff", readme)
+        self.assertIn("Quickstart", readme)
         self.assertIn("Agent Bootstrap From That Prompt", readme)
         self.assertIn("Advanced / Pre-Provisioned Environments", readme)
         self.assertIn("Minimal Config", readme)
@@ -6519,12 +6638,13 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("The operator should not need to provide a local checkout path", readme)
         self.assertIn("It should not do a manual review outside CURe.", readme)
         self.assertIn("git -C <CURE_SOURCE> pull --ff-only", readme)
-        self.assertIn("~/.config/reviewflow/reviewflow.toml", readme)
-        self.assertIn("~/.config/reviewflow/chunkhound-base.json", readme)
+        self.assertIn("~/.config/cure/cure.toml", readme)
+        self.assertIn("~/.config/cure/chunkhound-base.json", readme)
         self.assertIn("VOYAGE_API_KEY", readme)
         self.assertIn("OPENAI_API_KEY", readme)
         self.assertIn("the project checkout stays untouched", readme)
         self.assertIn("./selftest.sh", readme)
+        self.assertLess(readme.index("## Quickstart"), readme.index("## What CURe Is For"))
         self.assertIn("Hard Rule", skill)
         self.assertIn("When To Use CURe", skill)
         self.assertIn("Primary Inputs", skill)
@@ -6544,7 +6664,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("uv tool install --editable /path/to/cure", skill)
         self.assertIn("cure install", skill)
         self.assertIn("`cure install` provisions ChunkHound only", skill)
-        self.assertIn("Create the default non-secret config files under `~/.config/reviewflow/` when they are missing.", skill)
+        self.assertIn("Create the default non-secret config files under `~/.config/cure/` when they are missing.", skill)
         self.assertIn("If `VOYAGE_API_KEY` is present, configure Voyage embeddings automatically.", skill)
         self.assertIn("Otherwise, if `OPENAI_API_KEY` is present, configure OpenAI embeddings automatically.", skill)
         self.assertIn("If a required embedding secret is still missing, provide the exact local remediation steps for secret placement and the rerun command, then stop.", skill)
@@ -6552,11 +6672,11 @@ class InstallAndDoctorTests(unittest.TestCase):
 
     def test_skill_documents_proactive_secret_and_config_remediation(self) -> None:
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("reviewflow.toml", skill)
+        self.assertIn("cure.toml", skill)
         self.assertIn("chunkhound-base.json", skill)
         self.assertIn("Bootstrap everything non-secret before you stop:", skill)
-        self.assertIn("create `~/.config/reviewflow/reviewflow.toml` if it is missing", skill)
-        self.assertIn("create `~/.config/reviewflow/chunkhound-base.json` if it is missing", skill)
+        self.assertIn("create `~/.config/cure/cure.toml` if it is missing", skill)
+        self.assertIn("create `~/.config/cure/chunkhound-base.json` if it is missing", skill)
         self.assertIn("auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists", skill)
         self.assertIn("prefer a current-shell export for the immediate retry", skill)
         self.assertIn("shell profile or existing local secret manager for persistence", skill)
@@ -6564,7 +6684,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("OPENAI_API_KEY", skill)
         self.assertIn("never ask the operator to paste a secret into chat", skill)
         self.assertIn("If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails because neither `VOYAGE_API_KEY` nor `OPENAI_API_KEY` is present", skill)
-        self.assertIn("I checked ~/.config/reviewflow/reviewflow.toml", skill)
+        self.assertIn("I checked ~/.config/cure/cure.toml", skill)
         self.assertIn("\"provider\": \"voyage\"", skill)
         self.assertIn("\"model\": \"voyage-code-3\"", skill)
         self.assertIn("merge the `embedding` object into the existing JSON", skill)

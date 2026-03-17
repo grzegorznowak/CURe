@@ -25,18 +25,30 @@ def _xdg_root(env_var: str, *, fallback: str) -> Path:
 
 
 def default_reviewflow_config_path() -> Path:
+    return (_xdg_root("XDG_CONFIG_HOME", fallback=".config") / "cure" / "cure.toml").resolve(strict=False)
+
+
+def legacy_default_reviewflow_config_path() -> Path:
     return (_xdg_root("XDG_CONFIG_HOME", fallback=".config") / "reviewflow" / "reviewflow.toml").resolve(
         strict=False
     )
 
 
 def default_sandbox_root() -> Path:
+    return (_xdg_root("XDG_STATE_HOME", fallback=".local/state") / "cure" / "sandboxes").resolve(strict=False)
+
+
+def legacy_default_sandbox_root() -> Path:
     return (_xdg_root("XDG_STATE_HOME", fallback=".local/state") / "reviewflow" / "sandboxes").resolve(
         strict=False
     )
 
 
 def default_cache_root() -> Path:
+    return (_xdg_root("XDG_CACHE_HOME", fallback=".cache") / "cure").resolve(strict=False)
+
+
+def legacy_default_cache_root() -> Path:
     return (_xdg_root("XDG_CACHE_HOME", fallback=".cache") / "reviewflow").resolve(strict=False)
 
 
@@ -61,8 +73,8 @@ class ReviewflowPaths:
 
 
 DEFAULT_PATHS = ReviewflowPaths(
-    sandbox_root=_home_relative(".local/state/reviewflow/sandboxes"),
-    cache_root=_home_relative(".cache/reviewflow"),
+    sandbox_root=_home_relative(".local/state/cure/sandboxes"),
+    cache_root=_home_relative(".cache/cure"),
 )
 
 
