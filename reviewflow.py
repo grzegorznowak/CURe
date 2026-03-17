@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
 
+from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import (
     DEPRECATED_ALIAS_WARNING,
     DEPRECATED_CLI_ALIAS,
@@ -4741,8 +4742,14 @@ def cache_prime(
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        index_summary = parse_chunkhound_index_summary(
+            "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+            scope="base_cache",
+        )
+        if index_summary is not None:
+            meta["index_summary"] = index_summary
         write_redacted_json(meta_path, meta)
-        return meta
+    return meta
 
 
 def cache_status(*, paths: ReviewflowPaths, host: str, owner: str, repo: str, base_ref: str) -> int:
@@ -5666,7 +5673,7 @@ def _pr_flow_impl(
                 progress.record_cmd(index_cmd)
                 out = active_output()
                 if out is not None:
-                    out.run_logged_cmd(
+                    index_result = out.run_logged_cmd(
                         index_cmd,
                         kind="chunkhound",
                         cwd=chunkhound_work_dir,
@@ -5675,13 +5682,20 @@ def _pr_flow_impl(
                         stream_requested=stream,
                     )
                 else:
-                    run_cmd(
+                    index_result = run_cmd(
                         index_cmd,
                         cwd=chunkhound_work_dir,
                         env=env,
                         stream=stream,
                         stream_label="chunkhound",
                     )
+                index_summary = parse_chunkhound_index_summary(
+                    "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+                    scope="topup",
+                )
+                if index_summary is not None:
+                    progress.meta.setdefault("chunkhound", {})["last_index"] = index_summary
+                    progress.flush()
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -7033,7 +7047,7 @@ def _followup_flow_impl(
             ]
             out_obj = active_output()
             if out_obj is not None:
-                out_obj.run_logged_cmd(
+                index_result = out_obj.run_logged_cmd(
                     index_cmd,
                     kind="chunkhound",
                     cwd=chunkhound_work_dir,
@@ -7042,7 +7056,7 @@ def _followup_flow_impl(
                     stream_requested=stream,
                 )
             else:
-                run_cmd(
+                index_result = run_cmd(
                     index_cmd,
                     cwd=chunkhound_work_dir,
                     env=env,
@@ -7050,6 +7064,13 @@ def _followup_flow_impl(
                     stream=stream,
                     stream_label="chunkhound",
                 )
+            index_summary = parse_chunkhound_index_summary(
+                "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+                scope="followup",
+            )
+            if index_summary is not None:
+                meta.setdefault("chunkhound", {})["last_index"] = index_summary
+                write_redacted_json(meta_path, meta)
 
         # Pick follow-up prompt template based on the original profile (best-effort).
         prompt_meta = meta.get("prompt") if isinstance(meta.get("prompt"), dict) else {}

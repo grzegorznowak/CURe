@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from meta import write_redacted_json
@@ -420,10 +421,11 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
 def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
     payload: dict[str, str] = {}
-    for key in ("reviewflow", "chunkhound", "codex"):
+    for key in ("reviewflow", "chunkhound", "codex", "codex_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
-            fallback = logs_dir / f"{key}.log"
+            suffix = "codex.events.jsonl" if key == "codex_events" else f"{key}.log"
+            fallback = logs_dir / suffix
             candidate = fallback if fallback.exists() else None
         if candidate is not None:
             payload[key] = str(candidate)
@@ -1105,6 +1107,25 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
         if profile or provider:
             agent_runtime_payload["summary"] = "/".join(part for part in (profile, provider) if part)
 
+    chunkhound_payload = None
+    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
+    last_index = (
+        dict(chunkhound_meta.get("last_index"))
+        if isinstance(chunkhound_meta.get("last_index"), dict)
+        else None
+    )
+    if last_index is not None:
+        chunkhound_payload = {"last_index": last_index}
+    elif isinstance(logs.get("chunkhound"), str):
+        try:
+            parsed = parse_chunkhound_index_summary(
+                Path(str(logs["chunkhound"])).read_text(encoding="utf-8")
+            )
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            chunkhound_payload = {"last_index": parsed}
+
     host = _normalize_pr_identity_value(meta.get("host")) or "github.com"
     owner = _normalize_pr_identity_value(meta.get("owner"))
     repo = _normalize_pr_identity_value(meta.get("repo"))
@@ -1134,12 +1155,16 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
         },
         "logs": logs,
     }
+    if isinstance(meta.get("live_progress"), dict):
+        payload["live_progress"] = dict(meta.get("live_progress"))
     if latest_artifact is not None:
         payload["latest_artifact"] = latest_artifact
     if llm_payload is not None:
         payload["llm"] = llm_payload
     if agent_runtime_payload is not None:
         payload["agent_runtime"] = agent_runtime_payload
+    if chunkhound_payload is not None:
+        payload["chunkhound"] = chunkhound_payload
     if isinstance(meta.get("error"), dict):
         payload["error"] = meta.get("error")
         payload["terminal_error"] = meta.get("error")

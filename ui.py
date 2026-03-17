@@ -15,6 +15,8 @@ from pathlib import Path
 from shutil import get_terminal_size
 from typing import Callable, TextIO
 
+from chunkhound_summary import parse_chunkhound_index_summary, render_chunkhound_index_context_lines
+
 
 class Verbosity(str, Enum):
     quiet = "quiet"
@@ -536,38 +538,36 @@ def _looks_like_email(text: str) -> bool:
     return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
 
 
+def _chunkhound_index_summary(*, meta: dict, chunkhound_tail: list[str]) -> dict | None:
+    cleaned = _clean_tail_lines(chunkhound_tail)
+    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
+    last_index = (
+        dict(chunkhound_meta.get("last_index"))
+        if isinstance(chunkhound_meta.get("last_index"), dict)
+        else None
+    )
+    if last_index is not None:
+        return last_index
+    base_cache = meta.get("base_cache") if isinstance(meta.get("base_cache"), dict) else {}
+    cache_index = (
+        dict(base_cache.get("index_summary"))
+        if isinstance(base_cache.get("index_summary"), dict)
+        else None
+    )
+    if cache_index is not None:
+        return cache_index
+    return parse_chunkhound_index_summary(cleaned)
+
+
 def _support_summary_items(*, meta: dict, chunkhound_tail: list[str]) -> list[tuple[str, str]]:
     cleaned = _clean_tail_lines(chunkhound_tail)
-    processed = None
-    chunks = None
-    elapsed = None
     jira_identity = None
     for line in cleaned:
         text = line.strip()
-        match = re.match(r"Processed:\s+(\d+)\s+files", text)
-        if match:
-            processed = int(match.group(1))
-            continue
-        match = re.match(r"Total chunks:\s+(\d+)", text)
-        if match:
-            chunks = int(match.group(1))
-            continue
-        match = re.match(r"Time:\s+(.+)$", text)
-        if match:
-            elapsed = match.group(1).strip()
-            continue
         if _looks_like_email(text):
             jira_identity = text
 
     items: list[tuple[str, str]] = []
-    if processed is not None or chunks is not None or elapsed:
-        summary = f"{processed if processed is not None else '?'} files"
-        if chunks is not None:
-            summary += f" -> {chunks} chunks"
-        if elapsed:
-            summary += f" in {elapsed}"
-        items.append(("Index", summary))
-
     failure_message = ""
     error_meta = meta.get("error")
     if isinstance(error_meta, dict):
@@ -662,7 +662,59 @@ def _review_snapshot_lines(*, review_md: str) -> list[str]:
     return out
 
 
-def _primary_panel_content(*, meta: dict, codex_tail: list[str], review_md: str) -> tuple[str, list[str], str]:
+def _short_live_progress_ts(raw: object) -> str:
+    text = str(raw or "").strip()
+    if "T" in text:
+        text = text.split("T", 1)[1]
+    if "+" in text:
+        text = text.split("+", 1)[0]
+    return text[:8] if len(text) >= 8 else text
+
+
+def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[str]:
+    live = meta.get("live_progress")
+    live = live if isinstance(live, dict) else {}
+    if not live:
+        return []
+
+    out: list[str] = []
+    phase_label = _phase_label(_display_phase_name(meta))
+    current = live.get("current")
+    current = current if isinstance(current, dict) else {}
+    current_text = str(current.get("text") or live.get("last_agent_message") or "").strip()
+    if phase_label:
+        out.append(_truncate(f"Phase: {phase_label}", width))
+    if current_text:
+        out.append(_truncate(f"Now: {current_text}", width))
+
+    timeline = live.get("timeline")
+    timeline = timeline if isinstance(timeline, list) else []
+    recent: list[str] = []
+    for item in timeline:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        ts = _short_live_progress_ts(item.get("ts"))
+        prefix = f"[{ts}] " if ts else ""
+        line = prefix + text
+        if recent and recent[-1] == line:
+            continue
+        recent.append(line)
+
+    if current_text:
+        current_recent = [line for line in recent if not line.endswith(current_text)]
+    else:
+        current_recent = recent
+    for line in current_recent[-max(0, max_lines - len(out)) :]:
+        out.append(_truncate(line, width))
+    return out[:max_lines]
+
+
+def _primary_panel_content(
+    *, meta: dict, codex_tail: list[str], review_md: str, width: int
+) -> tuple[str, list[str], str]:
     status = str(meta.get("status") or "").strip().lower()
     failure_message = ""
     error_meta = meta.get("error")
@@ -682,6 +734,10 @@ def _primary_panel_content(*, meta: dict, codex_tail: list[str], review_md: str)
             lines.append(failure_message)
         lines.extend(line for line in cleaned if _is_runtime_activity_line(line))
         return ("Failure Detail", _dedupe_preserve_order(lines)[-6:], "(no failure detail yet)")
+
+    live_lines = _live_progress_lines(meta=meta, width=width, max_lines=8)
+    if live_lines:
+        return ("Live Progress", live_lines, "(agent is working)")
 
     activity = [line for line in cleaned if _is_runtime_activity_line(line)]
     activity = _dedupe_preserve_order(activity)
@@ -949,7 +1005,15 @@ def build_dashboard_lines(
         width = max(1, int(width))
         if max_lines == 0:
             return []
-        out: list[str] = _dial_lines_full(width=width)
+        out: list[str] = []
+        index_summary = _chunkhound_index_summary(meta=meta, chunkhound_tail=chunkhound_tail)
+        if index_summary is not None:
+            out.extend(_truncate(line, width) for line in render_chunkhound_index_context_lines(index_summary))
+        dial_lines = _dial_lines_full(width=width)
+        if dial_lines:
+            if out:
+                out.append("")
+            out.extend(dial_lines)
         if kind == "zip" and snapshot.verbosity is not Verbosity.quiet and zip_display_inputs:
             if out:
                 out.append("")
@@ -1046,6 +1110,7 @@ def build_dashboard_lines(
                 meta=meta,
                 codex_tail=codex_tail,
                 review_md=review_md,
+                width=width,
             )
             out = [_divider_segment(label=label, width=width)]
             if budget == 1:
@@ -1273,7 +1338,9 @@ def build_dashboard_lines(
     for i, line in enumerate(out):
         if line.startswith("─"):
             out[i] = wrap(ANSI_BOLD, line)
-        if line.startswith(("Support", "ChunkHound", "Codex", "Activity", "Review Snapshot", "Failure Detail")):
+        if line.startswith(
+            ("Support", "ChunkHound", "Codex", "Activity", "Live Progress", "Review Snapshot", "Failure Detail")
+        ):
             out[i] = wrap(ANSI_BOLD, line)
 
     # Footer/help: dim so it doesn't fight the logs.

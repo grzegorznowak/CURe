@@ -43,6 +43,14 @@ def _watch_line_for_payload(payload: dict[str, object]) -> str:
     llm_summary = str((llm or {}).get("summary") or "").strip()
     if llm_summary:
         parts.append(llm_summary)
+    live = payload.get("live_progress") if isinstance(payload.get("live_progress"), dict) else {}
+    current = live.get("current") if isinstance(live.get("current"), dict) else {}
+    current_text = str((current or {}).get("text") or (live or {}).get("last_agent_message") or "").strip()
+    if current_text:
+        current_text = " ".join(current_text.split())
+        if len(current_text) > 80:
+            current_text = current_text[:79] + "…"
+        parts.append(f"current={current_text}")
     return " ".join(parts)
 
 

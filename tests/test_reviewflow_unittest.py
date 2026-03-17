@@ -22,7 +22,9 @@ import cure  # noqa: E402
 import cure_commands  # noqa: E402
 import cure_flows  # noqa: E402
 import cure_llm  # noqa: E402
+import cure_output  # noqa: E402
 import cure_runtime  # noqa: E402
+import chunkhound_summary  # noqa: E402
 import ui as rui  # noqa: E402
 
 
@@ -5462,6 +5464,18 @@ class CodexCommandTests(unittest.TestCase):
         )
         self.assertEqual(cmd.count("-a"), 1)
 
+    def test_build_codex_exec_cmd_can_enable_json_events(self) -> None:
+        cmd = rf.build_codex_exec_cmd(
+            repo_dir=ROOT,
+            codex_flags=["-m", "gpt-5.2"],
+            codex_config_overrides=[],
+            review_md_path=ROOT / ".tmp_test_review.md",
+            prompt="hello",
+            json_output=True,
+        )
+        self.assertIn("--json", cmd)
+        self.assertLess(cmd.index("--json"), cmd.index("--output-last-message"))
+
     def test_build_codex_exec_cmd_injects_chunkhound_mcp_with_startup_timeout(self) -> None:
         repo = ROOT
         ch_cfg = ROOT / ".tmp_test_chunkhound_env.json"
@@ -5495,6 +5509,330 @@ class CodexCommandTests(unittest.TestCase):
         self.assertNotIn("--no-daemon", joined)
 
 
+class CodexJsonProgressTests(unittest.TestCase):
+    def test_codex_review_artifact_heuristic_prefers_real_review_markdown(self) -> None:
+        review_text = "\n".join(
+            [
+                "### Steps taken",
+                "- inspected diff",
+                "",
+                "**Summary**: Found two regressions.",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: REQUEST CHANGES",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: REQUEST CHANGES",
+            ]
+        )
+        self.assertTrue(cure_llm._looks_like_codex_review_artifact(review_text))
+        self.assertFalse(
+            cure_llm._looks_like_codex_review_artifact(
+                "Subagent shutdown notifications received; the review findings and verdicts above are unchanged."
+            )
+        )
+
+    def test_codex_json_event_sink_preserves_raw_events_and_emits_readable_progress(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        long_message = "Checking changed files " + ("and narrowing scope " * 20)
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            on_event=events.append,
+        )
+
+        sink.write('{"type":"thread.started","thread_id":"abc"}\n')
+        sink.write(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item_1", "type": "agent_message", "text": long_message},
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+
+        self.assertIn('"type":"thread.started"', raw.getvalue())
+        self.assertIn("Codex session started.", display.getvalue())
+        self.assertIn("Checking changed files", display.getvalue())
+        self.assertEqual(events[-1]["type"], "agent_message")
+        self.assertEqual(events[-1]["raw_text"], long_message)
+        self.assertEqual(events[-1]["text"], cure_output._compact_codex_text(long_message))
+        self.assertEqual(tail.tail(2)[-1], cure_output._compact_codex_text(long_message))
+
+    def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
+        payload = {
+            "session_id": "session-123",
+            "status": "running",
+            "phase": "codex_review",
+            "pr": {"owner": "acme", "repo": "repo", "number": 12},
+            "llm": {"summary": "llm=default/gpt-5/?"},
+            "live_progress": {
+                "current": {"type": "agent_message", "text": "Checking changed files and narrowing scope"},
+            },
+        }
+        line = cure_commands._watch_line_for_payload(payload)
+        self.assertIn("current=Checking changed files and narrowing scope", line)
+
+    def test_run_codex_exec_json_mode_keeps_review_artifact_when_final_message_is_status_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            output_path = Path(tmp) / "review.md"
+            review_text = "\n".join(
+                [
+                    "### Steps taken",
+                    "- inspected diff",
+                    "",
+                    "**Summary**: Found two regressions.",
+                    "",
+                    "## Business / Product Assessment",
+                    "**Verdict**: REQUEST CHANGES",
+                    "",
+                    "## Technical Assessment",
+                    "**Verdict**: REQUEST CHANGES",
+                ]
+            )
+
+            class _DummyProgress:
+                def __init__(self, root: Path) -> None:
+                    self.meta = {
+                        "logs": {"codex_events": str(root / "codex.events.jsonl")},
+                        "live_progress": {},
+                    }
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.last_cmd = list(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress(Path(tmp))
+            out = mock.Mock()
+            out.ui_enabled = True
+
+            def fake_run_logged_cmd(*args: object, **kwargs: object) -> None:
+                callback = kwargs["codex_event_callback"]
+                assert callback is not None
+                callback({"type": "agent_message", "text": review_text, "ts": "2026-03-17T07:35:02+00:00"})
+                callback(
+                    {
+                        "type": "agent_message",
+                        "text": "Subagent shutdown notifications received; the review findings and verdicts above are unchanged.",
+                        "ts": "2026-03-17T07:35:18+00:00",
+                    }
+                )
+                output_path.write_text(
+                    "Subagent shutdown notifications received; the review findings and verdicts above are unchanged.\n",
+                    encoding="utf-8",
+                )
+
+            out.run_logged_cmd.side_effect = fake_run_logged_cmd
+
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ):
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    codex_flags=["-m", "gpt-5.2"],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                )
+
+            rendered = output_path.read_text(encoding="utf-8")
+            self.assertIn("**Summary**: Found two regressions.", rendered)
+            self.assertNotIn("Subagent shutdown notifications received", rendered)
+
+    def test_run_codex_exec_json_mode_uses_raw_review_text_for_artifact_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            output_path = Path(tmp) / "review.md"
+            review_text = "\n".join(
+                [
+                    "### Steps taken",
+                    "- inspected diff",
+                    "",
+                    "**Summary**: Found two regressions and one follow-up risk.",
+                    "",
+                    "## Business / Product Assessment",
+                    "**Verdict**: APPROVE",
+                    "",
+                    "### Strengths",
+                    "- " + " ".join(["Business strength"] * 20),
+                    "",
+                    "## Technical Assessment",
+                    "**Verdict**: REQUEST CHANGES",
+                    "",
+                    "### In Scope Issues",
+                    "- " + " ".join(["Technical issue"] * 20),
+                ]
+            )
+            compact_preview = cure_output._compact_codex_text(review_text)
+
+            class _DummyProgress:
+                def __init__(self, root: Path) -> None:
+                    self.meta = {
+                        "logs": {"codex_events": str(root / "codex.events.jsonl")},
+                        "live_progress": {},
+                    }
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.last_cmd = list(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress(Path(tmp))
+            out = mock.Mock()
+            out.ui_enabled = True
+
+            def fake_run_logged_cmd(*args: object, **kwargs: object) -> None:
+                callback = kwargs["codex_event_callback"]
+                assert callback is not None
+                callback(
+                    {
+                        "type": "agent_message",
+                        "text": compact_preview,
+                        "raw_text": review_text,
+                        "ts": "2026-03-17T08:08:41+00:00",
+                    }
+                )
+                output_path.write_text(review_text + "\n", encoding="utf-8")
+
+            out.run_logged_cmd.side_effect = fake_run_logged_cmd
+
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ):
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    codex_flags=["-m", "gpt-5.2"],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                )
+
+            rendered = output_path.read_text(encoding="utf-8")
+            self.assertEqual(rendered, review_text + "\n")
+            self.assertNotEqual(rendered, compact_preview + "\n")
+            verdicts = rf.extract_review_verdicts_from_markdown(rendered)
+            assert verdicts is not None
+            self.assertEqual(verdicts.business, "APPROVE")
+            self.assertEqual(verdicts.technical, "REQUEST CHANGES")
+
+    def test_build_status_payload_includes_live_progress_and_codex_events_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-123"
+            repo_dir = session_dir / "repo"
+            logs_dir = session_dir / "work" / "logs"
+            review_md = session_dir / "review.md"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            review_md.write_text("# Review\n", encoding="utf-8")
+            for name in ("reviewflow.log", "chunkhound.log", "codex.log", "codex.events.jsonl"):
+                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-123",
+                "status": "running",
+                "phase": "codex_review",
+                "phases": {"codex_review": {"status": "running"}},
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 12,
+                "created_at": "2026-03-17T12:00:00+00:00",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(session_dir / "work"),
+                    "logs_dir": str(logs_dir),
+                    "review_md": str(review_md),
+                },
+                "logs": {
+                    "reviewflow": str(logs_dir / "reviewflow.log"),
+                    "chunkhound": str(logs_dir / "chunkhound.log"),
+                    "codex": str(logs_dir / "codex.log"),
+                    "codex_events": str(logs_dir / "codex.events.jsonl"),
+                },
+                "live_progress": {
+                    "source": "codex_exec_json",
+                    "provider": "codex",
+                    "current": {"type": "agent_message", "text": "Checking changed files"},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            payload = rf.build_status_payload("session-123", sandbox_root=root)
+
+        self.assertIn("live_progress", payload)
+        self.assertIn("codex_events", payload["logs"])
+
+    def test_build_status_payload_includes_chunkhound_last_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-idx"
+            repo_dir = session_dir / "repo"
+            logs_dir = session_dir / "work" / "logs"
+            review_md = session_dir / "review.md"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            review_md.write_text("# Review\n", encoding="utf-8")
+            for name in ("reviewflow.log", "chunkhound.log", "codex.log"):
+                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-idx",
+                "status": "running",
+                "phase": "index_topup",
+                "phases": {"index_topup": {"status": "running"}},
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 12,
+                "created_at": "2026-03-17T12:00:00+00:00",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(session_dir / "work"),
+                    "logs_dir": str(logs_dir),
+                    "review_md": str(review_md),
+                },
+                "logs": {
+                    "reviewflow": str(logs_dir / "reviewflow.log"),
+                    "chunkhound": str(logs_dir / "chunkhound.log"),
+                    "codex": str(logs_dir / "codex.log"),
+                },
+                "chunkhound": {
+                    "last_index": {
+                        "scope": "topup",
+                        "processed_files": 4,
+                        "skipped_files": 1,
+                        "error_files": 0,
+                        "total_chunks": 84,
+                        "embeddings": 84,
+                        "duration_text": "17.23s",
+                    }
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            payload = rf.build_status_payload("session-idx", sandbox_root=root)
+
+        self.assertIn("chunkhound", payload)
+        self.assertEqual(payload["chunkhound"]["last_index"]["embeddings"], 84)
+
+
 class GitStatsTests(unittest.TestCase):
     def test_compute_pr_stats_on_tiny_repo(self) -> None:
         repo = ROOT / ".tmp_test_git_repo"
@@ -5524,6 +5862,30 @@ class GitStatsTests(unittest.TestCase):
 
 
 class TuiDashboardTests(unittest.TestCase):
+    def test_parse_chunkhound_index_summary_extracts_full_run_metrics(self) -> None:
+        summary = chunkhound_summary.parse_chunkhound_index_summary(
+            "\n".join(
+                [
+                    "Initial stats: 0 files, 0 chunks, 0 embeddings",
+                    "Processing Complete",
+                    "Processed: 1 files",
+                    "Skipped: 0 files",
+                    "Errors: 0 files",
+                    "Total chunks: 1",
+                    "Embeddings: 0",
+                    "Time: 0.07s",
+                ]
+            ),
+            scope="topup",
+        )
+        assert summary is not None
+        self.assertEqual(summary["scope"], "topup")
+        self.assertEqual(summary["initial_files"], 0)
+        self.assertEqual(summary["processed_files"], 1)
+        self.assertEqual(summary["total_chunks"], 1)
+        self.assertEqual(summary["embeddings"], 0)
+        self.assertEqual(summary["duration_text"], "0.07s")
+
     def test_parser_accepts_if_reviewed_and_followup_flags(self) -> None:
         p = rf.build_parser()
         args = p.parse_args(
@@ -6962,7 +7324,10 @@ class InstallAndDoctorTests(unittest.TestCase):
             snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
             chunkhound_tail=[
                 "Processed: 4 files",
+                "Skipped: 1 files",
+                "Errors: 0 files",
                 "Total chunks: 84",
+                "Embeddings: 84",
                 "Time: 17.23s",
                 "greg@academypl.us",
             ],
@@ -6973,11 +7338,111 @@ class InstallAndDoctorTests(unittest.TestCase):
             color=False,
         )
         joined = "\n".join(lines)
-        self.assertIn("Index:", joined)
-        self.assertIn("4 files -> 84 chunks in 17.23s", joined)
+        self.assertIn("Index", joined)
+        self.assertIn("Run: 4 proc · 1 skip · 0 err", joined)
+        self.assertIn("Output: 84 chunks · 84 emb · 17.23s", joined)
         self.assertIn("Preflight: Jira OK as greg@academypl.us", joined)
         self.assertIn("─ Activity", joined)
         self.assertIn("mcp: chunkhound ready", joined)
+
+    def test_dashboard_context_prefers_structured_chunkhound_summary(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "codex_review",
+            "phases": {"codex_review": {"status": "running"}},
+            "chunkhound": {
+                "last_index": {
+                    "scope": "followup",
+                    "initial_files": 120,
+                    "initial_chunks": 4091,
+                    "initial_embeddings": 4091,
+                    "processed_files": 4,
+                    "skipped_files": 1,
+                    "error_files": 0,
+                    "total_chunks": 84,
+                    "embeddings": 84,
+                    "duration_text": "17.23s",
+                }
+            },
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=["mcp: chunkhound ready"],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("Index: follow-up", joined)
+        self.assertIn("Run: 4 proc · 1 skip · 0 err", joined)
+        self.assertIn("Output: 84 chunks · 84 emb · 17.23s", joined)
+        self.assertIn("Before: 120 files · 4091 chunks · 4091 emb", joined)
+
+    def test_dashboard_running_prefers_structured_live_progress_over_raw_activity(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "codex_review",
+            "phases": {"codex_review": {"status": "running"}},
+            "live_progress": {
+                "current": {
+                    "type": "agent_message",
+                    "text": "Checking changed files",
+                    "ts": "2026-03-17T12:00:02+00:00",
+                },
+                "timeline": [
+                    {
+                        "type": "thread_started",
+                        "text": "Codex session started.",
+                        "ts": "2026-03-17T12:00:00+00:00",
+                    },
+                    {
+                        "type": "turn_started",
+                        "text": "Review turn started.",
+                        "ts": "2026-03-17T12:00:01+00:00",
+                    },
+                    {
+                        "type": "agent_message",
+                        "text": "Checking changed files",
+                        "ts": "2026-03-17T12:00:02+00:00",
+                    },
+                ],
+            },
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=["raw-codex-tail"],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("─ Live Progress", joined)
+        self.assertIn("Phase: Generate review", joined)
+        self.assertIn("Now: Checking changed files", joined)
+        self.assertIn("[12:00:00] Codex session started.", joined)
+        self.assertNotIn("─ Activity", joined)
 
     def test_dashboard_done_uses_review_snapshot_in_primary_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

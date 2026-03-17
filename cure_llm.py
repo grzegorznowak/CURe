@@ -90,6 +90,120 @@ class CodexRunResult:
     resume: CodexResumeInfo | None = None
 
 
+_LIVE_PROGRESS_TIMELINE_MAX = 8
+
+
+def _looks_like_codex_review_artifact(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    markers = (
+        "### Steps taken",
+        "**Summary**:",
+        "## Business / Product Assessment",
+        "## Technical Assessment",
+        "**Verdict**:",
+    )
+    if any(marker in value for marker in markers):
+        return True
+    return len(value) >= 800 and ("\n# " in ("\n" + value) or "\n- " in ("\n" + value))
+
+
+def _write_text_artifact(path: Path, text: str) -> None:
+    body = str(text or "").rstrip("\n")
+    if not body:
+        return
+    path.write_text(body + "\n", encoding="utf-8")
+
+
+def _progress_meta_dict(progress: Any) -> dict[str, Any] | None:
+    meta = getattr(progress, "meta", None)
+    return meta if isinstance(meta, dict) else None
+
+
+def _flush_progress(progress: Any) -> None:
+    flush = getattr(progress, "flush", None)
+    if callable(flush):
+        try:
+            flush()
+        except Exception:
+            pass
+
+
+def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
+    meta = _progress_meta_dict(progress)
+    logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
+    raw_path = str(logs.get("codex_events") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        return ((repo_dir.parent / path).resolve() if not path.is_absolute() else path.resolve())
+    path = (repo_dir.parent / "work" / "logs" / "codex.events.jsonl").resolve()
+    if isinstance(meta, dict):
+        meta.setdefault("logs", {})["codex_events"] = str(path)
+        _flush_progress(progress)
+    return path
+
+
+def _ensure_codex_live_progress(*, progress: Any, events_log_path: Path) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None:
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    live = meta.get("live_progress") if isinstance(meta.get("live_progress"), dict) else {}
+    live["source"] = "codex_exec_json"
+    live["provider"] = "codex"
+    live["status"] = "running"
+    live["events_log"] = str(events_log_path)
+    live["updated_at"] = now
+    live["timeline"] = list(live.get("timeline")) if isinstance(live.get("timeline"), list) else []
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _record_codex_live_event(*, progress: Any, event: dict[str, Any]) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None:
+        return
+    text = str(event.get("text") or "").strip()
+    event_type = str(event.get("type") or "").strip() or "event"
+    timestamp = str(event.get("ts") or "").strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    live = meta.get("live_progress") if isinstance(meta.get("live_progress"), dict) else {}
+    live["source"] = "codex_exec_json"
+    live["provider"] = "codex"
+    live["status"] = "running"
+    live["updated_at"] = timestamp
+    timeline = list(live.get("timeline")) if isinstance(live.get("timeline"), list) else []
+    if text:
+        normalized = {"ts": timestamp, "type": event_type, "text": text}
+        last = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+        if last.get("type") != event_type or last.get("text") != text:
+            timeline.append(normalized)
+        if len(timeline) > _LIVE_PROGRESS_TIMELINE_MAX:
+            timeline = timeline[-_LIVE_PROGRESS_TIMELINE_MAX:]
+        live["timeline"] = timeline
+        current = live.get("current") if isinstance(live.get("current"), dict) else {}
+        if event_type == "agent_message":
+            live["last_agent_message"] = text
+            live["current"] = normalized
+        elif bool(event.get("replace_current")) or (not str(current.get("text") or "").strip()):
+            live["current"] = normalized
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _finalize_codex_live_progress(*, progress: Any, status: str) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None:
+        return
+    live = meta.get("live_progress")
+    if not isinstance(live, dict):
+        return
+    live["status"] = str(status or "done")
+    live["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
 def build_codex_exec_cmd(
     *,
     repo_dir: Path,
@@ -102,6 +216,7 @@ def build_codex_exec_cmd(
     approval_policy: str = "never",
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
+    json_output: bool = False,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
@@ -120,6 +235,8 @@ def build_codex_exec_cmd(
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
     if skip_git_repo_check:
         cmd.append("--skip-git-repo-check")
+    if json_output:
+        cmd.append("--json")
     cmd.extend(["--output-last-message", str(review_md_path), "--", prompt])
     return cmd
 
@@ -141,6 +258,21 @@ def run_codex_exec(
     include_shell_environment_inherit_all: bool = True,
 ) -> CodexRunResult:
     started_at = datetime.now(timezone.utc)
+    out = active_output()
+    json_live = bool(stream) and out is not None and bool(getattr(out, "ui_enabled", False))
+    codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir) if json_live else None
+    artifact_override: dict[str, str | None] = {"text": None}
+    if codex_events_log_path is not None:
+        _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
+
+    def _handle_codex_event(event: dict[str, Any]) -> None:
+        _record_codex_live_event(progress=progress, event=event)
+        artifact_text = str(event.get("raw_text") or event.get("text") or "").strip()
+        if str(event.get("type") or "").strip() == "agent_message" and _looks_like_codex_review_artifact(
+            artifact_text
+        ):
+            artifact_override["text"] = artifact_text
+
     cmd = build_codex_exec_cmd(
         repo_dir=repo_dir,
         codex_flags=codex_flags,
@@ -152,10 +284,10 @@ def run_codex_exec(
         approval_policy=approval_policy,
         dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
         include_shell_environment_inherit_all=include_shell_environment_inherit_all,
+        json_output=json_live,
     )
     progress.record_cmd(cmd)
     try:
-        out = active_output()
         if out is not None:
             out.run_logged_cmd(
                 cmd,
@@ -164,10 +296,16 @@ def run_codex_exec(
                 env=env,
                 check=True,
                 stream_requested=stream,
+                codex_json_events_path=codex_events_log_path,
+                codex_event_callback=(_handle_codex_event if codex_events_log_path is not None else None),
             )
         else:
             run_cmd(cmd, cwd=repo_dir, env=env, check=True, stream=stream, stream_label=stream_label)
+        if artifact_override["text"]:
+            _write_text_artifact(output_path, str(artifact_override["text"]))
         normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+        if codex_events_log_path is not None:
+            _finalize_codex_live_progress(progress=progress, status="done")
         return CodexRunResult(
             resume=find_codex_resume_info(
                 repo_dir=repo_dir,
@@ -181,7 +319,19 @@ def run_codex_exec(
     except ReviewflowSubprocessError as e:
         msg = (e.stderr or "") + "\n" + (e.stdout or "")
         if "skip-git-repo-check" not in msg and "trusted directory" not in msg:
+            if codex_events_log_path is not None:
+                _finalize_codex_live_progress(progress=progress, status="error")
             raise
+        if codex_events_log_path is not None:
+            _record_codex_live_event(
+                progress=progress,
+                event={
+                    "type": "agent_message",
+                    "text": "Retrying review with --skip-git-repo-check.",
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "replace_current": True,
+                },
+            )
         fallback = build_codex_exec_cmd(
             repo_dir=repo_dir,
             codex_flags=codex_flags,
@@ -193,28 +343,40 @@ def run_codex_exec(
             approval_policy=approval_policy,
             dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
             include_shell_environment_inherit_all=include_shell_environment_inherit_all,
+            json_output=json_live,
         )
         progress.record_cmd(fallback)
         out = active_output()
-        if out is not None:
-            out.run_logged_cmd(
-                fallback,
-                kind="codex",
-                cwd=repo_dir,
-                env=env,
-                check=True,
-                stream_requested=stream,
-            )
-        else:
-            run_cmd(
-                fallback,
-                cwd=repo_dir,
-                env=env,
-                check=True,
-                stream=stream,
-                stream_label=stream_label,
-            )
+        try:
+            if out is not None:
+                out.run_logged_cmd(
+                    fallback,
+                    kind="codex",
+                    cwd=repo_dir,
+                    env=env,
+                    check=True,
+                    stream_requested=stream,
+                    codex_json_events_path=codex_events_log_path,
+                    codex_event_callback=(_handle_codex_event if codex_events_log_path is not None else None),
+                )
+            else:
+                run_cmd(
+                    fallback,
+                    cwd=repo_dir,
+                    env=env,
+                    check=True,
+                    stream=stream,
+                    stream_label=stream_label,
+                )
+        except ReviewflowSubprocessError:
+            if codex_events_log_path is not None:
+                _finalize_codex_live_progress(progress=progress, status="error")
+            raise
+        if artifact_override["text"]:
+            _write_text_artifact(output_path, str(artifact_override["text"]))
         normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+        if codex_events_log_path is not None:
+            _finalize_codex_live_progress(progress=progress, status="done")
         return CodexRunResult(
             resume=find_codex_resume_info(
                 repo_dir=repo_dir,

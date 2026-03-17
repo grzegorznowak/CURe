@@ -1,17 +1,159 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shlex
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Callable, TextIO
 
 from cure_branding import LEGACY_SLUG
 from cure_errors import ReviewflowError
 from run import run_cmd
 from ui import Dashboard, TailBuffer, UiState, Verbosity, StreamSink
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _compact_codex_text(text: str, *, max_chars: int = 240) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 1:
+        return value[:max_chars]
+    return value[: max_chars - 1] + "…"
+
+
+class CodexJsonEventSink:
+    """Stream Codex JSONL to a raw log while preserving readable tails for the dashboard."""
+
+    def __init__(
+        self,
+        *,
+        raw_file: TextIO,
+        display_file: TextIO,
+        tail: TailBuffer,
+        also_to: TextIO | None = None,
+        on_activity: Callable[[], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._raw_file = raw_file
+        self._display_file = display_file
+        self._tail = tail
+        self._also_to = also_to
+        self._on_activity = on_activity
+        self._on_event = on_event
+        self._lock = threading.Lock()
+        self._pending = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def _emit_display_line(self, line: str) -> None:
+        text = str(line or "").strip()
+        if not text:
+            return
+        rendered = text + "\n"
+        self._display_file.write(rendered)
+        self._display_file.flush()
+        self._tail.append_text(text)
+        if self._also_to is not None:
+            self._also_to.write(rendered)
+            self._also_to.flush()
+
+    def _normalize_event(self, payload: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None]:
+        event_type = str(payload.get("type") or "").strip()
+        timestamp = _utc_now_iso()
+
+        if event_type == "thread.started":
+            text = "Codex session started."
+            return ([text], {"type": "thread_started", "text": text, "ts": timestamp, "replace_current": True})
+
+        if event_type == "turn.started":
+            text = "Review turn started."
+            return ([text], {"type": "turn_started", "text": text, "ts": timestamp, "replace_current": True})
+
+        if event_type == "item.completed":
+            item = payload.get("item")
+            item = item if isinstance(item, dict) else {}
+            if str(item.get("type") or "").strip() == "agent_message":
+                raw_text = str(item.get("text") or "")
+                text = _compact_codex_text(raw_text)
+                if text:
+                    return (
+                        [text],
+                        {
+                            "type": "agent_message",
+                            "text": text,
+                            "raw_text": raw_text,
+                            "ts": timestamp,
+                            "replace_current": True,
+                        },
+                    )
+            return ([], None)
+
+        if event_type == "turn.completed":
+            usage = payload.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            output_tokens = usage.get("output_tokens")
+            text = "Review turn completed."
+            if isinstance(output_tokens, int):
+                text = f"Review turn completed ({output_tokens} output tok)."
+            return ([text], {"type": "turn_completed", "text": text, "ts": timestamp, "replace_current": False})
+
+        return ([], None)
+
+    def _consume_line(self, line: str) -> None:
+        text = str(line or "").rstrip("\r")
+        if not text.strip():
+            return
+        try:
+            payload = json.loads(text)
+        except Exception:
+            self._emit_display_line(_compact_codex_text(text))
+            return
+        if not isinstance(payload, dict):
+            return
+        lines, event = self._normalize_event(payload)
+        for display_line in lines:
+            self._emit_display_line(display_line)
+        if event is not None and self._on_event is not None:
+            try:
+                self._on_event(event)
+            except Exception:
+                pass
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        with self._lock:
+            self._raw_file.write(s)
+            self._raw_file.flush()
+            self._pending += s
+            while "\n" in self._pending:
+                line, self._pending = self._pending.split("\n", 1)
+                self._consume_line(line)
+        if self._on_activity is not None:
+            try:
+                self._on_activity()
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._pending.strip():
+                self._consume_line(self._pending)
+            self._pending = ""
+            self._raw_file.flush()
+            self._display_file.flush()
+            if self._also_to is not None:
+                self._also_to.flush()
 
 
 class ReviewflowOutput:
@@ -133,19 +275,51 @@ class ReviewflowOutput:
         env: dict[str, str] | None,
         check: bool,
         stream_requested: bool,
+        codex_json_events_path: Path | None = None,
+        codex_event_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         stream = True if self.ui_enabled else bool(stream_requested)
         label = self.stream_label(kind) if stream else None
         if stream:
-            return run_cmd(
-                cmd,
-                cwd=cwd,
-                env=env,
-                check=check,
-                stream=True,
-                stream_to=self.stream_sink(kind),
-                stream_label=label,
-            )
+            sink: TextIO = self.stream_sink(kind)
+            raw_fh: TextIO | None = None
+            try:
+                if kind == "codex" and codex_json_events_path is not None:
+                    codex_json_events_path.parent.mkdir(parents=True, exist_ok=True)
+                    raw_fh = codex_json_events_path.open("a", encoding="utf-8", buffering=1)
+                    also_to = (
+                        None
+                        if (self.ui_enabled or self.no_stream or self.verbosity is Verbosity.quiet)
+                        else self.stderr
+                    )
+                    sink = CodexJsonEventSink(
+                        raw_file=raw_fh,
+                        display_file=self.codex_log,
+                        tail=self.tails["codex"],
+                        also_to=also_to,
+                        on_activity=self.state.ping,
+                        on_event=codex_event_callback,
+                    )
+                return run_cmd(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    check=check,
+                    stream=True,
+                    stream_to=sink,
+                    stream_label=label,
+                )
+            finally:
+                if raw_fh is not None:
+                    try:
+                        sink.flush()
+                    except Exception:
+                        pass
+                    try:
+                        raw_fh.flush()
+                        raw_fh.close()
+                    except Exception:
+                        pass
         res = run_cmd(cmd, cwd=cwd, env=env, check=check, stream=False)
         try:
             self.stream_sink(kind).write(res.stdout)

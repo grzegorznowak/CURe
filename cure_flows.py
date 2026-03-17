@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from cure_output import _eprint, active_output, log
@@ -733,8 +734,14 @@ def cache_prime(
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        index_summary = parse_chunkhound_index_summary(
+            "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+            scope="base_cache",
+        )
+        if index_summary is not None:
+            meta["index_summary"] = index_summary
         write_redacted_json(meta_path, meta)
-        return meta
+    return meta
 
 
 def _compat_cache_prime(**kwargs: Any) -> dict[str, Any]:
