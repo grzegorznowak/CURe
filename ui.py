@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import sys
 import termios
@@ -509,6 +510,190 @@ def _footer_bar(*, text: str, width: int) -> str:
     return prefix + ("┄" * (width - len(prefix)))
 
 
+def _clean_tail_lines(raw_lines: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    last_blank = False
+    for raw in raw_lines:
+        s = str(raw).rstrip("\r\n")
+        t = s.strip()
+        if t and len(t) >= 3 and set(t) == {"#"}:
+            continue
+        if not t:
+            if last_blank:
+                continue
+            last_blank = True
+            cleaned.append("")
+            continue
+        last_blank = False
+        cleaned.append(s)
+    return cleaned
+
+
+def _looks_like_email(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value or " " in value:
+        return False
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
+
+
+def _support_summary_items(*, meta: dict, chunkhound_tail: list[str]) -> list[tuple[str, str]]:
+    cleaned = _clean_tail_lines(chunkhound_tail)
+    processed = None
+    chunks = None
+    elapsed = None
+    jira_identity = None
+    for line in cleaned:
+        text = line.strip()
+        match = re.match(r"Processed:\s+(\d+)\s+files", text)
+        if match:
+            processed = int(match.group(1))
+            continue
+        match = re.match(r"Total chunks:\s+(\d+)", text)
+        if match:
+            chunks = int(match.group(1))
+            continue
+        match = re.match(r"Time:\s+(.+)$", text)
+        if match:
+            elapsed = match.group(1).strip()
+            continue
+        if _looks_like_email(text):
+            jira_identity = text
+
+    items: list[tuple[str, str]] = []
+    if processed is not None or chunks is not None or elapsed:
+        summary = f"{processed if processed is not None else '?'} files"
+        if chunks is not None:
+            summary += f" -> {chunks} chunks"
+        if elapsed:
+            summary += f" in {elapsed}"
+        items.append(("Index", summary))
+
+    failure_message = ""
+    error_meta = meta.get("error")
+    if isinstance(error_meta, dict):
+        failure_message = str(error_meta.get("message") or "").strip()
+
+    if failure_message and "JIRA_CONFIG_FILE" in failure_message:
+        items.append(("Preflight", failure_message))
+    elif jira_identity:
+        items.append(("Preflight", f"Jira OK as {jira_identity}"))
+
+    return items
+
+
+def _is_runtime_activity_line(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    prefixes = (
+        "mcp:",
+        "mcp startup:",
+        "Reconnecting",
+        "ERROR:",
+        "Warning:",
+        "task interrupted",
+    )
+    if value.startswith(prefixes):
+        return True
+    lower = value.lower()
+    return ("unexpected status" in lower) or ("unauthorized" in lower)
+
+
+def _looks_like_markdown_output(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return value.startswith(("- ", "#", "```", "**Summary**", "**Verdict**", "### "))
+
+
+def _dedupe_preserve_order(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+    return out
+
+
+def _review_snapshot_lines(*, review_md: str) -> list[str]:
+    path_text = str(review_md or "").strip()
+    if not path_text:
+        return []
+    path = Path(path_text)
+    try:
+        if not path.is_file():
+            return []
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+
+    section = ""
+    subsection = ""
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line in {"####", "```"}:
+            continue
+        if line.startswith("## "):
+            if "Business / Product Assessment" in line:
+                section = "Business"
+            elif "Technical Assessment" in line:
+                section = "Technical"
+            else:
+                section = ""
+            subsection = ""
+            continue
+        if line.startswith("### "):
+            subsection = line[4:].strip()
+            continue
+        if line.startswith("**Summary**:"):
+            out.append(f"Summary: {line.split(':', 1)[1].strip()}")
+        elif line.startswith("**Verdict**:"):
+            verdict = line.split(":", 1)[1].strip()
+            out.append(f"{section or 'Verdict'}: {verdict}")
+        elif subsection == "In Scope Issues" and line.startswith("- "):
+            issue = line[2:].strip()
+            if issue != "None.":
+                out.append(f"{section or 'Review'} issue: {issue}")
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _primary_panel_content(*, meta: dict, codex_tail: list[str], review_md: str) -> tuple[str, list[str], str]:
+    status = str(meta.get("status") or "").strip().lower()
+    failure_message = ""
+    error_meta = meta.get("error")
+    if isinstance(error_meta, dict):
+        failure_message = str(error_meta.get("message") or "").strip()
+    cleaned = _clean_tail_lines(codex_tail)
+
+    if status in {"done", "completed", "success", "succeeded"}:
+        snapshot_lines = _review_snapshot_lines(review_md=review_md)
+        if snapshot_lines:
+            return ("Review Snapshot", snapshot_lines, "(review snapshot unavailable)")
+        return ("Review Snapshot", [], "(review snapshot unavailable)")
+
+    if status in {"error", "failed", "failure"}:
+        lines: list[str] = []
+        if failure_message:
+            lines.append(failure_message)
+        lines.extend(line for line in cleaned if _is_runtime_activity_line(line))
+        return ("Failure Detail", _dedupe_preserve_order(lines)[-6:], "(no failure detail yet)")
+
+    activity = [line for line in cleaned if _is_runtime_activity_line(line)]
+    activity = _dedupe_preserve_order(activity)
+    if activity:
+        return ("Activity", activity[-8:], "(agent is working)")
+    if any(_looks_like_markdown_output(line) for line in cleaned):
+        return ("Activity", ["Agent is drafting review output."], "(agent is working)")
+    if cleaned:
+        return ("Activity", cleaned[-4:], "(agent is working)")
+    return ("Activity", [], "(agent is working)")
+
+
 def build_dashboard_lines(
     *,
     meta: dict,
@@ -616,6 +801,9 @@ def build_dashboard_lines(
         dials.append(("Failure", failure_message))
     if (not wide) and verdicts:
         dials.append(("Verdict", verdicts))
+    for key, value in _support_summary_items(meta=meta, chunkhound_tail=chunkhound_tail):
+        dials.append((key, value))
+
     base_ref = str(meta.get("base_ref") or "").strip()
     head_sha = str(meta.get("head_sha") or "").strip()
     if base_ref:
@@ -853,6 +1041,24 @@ def build_dashboard_lines(
         if snapshot.verbosity is Verbosity.quiet or budget <= 0:
             return []
 
+        if snapshot.verbosity is not Verbosity.debug:
+            label, primary_lines, empty_text = _primary_panel_content(
+                meta=meta,
+                codex_tail=codex_tail,
+                review_md=review_md,
+            )
+            out = [_divider_segment(label=label, width=width)]
+            if budget == 1:
+                return out
+            if no_stream:
+                out.append("stream hidden (--no-stream); see session logs under <session>/work/logs/")
+                return out[:budget]
+            if primary_lines:
+                out.extend(primary_lines[-max(0, budget - 1) :])
+            else:
+                out.append(empty_text)
+            return out[:budget]
+
         out: list[str] = []
         out.append(_divider_segment(label="Logs", width=width))
         if budget == 1:
@@ -871,28 +1077,8 @@ def build_dashboard_lines(
 
         support_label = _support_log_label(phase_name=phase)
 
-        def _clean_tail(raw_lines: list[str]) -> list[str]:
-            cleaned: list[str] = []
-            last_blank = False
-            for raw in raw_lines:
-                s = str(raw).rstrip("\r\n")
-                t = s.strip()
-                # Drop the "####" delimiter artifact that sometimes appears at the end
-                # of Codex markdown output.
-                if t and len(t) >= 3 and set(t) == {"#"}:
-                    continue
-                if not t:
-                    if last_blank:
-                        continue
-                    last_blank = True
-                    cleaned.append("")
-                    continue
-                last_blank = False
-                cleaned.append(s)
-            return cleaned
-
-        ch_tail = _clean_tail(chunkhound_tail)
-        cx_tail = _clean_tail(codex_tail)
+        ch_tail = _clean_tail_lines(chunkhound_tail)
+        cx_tail = _clean_tail_lines(codex_tail)
 
         if ch_tail and not cx_tail:
             show_chunkhound = True
@@ -1087,7 +1273,7 @@ def build_dashboard_lines(
     for i, line in enumerate(out):
         if line.startswith("─"):
             out[i] = wrap(ANSI_BOLD, line)
-        if line.startswith("ChunkHound") or line.startswith("Codex"):
+        if line.startswith(("Support", "ChunkHound", "Codex", "Activity", "Review Snapshot", "Failure Detail")):
             out[i] = wrap(ANSI_BOLD, line)
 
     # Footer/help: dim so it doesn't fight the logs.

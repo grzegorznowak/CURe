@@ -6714,7 +6714,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("✖ Context preflight", joined)
         self.assertIn("Failure:", joined)
         self.assertIn("JIRA_CONF", joined)
-        self.assertIn("Support (Preflight) (last 1):", joined)
+        self.assertIn("Preflight:", joined)
+        self.assertIn("Failure Detail", joined)
 
     def test_dashboard_color_mode_emits_ansi_and_preserves_width_math(self) -> None:
         meta = {
@@ -6867,7 +6868,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         cx_tail = [f"cx-{i}" for i in range(1, 401)]
         lines = rui.build_dashboard_lines(
             meta=meta,
-            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.debug, show_help=False),
             chunkhound_tail=ch_tail,
             codex_tail=cx_tail,
             no_stream=False,
@@ -6912,7 +6913,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         )
         joined = "\n".join(lines)
         # Ensure at least one actual tail line makes it on screen at short heights.
-        self.assertIn("Codex (last ", joined)
+        self.assertIn("─ Activity", joined)
         self.assertIn("cx-400", joined)
 
     def test_dashboard_empty_logs_render_stream_specific_placeholder(self) -> None:
@@ -6939,8 +6940,99 @@ class InstallAndDoctorTests(unittest.TestCase):
             height=20,
         )
         joined = "\n".join(lines)
-        self.assertIn("Codex (last 0):", joined)
-        self.assertIn("(no Codex output)", joined)
+        self.assertIn("─ Activity", joined)
+        self.assertIn("(agent is working)", joined)
+
+    def test_dashboard_context_summarizes_support_signals(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "codex_review",
+            "phases": {"codex_review": {"status": "running"}},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[
+                "Processed: 4 files",
+                "Total chunks: 84",
+                "Time: 17.23s",
+                "greg@academypl.us",
+            ],
+            codex_tail=["mcp: chunkhound ready"],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("Index:", joined)
+        self.assertIn("4 files -> 84 chunks in 17.23s", joined)
+        self.assertIn("Preflight: Jira OK as greg@academypl.us", joined)
+        self.assertIn("─ Activity", joined)
+        self.assertIn("mcp: chunkhound ready", joined)
+
+    def test_dashboard_done_uses_review_snapshot_in_primary_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- inspected diff",
+                        "",
+                        "**Summary**: Ticket ABAU-1026 aligns with the empty-state wording update.",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "### In Scope Issues",
+                        "- CTA copy is inconsistent with the approved wording.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: APPROVE",
+                        "### In Scope Issues",
+                        "- None.",
+                        "####",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            meta = {
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 1,
+                "title": "Test PR",
+                "session_id": "s",
+                "created_at": "",
+                "status": "done",
+                "completed_at": "2026-03-04T00:05:00+00:00",
+                "phase": "codex_review",
+                "phases": {"codex_review": {"status": "done", "duration_seconds": 10.0}},
+                "paths": {"session_dir": tmp, "review_md": str(review_md)},
+            }
+            lines = rui.build_dashboard_lines(
+                meta=meta,
+                snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+                chunkhound_tail=[],
+                codex_tail=["### In Scope Issues", "- stale tail"],
+                no_stream=False,
+                width=140,
+                height=30,
+                color=False,
+            )
+        joined = "\n".join(lines)
+        self.assertIn("─ Review Snapshot", joined)
+        self.assertIn("Summary: Ticket ABAU-1026 aligns with the empty-state wording update.", joined)
+        self.assertIn("Business: REQUEST CHANGES", joined)
+        self.assertIn("Business issue: CTA copy is inconsistent with the approved wording.", joined)
 
 
 class TuiPrintFinalMarkdownTests(unittest.TestCase):
