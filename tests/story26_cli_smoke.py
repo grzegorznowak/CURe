@@ -283,7 +283,7 @@ def run_pty_watch(
     return int(status_file.read_text(encoding="utf-8").strip())
 
 
-def test_commands(primary_bin: Path, alias_bin: Path, env: dict[str, str], sandbox_root: Path) -> None:
+def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str], sandbox_root: Path) -> None:
     proc = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands", "--json"), env=env)
     payload = json.loads(proc.stdout)
     ensure(payload["schema_version"] == 1, "commands schema_version mismatch")
@@ -308,7 +308,10 @@ def test_commands(primary_bin: Path, alias_bin: Path, env: dict[str, str], sandb
     ensure("cure clean closed --json" in human.stdout, "commands human output missing clean")
     ensure("cure status <session_id|PR_URL> --json" in human.stdout, "commands human output missing status")
     ensure("cure watch <session_id|PR_URL>" in human.stdout, "commands human output missing watch")
-    ensure("reviewflow pr <PR_URL>" in human.stdout, "commands human output missing deprecated alias")
+    ensure("reviewflow" not in human.stdout, "commands human output should not advertise deprecated alias")
+
+    if alias_bin is None:
+        return
 
     alias_json = run_cmd(cli_cmd(alias_bin, sandbox_root, "commands", "--json"), env=env)
     ensure("deprecated" in alias_json.stderr.lower(), "alias warning missing from stderr")
@@ -572,15 +575,16 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli-bin", required=True)
-    parser.add_argument("--alias-bin", required=True)
+    parser.add_argument("--alias-bin")
     parser.add_argument("--script-bin", required=True)
     args = parser.parse_args()
 
     binary = Path(args.cli_bin).resolve()
-    alias_bin = Path(args.alias_bin).resolve()
+    alias_bin = Path(args.alias_bin).resolve() if args.alias_bin else None
     script_bin = Path(args.script_bin).resolve()
     ensure(binary.is_file(), f"missing primary CLI binary: {binary}")
-    ensure(alias_bin.is_file(), f"missing alias CLI binary: {alias_bin}")
+    if alias_bin is not None:
+        ensure(alias_bin.is_file(), f"missing alias CLI binary: {alias_bin}")
     ensure(script_bin.is_file(), f"missing script binary: {script_bin}")
 
     with tempfile.TemporaryDirectory(prefix="reviewflow-story26-smoke-") as tmp:

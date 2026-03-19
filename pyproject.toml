@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reviewflow"
+name = "cureview"
 version = "0.1.0"
 description = "CURe PR review sandboxes powered by ChunkHound and configurable LLM presets"
 readme = "README.md"
@@ -12,7 +12,6 @@ dependencies = []
 
 [project.scripts]
 cure = "cure:console_main"
-reviewflow = "reviewflow:console_main"
 
 [tool.setuptools]
 py-modules = ["cure", "reviewflow", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_flows", "cure_commands", "chunkhound_summary"]

@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+import tomllib
 from typing import TYPE_CHECKING, TextIO
 
-from cure_branding import DEPRECATED_CLI_ALIAS, PRIMARY_CLI_COMMAND
+from cure_branding import PRIMARY_CLI_COMMAND
+from cure_errors import ReviewflowError
 from cure_runtime import (
+    REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
     _doctor_runtime_checks,
     _doctor_runtime_payload,
 )
@@ -58,18 +62,6 @@ def preferred_cli_invocation(invocation: str) -> str:
     return f"{PRIMARY_CLI_COMMAND} {invocation}"
 
 
-def deprecated_cli_invocation(invocation: str) -> str:
-    return f"{DEPRECATED_CLI_ALIAS} {invocation}"
-
-
-def deprecated_alias_variant(invocation: str) -> dict[str, str]:
-    return {
-        "name": "deprecated_alias",
-        "summary": "Temporary one-release alias; prints a deprecation warning on stderr.",
-        "invocation": deprecated_cli_invocation(invocation),
-    }
-
-
 def build_commands_catalog_payload() -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -90,7 +82,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                         "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
                         "invocation": preferred_cli_invocation("pr <PR_URL>"),
                     },
-                    deprecated_alias_variant("pr <PR_URL>"),
                 ],
             },
             {
@@ -102,7 +93,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
                 "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("followup <session_id>"),
-                "variants": [deprecated_alias_variant("followup <session_id>")],
+                "variants": [],
             },
             {
                 "name": "resume",
@@ -119,7 +110,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                         "summary": "PR URL mode preserves the existing special behavior documented in the README.",
                         "invocation": preferred_cli_invocation("resume <PR_URL>"),
                     },
-                    deprecated_alias_variant("resume <session_id>"),
                 ],
             },
             {
@@ -131,7 +121,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "stdout": "Prints the generated zip markdown path on success.",
                 "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("zip <PR_URL>"),
-                "variants": [deprecated_alias_variant("zip <PR_URL>")],
+                "variants": [],
             },
             {
                 "name": "clean",
@@ -153,7 +143,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                         "summary": "Delete one exact session with a structured result.",
                         "invocation": preferred_cli_invocation("clean <session_id> --json"),
                     },
-                    deprecated_alias_variant("clean <session_id>"),
                 ],
             },
             {
@@ -165,7 +154,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
                 "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
                 "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
-                "variants": [deprecated_alias_variant("status <session_id|PR_URL>")],
+                "variants": [],
             },
             {
                 "name": "watch",
@@ -180,7 +169,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                     "2": "invalid target, lookup failure, or corrupt metadata",
                 },
                 "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
-                "variants": [deprecated_alias_variant("watch <session_id|PR_URL>")],
+                "variants": [],
             },
         ],
     }
@@ -298,6 +287,115 @@ def cache_prime(
 def cache_status(*, paths: ReviewflowPaths, host: str, owner: str, repo: str, base_ref: str) -> int:
     rf = _reviewflow()
     return rf.cache_status(paths=paths, host=host, owner=owner, repo=repo, base_ref=base_ref)
+
+
+def _path_has_text(path: Path) -> bool:
+    try:
+        return bool(path.read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        return False
+
+
+def _default_chunkhound_base_config_path(config_path: Path) -> Path:
+    return (config_path.parent / "chunkhound-base.json").resolve(strict=False)
+
+
+def _load_existing_chunkhound_base_config_path(config_path: Path) -> Path | None:
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read CURe config at {config_path}: {exc}") from exc
+    if not text.strip():
+        return None
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReviewflowError(
+            f"Failed to parse existing CURe config at {config_path}; use --force to replace it."
+        ) from exc
+    chunkhound = raw.get("chunkhound")
+    if not isinstance(chunkhound, dict):
+        return None
+    raw_path = str(chunkhound.get("base_config_path") or "").strip()
+    if not raw_path:
+        return None
+    resolved = Path(raw_path).expanduser()
+    if not resolved.is_absolute():
+        resolved = config_path.parent / resolved
+    return resolved.resolve(strict=False)
+
+
+def _auto_embedding_block() -> dict[str, str] | None:
+    if os.environ.get("VOYAGE_API_KEY"):
+        return {"provider": "voyage", "model": "voyage-code-3"}
+    if os.environ.get("OPENAI_API_KEY"):
+        return {"provider": "openai", "model": "text-embedding-3-small"}
+    return None
+
+
+def _render_init_config(*, runtime: ReviewflowRuntime, chunkhound_base_config_path: Path) -> str:
+    lines = [
+        "# Generated by `cure init`.",
+        "# This file is intentionally non-secret and safe to edit locally.",
+        "",
+        "[paths]",
+        f"sandbox_root = {json.dumps(str(runtime.paths.sandbox_root))}",
+        f"cache_root = {json.dumps(str(runtime.paths.cache_root))}",
+        "",
+        REVIEW_INTELLIGENCE_CONFIG_EXAMPLE.rstrip(),
+        "",
+        "[chunkhound]",
+        f"base_config_path = {json.dumps(str(chunkhound_base_config_path))}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def init_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
+    config_path = runtime.config_path
+    force = bool(getattr(args, "force", False))
+    existing_base_path = None if force else _load_existing_chunkhound_base_config_path(config_path)
+    chunkhound_base_config_path = existing_base_path or _default_chunkhound_base_config_path(config_path)
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    chunkhound_base_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config_written = False
+    if force or not _path_has_text(config_path):
+        config_path.write_text(
+            _render_init_config(
+                runtime=runtime,
+                chunkhound_base_config_path=chunkhound_base_config_path,
+            ),
+            encoding="utf-8",
+        )
+        config_written = True
+        print(f"Wrote CURe config: {config_path}")
+    else:
+        print(f"Left existing CURe config unchanged: {config_path}")
+
+    if not config_written and existing_base_path is None:
+        print(
+            "Left ChunkHound base config unchanged because the existing cure.toml does not declare `[chunkhound].base_config_path`."
+        )
+    elif force or not _path_has_text(chunkhound_base_config_path):
+        payload: dict[str, object] = {}
+        embedding = _auto_embedding_block()
+        if embedding is not None:
+            payload["embedding"] = embedding
+        chunkhound_base_config_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        suffix = f" ({embedding['provider']} embedding defaults)" if embedding is not None else ""
+        print(f"Wrote ChunkHound base config: {chunkhound_base_config_path}{suffix}")
+    else:
+        print(f"Left existing ChunkHound base config unchanged: {chunkhound_base_config_path}")
+
+    print(f"Next: {PRIMARY_CLI_COMMAND} install")
+    return 0
 
 
 def pr_flow(
@@ -446,6 +544,7 @@ __all__ = [
     "commands_flow",
     "doctor_flow",
     "followup_flow",
+    "init_flow",
     "interactive_flow",
     "pr_flow",
     "preferred_cli_invocation",

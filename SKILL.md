@@ -1,6 +1,6 @@
 ---
 name: cure
-description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure pr`, `cure status`, `cure watch`, follow-up, resume, and zip synthesis.
+description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure init`, `cure pr`, `cure status`, `cure watch`, follow-up, resume, and zip synthesis.
 metadata:
   short-description: Review GitHub PRs in isolated sandboxes with CURe
 ---
@@ -56,40 +56,78 @@ Official install docs:
 https://docs.astral.sh/uv/getting-started/installation/
 ```
 
-3. Materialize a local CURe checkout.
+3. Choose the package-first bootstrap path that matches the session.
 
-If no usable local checkout exists:
+Persistent human install:
 ```bash
-git clone <CURE_REPO_URL> /path/to/cure
+uv tool install cureview
 ```
 
-If a local checkout already exists:
+Ephemeral agent bootstrap:
 ```bash
-git -C /path/to/cure pull --ff-only
+uvx --from cureview cure --help
 ```
 
-4. Install CURe from that local checkout:
-
+Advanced local-development fallback only:
 ```bash
 uv tool install /path/to/cure
 ```
 
-For local iteration from the checkout:
-
+For local iteration from a checkout:
 ```bash
 uv tool install --editable /path/to/cure
 ```
 
-5. Create the default local non-secret config files if they are missing:
+4. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
+
+Disposable bootstrap example:
+
+```bash
+tmp_root="$(mktemp -d)"
+export XDG_CONFIG_HOME="$tmp_root/config"
+export XDG_STATE_HOME="$tmp_root/state"
+export XDG_CACHE_HOME="$tmp_root/cache"
+```
+
+Equivalent explicit override example:
+
+```bash
+cure init \
+  --config /tmp/cure-public/cure.toml \
+  --sandbox-root /tmp/cure-public/sandboxes \
+  --cache-root /tmp/cure-public/cache
+```
+
+5. Run `cure init` before `cure install` or `cure doctor`.
+
+Human persistent flow:
+
+```bash
+cure init
+```
+
+Agent ephemeral flow:
+
+```bash
+uvx --from cureview cure init
+```
+
+`cure init` writes the default local non-secret config files if they are missing:
 
 ```text
 ~/.config/cure/cure.toml
 ~/.config/cure/chunkhound-base.json
 ```
 
-Minimal `~/.config/cure/cure.toml`:
+When `--config` or `XDG_CONFIG_HOME` changes the config location, `chunkhound-base.json` is written alongside the selected `cure.toml`.
+
+Minimal `cure.toml` written by `cure init`:
 
 ```toml
+[paths]
+sandbox_root = "/absolute/path/to/sandboxes"
+cache_root = "/absolute/path/to/cache"
+
 [review_intelligence]
 tool_prompt_fragment = """
 Preferred review-intelligence tools:
@@ -99,14 +137,14 @@ Preferred review-intelligence tools:
 """
 
 [chunkhound]
-base_config_path = "~/.config/cure/chunkhound-base.json"
+base_config_path = "/absolute/path/to/chunkhound-base.json"
 ```
 
-If `~/.config/cure/chunkhound-base.json` is missing, create it with `{}` first, then layer the embedding config below.
+If the base JSON file is missing, `cure init` creates it with `{}` first, then layers the embedding config below when a supported key already exists in the environment.
 
 6. Auto-wire embeddings from the current environment when possible.
 
-If `VOYAGE_API_KEY` exists, write:
+If `VOYAGE_API_KEY` exists, `cure init` writes:
 
 ```json
 {
@@ -117,7 +155,7 @@ If `VOYAGE_API_KEY` exists, write:
 }
 ```
 
-If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, write:
+If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:
 
 ```json
 {
@@ -128,7 +166,7 @@ If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, write:
 }
 ```
 
-If the file already has top-level keys, merge the `embedding` object into the existing JSON instead of replacing the whole file.
+If the file already exists and you want to rewrite it, rerun `cure init --force`.
 
 7. Provision ChunkHound:
 
@@ -179,8 +217,9 @@ cure clean closed --json
 ## When To Stop And Ask
 
 Bootstrap everything non-secret before you stop:
-- create `~/.config/cure/cure.toml` if it is missing
-- create `~/.config/cure/chunkhound-base.json` if it is missing
+- run `cure init`
+- create `~/.config/cure/cure.toml` only when `cure init` is unavailable or the session explicitly requires a manual path
+- create `~/.config/cure/chunkhound-base.json` only when `cure init` is unavailable or the session explicitly requires a manual path
 - auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists
 
 When readiness still fails because a required secret is missing, inspect the actual active local files you already know about before you stop:
@@ -234,7 +273,9 @@ If the operator prefers OpenAI instead, switch the snippet to the OpenAI embeddi
 export OPENAI_API_KEY=<your-openai-api-key>
 ```
 
-4. End with the rerun command:
+4. If the existing JSON became stale, tell the operator to rerun `cure init --force`.
+
+5. End with the rerun command:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
@@ -247,13 +288,13 @@ Use CURe from <CURE_REPO_URL> to review <PR_URL>.
 
 Required behavior:
 - If the operator asked to use CURe, do not perform a manual review outside CURe.
-- Materialize a local CURe checkout from `<CURE_REPO_URL>` if one is not already available, or refresh the existing checkout with `git -C <CURE_SOURCE> pull --ff-only`.
-- If `cure` is already installed and working, use it.
-- If `cure` is installed but not working, diagnose and repair or reinstall it from the local CURe checkout.
-- If `cure` is not installed, install it from the local CURe checkout.
-- Create the default non-secret config files under `~/.config/cure/` when they are missing.
-- If `VOYAGE_API_KEY` is present, configure Voyage embeddings automatically.
-- Otherwise, if `OPENAI_API_KEY` is present, configure OpenAI embeddings automatically.
+- Prefer the public package contract:
+  - `uv tool install cureview` for persistent human setup
+  - `uvx --from cureview cure ...` for disposable agent execution
+- Use a temp XDG root or explicit `--config` / `--sandbox-root` / `--cache-root` overrides when the session should not touch the default `~/.config/cure` layout.
+- Run `cure init` before `cure install`.
+- If `VOYAGE_API_KEY` is present, let `cure init` configure Voyage embeddings automatically.
+- Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.

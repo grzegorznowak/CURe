@@ -4937,7 +4937,7 @@ class WorkflowContractTests(unittest.TestCase):
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
-        self.assertIn("deprecated_alias", {item["name"] for item in pr_entry["variants"]})
+        self.assertNotIn("deprecated_alias", {item["name"] for item in pr_entry["variants"]})
         self.assertNotIn("interactive", names)
 
     def test_commands_flow_human_output_lists_curated_recommended_invocations(self) -> None:
@@ -4950,10 +4950,11 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cure clean closed --json", rendered)
         self.assertIn("cure status <session_id|PR_URL> --json", rendered)
         self.assertIn("cure watch <session_id|PR_URL>", rendered)
-        self.assertIn("reviewflow pr <PR_URL>", rendered)
+        self.assertNotIn("reviewflow", rendered)
         self.assertNotIn("interactive", rendered)
 
     def test_reviewflow_reexports_active_extracted_module_surfaces(self) -> None:
+        self.assertIs(rf.init_flow, cure_commands.init_flow)
         self.assertIs(rf.render_prompt, cure_flows.render_prompt)
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
@@ -5971,6 +5972,10 @@ class TuiDashboardTests(unittest.TestCase):
         args4 = p.parse_args(["doctor", "--pr-url", "https://github.com/acme/repo/pull/1", "--json"])
         self.assertEqual(args4.pr_url, "https://github.com/acme/repo/pull/1")
         self.assertTrue(args4.json_output)
+        args5 = p.parse_args(["init", "--config", "/tmp/cure.toml", "--sandbox-root", "/tmp/sandboxes", "--force"])
+        self.assertEqual(args5.config_path, "/tmp/cure.toml")
+        self.assertEqual(args5.sandbox_root, "/tmp/sandboxes")
+        self.assertTrue(args5.force)
 
     def test_parser_accepts_install_command(self) -> None:
         p = rf.build_parser()
@@ -6253,6 +6258,7 @@ class RuntimeResolutionTests(unittest.TestCase):
 
 class CanonicalShellOwnershipTests(RuntimeResolutionTests):
     def test_cure_is_the_canonical_shell_surface(self) -> None:
+        self.assertIs(cure.init_flow, cure_commands.init_flow)
         self.assertIs(cure.render_prompt, cure_flows.render_prompt)
         self.assertIs(cure.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(cure.commands_flow, cure_commands.commands_flow)
@@ -6261,6 +6267,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
 
     def test_reviewflow_reexports_active_extracted_owners(self) -> None:
         self.assertIs(rf.resolve_runtime, cure_runtime.resolve_runtime)
+        self.assertIs(rf.init_flow, cure_commands.init_flow)
         self.assertIs(rf.render_prompt, cure_flows.render_prompt)
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
@@ -6294,11 +6301,12 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertEqual(cure_main.call_args.kwargs["prog"], "cure")
         self.assertIs(cure_main.call_args.kwargs["_shell_module"], rf)
 
-    def test_pyproject_points_cure_script_to_cure_console_main(self) -> None:
+    def test_pyproject_points_public_package_to_cure_console_main(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
+        self.assertEqual(pyproject["project"]["name"], "cureview")
         self.assertEqual(pyproject["project"]["scripts"]["cure"], "cure:console_main")
-        self.assertEqual(pyproject["project"]["scripts"]["reviewflow"], "reviewflow:console_main")
+        self.assertNotIn("reviewflow", pyproject["project"]["scripts"])
         self.assertIn("cure", pyproject["tool"]["setuptools"]["py-modules"])
 
     def _runtime(self) -> rf.ReviewflowRuntime:
@@ -6348,6 +6356,19 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertEqual(rc, 5)
         resolve_runtime.assert_called_once()
         doctor_flow.assert_called_once_with(mock.ANY, runtime=runtime)
+
+    def test_main_dispatches_init_via_cure_runtime_and_cure_commands(self) -> None:
+        runtime = self._runtime()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "init_flow", return_value=7
+        ) as init_flow:
+            rc = rf.main(["init", "--force"])
+
+        self.assertEqual(rc, 7)
+        resolve_runtime.assert_called_once()
+        self.assertEqual(init_flow.call_count, 1)
+        self.assertTrue(init_flow.call_args.args[0].force)
+        self.assertIs(init_flow.call_args.kwargs["runtime"], runtime)
 
     def test_console_main_warns_for_reviewflow_alias_and_dispatches_to_main(self) -> None:
         stderr = StringIO()
@@ -6630,6 +6651,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("use <CURE_REPO_URL> to review <PR_URL>", readme)
         self.assertIn("use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220", readme)
         self.assertIn("start with [SKILL.md](SKILL.md)", readme)
+        self.assertIn("uv tool install cureview", readme)
+        self.assertIn("uvx --from cureview cure init", readme)
+        self.assertIn("cure init", readme)
         self.assertIn("cure doctor --pr-url <PR_URL> --json", readme)
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
@@ -6637,7 +6661,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
         self.assertIn("The operator should not need to provide a local checkout path", readme)
         self.assertIn("It should not do a manual review outside CURe.", readme)
-        self.assertIn("git -C <CURE_SOURCE> pull --ff-only", readme)
+        self.assertIn("XDG_CONFIG_HOME", readme)
+        self.assertIn("XDG_STATE_HOME", readme)
+        self.assertIn("XDG_CACHE_HOME", readme)
         self.assertIn("~/.config/cure/cure.toml", readme)
         self.assertIn("~/.config/cure/chunkhound-base.json", readme)
         self.assertIn("VOYAGE_API_KEY", readme)
@@ -6653,21 +6679,22 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("When To Stop And Ask", skill)
         self.assertIn("Canonical Agent Prompt", skill)
         self.assertIn("Use CURe from <CURE_REPO_URL> to review <PR_URL>.", skill)
-        self.assertIn("git -C /path/to/cure pull --ff-only", skill)
         self.assertIn("If the operator asked to use CURe, do not perform a manual review outside CURe.", skill)
-        self.assertIn("If `cure` is already installed and working, use it.", skill)
-        self.assertIn("If `cure` is installed but not working", skill)
-        self.assertIn("If `cure` is not installed, install it from the local CURe checkout.", skill)
         self.assertIn("curl -LsSf https://astral.sh/uv/install.sh | sh", skill)
         self.assertIn("https://docs.astral.sh/uv/getting-started/installation/", skill)
+        self.assertIn("uv tool install cureview", skill)
+        self.assertIn("uvx --from cureview cure --help", skill)
+        self.assertIn("uvx --from cureview cure init", skill)
         self.assertIn("uv tool install /path/to/cure", skill)
         self.assertIn("uv tool install --editable /path/to/cure", skill)
+        self.assertIn("--config /tmp/cure-public/cure.toml", skill)
+        self.assertIn("XDG_CONFIG_HOME", skill)
         self.assertIn("cure install", skill)
         self.assertIn("`cure install` provisions ChunkHound only", skill)
-        self.assertIn("Create the default non-secret config files under `~/.config/cure/` when they are missing.", skill)
-        self.assertIn("If `VOYAGE_API_KEY` is present, configure Voyage embeddings automatically.", skill)
-        self.assertIn("Otherwise, if `OPENAI_API_KEY` is present, configure OpenAI embeddings automatically.", skill)
-        self.assertIn("If a required embedding secret is still missing, provide the exact local remediation steps for secret placement and the rerun command, then stop.", skill)
+        self.assertIn("Run `cure init` before `cure install` or `cure doctor`.", skill)
+        self.assertIn("If `VOYAGE_API_KEY` exists, `cure init` writes:", skill)
+        self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:", skill)
+        self.assertIn("If a required embedding secret is still missing", skill)
         self.assertNotIn("pip install", readme)
 
     def test_skill_documents_proactive_secret_and_config_remediation(self) -> None:
@@ -6675,8 +6702,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure.toml", skill)
         self.assertIn("chunkhound-base.json", skill)
         self.assertIn("Bootstrap everything non-secret before you stop:", skill)
-        self.assertIn("create `~/.config/cure/cure.toml` if it is missing", skill)
-        self.assertIn("create `~/.config/cure/chunkhound-base.json` if it is missing", skill)
+        self.assertIn("run `cure init`", skill)
+        self.assertIn("create `~/.config/cure/cure.toml` only when `cure init` is unavailable", skill)
+        self.assertIn("create `~/.config/cure/chunkhound-base.json` only when `cure init` is unavailable", skill)
         self.assertIn("auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists", skill)
         self.assertIn("prefer a current-shell export for the immediate retry", skill)
         self.assertIn("shell profile or existing local secret manager for persistence", skill)
@@ -6687,10 +6715,53 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("I checked ~/.config/cure/cure.toml", skill)
         self.assertIn("\"provider\": \"voyage\"", skill)
         self.assertIn("\"model\": \"voyage-code-3\"", skill)
-        self.assertIn("merge the `embedding` object into the existing JSON", skill)
+        self.assertIn("rerun `cure init --force`", skill)
         self.assertIn("\"provider\": \"openai\"", skill)
         self.assertIn("\"model\": \"text-embedding-3-small\"", skill)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
+
+    def test_init_flow_writes_public_bootstrap_files(self) -> None:
+        root = ROOT / ".tmp_test_cure_init"
+        config_path = root / "config" / "cure.toml"
+        base_path = root / "config" / "chunkhound-base.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), contextlib.redirect_stdout(
+                stdout
+            ):
+                rc = rf.init_flow(argparse.Namespace(force=False), runtime=runtime)
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(config_path.is_file())
+            self.assertTrue(base_path.is_file())
+            config_text = config_path.read_text(encoding="utf-8")
+            self.assertIn(str(runtime.paths.sandbox_root), config_text)
+            self.assertIn(str(runtime.paths.cache_root), config_text)
+            self.assertIn(str(base_path), config_text)
+            self.assertIn("[review_intelligence]", config_text)
+            base_payload = json.loads(base_path.read_text(encoding="utf-8"))
+            self.assertEqual(base_payload["embedding"]["provider"], "voyage")
+            self.assertEqual(base_payload["embedding"]["model"], "voyage-code-3")
+            output = stdout.getvalue()
+            self.assertIn("Wrote CURe config", output)
+            self.assertIn("Wrote ChunkHound base config", output)
+            self.assertIn("Next: cure install", output)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
         reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")

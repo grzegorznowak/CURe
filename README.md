@@ -42,27 +42,50 @@ CURe is not for:
 When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent should:
 1. Ensure the local environment has `git`, `curl`, and `ca-certificates`. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
 2. Install `uv` if it is missing.
-3. Clone CURe to a disposable local path, or refresh an existing local checkout with `git -C <CURE_SOURCE> pull --ff-only`.
-4. Install CURe from that local checkout with `uv tool install /path/to/cure`.
-5. Create the default local non-secret config files if they are missing:
+3. For disposable agent bootstrap, prefer a temp XDG root instead of editing `~/.config/cure` by hand:
 
-```text
-~/.config/cure/cure.toml
-~/.config/cure/chunkhound-base.json
+```bash
+tmp_root="$(mktemp -d)"
+export XDG_CONFIG_HOME="$tmp_root/config"
+export XDG_STATE_HOME="$tmp_root/state"
+export XDG_CACHE_HOME="$tmp_root/cache"
 ```
 
-6. If `VOYAGE_API_KEY` already exists, write a Voyage embedding block into the active ChunkHound base config and continue.
-7. Otherwise, if `OPENAI_API_KEY` already exists, write an OpenAI embedding block into the active ChunkHound base config and continue.
+4. Bootstrap CURe from the public package instead of cloning the repo:
+
+```bash
+uvx --from cureview cure init
+uvx --from cureview cure install
+uvx --from cureview cure doctor --pr-url <PR_URL> --json
+uvx --from cureview cure pr <PR_URL> --if-reviewed new
+```
+
+5. `cure init` writes the non-secret local config files if they are missing:
+
+```text
+<resolved config dir>/cure.toml
+<resolved config dir>/chunkhound-base.json
+```
+
+6. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues.
+7. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
 8. Otherwise, stop only after writing the exact local config path, the minimal snippet to add, the required env var name, and the rerun command.
-9. Run `cure install`.
-10. Run `cure doctor --pr-url <PR_URL> --json`.
-11. If ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 
 For public `github.com` PRs, `cure doctor --pr-url <PR_URL> --json` is the readiness gate for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those flows, and `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required for PR checkout.
 
 ## Advanced / Pre-Provisioned Environments
 
-Teams that already manage a local CURe checkout can keep using that flow:
+Persistent human install should use the public package:
+
+```bash
+uv tool install cureview
+cure init
+cure install
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+```
+
+Teams that already manage a local CURe checkout can keep using that as a secondary local-development flow:
 - keep CURe in a stable local path
 - refresh it with `git -C <CURE_SOURCE> pull --ff-only`
 - install it with `uv tool install /path/to/cure`
@@ -78,9 +101,21 @@ Default config path:
 ~/.config/cure/cure.toml
 ```
 
-Minimal config:
+By default `cure init` also writes:
+
+```text
+~/.config/cure/chunkhound-base.json
+```
+
+If you need a disposable or non-default layout, set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` before `cure init`, or pass `--config`, `--sandbox-root`, and `--cache-root` directly to `cure init`.
+
+Minimal config written by `cure init`:
 
 ```toml
+[paths]
+sandbox_root = "/absolute/path/to/sandboxes"
+cache_root = "/absolute/path/to/cache"
+
 [review_intelligence]
 tool_prompt_fragment = """
 Preferred review-intelligence tools:
@@ -90,18 +125,18 @@ Preferred review-intelligence tools:
 """
 
 [chunkhound]
-base_config_path = "~/.config/cure/chunkhound-base.json"
+base_config_path = "/absolute/path/to/chunkhound-base.json"
 ```
 
-Default ChunkHound base config path:
-
-```text
-~/.config/cure/chunkhound-base.json
-```
-
-If an embedding key is already present in the environment, the agent should add the matching embedding block and continue. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.
+If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.
 
 ## Core Commands
+
+Initialize non-secret bootstrap files:
+
+```bash
+cure init
+```
 
 Start a fresh review:
 

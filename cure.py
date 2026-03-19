@@ -3514,18 +3514,6 @@ def preferred_cli_invocation(invocation: str) -> str:
     return f"{PRIMARY_CLI_COMMAND} {invocation}"
 
 
-def deprecated_cli_invocation(invocation: str) -> str:
-    return f"{DEPRECATED_CLI_ALIAS} {invocation}"
-
-
-def deprecated_alias_variant(invocation: str) -> dict[str, str]:
-    return {
-        "name": "deprecated_alias",
-        "summary": "Temporary one-release alias; prints a deprecation warning on stderr.",
-        "invocation": deprecated_cli_invocation(invocation),
-    }
-
-
 def build_commands_catalog_payload() -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -3546,7 +3534,6 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                         "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
                         "invocation": preferred_cli_invocation("pr <PR_URL>"),
                     },
-                    deprecated_alias_variant("pr <PR_URL>"),
                 ],
             },
             {
@@ -3558,7 +3545,7 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
                 "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("followup <session_id>"),
-                "variants": [deprecated_alias_variant("followup <session_id>")],
+                "variants": [],
             },
             {
                 "name": "resume",
@@ -3575,7 +3562,6 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                         "summary": "PR URL mode preserves the existing special behavior documented in the README.",
                         "invocation": preferred_cli_invocation("resume <PR_URL>"),
                     },
-                    deprecated_alias_variant("resume <session_id>"),
                 ],
             },
             {
@@ -3587,7 +3573,7 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "stdout": "Prints the generated zip markdown path on success.",
                 "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("zip <PR_URL>"),
-                "variants": [deprecated_alias_variant("zip <PR_URL>")],
+                "variants": [],
             },
             {
                 "name": "clean",
@@ -3609,7 +3595,6 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                         "summary": "Delete one exact session with a structured result.",
                         "invocation": preferred_cli_invocation("clean <session_id> --json"),
                     },
-                    deprecated_alias_variant("clean <session_id>"),
                 ],
             },
             {
@@ -3621,7 +3606,7 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
                 "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
                 "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
-                "variants": [deprecated_alias_variant("status <session_id|PR_URL>")],
+                "variants": [],
             },
             {
                 "name": "watch",
@@ -3636,7 +3621,7 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                     "2": "invalid target, lookup failure, or corrupt metadata",
                 },
                 "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
-                "variants": [deprecated_alias_variant("watch <session_id|PR_URL>")],
+                "variants": [],
             },
         ],
     }
@@ -10194,10 +10179,9 @@ from cure_commands import (
     build_commands_catalog_payload,
     clean_flow,
     commands_flow,
-    deprecated_alias_variant,
-    deprecated_cli_invocation,
     doctor_flow,
     followup_flow,
+    init_flow,
     interactive_flow,
     pr_flow,
     preferred_cli_invocation,
@@ -10447,6 +10431,17 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
     wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
+    initp = sub.add_parser(
+        "init",
+        help="Write the non-secret CURe bootstrap config files for the current runtime path layout",
+        parents=[runtime_parent],
+    )
+    initp.add_argument(
+        "--force",
+        action="store_true",
+        help="Rewrite bootstrap files even when they already exist",
+    )
+
     ins = sub.add_parser(
         "install",
         help="Install or update ChunkHound so the `chunkhound` CLI is available to CURe",
@@ -10492,6 +10487,8 @@ def main(
     paths = runtime.paths
 
     try:
+        if args.cmd == "init":
+            return command_surface.init_flow(args, runtime=runtime)
         if args.cmd == "install":
             return install_flow(args)
         if args.cmd == "doctor":

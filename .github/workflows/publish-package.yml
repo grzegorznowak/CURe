@@ -1,0 +1,154 @@
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing git tag to publish, for example v0.1.0rc1
+        required: true
+        type: string
+      target:
+        description: Target package index for a manual rerun
+        required: true
+        default: testpypi
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify release artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      package_name: ${{ steps.meta.outputs.package_name }}
+      version: ${{ steps.meta.outputs.version }}
+      ref_name: ${{ steps.meta.outputs.ref_name }}
+      manual_target: ${{ steps.meta.outputs.manual_target }}
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade build twine
+
+      - name: Validate tag and package metadata
+        id: meta
+        env:
+          PACKAGE_NAME: "cureview"
+          REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          MANUAL_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || '' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import tomllib
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          package_name = project["name"]
+          version = project["version"]
+          expected_package_name = os.environ["PACKAGE_NAME"]
+          ref_name = os.environ["REF_NAME"]
+          manual_target = os.environ.get("MANUAL_TARGET", "")
+
+          if package_name != expected_package_name:
+              raise SystemExit(f"Expected package name {expected_package_name}, found {package_name!r}")
+          if ref_name != f"v{version}":
+              raise SystemExit(
+                  f"Tag {ref_name!r} does not match project.version {version!r}; expected v{version}"
+              )
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
+              fh.write(f"package_name={package_name}\n")
+              fh.write(f"version={version}\n")
+              fh.write(f"ref_name={ref_name}\n")
+              fh.write(f"manual_target={manual_target}\n")
+          PY
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Smoke test installed wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .tmp_release_venv
+          ./.tmp_release_venv/bin/python -m pip install --upgrade pip
+          ./.tmp_release_venv/bin/python -m pip install dist/*.whl
+          ./.tmp_release_venv/bin/cure --help >/dev/null
+          if [[ -x ./.tmp_release_venv/bin/reviewflow ]]; then
+            echo "Unexpected deprecated reviewflow entrypoint in release artifact" >&2
+            exit 1
+          fi
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-dists
+          path: dist/*
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: ${{ needs.build.outputs.manual_target == 'testpypi' || (github.event_name == 'push' && (contains(needs.build.outputs.version, 'a') || contains(needs.build.outputs.version, 'b') || contains(needs.build.outputs.version, 'rc') || contains(needs.build.outputs.version, 'dev'))) }}
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/cureview
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: package-dists
+          path: dist
+
+      - name: Publish package distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: ${{ (needs.build.outputs.manual_target == 'pypi' && !contains(needs.build.outputs.version, 'a') && !contains(needs.build.outputs.version, 'b') && !contains(needs.build.outputs.version, 'rc') && !contains(needs.build.outputs.version, 'dev')) || (github.event_name == 'push' && !contains(needs.build.outputs.version, 'a') && !contains(needs.build.outputs.version, 'b') && !contains(needs.build.outputs.version, 'rc') && !contains(needs.build.outputs.version, 'dev')) }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cureview
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: package-dists
+          path: dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
