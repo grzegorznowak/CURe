@@ -2436,6 +2436,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     "chunkhound_env",
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
                 ),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
                 rc = rf.interactive_flow(argparse.Namespace(), paths=paths, stdin=stdin, stderr=stderr)
@@ -2530,6 +2535,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     rf,
                     "chunkhound_env",
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
@@ -2651,6 +2661,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
                 rc = rf.interactive_flow(
@@ -2764,7 +2779,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=9) as runner,
             ):
@@ -2855,7 +2870,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0),
             ):
@@ -2978,7 +2993,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -3104,7 +3119,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -8183,6 +8198,14 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
 
 class RefactorRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        rf._set_disabled_reviewflow_config_path(None)
+        cure_runtime._set_disabled_reviewflow_config_path(None)
+
+    def tearDown(self) -> None:
+        rf._set_disabled_reviewflow_config_path(None)
+        cure_runtime._set_disabled_reviewflow_config_path(None)
+
     def test_load_toml_raises_on_malformed_content(self) -> None:
         cfg = ROOT / ".tmp_test_malformed_reviewflow.toml"
         try:
