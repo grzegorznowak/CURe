@@ -182,7 +182,7 @@ cure install
 cure doctor --pr-url <PR_URL> --json
 ```
 
-Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
+Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [README.md](README.md#jira-cli): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
 9. If the environment is ready, start the review:
 
@@ -225,10 +225,12 @@ Bootstrap everything non-secret before you stop:
 When readiness still fails because a required secret is missing, inspect the actual active local files you already know about before you stop:
 - the active `cure.toml`
 - the JSON file resolved from `[chunkhound].base_config_path`
+- for Jira-driven workflows, the active Jira CLI config at `~/.config/.jira/.config.yml` or the path from `JIRA_CONFIG_FILE`
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
 - if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
 - mention only the env vars relevant to the active or auto-selected path, such as `VOYAGE_API_KEY` or `OPENAI_API_KEY`
+- for Jira-driven workflows, verify auth with `jira serverinfo` and a minimal `jira issue list ...`; if auth still fails, retry with `env -u JIRA_API_TOKEN ...` to rule out a stale exported token overriding `~/.netrc`
 - if non-secret config structure is missing, create it yourself instead of stopping
 - never ask the operator to paste a secret into chat
 - end with the exact rerun command, usually `cure pr <PR_URL> --if-reviewed new`
