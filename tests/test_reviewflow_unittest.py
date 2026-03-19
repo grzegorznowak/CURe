@@ -2761,6 +2761,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     "chunkhound_env",
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
                 ),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=9) as runner,
             ):
                 rc = rf.interactive_flow(args, paths=paths, stdin=stdin, stderr=stderr)
@@ -2846,6 +2851,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     rf,
                     "chunkhound_env",
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
+                ),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {}, "metadata": {"provider": "codex"}},
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0),
             ):
@@ -2965,6 +2975,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
@@ -3086,6 +3101,11 @@ class InteractiveFlowTests(unittest.TestCase):
                     return_value={"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "real_user_home_dir", return_value=fake_home),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={"env": {}, "metadata": {"provider": "codex"}},
+                ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
@@ -3457,6 +3477,17 @@ class ZipFlowTests(unittest.TestCase):
                 mock.patch.object(rf, "select_zip_sources_for_pr_head", return_value=sources),
                 mock.patch.object(rf, "resolve_codex_flags", return_value=([], {"resolved": {}})),
                 mock.patch.object(rf, "codex_mcp_overrides_for_reviewflow", return_value=[]),
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={
+                        "env": {},
+                        "metadata": {"provider": "codex"},
+                        "codex_flags": [],
+                        "dangerously_bypass_approvals_and_sandbox": False,
+                        "add_dirs": [],
+                    },
+                ),
                 mock.patch.object(rf, "run_codex_exec", side_effect=fake_run_codex_exec),
                 mock.patch("sys.stdout", stdout),
                 mock.patch("sys.stderr", stderr),
@@ -6862,7 +6893,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 shutil,
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}",
-            ), mock.patch.object(rf, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
+            ), mock.patch.object(cure_runtime, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
                 checks = rf._doctor_runtime_checks(runtime)
             by_name = {item.name: item for item in checks}
             self.assertEqual(by_name["reviewflow-config"].status, "ok")
