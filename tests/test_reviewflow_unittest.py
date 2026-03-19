@@ -2439,7 +2439,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
@@ -6786,7 +6786,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         stdout = StringIO()
         try:
             shutil.rmtree(root, ignore_errors=True)
-            with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), contextlib.redirect_stdout(
+            with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), contextlib.redirect_stdout(  # pragma: allowlist secret
                 stdout
             ):
                 rc = rf.init_flow(argparse.Namespace(force=False), runtime=runtime)
