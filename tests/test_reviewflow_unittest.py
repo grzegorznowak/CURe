@@ -2539,7 +2539,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
@@ -2664,7 +2664,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner,
             ):
@@ -2779,7 +2779,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=9) as runner,
             ):
@@ -2870,7 +2870,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=0),
             ):
@@ -2993,7 +2993,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -3119,7 +3119,7 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},
+                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
