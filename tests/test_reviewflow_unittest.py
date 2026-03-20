@@ -9260,6 +9260,7 @@ class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):
         repo_root: Path,
         resolved_runtime_config: dict[str, object],
         db_rel: str = ".chunkhound",
+        config_name: str = ".chunkhound.json",
         mutate_config: Any | None = None,
     ) -> tuple[Path, Path]:
         db_path = repo_root / db_rel
@@ -9269,9 +9270,243 @@ class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):
         if mutate_config is not None:
             mutate_config(config)
         config["database"] = {"provider": "duckdb", "path": db_rel}
-        config_path = repo_root / ".chunkhound.json"
+        config_path = repo_root / config_name
         config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return config_path, db_path
+
+    def test_discover_repo_local_chunkhound_config_prefers_chunkhound_json(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_precedence"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            invocation_cwd = repo_root / "src"
+            invocation_cwd.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            selected_config_path, selected_db_path = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                db_rel=".chunkhound-primary",
+                config_name="chunkhound.json",
+            )
+            self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                db_rel=".chunkhound-fallback",
+                config_name=".chunkhound.json",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(invocation_cwd), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=invocation_cwd,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(
+                candidate,
+                {
+                    "candidate_state": "candidate",
+                    "reason": None,
+                    "repo_root": str(repo_root.resolve()),
+                    "config_path": str(selected_config_path.resolve()),
+                    "config_file_name": "chunkhound.json",
+                    "db_provider": "duckdb",
+                    "db_path": str(selected_db_path.resolve()),
+                    "repo_identity": None,
+                    "expected_repo_identity": None,
+                    "target_match_state": "not_requested",
+                    "runtime_match_state": "compatible",
+                },
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_falls_back_to_dot_chunkhound_json(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_fallback"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            invocation_cwd = repo_root / "src"
+            invocation_cwd.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, db_path = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name=".chunkhound.json",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(invocation_cwd), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=invocation_cwd,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "candidate")
+            self.assertEqual(candidate["config_path"], str(config_path.resolve()))
+            self.assertEqual(candidate["config_file_name"], ".chunkhound.json")
+            self.assertEqual(candidate["db_path"], str(db_path.resolve()))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_reports_non_git_cwd(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_not_git"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            invocation_cwd = root / "cwd"
+            invocation_cwd.mkdir(parents=True, exist_ok=True)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                raise RuntimeError("not a git worktree")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=invocation_cwd,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "absent")
+            self.assertEqual(candidate["reason"], "cwd_not_git_worktree")
+            self.assertIsNone(candidate["repo_root"])
+            self.assertEqual(candidate["runtime_match_state"], "not_requested")
+            self.assertEqual(candidate["target_match_state"], "not_requested")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_reports_broader_workspace_config(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_workspace_reject"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            workspace_root = root / "workspace"
+            repo_root = workspace_root / "repo"
+            invocation_cwd = repo_root / "src"
+            invocation_cwd.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, _ = self._write_repo_local_chunkhound_state(
+                repo_root=workspace_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(invocation_cwd), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=invocation_cwd,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "incompatible")
+            self.assertEqual(candidate["reason"], "config_not_at_repo_root")
+            self.assertEqual(candidate["repo_root"], str(repo_root.resolve()))
+            self.assertEqual(candidate["config_path"], str(config_path.resolve()))
+            self.assertIsNone(candidate["db_path"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_reports_invalid_config(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_invalid_config"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            (repo_root / "chunkhound.json").write_text("{", encoding="utf-8")
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=repo_root,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "incompatible")
+            self.assertEqual(candidate["reason"], "invalid_candidate_config")
+            self.assertEqual(candidate["config_file_name"], "chunkhound.json")
+            self.assertIsNone(candidate["db_provider"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_reports_missing_db_path(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_missing_db_path"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            config_path = repo_root / "chunkhound.json"
+            config_path.write_text(
+                json.dumps({"database": {"provider": "duckdb"}}, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=repo_root,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "incompatible")
+            self.assertEqual(candidate["reason"], "missing_candidate_db_path")
+            self.assertEqual(candidate["config_path"], str(config_path.resolve()))
+            self.assertEqual(candidate["db_provider"], "duckdb")
+            self.assertIsNone(candidate["db_path"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_discover_repo_local_chunkhound_config_reports_ambiguous_origin_for_targeted_review(self) -> None:
+        root = ROOT / ".tmp_test_repo_local_chunkhound_discovery_ambiguous_origin"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, db_path = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", duration_seconds=0.0)
+                if cmd == ["git", "-C", str(repo_root), "remote", "get-url", "origin"]:
+                    raise RuntimeError("origin missing")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.discover_repo_local_chunkhound_config(
+                    invocation_cwd=repo_root,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "ambiguous")
+            self.assertEqual(candidate["reason"], "origin_remote_unavailable")
+            self.assertEqual(candidate["config_path"], str(config_path.resolve()))
+            self.assertEqual(candidate["db_path"], str(db_path.resolve()))
+            self.assertEqual(candidate["expected_repo_identity"], "github.com/acme/repo")
+            self.assertEqual(candidate["repo_identity"], None)
+            self.assertEqual(candidate["target_match_state"], "unknown")
+            self.assertEqual(candidate["runtime_match_state"], "compatible")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_discover_exact_repo_local_chunkhound_seed_candidate_accepts_matching_repo_local_duckdb(self) -> None:
         root = ROOT / ".tmp_test_exact_repo_seed_accept"

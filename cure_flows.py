@@ -904,18 +904,45 @@ def _duckdb_storage_exists(db_path: Path) -> bool:
     return False
 
 
-def discover_exact_repo_local_chunkhound_seed_candidate(
+def _select_repo_local_chunkhound_config_path(repo_root: Path) -> tuple[Path | None, str | None, str | None]:
+    for file_name in ("chunkhound.json", ".chunkhound.json"):
+        candidate_path = (repo_root / file_name).resolve(strict=False)
+        if candidate_path.is_file():
+            return candidate_path, file_name, None
+
+    parent_root = repo_root.parent.resolve(strict=False)
+    if parent_root != repo_root:
+        for file_name in ("chunkhound.json", ".chunkhound.json"):
+            candidate_path = (parent_root / file_name).resolve(strict=False)
+            if candidate_path.is_file():
+                return candidate_path, file_name, "config_not_at_repo_root"
+
+    return None, None, "missing_repo_root_config"
+
+
+def discover_repo_local_chunkhound_config(
     *,
-    pr: PullRequestRef,
-    resolved_runtime_config: dict[str, Any],
     invocation_cwd: Path | None = None,
+    pr: PullRequestRef | None = None,
+    resolved_runtime_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    candidate: dict[str, Any] = {
+    expected_repo_identity = (
+        _canonical_repo_identity(host=pr.host, owner=pr.owner, repo=pr.repo)
+        if pr is not None
+        else None
+    )
+    result: dict[str, Any] = {
+        "candidate_state": "absent",
+        "reason": None,
         "repo_root": None,
         "config_path": None,
+        "config_file_name": None,
+        "db_provider": None,
         "db_path": None,
-        "acceptance_state": "absent",
-        "rejection_reason": None,
+        "repo_identity": None,
+        "expected_repo_identity": expected_repo_identity,
+        "target_match_state": "not_requested" if pr is None else "unknown",
+        "runtime_match_state": "not_requested" if resolved_runtime_config is None else "unknown",
     }
 
     cwd_path = Path(invocation_cwd or Path.cwd()).resolve(strict=False)
@@ -927,95 +954,155 @@ def discover_exact_repo_local_chunkhound_seed_candidate(
             ).stdout.strip()
         ).resolve(strict=False)
     except Exception:
-        candidate["rejection_reason"] = "cwd_not_git_worktree"
-        return candidate
+        result["reason"] = "cwd_not_git_worktree"
+        return result
 
-    candidate["repo_root"] = str(repo_root)
-    candidate_config_path = (repo_root / ".chunkhound.json").resolve(strict=False)
-    if not candidate_config_path.is_file():
-        candidate["rejection_reason"] = "missing_repo_local_config"
-        return candidate
-    candidate["config_path"] = str(candidate_config_path)
+    result["repo_root"] = str(repo_root)
+    candidate_config_path, config_file_name, selection_reason = _select_repo_local_chunkhound_config_path(
+        repo_root
+    )
+    if candidate_config_path is None:
+        result["reason"] = selection_reason
+        return result
 
-    try:
-        remote_url = _run_cmd(
-            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
-            check=True,
-        ).stdout.strip()
-    except Exception:
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "origin_remote_unavailable"
-        return candidate
-
-    remote_identity = _parse_git_remote_repo_identity(remote_url)
-    expected_identity = _canonical_repo_identity(host=pr.host, owner=pr.owner, repo=pr.repo)
-    if remote_identity is None:
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "origin_remote_unrecognized"
-        return candidate
-    if _canonical_repo_identity(
-        host=remote_identity[0],
-        owner=remote_identity[1],
-        repo=remote_identity[2],
-    ) != expected_identity:
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "repo_remote_mismatch"
-        return candidate
+    result["config_path"] = str(candidate_config_path)
+    result["config_file_name"] = config_file_name
+    if selection_reason == "config_not_at_repo_root":
+        result["candidate_state"] = "incompatible"
+        result["reason"] = selection_reason
+        return result
 
     try:
         candidate_config = json.loads(candidate_config_path.read_text(encoding="utf-8"))
     except Exception:
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "invalid_candidate_config"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "invalid_candidate_config"
+        return result
     if not isinstance(candidate_config, dict):
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "invalid_candidate_config"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "invalid_candidate_config"
+        return result
 
     database = candidate_config.get("database")
     if not isinstance(database, dict):
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "missing_candidate_database"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "missing_candidate_database"
+        return result
+
     provider = str(database.get("provider") or "").strip().lower()
+    result["db_provider"] = provider or None
     if provider != "duckdb":
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "database_provider_mismatch"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "database_provider_mismatch"
+        return result
 
     candidate_db_raw = str(database.get("path") or "").strip()
     if not candidate_db_raw:
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "missing_candidate_db_path"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "missing_candidate_db_path"
+        return result
+
     candidate_db_path = Path(candidate_db_raw).expanduser()
     if not candidate_db_path.is_absolute():
         candidate_db_path = candidate_config_path.parent / candidate_db_path
     candidate_db_path = candidate_db_path.resolve(strict=False)
-    candidate["db_path"] = str(candidate_db_path)
+    result["db_path"] = str(candidate_db_path)
 
     if not _is_relative_to(candidate_db_path, repo_root):
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "candidate_db_outside_repo_root"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "candidate_db_outside_repo_root"
+        return result
     if not _duckdb_storage_exists(candidate_db_path):
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "candidate_db_missing"
-        return candidate
+        result["candidate_state"] = "incompatible"
+        result["reason"] = "candidate_db_missing"
+        return result
 
-    runtime_effective = _runtime_chunkhound_seed_match_config(
-        resolved_runtime_config=resolved_runtime_config
+    if resolved_runtime_config is not None:
+        runtime_effective = _runtime_chunkhound_seed_match_config(
+            resolved_runtime_config=resolved_runtime_config
+        )
+        if _normalize_chunkhound_seed_match_config(
+            candidate_config
+        ) != _normalize_chunkhound_seed_match_config(runtime_effective):
+            result["candidate_state"] = "incompatible"
+            result["reason"] = "config_mismatch"
+            result["runtime_match_state"] = "incompatible"
+            return result
+        result["runtime_match_state"] = "compatible"
+
+    if pr is not None:
+        try:
+            remote_url = _run_cmd(
+                ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+                check=True,
+            ).stdout.strip()
+        except Exception:
+            result["candidate_state"] = "ambiguous"
+            result["reason"] = "origin_remote_unavailable"
+            return result
+
+        remote_identity = _parse_git_remote_repo_identity(remote_url)
+        if remote_identity is None:
+            result["candidate_state"] = "ambiguous"
+            result["reason"] = "origin_remote_unrecognized"
+            return result
+
+        resolved_repo_identity = _canonical_repo_identity(
+            host=remote_identity[0],
+            owner=remote_identity[1],
+            repo=remote_identity[2],
+        )
+        result["repo_identity"] = resolved_repo_identity
+        if resolved_repo_identity != expected_repo_identity:
+            result["candidate_state"] = "incompatible"
+            result["reason"] = "repo_remote_mismatch"
+            result["target_match_state"] = "mismatch"
+            return result
+        result["target_match_state"] = "match"
+
+    result["candidate_state"] = "candidate"
+    return result
+
+
+def discover_exact_repo_local_chunkhound_seed_candidate(
+    *,
+    pr: PullRequestRef,
+    resolved_runtime_config: dict[str, Any],
+    invocation_cwd: Path | None = None,
+) -> dict[str, Any]:
+    discovery = discover_repo_local_chunkhound_config(
+        invocation_cwd=invocation_cwd,
+        pr=pr,
+        resolved_runtime_config=resolved_runtime_config,
     )
-    if _normalize_chunkhound_seed_match_config(candidate_config) != _normalize_chunkhound_seed_match_config(
-        runtime_effective
-    ):
-        candidate["acceptance_state"] = "rejected"
-        candidate["rejection_reason"] = "config_mismatch"
+    candidate: dict[str, Any] = {
+        "repo_root": discovery.get("repo_root"),
+        "config_path": discovery.get("config_path"),
+        "db_path": discovery.get("db_path"),
+        "acceptance_state": "absent",
+        "rejection_reason": None,
+    }
+
+    state = str(discovery.get("candidate_state") or "absent")
+    reason = str(discovery.get("reason") or "").strip() or None
+    if state == "candidate":
+        candidate["acceptance_state"] = "accepted"
         return candidate
 
-    candidate["acceptance_state"] = "accepted"
-    candidate["rejection_reason"] = None
+    if reason in {"missing_repo_root_config", "config_not_at_repo_root"}:
+        candidate["config_path"] = None
+        candidate["db_path"] = None
+        candidate["acceptance_state"] = "absent"
+        candidate["rejection_reason"] = "missing_repo_local_config"
+        return candidate
+
+    if state == "absent":
+        candidate["acceptance_state"] = "absent"
+        candidate["rejection_reason"] = reason
+        return candidate
+
+    candidate["acceptance_state"] = "rejected"
+    candidate["rejection_reason"] = reason
     return candidate
 
 
@@ -1404,6 +1491,7 @@ __all__ = [
     'copy_duckdb_files',
     'DEFAULT_BASE_CACHE_TTL_HOURS',
     'discover_exact_repo_local_chunkhound_seed_candidate',
+    'discover_repo_local_chunkhound_config',
     'ensure_base_cache',
     'ensure_clean_git_worktree',
     'ensure_review_config',
