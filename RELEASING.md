@@ -39,6 +39,45 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
    - `uvx --from cureview cure --help`
    - `uv tool install cureview`
 
+## Standalone Release Assets
+
+Tagged releases also build a secondary standalone channel after the package publish target succeeds.
+
+- Supported standalone targets:
+  - Linux x86_64
+  - macOS x86_64
+  - macOS arm64
+- The same `publish-package.yml` workflow builds and uploads:
+  - `cureview-v<version>-linux-x86_64.tar.gz`
+  - `cureview-v<version>-macos-x86_64.tar.gz`
+  - `cureview-v<version>-macos-arm64.tar.gz`
+  - `SHA256SUMS`
+- GitHub Release assets are uploaded only after the matching package publish succeeds:
+  - TestPyPI-targeted tags/reruns must finish `publish-testpypi`
+  - PyPI-targeted tags/reruns must finish `publish-pypi`
+- The public install script is [`install-cure.sh`](install-cure.sh).
+- The installer remains a secondary path. Do not rewrite the README/SKILL contract to make it look equivalent to the package-first default.
+
+Pinned standalone install example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.2
+```
+
+Latest standalone install example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh
+```
+
+After install, the verified runtime flow is still:
+
+```bash
+cure init
+cure install
+cure doctor --pr-url <public github PR> --json
+```
+
 ## First Public Release Prove-Out
 
 Run the first public prove-out as an explicit evidence-gathering exercise, not as an implicit one-off:
@@ -62,6 +101,16 @@ Run the first public prove-out as an explicit evidence-gathering exercise, not a
 5. Record what actually happened in `public_release_evidence/` before closing the release.
 
 The local artifact smoke is the pre-publish gate. The published-package smoke is the release proof that the public index matches the built artifact.
+
+## Standalone Asset Verification
+
+For the standalone follow-on channel, verify all of the following before closing the release:
+
+1. the workflow produced all supported standalone assets plus `SHA256SUMS`
+2. each archive extracts a working `cure` binary and `cure --help` exits 0
+3. `install-cure.sh --version v<version>` installs the expected binary on a supported platform
+4. the docs still present `uv tool install cureview` / `uvx --from cureview cure ...` as the primary path and the standalone installer as secondary
+5. the post-install bootstrap path remains `cure init`, `cure install`, then `cure doctor --pr-url <public github PR> --json`
 
 ## Evidence Capture
 
@@ -115,3 +164,15 @@ If the failure is only in the GitHub workflow or index-side configuration:
 1. Keep the version/tag decision explicit in the evidence log.
 2. Prefer `workflow_dispatch` reruns only when the existing tag is still the correct release candidate.
 3. Record whether the failure was GitHub environment protection, Trusted Publisher setup, or index acceptance.
+
+If the package publish succeeded but the standalone asset upload or checksum manifest is missing:
+
+1. Fix the standalone workflow or asset builder without changing `project.version`.
+2. Rerun `publish-package.yml` with `workflow_dispatch` for the existing tag and correct target.
+3. Confirm the GitHub Release now contains all standalone assets plus `SHA256SUMS`.
+
+If the uploaded standalone binary itself is wrong:
+
+1. Do not treat GitHub Release asset replacement as a silent fix for a bad public binary.
+2. Record the defect in `public_release_evidence/`.
+3. Cut a new hotfix version and rerun the full package + standalone verification sequence.

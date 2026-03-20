@@ -78,6 +78,18 @@ For local iteration from a checkout:
 uv tool install --editable /path/to/cure
 ```
 
+Secondary standalone fallback only when the package path is unavailable:
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh
+```
+
+Version-pinned standalone fallback:
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.2
+```
+
+The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure init`, `cure install`, and `cure doctor` flow as the package path.
+
 4. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
 
 Disposable bootstrap example:

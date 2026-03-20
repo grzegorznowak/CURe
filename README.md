@@ -73,6 +73,42 @@ uvx --from cureview cure pr <PR_URL> --if-reviewed new
 
 For public `github.com` PRs, `cure doctor --pr-url <PR_URL> --json` is the readiness gate for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those flows, and `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required for PR checkout.
 
+## Secondary Standalone Install
+
+The public package remains the default and recommended path:
+
+```bash
+uv tool install cureview
+```
+
+Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient. The current secondary targets are:
+- Linux x86_64
+- macOS x86_64
+- macOS arm64
+
+Install the latest standalone release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh
+```
+
+Pin a specific standalone release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.2
+```
+
+The installer downloads the matching release asset into `~/.local/bin/cure`. After that, the bootstrap/readiness flow is unchanged:
+
+```bash
+cure init
+cure install
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+```
+
+If your platform is not covered by the standalone assets, fall back to the package path instead of inventing a separate bootstrap recipe.
+
 ## Jira CLI
 
 Use this only when the workflow actually needs Jira context. Normal public GitHub PR review flows do not require Jira.

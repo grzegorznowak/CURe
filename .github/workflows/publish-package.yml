@@ -31,6 +31,8 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       ref_name: ${{ steps.meta.outputs.ref_name }}
       manual_target: ${{ steps.meta.outputs.manual_target }}
+      publish_target: ${{ steps.meta.outputs.publish_target }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
 
     steps:
       - name: Checkout tagged source
@@ -65,6 +67,8 @@ jobs:
           expected_package_name = os.environ["PACKAGE_NAME"]
           ref_name = os.environ["REF_NAME"]
           manual_target = os.environ.get("MANUAL_TARGET", "")
+          is_prerelease = any(marker in version for marker in ("a", "b", "rc", "dev"))
+          publish_target = manual_target or ("testpypi" if is_prerelease else "pypi")
 
           if package_name != expected_package_name:
               raise SystemExit(f"Expected package name {expected_package_name}, found {package_name!r}")
@@ -78,6 +82,8 @@ jobs:
               fh.write(f"version={version}\n")
               fh.write(f"ref_name={ref_name}\n")
               fh.write(f"manual_target={manual_target}\n")
+              fh.write(f"publish_target={publish_target}\n")
+              fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")
           PY
 
       - name: Run unit tests
@@ -112,7 +118,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    if: ${{ needs.build.outputs.manual_target == 'testpypi' || (github.event_name == 'push' && (contains(needs.build.outputs.version, 'a') || contains(needs.build.outputs.version, 'b') || contains(needs.build.outputs.version, 'rc') || contains(needs.build.outputs.version, 'dev'))) }}
+    if: ${{ needs.build.outputs.publish_target == 'testpypi' }}
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -135,7 +141,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    if: ${{ (needs.build.outputs.manual_target == 'pypi' && !contains(needs.build.outputs.version, 'a') && !contains(needs.build.outputs.version, 'b') && !contains(needs.build.outputs.version, 'rc') && !contains(needs.build.outputs.version, 'dev')) || (github.event_name == 'push' && !contains(needs.build.outputs.version, 'a') && !contains(needs.build.outputs.version, 'b') && !contains(needs.build.outputs.version, 'rc') && !contains(needs.build.outputs.version, 'dev')) }}
+    if: ${{ needs.build.outputs.publish_target == 'pypi' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -152,3 +158,157 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  build-standalone-assets:
+    name: Build standalone asset (${{ matrix.target_id }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target_id: linux-x86_64
+          - runner: macos-13
+            target_id: macos-x86_64
+          - runner: macos-14
+            target_id: macos-arm64
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install standalone build dependencies
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build standalone release archive
+        run: python scripts/build_standalone_release.py --target-id ${{ matrix.target_id }} --output-dir standalone-dist
+
+      - name: Smoke test standalone archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(ls standalone-dist/*.tar.gz)"
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tar -xzf "$archive" -C "$tmp_dir"
+          "$tmp_dir/cure" --help >/dev/null
+
+      - name: Upload standalone release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-assets-${{ matrix.target_id }}
+          path: standalone-dist/*
+          if-no-files-found: error
+
+  publish-github-release:
+    name: Publish GitHub Release assets
+    needs:
+      - build
+      - publish-testpypi
+      - publish-pypi
+      - build-standalone-assets
+    if: ${{ (needs.build.outputs.publish_target == 'testpypi' && needs.publish-testpypi.result == 'success') || (needs.build.outputs.publish_target == 'pypi' && needs.publish-pypi.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download standalone artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: standalone-assets-*
+          path: standalone
+          merge-multiple: true
+
+      - name: Assemble checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat standalone/*.sha256 > standalone/SHA256SUMS
+          rm standalone/*.sha256
+
+      - name: Create or update GitHub Release
+        uses: actions/github-script@v7
+        env:
+          REF_NAME: ${{ needs.build.outputs.ref_name }}
+          IS_PRERELEASE: ${{ needs.build.outputs.is_prerelease }}
+          ASSET_DIR: standalone
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = process.env.REF_NAME;
+            const prerelease = process.env.IS_PRERELEASE === "true";
+            const assetDir = process.env.ASSET_DIR;
+
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              release = (
+                await github.rest.repos.createRelease({
+                  owner,
+                  repo,
+                  tag_name: tag,
+                  name: tag,
+                  prerelease,
+                  generate_release_notes: true,
+                })
+              ).data;
+            }
+
+            if (release.prerelease !== prerelease) {
+              release = (
+                await github.rest.repos.updateRelease({
+                  owner,
+                  repo,
+                  release_id: release.id,
+                  prerelease,
+                })
+              ).data;
+            }
+
+            const files = fs
+              .readdirSync(assetDir)
+              .filter((name) => name.endsWith(".tar.gz") || name === "SHA256SUMS")
+              .sort();
+            const existingAssets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: release.id,
+              per_page: 100,
+            });
+
+            for (const name of files) {
+              const existing = existingAssets.find((asset) => asset.name === name);
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner,
+                  repo,
+                  asset_id: existing.id,
+                });
+              }
+              const filePath = path.join(assetDir, name);
+              const data = fs.readFileSync(filePath);
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.id,
+                name,
+                data,
+              });
+            }
