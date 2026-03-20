@@ -198,6 +198,9 @@ CURATED_ENV_INHERIT_KEYS = (
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
+DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
+MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
+GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9][A-Za-z0-9._/-]*):([1-9][0-9]*)`?")
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
 tool_prompt_fragment = \"\"\"
@@ -595,12 +598,32 @@ def load_reviewflow_multipass_defaults(
     if not isinstance(max_steps, int):
         max_steps = DEFAULT_MULTIPASS_MAX_STEPS
 
+    grounding_mode_raw = mp.get("grounding_mode")
+    if grounding_mode_raw is None:
+        grounding_mode = DEFAULT_MULTIPASS_GROUNDING_MODE
+    elif isinstance(grounding_mode_raw, str):
+        grounding_mode = grounding_mode_raw.strip().lower()
+        if grounding_mode not in MULTIPASS_GROUNDING_MODES:
+            raise ReviewflowError(
+                "Invalid [multipass].grounding_mode in reviewflow config. "
+                "Expected one of: strict, warn, off."
+            )
+    else:
+        raise ReviewflowError(
+            "Invalid [multipass].grounding_mode in reviewflow config. "
+            "Expected one of: strict, warn, off."
+        )
+
     if max_steps < 1:
         max_steps = 1
     if max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
         max_steps = MULTIPASS_MAX_STEPS_HARD_CAP
 
-    cfg: dict[str, Any] = {"enabled": bool(enabled), "max_steps": int(max_steps)}
+    cfg: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "max_steps": int(max_steps),
+        "grounding_mode": grounding_mode,
+    }
     meta: dict[str, Any] = {
         "config_path": str(path),
         "loaded": bool(raw),
@@ -2946,11 +2969,20 @@ def resolve_resume_target(
         llm_meta = resolve_meta_llm(meta)
         supports_resume = bool(((llm_meta.get("capabilities") or {}).get("supports_resume")))
 
-        if status in {"running", "error"} and mp_enabled and (not no_index) and supports_resume:
+        if mp_enabled and (not no_index) and supports_resume and (
+            status in {"running", "error"} or _multipass_has_invalid_artifacts(meta)
+        ):
             resumed_at = str(meta.get("resumed_at") or "").strip() or None
             failed_at = str(meta.get("failed_at") or "").strip() or None
+            completed_at = str(meta.get("completed_at") or "").strip() or None
             created_at = str(meta.get("created_at") or "").strip() or None
-            dt = _parse_iso_dt(resumed_at) or _parse_iso_dt(failed_at) or _parse_iso_dt(created_at) or epoch
+            dt = (
+                _parse_iso_dt(resumed_at)
+                or _parse_iso_dt(failed_at)
+                or _parse_iso_dt(completed_at)
+                or _parse_iso_dt(created_at)
+                or epoch
+            )
             resumable.append((dt, entry.name))
             continue
 
@@ -4103,6 +4135,415 @@ def parse_multipass_plan_json(text: str) -> dict[str, Any]:
         if not isinstance(step.get("focus"), str) or not str(step.get("focus")).strip():
             raise ReviewflowError(f"Multipass plan step #{idx} missing focus.")
     return data
+
+
+def _grounding_report_path(*, work_dir: Path) -> Path:
+    return work_dir / "grounding_report.json"
+
+
+def _grounding_stage_key_for_step(idx: int) -> str:
+    return f"step-{idx:02d}"
+
+
+def _normalize_grounding_mode(raw: object) -> str:
+    text = str(raw or "").strip().lower()
+    if text in MULTIPASS_GROUNDING_MODES:
+        return text
+    return DEFAULT_MULTIPASS_GROUNDING_MODE
+
+
+def _load_grounding_report(report_path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _artifact_sha256(path: Path) -> str:
+    try:
+        return sha256_text(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+
+def _citation_records(text: str) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    for match in GROUNDING_CITATION_RE.finditer(text):
+        citations.append(
+            {
+                "raw": match.group(0),
+                "path": match.group(1),
+                "line": int(match.group(2)),
+            }
+        )
+    return citations
+
+
+def _resolve_grounding_path(*, root_dir: Path, relative_path: str) -> Path | None:
+    rel = str(relative_path or "").strip()
+    if not rel:
+        return None
+    candidate = Path(rel)
+    if candidate.is_absolute():
+        return None
+    try:
+        resolved = (root_dir / candidate).resolve()
+    except Exception:
+        return None
+    try:
+        resolved.relative_to(root_dir.resolve())
+    except Exception:
+        return None
+    return resolved
+
+
+def _line_exists_in_file(path: Path, line_number: int) -> bool:
+    if line_number < 1 or (not path.is_file()):
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for idx, _ in enumerate(fh, start=1):
+                if idx == line_number:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _markdown_sections(text: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in text.splitlines():
+        if line.startswith("### "):
+            current = {"title": line[4:].strip(), "lines": [], "line": len(sections) + 1}
+            sections.append(current)
+            continue
+        if current is not None:
+            current.setdefault("lines", []).append(line)
+    return sections
+
+
+def _section_bullets(section: dict[str, Any]) -> list[str]:
+    bullets: list[str] = []
+    for raw in section.get("lines", []):
+        stripped = str(raw).strip()
+        if stripped.startswith("- "):
+            bullets.append(stripped)
+    return bullets
+
+
+def _build_grounding_result(
+    *,
+    stage_key: str,
+    artifact_kind: str,
+    artifact_path: Path,
+    citations: list[dict[str, Any]],
+    errors: list[str],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "stage_key": stage_key,
+        "artifact_kind": artifact_kind,
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": _artifact_sha256(artifact_path),
+        "checked_at": _utc_now_iso(),
+        "valid": not errors,
+        "errors": list(errors),
+        "citations": citations,
+    }
+    if extra:
+        result.update(extra)
+    return result
+
+
+def validate_multipass_step_grounding(
+    *,
+    artifact_path: Path,
+    repo_dir: Path,
+    step_index: int,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    citations: list[dict[str, Any]] = []
+    text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
+    lines = text.splitlines()
+
+    if not lines or not lines[0].startswith("### Step Result:"):
+        errors.append("Missing or malformed '### Step Result:' header.")
+    if not any(line.startswith("**Focus**:") for line in lines):
+        errors.append("Missing '**Focus**:' line.")
+
+    sections = _markdown_sections(text)
+    findings = next((section for section in sections if section.get("title") == "Findings"), None)
+    if findings is None:
+        errors.append("Missing '### Findings' section.")
+        return _build_grounding_result(
+            stage_key=_grounding_stage_key_for_step(step_index),
+            artifact_kind="step",
+            artifact_path=artifact_path,
+            citations=citations,
+            errors=errors,
+        )
+
+    bullets = _section_bullets(findings)
+    if not bullets:
+        errors.append("'### Findings' must include at least one bullet.")
+
+    for bullet_index, bullet in enumerate(bullets, start=1):
+        body = bullet[2:].strip()
+        if body == "None.":
+            continue
+        bullet_citations = _citation_records(body)
+        if not bullet_citations:
+            errors.append(f"Findings bullet #{bullet_index} is missing a repo citation.")
+            continue
+        valid_citation_found = False
+        for citation in bullet_citations:
+            resolved = _resolve_grounding_path(root_dir=repo_dir, relative_path=str(citation["path"]))
+            entry = {
+                "section": "Findings",
+                "bullet_index": bullet_index,
+                "path": citation["path"],
+                "line": citation["line"],
+                "resolved_path": str(resolved) if resolved is not None else None,
+            }
+            if resolved is None or (not resolved.is_file()):
+                errors.append(
+                    f"Findings bullet #{bullet_index} cites missing repo path {citation['path']}:{citation['line']}."
+                )
+                entry["valid"] = False
+            elif not _line_exists_in_file(resolved, int(citation["line"])):
+                errors.append(
+                    f"Findings bullet #{bullet_index} cites missing repo line {citation['path']}:{citation['line']}."
+                )
+                entry["valid"] = False
+            else:
+                valid_citation_found = True
+                entry["valid"] = True
+            citations.append(entry)
+        if not valid_citation_found:
+            errors.append(f"Findings bullet #{bullet_index} must cite at least one valid repo line.")
+
+    return _build_grounding_result(
+        stage_key=_grounding_stage_key_for_step(step_index),
+        artifact_kind="step",
+        artifact_path=artifact_path,
+        citations=citations,
+        errors=errors,
+    )
+
+
+def validate_multipass_synth_grounding(
+    *,
+    artifact_path: Path,
+    step_outputs: list[Path],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    citations: list[dict[str, Any]] = []
+    text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
+    sections = _markdown_sections(text)
+    relevant_titles = {"Strengths", "In Scope Issues", "Out of Scope Issues", "Reusability"}
+    required_counts = {
+        "Strengths": 2,
+        "In Scope Issues": 2,
+        "Out of Scope Issues": 2,
+        "Reusability": 1,
+    }
+    step_output_map: dict[str, Path] = {}
+    source_shas: dict[str, str] = {}
+    for step_output in step_outputs:
+        step_output_map[step_output.name] = step_output
+        source_shas[step_output.name] = _artifact_sha256(step_output)
+
+    title_counts = {title: 0 for title in required_counts}
+    for section in sections:
+        title = str(section.get("title") or "")
+        if title not in relevant_titles:
+            continue
+        title_counts[title] += 1
+        bullets = _section_bullets(section)
+        if not bullets:
+            errors.append(f"Section '### {title}' must include at least one bullet.")
+            continue
+        for bullet_index, bullet in enumerate(bullets, start=1):
+            body = bullet[2:].strip()
+            if body == "None.":
+                continue
+            bullet_citations = _citation_records(body)
+            if not bullet_citations:
+                errors.append(f"Section '### {title}' bullet #{bullet_index} is missing a step-artifact citation.")
+                continue
+            valid_citation_found = False
+            for citation in bullet_citations:
+                target = step_output_map.get(str(citation["path"]))
+                entry = {
+                    "section": title,
+                    "bullet_index": bullet_index,
+                    "path": citation["path"],
+                    "line": citation["line"],
+                    "resolved_path": str(target) if target is not None else None,
+                }
+                if target is None or (not target.is_file()):
+                    errors.append(
+                        f"Section '### {title}' bullet #{bullet_index} cites unknown step artifact "
+                        f"{citation['path']}:{citation['line']}."
+                    )
+                    entry["valid"] = False
+                elif not _line_exists_in_file(target, int(citation["line"])):
+                    errors.append(
+                        f"Section '### {title}' bullet #{bullet_index} cites missing step artifact line "
+                        f"{citation['path']}:{citation['line']}."
+                    )
+                    entry["valid"] = False
+                else:
+                    valid_citation_found = True
+                    entry["valid"] = True
+                citations.append(entry)
+            if not valid_citation_found:
+                errors.append(
+                    f"Section '### {title}' bullet #{bullet_index} must cite at least one valid step-artifact line."
+                )
+
+    for title, required_count in required_counts.items():
+        if title_counts[title] < required_count:
+            errors.append(f"Missing required synth section count for '### {title}' (expected {required_count}).")
+
+    return _build_grounding_result(
+        stage_key="synth",
+        artifact_kind="synth",
+        artifact_path=artifact_path,
+        citations=citations,
+        errors=errors,
+        extra={"source_artifact_shas": source_shas},
+    )
+
+
+def _update_grounding_state(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    grounding_mode: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    report_path = _grounding_report_path(work_dir=work_dir)
+    report = _load_grounding_report(report_path)
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts[str(result.get("stage_key") or result.get("artifact_kind") or "artifact")] = dict(result)
+    invalid_artifacts = sorted(
+        key for key, value in artifacts.items() if isinstance(value, dict) and (value.get("valid") is False)
+    )
+    report.update(
+        {
+            "mode": grounding_mode,
+            "updated_at": _utc_now_iso(),
+            "artifacts": artifacts,
+            "invalid_artifacts": invalid_artifacts,
+        }
+    )
+    write_json(report_path, report)
+
+    mp = meta.setdefault("multipass", {})
+    validation = mp.get("validation")
+    if not isinstance(validation, dict):
+        validation = {}
+        mp["validation"] = validation
+    validation["mode"] = grounding_mode
+    validation["report_path"] = str(report_path)
+    validation["updated_at"] = str(report.get("updated_at") or _utc_now_iso())
+    validation["invalid_artifacts"] = invalid_artifacts
+    validation["has_invalid_artifacts"] = bool(invalid_artifacts)
+    validation["artifacts"] = artifacts
+    mp["grounding_mode"] = grounding_mode
+    return report
+
+
+def _validation_entry_for_stage(meta: dict[str, Any], stage_key: str) -> dict[str, Any] | None:
+    mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    validation = mp.get("validation") if isinstance(mp.get("validation"), dict) else {}
+    artifacts = validation.get("artifacts") if isinstance(validation.get("artifacts"), dict) else {}
+    entry = artifacts.get(stage_key)
+    return entry if isinstance(entry, dict) else None
+
+
+def _multipass_has_invalid_artifacts(meta: dict[str, Any]) -> bool:
+    mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    validation = mp.get("validation") if isinstance(mp.get("validation"), dict) else {}
+    if _normalize_grounding_mode(validation.get("mode") or mp.get("grounding_mode")) == "off":
+        return False
+    invalid = validation.get("invalid_artifacts")
+    if isinstance(invalid, list) and invalid:
+        return True
+    artifacts = validation.get("artifacts")
+    if isinstance(artifacts, dict):
+        return any(isinstance(value, dict) and (value.get("valid") is False) for value in artifacts.values())
+    return False
+
+
+def _grounding_entry_matches_file(entry: dict[str, Any], artifact_path: Path) -> bool:
+    expected_path = str(entry.get("artifact_path") or "").strip()
+    if expected_path != str(artifact_path):
+        return False
+    expected_sha = str(entry.get("artifact_sha256") or "").strip()
+    return bool(expected_sha) and expected_sha == _artifact_sha256(artifact_path)
+
+
+def _synth_entry_matches_sources(entry: dict[str, Any], step_outputs: list[Path]) -> bool:
+    source_shas = entry.get("source_artifact_shas")
+    if not isinstance(source_shas, dict):
+        return False
+    current = {path.name: _artifact_sha256(path) for path in step_outputs}
+    return source_shas == current
+
+
+def _validate_or_reuse_step_artifact(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    grounding_mode: str,
+    artifact_path: Path,
+    repo_dir: Path,
+    step_index: int,
+) -> tuple[bool, dict[str, Any] | None]:
+    if grounding_mode == "off":
+        return True, None
+    entry = _validation_entry_for_stage(meta, _grounding_stage_key_for_step(step_index))
+    if entry is not None and entry.get("valid") is True and _grounding_entry_matches_file(entry, artifact_path):
+        return True, entry
+    result = validate_multipass_step_grounding(
+        artifact_path=artifact_path,
+        repo_dir=repo_dir,
+        step_index=step_index,
+    )
+    _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
+    return bool(result.get("valid")), result
+
+
+def _validate_or_reuse_synth_artifact(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    grounding_mode: str,
+    artifact_path: Path,
+    step_outputs: list[Path],
+) -> tuple[bool, dict[str, Any] | None]:
+    if grounding_mode == "off":
+        return True, None
+    entry = _validation_entry_for_stage(meta, "synth")
+    if (
+        entry is not None
+        and entry.get("valid") is True
+        and _grounding_entry_matches_file(entry, artifact_path)
+        and _synth_entry_matches_sources(entry, step_outputs)
+    ):
+        return True, entry
+    result = validate_multipass_synth_grounding(
+        artifact_path=artifact_path,
+        step_outputs=step_outputs,
+    )
+    _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
+    return bool(result.get("valid")), result
 
 
 def require_gh_auth(host: str) -> None:
@@ -5380,6 +5821,8 @@ def _pr_flow_impl(
         "enabled": False if bool(args.no_review) else None,
         "max_steps": multipass_max_steps,
         "max_steps_source": multipass_max_steps_source,
+        "grounding_mode": ("off" if bool(args.no_review) else DEFAULT_MULTIPASS_GROUNDING_MODE),
+        "grounding_mode_source": ("forced_off:no_review" if bool(args.no_review) else "default"),
         "mode": ("skipped:no_review" if bool(args.no_review) else None),
         "plan_json_path": str(work_dir / "review_plan.json"),
         "artifacts": {},
@@ -5543,6 +5986,10 @@ def _pr_flow_impl(
                 config_path=effective_config_path
             )
             progress.meta["multipass_defaults"] = multipass_defaults_meta
+            progress.meta.setdefault("multipass", {})["grounding_mode"] = str(
+                multipass_defaults.get("grounding_mode") or DEFAULT_MULTIPASS_GROUNDING_MODE
+            )
+            progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "reviewflow.toml"
             cli_max_steps = getattr(args, "multipass_max_steps", None)
             if cli_max_steps is not None:
                 try:
@@ -5796,6 +6243,11 @@ def _pr_flow_impl(
 
             if use_multipass:
                 templates = multipass_prompt_template_names()
+                grounding_mode = str(
+                    progress.meta.setdefault("multipass", {}).get(
+                        "grounding_mode", DEFAULT_MULTIPASS_GROUNDING_MODE
+                    )
+                )
 
                 plan_md_path = session_dir / "review.plan.md"
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
@@ -5987,7 +6439,23 @@ def _pr_flow_impl(
                                 if step_runs and isinstance(step_runs[-1], dict) and step_result.resume is not None:
                                     step_runs[-1]["llm_session_id"] = step_result.resume.session_id
                                     step_runs[-1]["llm_provider"] = step_result.resume.provider
-                                    progress.flush()
+                                _, step_validation = _validate_or_reuse_step_artifact(
+                                    meta=progress.meta,
+                                    work_dir=work_dir,
+                                    grounding_mode=grounding_mode,
+                                    artifact_path=out_path,
+                                    repo_dir=repo_dir,
+                                    step_index=idx,
+                                )
+                                progress.flush()
+                                if (
+                                    grounding_mode == "strict"
+                                    and step_validation is not None
+                                    and (step_validation.get("valid") is False)
+                                ):
+                                    raise ReviewflowError(
+                                        f"Multipass step grounding validation failed for {out_path.name}."
+                                    )
                             except ReviewflowSubprocessError:
                                 _eprint(
                                     f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}"
@@ -6066,7 +6534,20 @@ def _pr_flow_impl(
                                 else None
                             )
                             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                        _, synth_validation = _validate_or_reuse_synth_artifact(
+                            meta=progress.meta,
+                            work_dir=work_dir,
+                            grounding_mode=grounding_mode,
+                            artifact_path=review_md_path,
+                            step_outputs=[Path(item) for item in step_outputs],
+                        )
                         progress.flush()
+                        if (
+                            grounding_mode == "strict"
+                            and synth_validation is not None
+                            and (synth_validation.get("valid") is False)
+                        ):
+                            raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
 
                     progress.meta.setdefault("multipass", {})["status"] = "done"
                     progress.flush()
@@ -6285,6 +6766,7 @@ def _resume_flow_impl(
             str(meta.get("status") or "").strip() == "done"
             or bool(str(meta.get("completed_at") or "").strip())
         )
+        and (not _multipass_has_invalid_artifacts(meta))
     )
     if already_done:
         # Fast no-op for completed sessions (do not rewrite meta.json).
@@ -6495,7 +6977,12 @@ def _resume_flow_impl(
         templates = multipass_prompt_template_names()
 
         # If already complete, no-op.
-        if from_phase == "auto" and review_md_path.is_file() and str(meta.get("status")) == "done":
+        if (
+            from_phase == "auto"
+            and review_md_path.is_file()
+            and str(meta.get("status")) == "done"
+            and (not _multipass_has_invalid_artifacts(meta))
+        ):
             success_markdown_path = review_md_path
             print(str(session_dir))
             return 0
@@ -6503,6 +6990,12 @@ def _resume_flow_impl(
         multipass_cfg, _ = load_reviewflow_multipass_defaults(
             config_path=effective_config_path
         )
+        grounding_mode = str(
+            multipass_cfg.get("grounding_mode") or DEFAULT_MULTIPASS_GROUNDING_MODE
+        )
+        progress.meta.setdefault("multipass", {})["grounding_mode"] = grounding_mode
+        progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "reviewflow.toml"
+        progress.flush()
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
             max_steps = int(cli_max_steps)
@@ -6645,6 +7138,7 @@ def _resume_flow_impl(
         progress.flush()
 
         step_outputs: list[str] = []
+        step_reran = False
         for idx, step in enumerate(steps, start=1):
             out_path = session_dir / f"review.step-{idx:02d}.md"
             step_outputs.append(str(out_path))
@@ -6655,6 +7149,17 @@ def _resume_flow_impl(
                 should_run = True
             else:
                 should_run = (not out_path.is_file()) or (out_path.stat().st_size == 0)
+                if (not should_run) and grounding_mode != "off":
+                    reusable, _ = _validate_or_reuse_step_artifact(
+                        meta=progress.meta,
+                        work_dir=work_dir,
+                        grounding_mode=grounding_mode,
+                        artifact_path=out_path,
+                        repo_dir=repo_dir,
+                        step_index=idx,
+                    )
+                    progress.flush()
+                    should_run = not reusable
             if not should_run:
                 continue
 
@@ -6671,6 +7176,7 @@ def _resume_flow_impl(
 
             with phase(f"codex_step_{idx:02d}", progress=progress, quiet=quiet):
                 did_work = True
+                step_reran = True
                 log(f"Multipass step {idx:02d}: {step_title}", quiet=quiet)
                 step_template = load_builtin_prompt_text(templates["step"])
                 step_prompt = render_prompt(
@@ -6717,9 +7223,39 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                _, step_validation = _validate_or_reuse_step_artifact(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    grounding_mode=grounding_mode,
+                    artifact_path=out_path,
+                    repo_dir=repo_dir,
+                    step_index=idx,
+                )
                 progress.flush()
+                if (
+                    grounding_mode == "strict"
+                    and step_validation is not None
+                    and (step_validation.get("valid") is False)
+                ):
+                    raise ReviewflowError(
+                        f"Multipass step grounding validation failed for {out_path.name}."
+                    )
 
-        should_synth = from_phase in {"synth", "plan", "steps"} or (not review_md_path.is_file())
+        should_synth = (
+            from_phase in {"synth", "plan", "steps"}
+            or step_reran
+            or (not review_md_path.is_file())
+        )
+        if (not should_synth) and grounding_mode != "off":
+            synth_reusable, _ = _validate_or_reuse_synth_artifact(
+                meta=progress.meta,
+                work_dir=work_dir,
+                grounding_mode=grounding_mode,
+                artifact_path=review_md_path,
+                step_outputs=[Path(item) for item in step_outputs],
+            )
+            progress.flush()
+            should_synth = not synth_reusable
         if should_synth:
             progress.meta.setdefault("multipass", {})["current"] = {
                 "stage": "synth",
@@ -6776,7 +7312,20 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                _, synth_validation = _validate_or_reuse_synth_artifact(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    grounding_mode=grounding_mode,
+                    artifact_path=review_md_path,
+                    step_outputs=[Path(item) for item in step_outputs],
+                )
                 progress.flush()
+                if (
+                    grounding_mode == "strict"
+                    and synth_validation is not None
+                    and (synth_validation.get("valid") is False)
+                ):
+                    raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
 
         if did_work:
             progress.meta["status"] = "running"

@@ -27,6 +27,21 @@ def _saved_session_supports_resume(meta: dict[str, Any]) -> bool:
     return bool(((llm.get("capabilities") or {}).get("supports_resume")))
 
 
+def _multipass_has_invalid_artifacts(meta: dict[str, Any]) -> bool:
+    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    validation = multipass.get("validation") if isinstance(multipass.get("validation"), dict) else {}
+    mode = str(validation.get("mode") or multipass.get("grounding_mode") or "").strip().lower()
+    if mode == "off":
+        return False
+    invalid = validation.get("invalid_artifacts")
+    if isinstance(invalid, list) and invalid:
+        return True
+    artifacts = validation.get("artifacts")
+    if isinstance(artifacts, dict):
+        return any(isinstance(value, dict) and (value.get("valid") is False) for value in artifacts.values())
+    return bool(validation.get("has_invalid_artifacts"))
+
+
 @dataclass(frozen=True)
 class PullRequestRef:
     host: str
@@ -245,11 +260,20 @@ def resolve_resume_target(target: str, *, sandbox_root: Path, from_phase: str) -
         multipass_enabled = bool((multipass or {}).get("enabled") is True)
         supports_resume = _saved_session_supports_resume(meta)
 
-        if status in {"running", "error"} and multipass_enabled and (not no_index) and supports_resume:
+        if multipass_enabled and (not no_index) and supports_resume and (
+            status in {"running", "error"} or _multipass_has_invalid_artifacts(meta)
+        ):
             resumed_at = str(meta.get("resumed_at") or "").strip() or None
             failed_at = str(meta.get("failed_at") or "").strip() or None
+            completed_at = str(meta.get("completed_at") or "").strip() or None
             created_at = str(meta.get("created_at") or "").strip() or None
-            dt = _parse_iso_dt(resumed_at) or _parse_iso_dt(failed_at) or _parse_iso_dt(created_at) or epoch
+            dt = (
+                _parse_iso_dt(resumed_at)
+                or _parse_iso_dt(failed_at)
+                or _parse_iso_dt(completed_at)
+                or _parse_iso_dt(created_at)
+                or epoch
+            )
             resumable.append((dt, entry.name))
             continue
 

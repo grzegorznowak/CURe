@@ -346,6 +346,12 @@ Preferred review-intelligence tools:
 
 [chunkhound]
 base_config_path = "/absolute/path/to/chunkhound-base.json"
+
+[multipass]
+# strict = fail closed on invalid grounding
+# warn   = record findings and continue
+# off    = skip grounding validation
+grounding_mode = "strict"
 ```
 
 If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.

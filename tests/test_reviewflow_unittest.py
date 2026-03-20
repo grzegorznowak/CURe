@@ -748,6 +748,7 @@ class CodexConfigTests(unittest.TestCase):
                         "[multipass]",
                         "enabled = false",
                         "max_steps = 7",
+                        'grounding_mode = "warn"',
                         "",
                     ]
                 ),
@@ -757,6 +758,25 @@ class CodexConfigTests(unittest.TestCase):
             self.assertTrue(meta.get("loaded"))
             self.assertEqual(mp["enabled"], False)
             self.assertEqual(mp["max_steps"], 7)
+            self.assertEqual(mp["grounding_mode"], "warn")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_multipass_defaults_defaults_grounding_mode_to_strict(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_default_grounding.toml"
+        try:
+            cfg.write_text("[multipass]\nmax_steps = 5\n", encoding="utf-8")
+            mp, _ = rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertEqual(mp["grounding_mode"], "strict")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_multipass_defaults_rejects_invalid_grounding_mode(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_invalid_grounding.toml"
+        try:
+            cfg.write_text('[multipass]\ngrounding_mode = "broken"\n', encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError):
+                rf.load_reviewflow_multipass_defaults(config_path=cfg)
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -1719,6 +1739,14 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("outside the sandbox checkout", text)
             self.assertIn("$REVIEWFLOW_WORK_DIR", text)
 
+    def test_multipass_grounding_prompts_require_parseable_citation_suffixes(self) -> None:
+        step_text = (ROOT / "prompts" / "mrereview_gh_local_big_step.md").read_text(encoding="utf-8")
+        synth_text = (ROOT / "prompts" / "mrereview_gh_local_big_synth.md").read_text(encoding="utf-8")
+        self.assertIn("Evidence:", step_text)
+        self.assertIn("relative/path:line", step_text)
+        self.assertIn("Sources:", synth_text)
+        self.assertIn("review.step-XX.md:line", synth_text)
+
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",
@@ -1841,6 +1869,144 @@ class MultipassPlanParsingTests(unittest.TestCase):
         )
         plan = rf.parse_multipass_plan_json(text)
         self.assertTrue(plan["abort"])
+
+
+class MultipassGroundingValidationTests(unittest.TestCase):
+    def test_validate_multipass_step_grounding_accepts_valid_repo_citation(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_valid"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Findings",
+                        "- Input is unchecked. Evidence: `pkg/module.py:2`",
+                        "",
+                        "### Suggested actions",
+                        "- Add validation",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_step_grounding_rejects_missing_repo_citation(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_invalid"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Missing provenance",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            self.assertFalse(result["valid"])
+            self.assertIn("missing a repo citation", "\n".join(result["errors"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_synth_grounding_accepts_step_artifact_sources(self) -> None:
+        root = ROOT / ".tmp_test_synth_grounding_valid"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            step_output = root / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `review.step-01.md:5`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `review.step-01.md:5`",
+                        "",
+                        "### In Scope Issues",
+                        "- Provenance is present. Sources: `review.step-01.md:5`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `review.step-01.md:5`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class HistoricalReviewsTests(unittest.TestCase):
@@ -3956,6 +4122,52 @@ class ResumeTargetResolutionTests(unittest.TestCase):
             )
             self.assertEqual(sid, "s_done")
             self.assertEqual(action, "followup")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_resolve_resume_target_treats_done_session_with_invalid_grounding_as_resumable(self) -> None:
+        root = ROOT / ".tmp_test_resume_target_invalid_grounding_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+
+            session_dir = root / "s_invalid"
+            session_dir.mkdir()
+            (session_dir / "review.md").write_text("**Decision**: APPROVE\n", encoding="utf-8")
+            (session_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s_invalid",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 4,
+                        "created_at": "2026-03-05T00:00:00+00:00",
+                        "completed_at": "2026-03-05T01:00:00+00:00",
+                        "multipass": {
+                            "enabled": True,
+                            "validation": {
+                                "mode": "warn",
+                                "invalid_artifacts": ["step-01"],
+                                "has_invalid_artifacts": True,
+                            },
+                        },
+                        "llm": {"capabilities": {"supports_resume": True}},
+                        "notes": {"no_index": False},
+                        "paths": {"review_md": str(session_dir / "review.md")},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            sid, action = rf.resolve_resume_target(
+                "https://github.com/acme/repo/pull/4",
+                sandbox_root=root,
+                from_phase="auto",
+            )
+            self.assertEqual(sid, "s_invalid")
+            self.assertEqual(action, "resume")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8797,6 +9009,552 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertIn("Context: ", captured["prompt"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+class MultipassGroundingRuntimeTests(unittest.TestCase):
+    def _fake_run_cmd(self, *, seed: Path) -> object:
+        class _Result:
+            def __init__(self, stdout: str = "") -> None:
+                self.stdout = stdout
+                self.stderr = ""
+                self.duration_seconds = 0.0
+
+        def runner(cmd: list[str], **kwargs: object) -> _Result:
+            if cmd[:2] == ["git", "clone"]:
+                Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                return _Result()
+            if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                return _Result("https://github.com/acme/repo.git\n")
+            if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                return _Result("true\n")
+            if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+            if cmd[:3] == ["gh", "pr", "checkout"]:
+                return _Result()
+            if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                return _Result()
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        return runner
+
+    def _fake_materialize_chunkhound_env_config(
+        self,
+        *,
+        resolved_config: dict[str, object],
+        output_config_path: Path,
+        database_provider: str,
+        database_path: Path,
+    ) -> None:
+        output_config_path.parent.mkdir(parents=True, exist_ok=True)
+        output_config_path.write_text("{}", encoding="utf-8")
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fake_write_pr_context_file(
+        self,
+        *,
+        work_dir: Path,
+        pr: rf.PullRequestRef,
+        pr_meta: dict[str, object],
+    ) -> Path:
+        context_path = work_dir / "pr-context.md"
+        context_path.write_text("context", encoding="utf-8")
+        return context_path
+
+    def _valid_synth_markdown(self) -> str:
+        return "\n".join(
+            [
+                "### Steps taken",
+                "- Read step output",
+                "",
+                "**Summary**: ok",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Business value is clear. Sources: `review.step-01.md:8`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: REQUEST CHANGES",
+                "",
+                "### Strengths",
+                "- Technical read happened. Sources: `review.step-01.md:8`",
+                "",
+                "### In Scope Issues",
+                "- Missing provenance hygiene. Sources: `review.step-01.md:8`",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Artifact stays inspectable. Sources: `review.step-01.md:8`",
+                "",
+            ]
+        )
+
+    def _run_pr_flow_with_grounding(self, *, grounding_mode: str) -> tuple[Path, list[str]]:
+        root = ROOT / f".tmp_test_pr_grounding_{grounding_mode}"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        sandbox_root = root / "sandboxes"
+        cache_root = root / "cache"
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        seed = root / "seed"
+        seed.mkdir(parents=True, exist_ok=True)
+        base_db = root / "base.chunkhound.db"
+        base_db.write_text("db", encoding="utf-8")
+        base_cfg = root / "chunkhound-base.json"
+        base_cfg.write_text("{}", encoding="utf-8")
+        config_path = root / "reviewflow.toml"
+        config_path.write_text(
+            f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+            encoding="utf-8",
+        )
+        paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+        args = rf.build_parser().parse_args(
+            [
+                "pr",
+                "https://github.com/acme/repo/pull/14",
+                "--if-reviewed",
+                "new",
+                "--ui",
+                "off",
+                "--quiet",
+                "--no-stream",
+            ]
+        )
+        calls: list[str] = []
+
+        def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+            output_path = Path(str(kwargs["output_path"]))
+            calls.append(output_path.name)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [{"id": "01", "title": "API review", "focus": "grounding"}],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: grounding",
+                            "",
+                            "### Steps taken",
+                            "- checked repo",
+                            "",
+                            "### Findings",
+                            "- Missing provenance on this finding.",
+                            "",
+                            "### Suggested actions",
+                            "- Add evidence suffixes",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+            elif output_path.name == "review.md":
+                output_path.write_text(self._valid_synth_markdown(), encoding="utf-8")
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(resume=None)
+
+        with contextlib.ExitStack() as stack:
+            fake_run_cmd = self._fake_run_cmd(seed=seed)
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "gh_api_json",
+                    return_value={
+                        "base": {"ref": "main"},
+                        "head": {"sha": "1111111111111111111111111111111111111111"},
+                        "title": "Grounding PR",
+                    },
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        {"chunkhound": {"base_config_path": str(base_cfg)}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=self._fake_materialize_chunkhound_env_config,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(rf, "write_pr_context_file", side_effect=self._fake_write_pr_context_file)
+            )
+            stack.enter_context(mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}))
+            stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+            stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+            stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+            stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+            stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+            stack.enter_context(
+                mock.patch.object(
+                    rf.ReviewflowOutput,
+                    "run_logged_cmd",
+                    autospec=True,
+                    side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_review_intelligence_config",
+                    return_value=(
+                        rf.ReviewIntelligenceConfig(
+                            tool_prompt_fragment="Use GitHub MCP first.",
+                            policy_mode="cure_first_unrestricted",
+                        ),
+                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_reviewflow_multipass_defaults",
+                    return_value=(
+                        {"enabled": True, "max_steps": 20, "grounding_mode": grounding_mode},
+                        {"multipass": {"enabled": True, "max_steps": 20, "grounding_mode": grounding_mode}},
+                    ),
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "resolve_prompt_profile", return_value=("big", "forced:test")))
+            stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "resolve_llm_config_from_args",
+                    return_value=(
+                        {"provider": "openai", "preset": "test-openai"},
+                        {},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value={
+                        "env": {},
+                        "metadata": {},
+                        "staged_paths": {},
+                        "add_dirs": [],
+                        "codex_config_overrides": [],
+                    },
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+            if grounding_mode == "strict":
+                with self.assertRaisesRegex(rf.ReviewflowError, "grounding validation failed"):
+                    rf.pr_flow(
+                        args,
+                        paths=paths,
+                        config_path=config_path,
+                        codex_base_config_path=root / "codex.toml",
+                    )
+            else:
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+                self.assertEqual(rc, 0)
+        return root, calls
+
+    def test_pr_flow_strict_grounding_fails_before_synth_and_writes_report(self) -> None:
+        root, calls = self._run_pr_flow_with_grounding(grounding_mode="strict")
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
+            self.assertEqual(meta["status"], "error")
+            self.assertIn("step-01", report["invalid_artifacts"])
+            self.assertFalse(report["artifacts"]["step-01"]["valid"])
+            self.assertEqual(meta["multipass"]["validation"]["report_path"], str(session_dir / "work" / "grounding_report.json"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_warn_grounding_records_findings_and_completes(self) -> None:
+        root, calls = self._run_pr_flow_with_grounding(grounding_mode="warn")
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue((session_dir / "review.md").is_file())
+            self.assertIn("step-01", report["invalid_artifacts"])
+            self.assertNotIn("synth", report["invalid_artifacts"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_resume_flow_reruns_invalid_existing_step_artifact(self) -> None:
+        root = ROOT / ".tmp_test_resume_grounding_rerun"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.parent.mkdir(parents=True, exist_ok=True)
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "grounding"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Missing provenance",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(self._valid_synth_markdown(), encoding="utf-8")
+            invalid_step = rf.validate_multipass_step_grounding(
+                artifact_path=step_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            rf._update_grounding_state(
+                meta={
+                    "multipass": {
+                        "enabled": True,
+                        "grounding_mode": "strict",
+                    }
+                },
+                work_dir=work_dir,
+                grounding_mode="strict",
+                result=invalid_step,
+            )
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "reviewflow_base__main",
+                "llm": {"provider": "openai", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {
+                        "mode": "strict",
+                        "invalid_artifacts": ["step-01"],
+                        "has_invalid_artifacts": True,
+                        "artifacts": {"step-01": invalid_step},
+                        "report_path": str(work_dir / "grounding_report.json"),
+                    },
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                if output_path.name == "review.step-01.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Step Result: 01 — API review",
+                                "**Focus**: grounding",
+                                "",
+                                "### Steps taken",
+                                "- checked repo",
+                                "",
+                                "### Findings",
+                                "- Input lacks validation. Evidence: `src/app.py:2`",
+                                "",
+                                "### Suggested actions",
+                                "- Add checks",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                elif output_path.name == "review.md":
+                    output_path.write_text(self._valid_synth_markdown(), encoding="utf-8")
+                else:
+                    raise AssertionError(f"unexpected output path: {output_path}")
+                return rf.LlmRunResult(resume=None)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            rf.ReviewIntelligenceConfig(
+                                tool_prompt_fragment="Use GitHub MCP first.",
+                                policy_mode="cure_first_unrestricted",
+                            ),
+                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "openai", "preset": "test-openai", "capabilities": {"supports_resume": True}},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value={
+                            "env": {},
+                            "metadata": {},
+                            "staged_paths": {},
+                            "add_dirs": [],
+                            "codex_config_overrides": [],
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {"enabled": True, "max_steps": 20, "grounding_mode": "strict"},
+                            {"multipass": {"enabled": True, "max_steps": 20, "grounding_mode": "strict"}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.step-01.md", "review.md"])
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed["status"], "done")
+            self.assertFalse(refreshed["multipass"]["validation"]["has_invalid_artifacts"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
 
 
 class ExtractionOwnershipTests(unittest.TestCase):

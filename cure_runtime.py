@@ -82,6 +82,8 @@ CLI_PROVIDER_SESSION_ENV_PREFIXES = {
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
+DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
+MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
 tool_prompt_fragment = \"\"\"
@@ -611,12 +613,32 @@ def load_reviewflow_multipass_defaults(
     max_steps = mp.get("max_steps")
     if not isinstance(max_steps, int):
         max_steps = DEFAULT_MULTIPASS_MAX_STEPS
+
+    grounding_mode_raw = mp.get("grounding_mode")
+    if grounding_mode_raw is None:
+        grounding_mode = DEFAULT_MULTIPASS_GROUNDING_MODE
+    elif isinstance(grounding_mode_raw, str):
+        grounding_mode = grounding_mode_raw.strip().lower()
+        if grounding_mode not in MULTIPASS_GROUNDING_MODES:
+            raise ReviewflowError(
+                "Invalid [multipass].grounding_mode in reviewflow config. "
+                "Expected one of: strict, warn, off."
+            )
+    else:
+        raise ReviewflowError(
+            "Invalid [multipass].grounding_mode in reviewflow config. "
+            "Expected one of: strict, warn, off."
+        )
     if max_steps < 1:
         max_steps = 1
     if max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
         max_steps = MULTIPASS_MAX_STEPS_HARD_CAP
 
-    cfg: dict[str, Any] = {"enabled": bool(enabled), "max_steps": int(max_steps)}
+    cfg: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "max_steps": int(max_steps),
+        "grounding_mode": grounding_mode,
+    }
     meta: dict[str, Any] = {
         "config_path": str(path),
         "loaded": bool(raw),

@@ -36,6 +36,7 @@ If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
+- Every non-empty bullet under `Strengths`, `In Scope Issues`, `Out of Scope Issues`, and `Reusability` must end with a `Sources:` suffix containing one or more real `review.step-XX.md:line` citations.
 
 # Output Format
 Output ONLY the final review (no plan, no step outputs appended):
@@ -49,13 +50,13 @@ Output ONLY the final review (no plan, no step outputs appended):
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
 
 ### Strengths
-- ...
+- ... Sources: `review.step-01.md:12`
 
 ### In Scope Issues
-- ...
+- ... Sources: `review.step-02.md:8`
 
 ### Out of Scope Issues
-- ...
+- ... Sources: `review.step-03.md:6`
 
 ## Technical Assessment
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
@@ -70,6 +71,6 @@ Output ONLY the final review (no plan, no step outputs appended):
 - ...
 
 ### Reusability
-- ...
+- ... Sources: `review.step-01.md:18`
 ####
 ```
