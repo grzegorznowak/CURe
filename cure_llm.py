@@ -462,6 +462,10 @@ def build_codex_flags_from_llm_config(
 ) -> tuple[list[str], dict[str, Any]]:
     base_meta = resolution_meta.get("base_codex_config")
     base_meta = base_meta if isinstance(base_meta, dict) else {}
+    reviewflow_defaults = resolution_meta.get("reviewflow_defaults")
+    if not isinstance(reviewflow_defaults, dict):
+        legacy_defaults = resolution_meta.get("legacy_codex_defaults")
+        reviewflow_defaults = dict(legacy_defaults) if isinstance(legacy_defaults, dict) else {}
     flags: list[str] = []
     model = str(resolved.get("model") or "").strip()
     if model:
@@ -479,7 +483,7 @@ def build_codex_flags_from_llm_config(
         flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_reasoning_effort)}"])
     meta = {
         "base": base_meta,
-        "reviewflow_defaults": resolution_meta.get("legacy_codex_defaults"),
+        "reviewflow_defaults": reviewflow_defaults,
         "resolved": {
             "model": resolved.get("model"),
             "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),

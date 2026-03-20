@@ -156,6 +156,8 @@ HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
+DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
+IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_PROMPT_PACKAGE = "prompts"
 AGENT_RUNTIME_PROFILE_CHOICES = ("balanced", "strict", "permissive")
 DEFAULT_AGENT_RUNTIME_PROFILE = "balanced"
@@ -1060,6 +1062,53 @@ def _synthetic_legacy_codex_preset(
     }
 
 
+def _normalize_llm_preset_name(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text == DEFAULT_LEGACY_CODEX_PRESET:
+        return DEFAULT_IMPLICIT_CODEX_PRESET
+    return text
+
+
+def _reviewflow_defaults_meta(resolution_meta: dict[str, Any]) -> dict[str, Any]:
+    reviewflow_defaults = resolution_meta.get("reviewflow_defaults")
+    if isinstance(reviewflow_defaults, dict):
+        return dict(reviewflow_defaults)
+    legacy_defaults = resolution_meta.get("legacy_codex_defaults")
+    if isinstance(legacy_defaults, dict):
+        return dict(legacy_defaults)
+    return {}
+
+
+def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
+    cfg = value if isinstance(value, dict) else None
+    if cfg is None:
+        return None
+    out = dict(cfg)
+    selected_source = str(out.get("selected_preset_source") or "").strip()
+    if selected_source == "synthetic_legacy_codex":
+        out["selected_preset_source"] = IMPLICIT_CODEX_PRESET_SOURCE
+    normalized_selected = _normalize_llm_preset_name(out.get("selected_name"))
+    if normalized_selected is not None:
+        out["selected_name"] = normalized_selected
+    normalized_resolved = _normalize_llm_preset_name(out.get("resolved_preset_id"))
+    if normalized_resolved is not None:
+        out["resolved_preset_id"] = normalized_resolved
+    reviewflow_defaults = _reviewflow_defaults_meta(out)
+    if reviewflow_defaults:
+        out["reviewflow_defaults"] = reviewflow_defaults
+    out.pop("legacy_codex_defaults", None)
+    resolved = out.get("resolved") if isinstance(out.get("resolved"), dict) else None
+    if resolved is not None:
+        normalized_resolved_meta = dict(resolved)
+        for key, raw_value in list(normalized_resolved_meta.items()):
+            if str(raw_value or "").strip() == DEFAULT_LEGACY_CODEX_PRESET:
+                normalized_resolved_meta[key] = "reviewflow_defaults"
+        out["resolved"] = normalized_resolved_meta
+    return out
+
+
 def resolve_llm_config(
     *,
     base_codex_config_path: Path,
@@ -1098,13 +1147,13 @@ def resolve_llm_config(
                 f"Unknown llm preset: {selected_name!r}. Available presets: {', '.join(available) or '(none)'}"
             )
     else:
-        selected_name = DEFAULT_LEGACY_CODEX_PRESET
-        preset_source = "synthetic_legacy_codex"
+        selected_name = DEFAULT_IMPLICIT_CODEX_PRESET
+        preset_source = IMPLICIT_CODEX_PRESET_SOURCE
         base_preset = _synthetic_legacy_codex_preset(
             base_codex_config_path=base_codex_config_path,
             reviewflow_config_path=reviewflow_config_path,
         )
-        resolved_preset_id = DEFAULT_LEGACY_CODEX_PRESET
+        resolved_preset_id = DEFAULT_IMPLICIT_CODEX_PRESET
 
     transport = str(base_preset.get("transport") or "").strip().lower()
     provider = str(base_preset.get("provider") or "").strip().lower()
@@ -1140,7 +1189,7 @@ def resolve_llm_config(
             }.get(field, field)
             legacy_value = legacy_defaults.get(legacy_key)
             if legacy_value not in (None, ""):
-                return legacy_value, "legacy_codex"
+                return legacy_value, "reviewflow_defaults"
             if base_value not in (None, ""):
                 return base_value, "base_codex_config"
         return None, "unset"
@@ -1220,7 +1269,7 @@ def resolve_llm_config(
 
     meta: dict[str, Any] = {
         "llm_config": llm_meta,
-        "legacy_codex_defaults": legacy_meta,
+        "reviewflow_defaults": legacy_meta,
         "base_codex_config": base_codex_meta,
         "selected_preset_source": preset_source,
         "selected_name": selected_name,
@@ -1666,6 +1715,7 @@ def build_codex_flags_from_llm_config(
 ) -> tuple[list[str], dict[str, Any]]:
     base_meta = resolution_meta.get("base_codex_config")
     base_meta = base_meta if isinstance(base_meta, dict) else {}
+    reviewflow_defaults = _reviewflow_defaults_meta(resolution_meta)
     flags: list[str] = []
     model = str(resolved.get("model") or "").strip()
     if model:
@@ -1684,7 +1734,7 @@ def build_codex_flags_from_llm_config(
 
     meta = {
         "base": base_meta,
-        "reviewflow_defaults": resolution_meta.get("legacy_codex_defaults"),
+        "reviewflow_defaults": reviewflow_defaults,
         "resolved": {
             "model": resolved.get("model"),
             "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),
@@ -4008,7 +4058,7 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
 
     resume = codex.get("resume") if isinstance(codex.get("resume"), dict) else {}
     return {
-        "preset": DEFAULT_LEGACY_CODEX_PRESET,
+        "preset": DEFAULT_IMPLICIT_CODEX_PRESET,
         "transport": "cli",
         "provider": "codex",
         "model": model,
@@ -4023,6 +4073,15 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
     llm = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
     if llm:
         out = dict(llm)
+        normalized_preset = _normalize_llm_preset_name(out.get("preset"))
+        if normalized_preset is not None:
+            out["preset"] = normalized_preset
+        normalized_selected = _normalize_llm_preset_name(out.get("selected_name"))
+        if normalized_selected is not None:
+            out["selected_name"] = normalized_selected
+        normalized_config = _normalize_llm_config_meta(out.get("config"))
+        if normalized_config is not None:
+            out["config"] = normalized_config
         out["capabilities"] = (
             dict(out.get("capabilities"))
             if isinstance(out.get("capabilities"), dict)
@@ -4034,7 +4093,7 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
 
 def resolve_codex_summary(meta: dict[str, Any]) -> str:
     llm = resolve_meta_llm(meta)
-    preset = str(llm.get("preset") or DEFAULT_LEGACY_CODEX_PRESET).strip() or DEFAULT_LEGACY_CODEX_PRESET
+    preset = _normalize_llm_preset_name(llm.get("preset")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
     plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
@@ -10299,7 +10358,7 @@ def clean_session(
             failed_at=str(meta.get("failed_at") or "").strip() or None,
             resumed_at=str(meta.get("resumed_at") or "").strip() or None,
             verdicts=None,
-            codex_summary=resolve_codex_summary(meta) if meta else "llm=legacy_codex/?",
+            codex_summary=resolve_codex_summary(meta) if meta else f"llm={DEFAULT_IMPLICIT_CODEX_PRESET}/?",
             size_bytes=_cleanup_dir_size_bytes(target),
             path_display=str(target),
             is_running=(str(meta.get("status") or "").strip().lower() == "running"),

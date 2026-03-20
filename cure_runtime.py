@@ -34,6 +34,8 @@ HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
+DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
+IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 AGENT_RUNTIME_PROFILE_CHOICES = ("balanced", "strict", "permissive")
 DEFAULT_AGENT_RUNTIME_PROFILE = "balanced"
 BUILTIN_LLM_PRESET_IDS = (
@@ -529,6 +531,16 @@ def build_llm_meta(
         "env_keys": sorted(_string_dict(resolved.get("env")).keys()),
         "capabilities": dict(resolved.get("capabilities") or {}),
     }
+
+
+def _reviewflow_defaults_meta(resolution_meta: dict[str, Any]) -> dict[str, Any]:
+    reviewflow_defaults = resolution_meta.get("reviewflow_defaults")
+    if isinstance(reviewflow_defaults, dict):
+        return dict(reviewflow_defaults)
+    legacy_defaults = resolution_meta.get("legacy_codex_defaults")
+    if isinstance(legacy_defaults, dict):
+        return dict(legacy_defaults)
+    return {}
 
 
 def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict[str, str]:
@@ -1052,13 +1064,13 @@ def resolve_llm_config(
                 f"Unknown llm preset: {selected_name!r}. Available presets: {', '.join(available) or '(none)'}"
             )
     else:
-        selected_name = DEFAULT_LEGACY_CODEX_PRESET
-        preset_source = "synthetic_legacy_codex"
+        selected_name = DEFAULT_IMPLICIT_CODEX_PRESET
+        preset_source = IMPLICIT_CODEX_PRESET_SOURCE
         base_preset = _synthetic_legacy_codex_preset(
             base_codex_config_path=base_codex_config_path,
             reviewflow_config_path=reviewflow_config_path,
         )
-        resolved_preset_id = DEFAULT_LEGACY_CODEX_PRESET
+        resolved_preset_id = DEFAULT_IMPLICIT_CODEX_PRESET
 
     transport = str(base_preset.get("transport") or "").strip().lower()
     provider = str(base_preset.get("provider") or "").strip().lower()
@@ -1087,7 +1099,7 @@ def resolve_llm_config(
             }.get(field, field)
             legacy_value = legacy_defaults.get(legacy_key)
             if legacy_value not in (None, ""):
-                return legacy_value, "legacy_codex"
+                return legacy_value, "reviewflow_defaults"
             if base_value not in (None, ""):
                 return base_value, "base_codex_config"
         return None, "unset"
@@ -1162,7 +1174,7 @@ def resolve_llm_config(
 
     meta: dict[str, Any] = {
         "llm_config": llm_meta,
-        "legacy_codex_defaults": legacy_meta,
+        "reviewflow_defaults": legacy_meta,
         "base_codex_config": base_codex_meta,
         "selected_preset_source": preset_source,
         "selected_name": selected_name,

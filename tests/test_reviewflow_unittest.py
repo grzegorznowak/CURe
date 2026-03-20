@@ -743,6 +743,60 @@ class LlmPresetConfigTests(unittest.TestCase):
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
 
+    def test_resolve_llm_config_without_explicit_preset_uses_codex_cli_identity(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_implicit.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_implicit.toml"
+        try:
+            base.write_text(
+                "\n".join(
+                    [
+                        'model = "base-codex-model"',
+                        'model_reasoning_effort = "high"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[codex]",
+                        'model = "legacy-model"',
+                        'model_reasoning_effort = "low"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            resolved, meta = rf.resolve_llm_config(
+                base_codex_config_path=base,
+                reviewflow_config_path=rf_cfg,
+                cli_preset=None,
+                cli_model=None,
+                cli_effort=None,
+                cli_plan_effort=None,
+                cli_verbosity=None,
+                cli_max_output_tokens=None,
+                cli_request_overrides={},
+                cli_header_overrides={},
+                deprecated_codex_model=None,
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
+            )
+            self.assertEqual(resolved["preset"], "codex-cli")
+            self.assertEqual(resolved["selected_name"], "codex-cli")
+            self.assertEqual(resolved["model"], "legacy-model")
+            self.assertEqual(resolved["reasoning_effort"], "low")
+            self.assertEqual(meta["selected_preset_source"], "implicit_codex_cli")
+            self.assertEqual(meta["resolved_preset_id"], "codex-cli")
+            self.assertEqual(meta["resolved"]["model_source"], "preset")
+            self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
+            self.assertIn("reviewflow_defaults", meta)
+            self.assertNotIn("legacy_codex_defaults", meta)
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
     def test_resolve_llm_config_allows_direct_builtin_preset_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin.toml"
         try:
@@ -1989,7 +2043,7 @@ class HistoricalReviewsTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(summary, "llm=legacy_codex/gpt-5.3-codex/high")
+        self.assertEqual(summary, "llm=codex-cli/gpt-5.3-codex/high")
 
     def test_resolve_codex_summary_falls_back_to_flags(self) -> None:
         summary = rf.resolve_codex_summary(
@@ -2004,7 +2058,7 @@ class HistoricalReviewsTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(summary, "llm=legacy_codex/gpt-5.3-codex-spark/medium")
+        self.assertEqual(summary, "llm=codex-cli/gpt-5.3-codex-spark/medium")
 
     def test_scan_completed_sessions_for_pr_filters_and_sorts(self) -> None:
         root = ROOT / ".tmp_test_review_sandboxes"
@@ -2098,8 +2152,8 @@ class HistoricalReviewsTests(unittest.TestCase):
             self.assertEqual([s.session_id for s in sessions], ["s2", "s1"])
             self.assertEqual(sessions[0].verdicts, _verdicts("APPROVE", "REQUEST CHANGES"))
             self.assertEqual(sessions[1].verdicts, _verdicts("REJECT"))
-            self.assertEqual(sessions[0].codex_summary, "llm=legacy_codex/gpt-5.3-codex/high")
-            self.assertEqual(sessions[1].codex_summary, "llm=legacy_codex/gpt-5.2/medium")
+            self.assertEqual(sessions[0].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
+            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.2/medium")
             self.assertEqual(sessions[0].review_head_sha, "2222222222222222222222222222222222222222")
             self.assertEqual(sessions[1].review_head_sha, "1111111111111111111111111111111111111111")
         finally:
@@ -2378,8 +2432,8 @@ class HistoricalReviewsTests(unittest.TestCase):
             self.assertFalse(sessions[0].supports_resume)
             self.assertEqual(sessions[1].repo_slug, "beta/app#7")
             self.assertEqual(sessions[1].resume_command, "cd /tmp/s2 && codex resume s2")
-            self.assertEqual(sessions[1].codex_summary, "llm=legacy_codex/gpt-5.3-codex/high")
-            self.assertEqual(sessions[2].codex_summary, "llm=legacy_codex/gpt-5.2/medium")
+            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
+            self.assertEqual(sessions[2].codex_summary, "llm=codex-cli/gpt-5.2/medium")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -2555,7 +2609,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertIn("s1", runner.call_args.args[0])
             self.assertNotIn(f"--add-dir {root}", runner.call_args.args[0])
             self.assertEqual(runner.call_args.kwargs["env"]["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")  # pragma: allowlist secret
-            self.assertIn("llm=legacy_codex/gpt-5.3-codex/high", stderr.getvalue())
+            self.assertIn("llm=codex-cli/gpt-5.3-codex/high", stderr.getvalue())
             self.assertIn(str(s1 / "review.md"), stderr.getvalue())
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -4183,8 +4237,8 @@ class ListSessionsTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             rendered = stdout.getvalue()
-            self.assertIn("s1  acme/repo#7  2026-03-04T01:00:00+00:00  llm=legacy_codex/gpt-5.3-codex/high", rendered)
-            self.assertIn("s2  beta/app#9  2026-03-05T01:00:00+00:00  llm=legacy_codex/gpt-5.2/medium", rendered)
+            self.assertIn("s1  acme/repo#7  2026-03-04T01:00:00+00:00  llm=codex-cli/gpt-5.3-codex/high", rendered)
+            self.assertIn("s2  beta/app#9  2026-03-05T01:00:00+00:00  llm=codex-cli/gpt-5.2/medium", rendered)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -5470,6 +5524,59 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertEqual(payload["latest_artifact"]["path"].rsplit("/", 1)[-1], "followup-1.md")
             self.assertEqual(payload["llm"]["summary"], "llm=claude-cli/claude-sonnet-4-6/high")
             self.assertEqual(payload["agent_runtime"]["profile"], "balanced")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_json_normalizes_legacy_nested_llm_config(self) -> None:
+        root = ROOT / ".tmp_test_status_legacy_llm_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_legacy_llm")
+            self._write_session(
+                root=root,
+                session_id="legacy-session",
+                status="done",
+                created_at="2026-03-10T10:00:00+00:00",
+                completed_at="2026-03-10T10:10:00+00:00",
+                number=30,
+                llm={
+                    "preset": "legacy_codex",
+                    "selected_name": "legacy_codex",
+                    "transport": "cli",
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                    "config": {
+                        "selected_preset_source": "synthetic_legacy_codex",
+                        "selected_name": "legacy_codex",
+                        "resolved_preset_id": "legacy_codex",
+                        "legacy_codex_defaults": {"model": "gpt-5.4"},
+                        "resolved": {"reasoning_effort_source": "legacy_codex"},
+                    },
+                },
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(target="legacy-session", json_output=True),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["llm"]["preset"], "codex-cli")
+            self.assertEqual(payload["llm"]["selected_name"], "codex-cli")
+            self.assertEqual(payload["llm"]["summary"], "llm=codex-cli/gpt-5.4/medium")
+            self.assertEqual(payload["llm"]["config"]["selected_preset_source"], "implicit_codex_cli")
+            self.assertEqual(payload["llm"]["config"]["selected_name"], "codex-cli")
+            self.assertEqual(payload["llm"]["config"]["resolved_preset_id"], "codex-cli")
+            self.assertEqual(payload["llm"]["config"]["resolved"]["reasoning_effort_source"], "reviewflow_defaults")
+            self.assertEqual(payload["llm"]["config"]["reviewflow_defaults"]["model"], "gpt-5.4")
+            self.assertNotIn("legacy_codex_defaults", payload["llm"]["config"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -6877,6 +6984,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
         self.assertIn("cure watch <session_id|PR_URL>", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
+        self.assertIn("That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended.", readme)
         self.assertIn("The operator should not need to provide a local checkout path", readme)
         self.assertIn("It should not do a manual review outside CURe.", readme)
         self.assertIn("XDG_CONFIG_HOME", readme)
@@ -6999,6 +7107,7 @@ class InstallAndDoctorTests(unittest.TestCase):
 
         self.assertNotIn("pristine environment", readme)
         self.assertNotIn('"nothing installed"', readme)
+        self.assertNotIn("That should be enough to start the CURe system.", readme)
         self.assertNotIn("pristine environment", skill)
 
         for text in (readme, skill):

@@ -16,6 +16,56 @@ from meta import write_redacted_json
 
 
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
+DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
+IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
+
+
+def _normalize_llm_preset_name(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text == DEFAULT_LEGACY_CODEX_PRESET:
+        return DEFAULT_IMPLICIT_CODEX_PRESET
+    return text
+
+
+def _reviewflow_defaults_meta(value: object) -> dict[str, Any]:
+    cfg = value if isinstance(value, dict) else {}
+    reviewflow_defaults = cfg.get("reviewflow_defaults")
+    if isinstance(reviewflow_defaults, dict):
+        return dict(reviewflow_defaults)
+    legacy_defaults = cfg.get("legacy_codex_defaults")
+    if isinstance(legacy_defaults, dict):
+        return dict(legacy_defaults)
+    return {}
+
+
+def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
+    cfg = value if isinstance(value, dict) else None
+    if cfg is None:
+        return None
+    out = dict(cfg)
+    selected_source = str(out.get("selected_preset_source") or "").strip()
+    if selected_source == "synthetic_legacy_codex":
+        out["selected_preset_source"] = IMPLICIT_CODEX_PRESET_SOURCE
+    normalized_selected = _normalize_llm_preset_name(out.get("selected_name"))
+    if normalized_selected is not None:
+        out["selected_name"] = normalized_selected
+    normalized_resolved = _normalize_llm_preset_name(out.get("resolved_preset_id"))
+    if normalized_resolved is not None:
+        out["resolved_preset_id"] = normalized_resolved
+    reviewflow_defaults = _reviewflow_defaults_meta(out)
+    if reviewflow_defaults:
+        out["reviewflow_defaults"] = reviewflow_defaults
+    out.pop("legacy_codex_defaults", None)
+    resolved = out.get("resolved") if isinstance(out.get("resolved"), dict) else None
+    if resolved is not None:
+        normalized_resolved_meta = dict(resolved)
+        for key, raw_value in list(normalized_resolved_meta.items()):
+            if str(raw_value or "").strip() == DEFAULT_LEGACY_CODEX_PRESET:
+                normalized_resolved_meta[key] = "reviewflow_defaults"
+        out["resolved"] = normalized_resolved_meta
+    return out
 
 
 def _normalize_pr_identity_value(raw: object) -> str:
@@ -605,7 +655,7 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
                 plan_effort = _parse_codex_flag_assignment(assignment, key="plan_mode_reasoning_effort")
     resume = codex.get("resume") if isinstance(codex.get("resume"), dict) else {}
     return {
-        "preset": DEFAULT_LEGACY_CODEX_PRESET,
+        "preset": DEFAULT_IMPLICIT_CODEX_PRESET,
         "transport": "cli",
         "provider": "codex",
         "model": model,
@@ -620,6 +670,15 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
     llm = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
     if llm:
         out = dict(llm)
+        normalized_preset = _normalize_llm_preset_name(out.get("preset"))
+        if normalized_preset is not None:
+            out["preset"] = normalized_preset
+        normalized_selected = _normalize_llm_preset_name(out.get("selected_name"))
+        if normalized_selected is not None:
+            out["selected_name"] = normalized_selected
+        normalized_config = _normalize_llm_config_meta(out.get("config"))
+        if normalized_config is not None:
+            out["config"] = normalized_config
         out["capabilities"] = (
             dict(out.get("capabilities"))
             if isinstance(out.get("capabilities"), dict)
@@ -631,7 +690,7 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
 
 def resolve_codex_summary(meta: dict[str, Any]) -> str:
     llm = resolve_meta_llm(meta)
-    preset = str(llm.get("preset") or DEFAULT_LEGACY_CODEX_PRESET).strip() or DEFAULT_LEGACY_CODEX_PRESET
+    preset = _normalize_llm_preset_name(llm.get("preset")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
     plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
