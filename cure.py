@@ -5749,7 +5749,7 @@ def _pr_flow_impl(
     agent_desc_path = session_dir / "agent_desc.txt"
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
-    progress.meta["chunkhound"] = chunkhound_meta["chunkhound"]
+    progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
     progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
     progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
@@ -5779,6 +5779,8 @@ def _pr_flow_impl(
     runtime_policy: dict[str, Any] | None = None
 
     base_cache_meta: dict[str, Any] | None = None
+    seed_source_db_path: Path | None = None
+    seed_source_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
     profile_resolved: str | None = None
     profile_reason: str | None = None
@@ -5843,6 +5845,14 @@ def _pr_flow_impl(
                     no_stream=no_stream,
                 )
             progress.set_base_cache(base_cache_meta)
+            seed_source_db_path, seed_source_meta = resolve_pr_review_chunkhound_seed_source(
+                pr=pr,
+                base_cache_meta=base_cache_meta,
+                resolved_runtime_config=resolved_chunkhound_cfg,
+                invocation_cwd=Path.cwd(),
+            )
+            progress.meta.setdefault("chunkhound", {})["seed_source"] = seed_source_meta
+            progress.flush()
 
         # Create sandbox repo by cloning from seed for speed + object reuse.
         seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
@@ -6080,13 +6090,18 @@ def _pr_flow_impl(
 
         if not args.no_index:
             assert base_cache_meta is not None
-            base_db_path = Path(str(base_cache_meta["db_path"]))
-            if not base_db_path.exists():
-                raise ReviewflowError(f"Base DB missing: {base_db_path}")
+            assert seed_source_db_path is not None
+            if not seed_source_db_path.exists():
+                raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
 
             with phase("index_topup", progress=progress, quiet=quiet):
+                seed_kind = (
+                    str((seed_source_meta or {}).get("source_kind") or "shared_base_cache")
+                    if isinstance(seed_source_meta, dict)
+                    else "shared_base_cache"
+                )
                 log(
-                    f"ChunkHound top-up index: db={chunkhound_db_path}",
+                    f"ChunkHound top-up index: seed={seed_kind} db={chunkhound_db_path}",
                     quiet=quiet,
                 )
                 if chunkhound_db_path.exists():
@@ -6094,7 +6109,7 @@ def _pr_flow_impl(
                         shutil.rmtree(chunkhound_db_path, ignore_errors=True)
                     else:
                         chunkhound_db_path.unlink(missing_ok=True)
-                copy_duckdb_files(base_db_path, chunkhound_db_path)
+                copy_duckdb_files(seed_source_db_path, chunkhound_db_path)
 
                 env = merged_env(
                     chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
@@ -10705,6 +10720,7 @@ from cure_flows import (
     parse_multipass_plan_json,
     prompt_template_name_for_profile,
     render_prompt,
+    resolve_pr_review_chunkhound_seed_source,
     resolve_pr_review_baseline_selection,
     resolve_prompt_profile,
     restore_session_chunkhound_db_from_baseline,

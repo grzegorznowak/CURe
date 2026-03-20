@@ -11,9 +11,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -62,6 +63,52 @@ PR_BASELINE_MAX_CHANGED_FILES = 1500
 PR_BASELINE_MAX_CHANGED_LINES = 100000
 GITHUB_COMPARE_FILES_HARD_LIMIT = 300
 DEFAULT_BASE_CACHE_TTL_HOURS = 24
+
+ChunkHoundToolRequirement = Literal["required", "guidance", "conditional"]
+
+
+@dataclass(frozen=True)
+class ChunkHoundPromptContract:
+    search_requirement: ChunkHoundToolRequirement
+    code_research_requirement: ChunkHoundToolRequirement
+    availability_proof: str = "real_tool_call"
+    resource_discovery_rule: str = "neutral_expected_empty"
+
+
+_BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS: dict[str, ChunkHoundPromptContract] = {
+    "default.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="required",
+    ),
+    "mrereview_gh_local.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="required",
+    ),
+    "mrereview_gh_local_big.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="required",
+    ),
+    "mrereview_gh_local_big_followup.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="required",
+    ),
+    "mrereview_gh_local_big_plan.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="required",
+    ),
+    "mrereview_gh_local_followup.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="guidance",
+    ),
+    "mrereview_gh_local_big_step.md": ChunkHoundPromptContract(
+        search_requirement="required",
+        code_research_requirement="guidance",
+    ),
+    "mrereview_gh_local_big_synth.md": ChunkHoundPromptContract(
+        search_requirement="conditional",
+        code_research_requirement="conditional",
+    ),
+}
 
 
 @contextlib.contextmanager
@@ -214,6 +261,14 @@ def followup_prompt_template_name_for_profile(profile: str) -> str:
     if profile == "big":
         return "mrereview_gh_local_big_followup.md"
     return "mrereview_gh_local_followup.md"
+
+
+def chunkhound_prompt_contracts() -> dict[str, ChunkHoundPromptContract]:
+    return dict(_BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS)
+
+
+def chunkhound_prompt_contract_for_template(name: str) -> ChunkHoundPromptContract | None:
+    return _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS.get(str(name).strip())
 
 def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, str]:
     return {"REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(cfg)}
@@ -774,6 +829,237 @@ def _compat_ensure_base_cache(**kwargs: Any) -> dict[str, Any]:
     return target(**kwargs)
 
 
+def _deep_copy_json_value(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _canonical_repo_identity(*, host: str, owner: str, repo: str) -> str:
+    return f"{host.strip().lower()}/{owner.strip().lower()}/{repo.strip().lower()}"
+
+
+def _parse_git_remote_repo_identity(remote_url: str) -> tuple[str, str, str] | None:
+    text = str(remote_url or "").strip()
+    if not text:
+        return None
+
+    parsed = urllib.parse.urlparse(text)
+    host = ""
+    path = ""
+    if parsed.scheme and parsed.netloc:
+        host = str(parsed.hostname or parsed.netloc or "").strip().lower()
+        path = str(parsed.path or "")
+    else:
+        match = re.match(r"^(?:[^@/]+@)?(?P<host>[^:]+):(?P<path>.+)$", text)
+        if match is None:
+            return None
+        host = str(match.group("host") or "").strip().lower()
+        path = str(match.group("path") or "")
+
+    path = path.strip().lstrip("/").rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 2 or not host:
+        return None
+    owner, repo = parts
+    return host, owner.lower(), repo.lower()
+
+
+def _normalize_chunkhound_seed_match_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = _deep_copy_json_value(config)
+    database = normalized.get("database")
+    if isinstance(database, dict):
+        database = dict(database)
+        database.pop("path", None)
+        if database:
+            normalized["database"] = database
+        else:
+            normalized.pop("database", None)
+    return normalized
+
+
+def _runtime_chunkhound_seed_match_config(*, resolved_runtime_config: dict[str, Any]) -> dict[str, Any]:
+    effective = _deep_copy_json_value(resolved_runtime_config)
+    database = effective.get("database")
+    database = dict(database) if isinstance(database, dict) else {}
+    database["provider"] = "duckdb"
+    database["path"] = "<session-local>"
+    effective["database"] = database
+    return effective
+
+
+def _duckdb_storage_exists(db_path: Path) -> bool:
+    if db_path.is_file():
+        return True
+    if db_path.is_dir():
+        return any(child.is_file() for child in db_path.rglob("*"))
+    return False
+
+
+def discover_exact_repo_local_chunkhound_seed_candidate(
+    *,
+    pr: PullRequestRef,
+    resolved_runtime_config: dict[str, Any],
+    invocation_cwd: Path | None = None,
+) -> dict[str, Any]:
+    candidate: dict[str, Any] = {
+        "repo_root": None,
+        "config_path": None,
+        "db_path": None,
+        "acceptance_state": "absent",
+        "rejection_reason": None,
+    }
+
+    cwd_path = Path(invocation_cwd or Path.cwd()).resolve(strict=False)
+    try:
+        repo_root = Path(
+            _run_cmd(
+                ["git", "-C", str(cwd_path), "rev-parse", "--show-toplevel"],
+                check=True,
+            ).stdout.strip()
+        ).resolve(strict=False)
+    except Exception:
+        candidate["rejection_reason"] = "cwd_not_git_worktree"
+        return candidate
+
+    candidate["repo_root"] = str(repo_root)
+    candidate_config_path = (repo_root / ".chunkhound.json").resolve(strict=False)
+    if not candidate_config_path.is_file():
+        candidate["rejection_reason"] = "missing_repo_local_config"
+        return candidate
+    candidate["config_path"] = str(candidate_config_path)
+
+    try:
+        remote_url = _run_cmd(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "origin_remote_unavailable"
+        return candidate
+
+    remote_identity = _parse_git_remote_repo_identity(remote_url)
+    expected_identity = _canonical_repo_identity(host=pr.host, owner=pr.owner, repo=pr.repo)
+    if remote_identity is None:
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "origin_remote_unrecognized"
+        return candidate
+    if _canonical_repo_identity(
+        host=remote_identity[0],
+        owner=remote_identity[1],
+        repo=remote_identity[2],
+    ) != expected_identity:
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "repo_remote_mismatch"
+        return candidate
+
+    try:
+        candidate_config = json.loads(candidate_config_path.read_text(encoding="utf-8"))
+    except Exception:
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "invalid_candidate_config"
+        return candidate
+    if not isinstance(candidate_config, dict):
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "invalid_candidate_config"
+        return candidate
+
+    database = candidate_config.get("database")
+    if not isinstance(database, dict):
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "missing_candidate_database"
+        return candidate
+    provider = str(database.get("provider") or "").strip().lower()
+    if provider != "duckdb":
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "database_provider_mismatch"
+        return candidate
+
+    candidate_db_raw = str(database.get("path") or "").strip()
+    if not candidate_db_raw:
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "missing_candidate_db_path"
+        return candidate
+    candidate_db_path = Path(candidate_db_raw).expanduser()
+    if not candidate_db_path.is_absolute():
+        candidate_db_path = candidate_config_path.parent / candidate_db_path
+    candidate_db_path = candidate_db_path.resolve(strict=False)
+    candidate["db_path"] = str(candidate_db_path)
+
+    if not _is_relative_to(candidate_db_path, repo_root):
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "candidate_db_outside_repo_root"
+        return candidate
+    if not _duckdb_storage_exists(candidate_db_path):
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "candidate_db_missing"
+        return candidate
+
+    runtime_effective = _runtime_chunkhound_seed_match_config(
+        resolved_runtime_config=resolved_runtime_config
+    )
+    if _normalize_chunkhound_seed_match_config(candidate_config) != _normalize_chunkhound_seed_match_config(
+        runtime_effective
+    ):
+        candidate["acceptance_state"] = "rejected"
+        candidate["rejection_reason"] = "config_mismatch"
+        return candidate
+
+    candidate["acceptance_state"] = "accepted"
+    candidate["rejection_reason"] = None
+    return candidate
+
+
+def resolve_pr_review_chunkhound_seed_source(
+    *,
+    pr: PullRequestRef,
+    base_cache_meta: dict[str, Any] | None,
+    resolved_runtime_config: dict[str, Any],
+    invocation_cwd: Path | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    base_cache = base_cache_meta if isinstance(base_cache_meta, dict) else {}
+    base_db_raw = str((base_cache or {}).get("db_path") or "").strip()
+    base_cfg_raw = str((base_cache or {}).get("chunkhound_config_path") or "").strip()
+    base_db_path = Path(base_db_raw).resolve(strict=False) if base_db_raw else None
+    base_cfg_path = Path(base_cfg_raw).resolve(strict=False) if base_cfg_raw else None
+
+    candidate = discover_exact_repo_local_chunkhound_seed_candidate(
+        pr=pr,
+        resolved_runtime_config=resolved_runtime_config,
+        invocation_cwd=invocation_cwd,
+    )
+
+    seed_source: dict[str, Any] = {
+        "source_kind": "shared_base_cache",
+        "repo_root": candidate.get("repo_root"),
+        "db_path": str(base_db_path) if base_db_path is not None else None,
+        "config_path": str(base_cfg_path) if base_cfg_path is not None else None,
+        "acceptance_state": candidate.get("acceptance_state"),
+        "rejection_reason": candidate.get("rejection_reason"),
+        "candidate_db_path": candidate.get("db_path"),
+        "candidate_config_path": candidate.get("config_path"),
+    }
+
+    if candidate.get("acceptance_state") == "accepted":
+        candidate_db_path = Path(str(candidate.get("db_path") or "")).resolve(strict=False)
+        candidate_cfg_path = Path(str(candidate.get("config_path") or "")).resolve(strict=False)
+        seed_source["source_kind"] = "repo_local_duckdb"
+        seed_source["db_path"] = str(candidate_db_path)
+        seed_source["config_path"] = str(candidate_cfg_path)
+        return candidate_db_path, seed_source
+
+    return base_db_path, seed_source
+
+
 def _coerce_int(value: Any, *, default: int = 0) -> int:
     try:
         return int(value)
@@ -1110,10 +1396,14 @@ __all__ = [
     'cache_prime',
     'cache_status',
     'checkout_pr_in_repo',
+    'ChunkHoundPromptContract',
     'clone_seed_repo',
+    'chunkhound_prompt_contract_for_template',
+    'chunkhound_prompt_contracts',
     'compute_pr_stats',
     'copy_duckdb_files',
     'DEFAULT_BASE_CACHE_TTL_HOURS',
+    'discover_exact_repo_local_chunkhound_seed_candidate',
     'ensure_base_cache',
     'ensure_clean_git_worktree',
     'ensure_review_config',
@@ -1131,6 +1421,7 @@ __all__ = [
     'require_gh_auth',
     'resolve_prompt_profile',
     'resolve_pr_review_baseline_selection',
+    'resolve_pr_review_chunkhound_seed_source',
     'resolve_session_baseline_selection',
     'restore_session_chunkhound_db_from_baseline',
     'review_intelligence_prompt_vars',
