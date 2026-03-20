@@ -7070,11 +7070,17 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("OPENAI_API_KEY", readme)
         self.assertIn("the project checkout stays untouched", readme)
         self.assertIn("./selftest.sh", readme)
+        self.assertIn("fresh or partially configured environments", readme)
+        self.assertIn('fresh install or existing local setup to "review in progress"', readme)
+        self.assertIn("inspect the active local setup before creating a fresh one", readme)
+        self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", readme)
+        self.assertIn("Do not silently adopt it in this public contract.", readme)
+        self.assertIn("Codex and Claude executor paths need internet / network access", readme)
         self.assertLess(readme.index("## Quickstart"), readme.index("## What CURe Is For"))
         self.assertIn("Hard Rule", skill)
         self.assertIn("When To Use CURe", skill)
         self.assertIn("Primary Inputs", skill)
-        self.assertIn("Bootstrap From A Pristine Environment", skill)
+        self.assertIn("Bootstrap From A Fresh Or Existing Local Setup", skill)
         self.assertIn("What Success Looks Like", skill)
         self.assertIn("When To Stop And Ask", skill)
         self.assertIn("Canonical Agent Prompt", skill)
@@ -7099,6 +7105,11 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("If `VOYAGE_API_KEY` exists, `cure init` writes:", skill)
         self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:", skill)
         self.assertIn("If a required embedding secret is still missing", skill)
+        self.assertIn("fresh or partially configured environment with explicit readiness checks", skill)
+        self.assertIn("inspect the active local setup before creating fresh config files", skill)
+        self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", skill)
+        self.assertIn("Do not silently adopt it.", skill)
+        self.assertIn("Codex and Claude executor paths need internet / network access", skill)
         self.assertNotIn("pip install", readme)
 
     def test_skill_documents_proactive_secret_and_config_remediation(self) -> None:
@@ -7123,6 +7134,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("\"provider\": \"openai\"", skill)
         self.assertIn("\"model\": \"text-embedding-3-small\"", skill)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
+        self.assertIn("if repo-root `chunkhound.json` or `.chunkhound.json` exists, summarize it as a setup hint", skill)
+        self.assertIn("ask the operator whether it should be reused; do not silently adopt it", skill)
+        self.assertIn("the active executor path is Codex or Claude", skill)
+        self.assertIn("the required internet / network access for code-under-review context", skill)
 
     def test_docs_mark_no_index_as_advanced_opt_out(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -7152,6 +7167,20 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn("not an outage signal", text)
             self.assertIn("`search` or `code_research`", text)
             self.assertIn("Treat availability as proven only when a real", text)
+
+    def test_docs_reset_agent_local_setup_contract(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("pristine environment", readme)
+        self.assertNotIn('"nothing installed"', readme)
+        self.assertNotIn("pristine environment", skill)
+
+        for text in (readme, skill):
+            self.assertIn("chunkhound.json", text)
+            self.assertIn(".chunkhound.json", text)
+            self.assertIn("ask the operator whether it should be reused", text)
+            self.assertIn("Codex and Claude executor paths need internet / network access", text)
 
     def test_init_flow_writes_public_bootstrap_files(self) -> None:
         root = ROOT / ".tmp_test_cure_init"

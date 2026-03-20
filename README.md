@@ -4,7 +4,7 @@ CURe ("Code Under Review") is a CLI for running pull request reviews inside isol
 
 It is for two audiences:
 - human operators who want a repeatable way to hand PR review work to agents without letting them mutate the source checkout
-- agentic sessions that need a clear, reusable bootstrap contract from a pristine environment
+- agentic sessions that need a clear, reusable bootstrap contract for fresh or partially configured environments
 
 If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
 
@@ -31,7 +31,7 @@ If the operator asked to use CURe, the agent should bootstrap CURe and run `cure
 Use CURe when you want to:
 - review a GitHub PR from a disposable sandbox instead of the working repo
 - standardize how humans and agents start, observe, resume, and clean review runs
-- give an agent a single documented path from "nothing installed" to "review in progress"
+- give an agent a single documented path from fresh install or existing local setup to "review in progress"
 
 CURe is not for:
 - ad-hoc in-place repo review where the agent should work directly in the project checkout
@@ -42,7 +42,17 @@ CURe is not for:
 When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent should:
 1. Ensure the local environment has `git`, `curl`, and `ca-certificates`. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
 2. Install `uv` if it is missing.
-3. For disposable agent bootstrap, prefer a temp XDG root instead of editing `~/.config/cure` by hand:
+3. If CURe is already partially configured, inspect the active local setup before creating a fresh one:
+
+```text
+- the active `cure.toml`
+- the JSON file resolved from `[chunkhound].base_config_path`
+- repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
+```
+
+If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
+
+4. For disposable agent bootstrap, prefer a temp XDG root instead of editing `~/.config/cure` by hand:
 
 ```bash
 tmp_root="$(mktemp -d)"
@@ -51,7 +61,7 @@ export XDG_STATE_HOME="$tmp_root/state"
 export XDG_CACHE_HOME="$tmp_root/cache"
 ```
 
-4. Bootstrap CURe from the public package instead of cloning the repo:
+5. Bootstrap CURe from the public package instead of cloning the repo:
 
 ```bash
 uvx --from cureview cure init
@@ -66,16 +76,18 @@ That indexed ChunkHound-backed path is the default and recommended public review
 
 ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
 
-5. `cure init` writes the non-secret local config files if they are missing:
+Codex and Claude executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state.
+
+6. `cure init` writes the non-secret local config files if they are missing:
 
 ```text
 <resolved config dir>/cure.toml
 <resolved config dir>/chunkhound-base.json
 ```
 
-6. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues.
-7. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
-8. Otherwise, stop only after writing the exact local config path, the minimal snippet to add, the required env var name, and the rerun command.
+7. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues.
+8. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
+9. Otherwise, stop only after writing the exact local config path, the minimal snippet to add, the required env var name, and the rerun command.
 
 For public `github.com` PRs, `cure doctor --pr-url <PR_URL> --json` is the readiness gate for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those flows, and `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required for PR checkout.
 
@@ -316,6 +328,11 @@ Teams that already manage a local CURe checkout can keep using that as a seconda
 - refresh it with `git -C <CURE_SOURCE> pull --ff-only`
 - install it with `uv tool install /path/to/cure`
 - keep any project-specific wrappers or config beside that checkout
+
+If local CURe config already exists, inspect it before overwriting it:
+- check the active `cure.toml`
+- inspect the JSON resolved from `[chunkhound].base_config_path`
+- treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt
 
 Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
 

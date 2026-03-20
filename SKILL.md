@@ -20,7 +20,7 @@ If the operator asked to use CURe, do not perform a manual review outside CURe. 
 Use CURe when:
 - you need to review a GitHub PR from a sandbox
 - you need a stable start command and observable session state
-- you need to bootstrap from a pristine environment with explicit readiness checks
+- you need to bootstrap from a fresh or partially configured environment with explicit readiness checks
 
 ## Primary Inputs
 
@@ -40,7 +40,7 @@ Optional inputs:
 
 Do not require the operator to provide a local checkout path or a config path in the primary flow.
 
-## Bootstrap From A Pristine Environment
+## Bootstrap From A Fresh Or Existing Local Setup
 
 1. Ensure `git`, `curl`, and `ca-certificates` are present. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
 
@@ -56,7 +56,16 @@ Official install docs:
 https://docs.astral.sh/uv/getting-started/installation/
 ```
 
-3. Choose the package-first bootstrap path that matches the session.
+3. If CURe is already partially configured, inspect the active local setup before creating fresh config files.
+
+Check:
+- the active `cure.toml`
+- the JSON file resolved from `[chunkhound].base_config_path`
+- repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
+
+If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it.
+
+4. Choose the package-first bootstrap path that matches the session.
 
 Persistent human install:
 ```bash
@@ -90,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cur
 
 The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure init`, `cure install`, and `cure doctor` flow as the package path.
 
-4. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
+5. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
 
 Disposable bootstrap example:
 
@@ -110,7 +119,7 @@ cure init \
   --cache-root /tmp/cure-public/cache
 ```
 
-5. Run `cure init` before `cure install` or `cure doctor`.
+6. Run `cure init` before `cure install` or `cure doctor`.
 
 Human persistent flow:
 
@@ -154,7 +163,7 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 
 If the base JSON file is missing, `cure init` creates it with `{}` first, then layers the embedding config below when a supported key already exists in the environment.
 
-6. Auto-wire embeddings from the current environment when possible.
+7. Auto-wire embeddings from the current environment when possible.
 
 If `VOYAGE_API_KEY` exists, `cure init` writes:
 
@@ -180,7 +189,7 @@ If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:
 
 If the file already exists and you want to rewrite it, rerun `cure init --force`.
 
-7. Provision ChunkHound:
+8. Provision ChunkHound:
 
 ```bash
 cure install
@@ -188,7 +197,7 @@ cure install
 
 `cure install` provisions ChunkHound only.
 
-8. Confirm readiness:
+9. Confirm readiness:
 
 ```bash
 cure doctor --pr-url <PR_URL> --json
@@ -208,13 +217,15 @@ cure resume <session_id|PR_URL>
 
 ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
 
-9. If the environment is ready, start the review:
+Codex and Claude executor paths need internet / network access to obtain code-under-review context. If the sandbox blocks that access, ask the operator for help instead of pretending CURe can always bootstrap fully autonomously.
+
+10. If the environment is ready, start the review:
 
 ```bash
 cure pr <PR_URL> --if-reviewed new
 ```
 
-10. Observe progress:
+11. Observe progress:
 
 ```bash
 cure status <session_id|PR_URL> --json
@@ -250,6 +261,7 @@ When readiness still fails because a required secret is missing, inspect the act
 - the active `cure.toml`
 - the JSON file resolved from `[chunkhound].base_config_path`
 - for Jira-driven workflows, the active Jira CLI config at `~/.config/.jira/.config.yml` or the path from `JIRA_CONFIG_FILE`
+- if repo-root `chunkhound.json` or `.chunkhound.json` exists, summarize it as a setup hint and ask the operator whether it should be reused; do not silently adopt it
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
 - if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
@@ -263,6 +275,7 @@ Stop instead of guessing only after you have already created the non-secret conf
 - `cure doctor --pr-url <PR_URL> --json` still reports missing prerequisites
 - no supported embedding key is present in the environment
 - GitHub access or ChunkHound base config are unavailable in a way that `cure doctor --pr-url <PR_URL> --json` does not clear for the target
+- the active executor path is Codex or Claude and the environment cannot provide the required internet / network access for code-under-review context
 - Jira is unavailable for a Jira-driven workflow
 - the operator has not provided a truly missing project-specific fact that cannot be inferred from the local files
 
@@ -317,13 +330,17 @@ Required behavior:
 - Prefer the public package contract:
   - `uv tool install cureview` for persistent human setup
   - `uvx --from cureview cure ...` for disposable agent execution
+- If CURe config already exists, inspect the active `cure.toml` and the JSON resolved from `[chunkhound].base_config_path` before creating new config files.
+- Look for repo-root `chunkhound.json` and `.chunkhound.json` as ask-first setup hints and ask the operator before reusing them.
 - Use a temp XDG root or explicit `--config` / `--sandbox-root` / `--cache-root` overrides when the session should not touch the default `~/.config/cure` layout.
 - Run `cure init` before `cure install`.
 - If `VOYAGE_API_KEY` is present, let `cure init` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
+- If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 - Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
+- In constrained sandboxes, ask the operator for help instead of promising end-to-end zero-state bootstrap.
 - If a required embedding secret is still missing, provide the exact local remediation steps for secret placement and the rerun command, then stop.
 ```
