@@ -196,6 +196,16 @@ cure doctor --pr-url <PR_URL> --json
 
 Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [README.md](README.md#jira-cli): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
+That indexed ChunkHound-backed path is the default and recommended review workflow:
+
+```bash
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+cure resume <session_id|PR_URL>
+```
+
+`cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
+
 9. If the environment is ready, start the review:
 
 ```bash

@@ -60,6 +60,10 @@ uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
 
+That indexed ChunkHound-backed path is the default and recommended public review workflow. Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.
+
+`cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
+
 5. `cure init` writes the non-secret local config files if they are missing:
 
 ```text
@@ -357,6 +361,14 @@ grounding_mode = "strict"
 If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.
 
 ## Core Commands
+
+Recommended indexed review loop:
+
+```bash
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+cure resume <session_id|PR_URL>
+```
 
 Initialize non-secret bootstrap files:
 

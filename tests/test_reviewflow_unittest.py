@@ -6210,6 +6210,20 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertTrue(args9.yes)
         self.assertTrue(args9.json_output)
 
+    def test_parser_help_marks_pr_no_index_as_advanced_and_hides_resume_no_index(self) -> None:
+        parser = rf.build_parser()
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        pr_help = subparsers.choices["pr"].format_help()
+        resume_help = subparsers.choices["resume"].format_help()
+
+        self.assertIn("--no-index", pr_help)
+        self.assertIn("Advanced opt-out for custom prompt flows", pr_help)
+        self.assertRegex(pr_help, r"not\s+recommended")
+        self.assertNotIn("--no-index", resume_help)
+
+        resume_args = parser.parse_args(["resume", "session-123", "--no-index"])
+        self.assertTrue(resume_args.no_index)
+
     def test_parser_accepts_runtime_overrides_before_and_after_subcommand(self) -> None:
         p = rf.build_parser()
         args = p.parse_args(["--config", "/tmp/reviewflow.toml", "doctor"])
@@ -6997,6 +7011,23 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("\"provider\": \"openai\"", skill)
         self.assertIn("\"model\": \"text-embedding-3-small\"", skill)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
+
+    def test_docs_mark_no_index_as_advanced_opt_out(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("That indexed ChunkHound-backed path is the default and recommended public review workflow.", readme)
+        self.assertIn("Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.", readme)
+        self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", readme)
+        self.assertIn("It is not the normal or recommended path.", readme)
+        self.assertLess(readme.index("cure doctor --pr-url <PR_URL> --json"), readme.index("cure pr <PR_URL> --if-reviewed new"))
+        self.assertLess(readme.index("cure pr <PR_URL> --if-reviewed new"), readme.index("cure resume <session_id|PR_URL>"))
+
+        self.assertIn("That indexed ChunkHound-backed path is the default and recommended review workflow:", skill)
+        self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", skill)
+        self.assertIn("It is not the normal or recommended path.", skill)
+        self.assertLess(skill.index("cure doctor --pr-url <PR_URL> --json"), skill.index("cure pr <PR_URL> --if-reviewed new"))
+        self.assertLess(skill.index("cure pr <PR_URL> --if-reviewed new"), skill.index("cure resume <session_id|PR_URL>"))
 
     def test_init_flow_writes_public_bootstrap_files(self) -> None:
         root = ROOT / ".tmp_test_cure_init"

@@ -10868,7 +10868,11 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
     mpg.add_argument("--no-multipass", dest="multipass", action="store_false", default=None, help="Disable multipass review")
     prp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
-    prp.add_argument("--no-index", action="store_true", help="Skip ChunkHound indexing")
+    prp.add_argument(
+        "--no-index",
+        action="store_true",
+        help="Advanced opt-out for custom prompt flows: skip ChunkHound indexing and built-in prompts (not recommended)",
+    )
     prp.add_argument("--no-review", action="store_true", help="Skip running codex review")
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     prp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
@@ -10931,7 +10935,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help=codex_help,
     )
     rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
-    rp.add_argument("--no-index", action="store_true", help="Disable ChunkHound MCP for resume")
+    rp.add_argument("--no-index", action="store_true", help=argparse.SUPPRESS)
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     rp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
