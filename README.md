@@ -22,7 +22,9 @@ Example:
 use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220
 ```
 
-That should be enough to start the CURe system. The operator should not need to provide a local checkout path, a config path, or a handwritten bootstrap recipe in the primary flow.
+That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended. It tells the agent to bootstrap CURe, inspect any existing local setup, and keep the review inside `cure` rather than falling back to a manual review.
+
+The operator should not need to provide a local checkout path, a config path, or a handwritten bootstrap recipe in the primary flow. If the sandbox still lacks required prerequisites such as network access or local secrets, the agent should surface the exact blocker and ask the operator for help instead of pretending CURe always self-bootstraps from zero state.
 
 If the operator asked to use CURe, the agent should bootstrap CURe and run `cure`. It should not do a manual review outside CURe.
 
