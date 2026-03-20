@@ -5140,16 +5140,22 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_review_intelligence_preflight_skips_when_jira_is_not_in_play(self) -> None:
         cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use GitHub only.")
-        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
-            rf, "active_output", return_value=None
-        ):
-            rf._run_review_intelligence_preflight(
-                repo_dir=Path("/tmp/repo"),
-                env={},
-                runtime_policy={"staged_paths": {}},
-                review_intelligence_cfg=cfg,
-                stream=False,
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir()
+            helper = repo_dir / "rf-jira"
+            helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            helper.chmod(0o755)
+            with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
+                rf, "active_output", return_value=None
+            ):
+                rf._run_review_intelligence_preflight(
+                    repo_dir=repo_dir,
+                    env={},
+                    runtime_policy={"staged_paths": {"rf_jira": str(helper)}},
+                    review_intelligence_cfg=cfg,
+                    stream=False,
+                )
         run_cmd.assert_not_called()
 
     def test_review_intelligence_preflight_fails_fast_when_jira_is_required_without_config(self) -> None:

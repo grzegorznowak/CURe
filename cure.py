@@ -5091,7 +5091,8 @@ def _run_review_intelligence_preflight(
     staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
     rf_jira_raw = str((staged_paths or {}).get("rf_jira") or "").strip()
     jira_cfg = str(env.get("JIRA_CONFIG_FILE") or "").strip()
-    if not (jira_cfg or rf_jira_raw or _review_intelligence_requires_jira(review_intelligence_cfg)):
+    jira_required = bool(jira_cfg or _review_intelligence_requires_jira(review_intelligence_cfg))
+    if not jira_required:
         return
     if not jira_cfg:
         raise ReviewflowError(
