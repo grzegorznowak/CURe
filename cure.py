@@ -5573,6 +5573,36 @@ def _run_review_intelligence_preflight(
         )
 
 
+def _enforce_codex_chunkhound_tool_proof(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    provider: str,
+    review_stage: str,
+    prompt_template_name: str | None,
+    adapter_meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    template_name = str(prompt_template_name or "").strip()
+    if not template_name:
+        return None
+    if chunkhound_prompt_contract_for_template(template_name) is None:
+        return None
+    report = validate_and_record_codex_chunkhound_tool_proof(
+        meta=meta,
+        work_dir=work_dir,
+        provider=provider,
+        review_stage=review_stage,
+        prompt_template_name=template_name,
+        adapter_meta=adapter_meta,
+    )
+    if report is None or bool(report.get("valid")):
+        return report
+    label = review_stage.replace("_", " ")
+    raise ReviewflowError(
+        f"ChunkHound tool proof failed for {label}: {report.get('failure_reason') or 'unknown reason'}"
+    )
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -6312,6 +6342,15 @@ def _pr_flow_impl(
                         plan_runs[-1]["llm_session_id"] = plan_result.resume.session_id
                         plan_runs[-1]["llm_provider"] = plan_result.resume.provider
                         progress.flush()
+                    _enforce_codex_chunkhound_tool_proof(
+                        meta=progress.meta,
+                        work_dir=work_dir,
+                        provider=str(llm_resolved.get("provider") or ""),
+                        review_stage="multipass_plan",
+                        prompt_template_name=templates["plan"],
+                        adapter_meta=plan_result.adapter_meta,
+                    )
+                    progress.flush()
 
                 plan_text = plan_md_path.read_text(encoding="utf-8") if plan_md_path.is_file() else ""
                 try:
@@ -6445,6 +6484,15 @@ def _pr_flow_impl(
                                     step_runs[-1]["llm_session_id"] = step_result.resume.session_id
                                     step_runs[-1]["llm_provider"] = step_result.resume.provider
                                 progress.flush()
+                                _enforce_codex_chunkhound_tool_proof(
+                                    meta=progress.meta,
+                                    work_dir=work_dir,
+                                    provider=str(llm_resolved.get("provider") or ""),
+                                    review_stage="multipass_step",
+                                    prompt_template_name=templates["step"],
+                                    adapter_meta=step_result.adapter_meta,
+                                )
+                                progress.flush()
                                 _, step_validation = _validate_or_reuse_step_artifact(
                                     meta=progress.meta,
                                     work_dir=work_dir,
@@ -6541,6 +6589,15 @@ def _pr_flow_impl(
                                 else None
                             )
                             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                        _enforce_codex_chunkhound_tool_proof(
+                            meta=progress.meta,
+                            work_dir=work_dir,
+                            provider=str(llm_resolved.get("provider") or ""),
+                            review_stage="multipass_synth",
+                            prompt_template_name=templates["synth"],
+                            adapter_meta=synth_result.adapter_meta,
+                        )
+                        progress.flush()
                         _, synth_validation = _validate_or_reuse_synth_artifact(
                             meta=progress.meta,
                             work_dir=work_dir,
@@ -6643,6 +6700,14 @@ def _pr_flow_impl(
                             else None
                         )
                         record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                    _enforce_codex_chunkhound_tool_proof(
+                        meta=progress.meta,
+                        work_dir=work_dir,
+                        provider=str(llm_resolved.get("provider") or ""),
+                        review_stage="singlepass_review",
+                        prompt_template_name=profile_template_name if args.prompt is None and args.prompt_file is None else None,
+                        adapter_meta=review_result.adapter_meta,
+                    )
                     progress.flush()
 
         if review_md_path.is_file() and (
@@ -7106,6 +7171,14 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                _enforce_codex_chunkhound_tool_proof(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    provider=str(llm_resolved.get("provider") or ""),
+                    review_stage="multipass_plan",
+                    prompt_template_name=templates["plan"],
+                    adapter_meta=plan_result.adapter_meta,
+                )
                 progress.flush()
             plan_text = plan_md_path.read_text(encoding="utf-8") if plan_md_path.is_file() else ""
             plan = parse_multipass_plan_json(plan_text)
@@ -7239,6 +7312,14 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                _enforce_codex_chunkhound_tool_proof(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    provider=str(llm_resolved.get("provider") or ""),
+                    review_stage="multipass_step",
+                    prompt_template_name=templates["step"],
+                    adapter_meta=step_result.adapter_meta,
+                )
                 progress.flush()
                 _, step_validation = _validate_or_reuse_step_artifact(
                     meta=progress.meta,
@@ -7329,6 +7410,14 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                _enforce_codex_chunkhound_tool_proof(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    provider=str(llm_resolved.get("provider") or ""),
+                    review_stage="multipass_synth",
+                    prompt_template_name=templates["synth"],
+                    adapter_meta=synth_result.adapter_meta,
+                )
                 progress.flush()
                 _, synth_validation = _validate_or_reuse_synth_artifact(
                     meta=progress.meta,
@@ -7693,6 +7782,17 @@ def _followup_flow_impl(
                 else None
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
+        try:
+            _enforce_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider=str(llm_resolved.get("provider") or ""),
+                review_stage="followup",
+                prompt_template_name=followup_template_name,
+                adapter_meta=followup_result.adapter_meta,
+            )
+        finally:
+            write_redacted_json(meta_path, meta)
 
         verdicts = extract_review_verdicts_from_markdown(followup_md_path.read_text(encoding="utf-8"))
         followup_entry: dict[str, Any] = {
@@ -10715,6 +10815,7 @@ from cure_runtime import (
 )
 from cure_flows import (
     build_abort_review_markdown,
+    chunkhound_prompt_contract_for_template,
     compute_pr_stats,
     followup_prompt_template_name_for_profile,
     multipass_prompt_template_names,
@@ -10726,6 +10827,8 @@ from cure_flows import (
     resolve_prompt_profile,
     restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
+    validate_and_record_codex_chunkhound_tool_proof,
+    validate_codex_chunkhound_tool_proof,
 )
 from cure_llm import (
     CodexResumeInfo,

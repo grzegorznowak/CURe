@@ -11179,7 +11179,145 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             cfg.unlink(missing_ok=True)
 
 
-class _CodexToolProofFlowTests:
+class ChunkHoundToolProofValidationTests(unittest.TestCase):
+    def _write_codex_events(self, *, root: Path, tool_names: list[str]) -> dict[str, object]:
+        logs_dir = root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        events_path = logs_dir / "codex.events.jsonl"
+        start = events_path.stat().st_size if events_path.exists() else 0
+        events: list[str] = []
+        if not tool_names:
+            events.append(json.dumps({"type": "thread.started", "thread_id": "tool-proof-test"}))
+        for tool_name in tool_names:
+            events.append(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "mcp_tool_call",
+                            "server": "chunkhound",
+                            "tool_name": tool_name,
+                        },
+                    }
+                )
+            )
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(events) + "\n")
+        end = events_path.stat().st_size
+        return {
+            "codex_events_path": str(events_path),
+            "codex_events_start_offset": start,
+            "codex_events_end_offset": end,
+        }
+
+    def test_validate_and_record_chunkhound_tool_proof_persists_report_and_meta(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_tool_proof_validation"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_codex_events(
+                    root=root,
+                    tool_names=["search", "list_mcp_resources", "code_research"],
+                ),
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["ignored_discovery_calls"], ["list_mcp_resources"])
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual(persisted["runs"][0]["review_stage"], "singlepass_review")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_and_record_chunkhound_tool_proof_latest_valid_overrides_prior_failure(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_tool_proof_recovery"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            first = rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_codex_events(
+                    root=root,
+                    tool_names=["list_mcp_resources"],
+                ),
+            )
+            second = rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_codex_events(
+                    root=root,
+                    tool_names=["search", "code_research"],
+                ),
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            assert first is not None
+            assert second is not None
+            self.assertFalse(first["valid"])
+            self.assertTrue(second["valid"])
+            self.assertTrue(persisted["valid"])
+            self.assertEqual(len(persisted["runs"]), 2)
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["latest_run_valid"])
+            self.assertEqual(meta["chunkhound"]["tool_validation"]["run_count"], 2)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_ignores_discovery_only_runs(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_tool_proof_discovery_only"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_codex_events(
+                    root=root,
+                    tool_names=["list_mcp_resources", "list_mcp_resource_templates"],
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(
+                report["ignored_discovery_calls"],
+                ["list_mcp_resources", "list_mcp_resource_templates"],
+            )
+            self.assertIn("search", str(report["failure_reason"]))
+            self.assertIn("code_research", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class CodexToolProofFlowTests(unittest.TestCase):
     def _fake_run_cmd(self, *, seed: Path) -> object:
         class _Result:
             def __init__(self, stdout: str = "") -> None:
@@ -11714,6 +11852,167 @@ class _CodexToolProofFlowTests:
             self.assertEqual(rc, 0)
             self.assertEqual(len(refreshed["followups"]), 1)
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_followup_flow_codex_tool_proof_failure_persists_meta_before_raise(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_followup_failure"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "prompt": {"profile_resolved": "normal"},
+                "llm": {"provider": "codex", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:4] == ["git", "-C", str(repo_dir), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd and cmd[0] == "chunkhound":
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(
+                    work_dir=work_dir,
+                    tool_names=["list_mcp_resources"],
+                )
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            rf.ReviewIntelligenceConfig(
+                                tool_prompt_fragment="Use GitHub MCP first.",
+                                policy_mode="cure_first_unrestricted",
+                            ),
+                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "codex", "preset": "test-codex"},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                with self.assertRaisesRegex(rf.ReviewflowError, "ChunkHound tool proof failed for followup"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertFalse(refreshed["chunkhound"]["tool_validation"]["valid"])
+            self.assertFalse(refreshed["chunkhound"]["tool_validation"]["latest_run_valid"])
+            self.assertEqual(refreshed["chunkhound"]["tool_validation"]["latest_review_stage"], "followup")
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
         finally:
             shutil.rmtree(root, ignore_errors=True)

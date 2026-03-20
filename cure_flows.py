@@ -270,6 +270,283 @@ def chunkhound_prompt_contract_for_template(name: str) -> ChunkHoundPromptContra
     return _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS.get(str(name).strip())
 
 
+_CHUNKHOUND_PROOF_SUCCESS_STATUSES = {"completed", "ok", "passed", "success", "succeeded"}
+_CHUNKHOUND_PROOF_FAILURE_STATUSES = {
+    "cancelled",
+    "canceled",
+    "error",
+    "failed",
+    "failure",
+    "timed_out",
+    "timeout",
+}
+_CHUNKHOUND_PROOF_REQUIRED_TOOLS = {"search", "code_research"}
+_CHUNKHOUND_PROOF_DISCOVERY_TOOLS = {
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+}
+
+
+def _first_nonempty_string(*values: object) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_chunkhound_tool_name(raw: object) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("chunkhound."):
+        text = text.split(".", 1)[1]
+    return text
+
+
+def _chunkhound_tool_targets_expected_server(*, item: dict[str, Any], raw_tool_name: str) -> bool:
+    raw = str(raw_tool_name or "").strip().lower()
+    server = _first_nonempty_string(
+        item.get("server"),
+        item.get("server_name"),
+        item.get("mcp_server"),
+    ).lower()
+    if raw.startswith("chunkhound."):
+        return True
+    if server and server != "chunkhound":
+        return False
+    return True
+
+
+def _extract_tool_name(item: dict[str, Any]) -> str:
+    tool = item.get("tool")
+    tool = tool if isinstance(tool, dict) else {}
+    call = item.get("call")
+    call = call if isinstance(call, dict) else {}
+    return _first_nonempty_string(
+        item.get("tool_name"),
+        item.get("name"),
+        item.get("tool"),
+        tool.get("name"),
+        call.get("tool_name"),
+        call.get("name"),
+    )
+
+
+def _extract_tool_status(event_type: str, item: dict[str, Any]) -> bool | None:
+    result = item.get("result")
+    result = result if isinstance(result, dict) else {}
+    outcome = item.get("outcome")
+    outcome = outcome if isinstance(outcome, dict) else {}
+    for value in (
+        item.get("success"),
+        item.get("ok"),
+        result.get("success"),
+        result.get("ok"),
+        outcome.get("success"),
+        outcome.get("ok"),
+    ):
+        if isinstance(value, bool):
+            return value
+    for raw_status in (
+        item.get("status"),
+        result.get("status"),
+        outcome.get("status"),
+    ):
+        status = str(raw_status or "").strip().lower()
+        if not status:
+            continue
+        if status in _CHUNKHOUND_PROOF_SUCCESS_STATUSES:
+            return True
+        if status in _CHUNKHOUND_PROOF_FAILURE_STATUSES:
+            return False
+    normalized_event_type = str(event_type or "").strip().lower()
+    if normalized_event_type == "item.completed":
+        return True
+    if normalized_event_type in {"item.failed", "item.error"}:
+        return False
+    return None
+
+
+def _iter_codex_tool_call_events(text: str) -> list[tuple[str, dict[str, Any]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(payload.get("type") or "").strip()
+        item = payload.get("item")
+        item = item if isinstance(item, dict) else {}
+        if str(item.get("type") or "").strip() == "mcp_tool_call":
+            calls.append((event_type, item))
+            continue
+        if str(payload.get("type") or "").strip() == "mcp_tool_call":
+            calls.append((event_type, payload))
+    return calls
+
+
+def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset: int | None) -> str:
+    with path.open("rb") as fh:
+        if isinstance(start_offset, int) and start_offset > 0:
+            fh.seek(start_offset)
+        if isinstance(start_offset, int) and isinstance(end_offset, int) and end_offset >= start_offset:
+            payload = fh.read(end_offset - start_offset)
+        else:
+            payload = fh.read()
+    return payload.decode("utf-8", errors="replace")
+
+
+def validate_codex_chunkhound_tool_proof(
+    *,
+    provider: str,
+    review_stage: str,
+    prompt_template_name: str,
+    adapter_meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if str(provider or "").strip().lower() != "codex":
+        return None
+    contract = chunkhound_prompt_contract_for_template(prompt_template_name)
+    if contract is None:
+        return None
+
+    required_tools: list[str] = []
+    if contract.search_requirement == "required":
+        required_tools.append("search")
+    if contract.code_research_requirement == "required":
+        required_tools.append("code_research")
+
+    meta = adapter_meta if isinstance(adapter_meta, dict) else {}
+    raw_events_path = str(meta.get("codex_events_path") or "").strip()
+    raw_start = meta.get("codex_events_start_offset")
+    raw_end = meta.get("codex_events_end_offset")
+    start_offset = int(raw_start) if isinstance(raw_start, int) else None
+    end_offset = int(raw_end) if isinstance(raw_end, int) else None
+
+    report: dict[str, Any] = {
+        "provider": "codex",
+        "review_stage": str(review_stage or "").strip(),
+        "prompt_template_name": str(prompt_template_name or "").strip(),
+        "required_tools": required_tools,
+        "observed_successful_calls": [],
+        "ignored_discovery_calls": [],
+        "valid": False,
+        "failure_reason": None,
+        "codex_events_path": raw_events_path or None,
+        "codex_events_start_offset": start_offset,
+        "codex_events_end_offset": end_offset,
+    }
+
+    if not raw_events_path:
+        report["failure_reason"] = "missing Codex events path"
+        return report
+
+    events_path = Path(raw_events_path).resolve()
+    if not events_path.is_file():
+        report["failure_reason"] = f"Codex events log not found: {events_path}"
+        return report
+
+    try:
+        events_text = _read_codex_events_slice(
+            path=events_path,
+            start_offset=start_offset,
+            end_offset=end_offset,
+        )
+    except OSError as e:
+        report["failure_reason"] = f"failed to read Codex events log: {e}"
+        return report
+
+    observed_successful_calls: list[str] = []
+    ignored_discovery_calls: list[str] = []
+    for event_type, item in _iter_codex_tool_call_events(events_text):
+        raw_tool_name = _extract_tool_name(item)
+        normalized_tool_name = _normalize_chunkhound_tool_name(raw_tool_name)
+        if not normalized_tool_name:
+            continue
+        if not _chunkhound_tool_targets_expected_server(item=item, raw_tool_name=raw_tool_name):
+            continue
+        if normalized_tool_name in _CHUNKHOUND_PROOF_DISCOVERY_TOOLS or normalized_tool_name.startswith(
+            "list_mcp_"
+        ):
+            if normalized_tool_name not in ignored_discovery_calls:
+                ignored_discovery_calls.append(normalized_tool_name)
+            continue
+        if normalized_tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+            continue
+        if _extract_tool_status(event_type, item) is True and normalized_tool_name not in observed_successful_calls:
+            observed_successful_calls.append(normalized_tool_name)
+
+    report["observed_successful_calls"] = observed_successful_calls
+    report["ignored_discovery_calls"] = ignored_discovery_calls
+    missing_tools = [tool for tool in required_tools if tool not in observed_successful_calls]
+    if missing_tools:
+        report["failure_reason"] = "missing successful ChunkHound tool call(s): " + ", ".join(
+            missing_tools
+        )
+        return report
+
+    report["valid"] = True
+    return report
+
+
+def validate_and_record_codex_chunkhound_tool_proof(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    provider: str,
+    review_stage: str,
+    prompt_template_name: str,
+    adapter_meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    run_report = validate_codex_chunkhound_tool_proof(
+        provider=provider,
+        review_stage=review_stage,
+        prompt_template_name=prompt_template_name,
+        adapter_meta=adapter_meta,
+    )
+    if run_report is None:
+        return None
+
+    report_path = (work_dir / "chunkhound_tool_validation.json").resolve()
+    existing_runs: list[dict[str, Any]] = []
+    if report_path.is_file():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        runs = payload.get("runs")
+        if isinstance(runs, list):
+            existing_runs = [item for item in runs if isinstance(item, dict)]
+    runs = [*existing_runs, run_report]
+    report_payload = {
+        "schema_version": 1,
+        "updated_at": _utc_now_iso(),
+        "provider": "codex",
+        "valid": bool(run_report.get("valid")),
+        "runs": runs,
+    }
+    write_json(report_path, report_payload)
+
+    chunkhound_meta = meta.get("chunkhound")
+    if not isinstance(chunkhound_meta, dict):
+        chunkhound_meta = {}
+        meta["chunkhound"] = chunkhound_meta
+    chunkhound_meta["tool_validation"] = {
+        "provider": "codex",
+        "path": str(report_path),
+        "valid": bool(report_payload["valid"]),
+        "run_count": len(runs),
+        "latest_review_stage": run_report["review_stage"],
+        "latest_run_valid": bool(run_report["valid"]),
+        "failure_reason": run_report.get("failure_reason"),
+    }
+    return run_report
+
+
 
 def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, str]:
     return {"REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(cfg)}
@@ -1484,5 +1761,7 @@ __all__ = [
     'review_intelligence_prompt_vars',
     'chunkhound_env',
     'same_device',
+    'validate_and_record_codex_chunkhound_tool_proof',
+    'validate_codex_chunkhound_tool_proof',
     'write_pr_context_file',
 ]
