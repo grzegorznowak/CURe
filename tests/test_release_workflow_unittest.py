@@ -75,6 +75,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("## First Public Release Prove-Out", release_doc)
         self.assertIn("uv build --out-dir dist-public-proveout --clear", release_doc)
         self.assertIn("verify there is no installed `reviewflow` executable", release_doc)
+        self.assertIn('verify `python -c "import reviewflow"` fails', release_doc)
         self.assertIn("uvx --from cureview cure init", release_doc)
         self.assertIn("cure doctor --pr-url <public github PR> --json", release_doc)
         self.assertIn("## Evidence Capture", release_doc)

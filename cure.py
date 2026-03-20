@@ -30,11 +30,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
 
-from cure_branding import (
-    DEPRECATED_ALIAS_WARNING,
-    DEPRECATED_CLI_ALIAS,
-    PRIMARY_CLI_COMMAND,
-)
+from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from cure_output import (
     ReviewflowOutput,
@@ -60,9 +56,6 @@ from paths import (
     default_codex_base_config_path,
     default_reviewflow_config_path,
     default_sandbox_root,
-    legacy_default_cache_root,
-    legacy_default_reviewflow_config_path,
-    legacy_default_sandbox_root,
     repo_id_for_gh,
     real_user_home_dir,
     safe_ref_slug,
@@ -74,6 +67,14 @@ from ui import UiSnapshot, Verbosity, build_dashboard_lines
 
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
+LEGACY_ENV_RENAMES = {
+    "REVIEWFLOW_AGENT_RUNTIME_PROFILE": "CURE_AGENT_RUNTIME_PROFILE",
+    "REVIEWFLOW_CACHE_ROOT": "CURE_CACHE_ROOT",
+    "REVIEWFLOW_CODEX_CONFIG": "CURE_CODEX_CONFIG",
+    "REVIEWFLOW_CONFIG": "CURE_CONFIG",
+    "REVIEWFLOW_SANDBOX_ROOT": "CURE_SANDBOX_ROOT",
+    "REVIEWFLOW_WORK_DIR": "CURE_WORK_DIR",
+}
 
 
 def _set_disabled_reviewflow_config_path(path: Path | None) -> None:
@@ -268,19 +269,18 @@ def _select_path_with_source(
 
 
 def _select_env_path_with_source(*, env_names: tuple[str, ...], base_dir: Path | None = None) -> tuple[Path, str] | None:
-    for idx, env_name in enumerate(env_names):
-        env_path = _resolve_optional_path(os.environ.get(env_name), base_dir=base_dir)
-        if env_path is not None:
-            return env_path, ("env" if idx == 0 else "legacy-env")
+    if not env_names:
+        return None
+    primary_env = env_names[0]
+    for legacy_env in env_names[1:]:
+        legacy_value = str(os.environ.get(legacy_env) or "").strip()
+        if legacy_value:
+            renamed_to = LEGACY_ENV_RENAMES.get(legacy_env, primary_env)
+            raise ReviewflowError(f"{legacy_env} is no longer supported. Use {renamed_to} instead.")
+    env_path = _resolve_optional_path(os.environ.get(primary_env), base_dir=base_dir)
+    if env_path is not None:
+        return env_path, "env"
     return None
-
-
-def _select_default_with_legacy_fallback(*, default_value: Path, legacy_default_value: Path) -> tuple[Path, str]:
-    default_path = default_value.resolve(strict=False)
-    legacy_path = legacy_default_value.resolve(strict=False)
-    if not default_path.exists() and legacy_path.exists():
-        return legacy_path, "legacy-default"
-    return default_path, "default"
 
 
 def load_reviewflow_paths_defaults(
@@ -322,10 +322,7 @@ def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str,
         if env_path is not None:
             config_path, config_source = env_path
         else:
-            config_path, config_source = _select_default_with_legacy_fallback(
-                default_value=default_reviewflow_config_path(),
-                legacy_default_value=legacy_default_reviewflow_config_path(),
-            )
+            config_path, config_source = default_reviewflow_config_path(), "default"
     config_enabled = not bool(getattr(args, "no_config", False))
     _set_disabled_reviewflow_config_path(None if config_enabled else config_path)
     return config_path, config_source, config_enabled
@@ -343,10 +340,7 @@ def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tup
         elif path_defaults.get("sandbox_root") is not None:
             sandbox_root, sandbox_root_source = path_defaults["sandbox_root"], "config"
         else:
-            sandbox_root, sandbox_root_source = _select_default_with_legacy_fallback(
-                default_value=default_sandbox_root(),
-                legacy_default_value=legacy_default_sandbox_root(),
-            )
+            sandbox_root, sandbox_root_source = default_sandbox_root(), "default"
     cache_root = _resolve_optional_path(getattr(args, "cache_root", None))
     if cache_root is not None:
         cache_root_source = "cli"
@@ -357,10 +351,7 @@ def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tup
         elif path_defaults.get("cache_root") is not None:
             cache_root, cache_root_source = path_defaults["cache_root"], "config"
         else:
-            cache_root, cache_root_source = _select_default_with_legacy_fallback(
-                default_value=default_cache_root(),
-                legacy_default_value=legacy_default_cache_root(),
-            )
+            cache_root, cache_root_source = default_cache_root(), "default"
     return ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root), sandbox_root_source, cache_root_source
 
 
@@ -378,6 +369,9 @@ def resolve_codex_base_config_path(args: argparse.Namespace, *, config_path: Pat
 
 
 def resolve_runtime(args: argparse.Namespace) -> ReviewflowRuntime:
+    legacy_work_dir = str(os.environ.get("REVIEWFLOW_WORK_DIR") or "").strip()
+    if legacy_work_dir:
+        raise ReviewflowError("REVIEWFLOW_WORK_DIR is no longer supported. Use CURE_WORK_DIR instead.")
     config_path, config_source, config_enabled = resolve_reviewflow_config_path(args)
     paths, sandbox_root_source, cache_root_source = resolve_runtime_paths(args, config_path=config_path)
     codex_base_config_path, codex_base_config_source = resolve_codex_base_config_path(
@@ -1011,9 +1005,12 @@ def resolve_agent_runtime_profile(
     if cli_profile is not None:
         return cli_profile, "cli", cfg, meta
 
-    env_profile = _normalize_agent_runtime_profile(
-        os.environ.get("REVIEWFLOW_AGENT_RUNTIME_PROFILE"), source="env"
-    )
+    legacy_env_profile = str(os.environ.get("REVIEWFLOW_AGENT_RUNTIME_PROFILE") or "").strip()
+    if legacy_env_profile:
+        raise ReviewflowError(
+            "REVIEWFLOW_AGENT_RUNTIME_PROFILE is no longer supported. Use CURE_AGENT_RUNTIME_PROFILE instead."
+        )
+    env_profile = _normalize_agent_runtime_profile(os.environ.get("CURE_AGENT_RUNTIME_PROFILE"), source="env")
     if env_profile is not None:
         return env_profile, "env", cfg, meta
 
@@ -1085,7 +1082,7 @@ def resolve_llm_config(
     builtin_presets = builtin_llm_presets()
 
     selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
-    preset_source = "cli" if str(cli_preset or "").strip() else "reviewflow.toml"
+    preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
     if selected_name:
         if selected_name in presets:
             base_preset = dict(presets[selected_name])
@@ -1355,7 +1352,7 @@ def resolve_codex_flags(
             return cli.strip(), "cli"
         rf = rf_defaults.get(key)
         if rf:
-            return rf, "reviewflow.toml"
+            return rf, "cure.toml"
         if base and str(base).strip():
             return str(base).strip(), "base_config"
         return None, "unset"
@@ -1818,7 +1815,7 @@ def build_claude_resume_command(
             "GH_CONFIG_DIR",
             "JIRA_CONFIG_FILE",
             "NETRC",
-            "REVIEWFLOW_WORK_DIR",
+            "CURE_WORK_DIR",
         ),
     )
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
@@ -2154,8 +2151,8 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     if netrc:
         env["NETRC"] = str(netrc)
         staged_paths["netrc"] = str(netrc)
-    env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-    staged_paths["reviewflow_work_dir"] = str(work_dir)
+    env["CURE_WORK_DIR"] = str(work_dir)
+    staged_paths["cure_work_dir"] = str(work_dir)
     rf_jira = write_rf_jira(repo_dir=repo_dir)
     staged_paths["rf_jira"] = str(rf_jira)
     return env, staged_paths
@@ -2350,7 +2347,7 @@ def prepare_review_agent_runtime(
                 claude_dir / "mcp.json",
                 {
                     "mcpServers": {
-                        "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                        "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
                             sandbox_repo_dir=repo_dir,
                             chunkhound_config_path=chunkhound_config_path,
                             chunkhound_db_path=chunkhound_db_path,
@@ -2404,7 +2401,7 @@ def prepare_review_agent_runtime(
         system_settings: dict[str, Any] = {}
         if enable_mcp:
             system_settings["mcpServers"] = {
-                "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
                     sandbox_repo_dir=repo_dir,
                     chunkhound_config_path=chunkhound_config_path,
                     chunkhound_db_path=chunkhound_db_path,
@@ -2412,7 +2409,7 @@ def prepare_review_agent_runtime(
                     trust=False,
                 )
             }
-            system_settings["mcp"] = {"allowed": ["reviewflow-chunkhound"]}
+            system_settings["mcp"] = {"allowed": ["cure-chunkhound"]}
         system_settings_path = _write_json_file(work_dir / "gemini" / "system-settings.json", system_settings)
         env["GEMINI_CLI_HOME"] = str(home_root)
         env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(system_settings_path)
@@ -2790,7 +2787,7 @@ def build_codex_resume_command(
         "GH_CONFIG_DIR",
         "JIRA_CONFIG_FILE",
         "NETRC",
-        "REVIEWFLOW_WORK_DIR",
+        "CURE_WORK_DIR",
     ):
         value = str(env.get(key) or "").strip()
         if value:
@@ -3314,7 +3311,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
             path = path.resolve()
         return path
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
-    for key in ("reviewflow", "chunkhound", "codex"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is not None:
             return candidate.parent
@@ -3324,7 +3321,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
 def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
     payload: dict[str, str] = {}
-    for key in ("reviewflow", "chunkhound", "codex"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
             fallback = logs_dir / f"{key}.log"
@@ -3392,8 +3389,8 @@ def build_status_payload(
     pr_url = f"https://{host}/{owner}/{repo}/pull/{number}" if owner and repo and number > 0 else None
 
     payload: dict[str, Any] = {
-        "schema_version": 1,
-        "kind": "reviewflow.status",
+        "schema_version": 2,
+        "kind": "cure.status",
         "requested_target": resolved.requested_target,
         "resolved_target": resolved.resolved_target,
         "resolution_strategy": resolved.resolution_strategy,
@@ -3548,8 +3545,8 @@ def preferred_cli_invocation(invocation: str) -> str:
 
 def build_commands_catalog_payload() -> dict[str, Any]:
     return {
-        "schema_version": 1,
-        "kind": "reviewflow.commands",
+        "schema_version": 2,
+        "kind": "cure.commands",
         "commands": [
             {
                 "name": "pr",
@@ -4638,7 +4635,7 @@ def _github_public_api_json(*, path: str) -> dict[str, Any]:
         f"https://api.github.com{normalized}",
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "reviewflow/0.1.0",
+            "User-Agent": "cure/0.1.0",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         method="GET",
@@ -4695,7 +4692,7 @@ def write_pr_context_file(
     write_json(
         path,
         {
-            "source": "reviewflow.resolve_pr_meta",
+            "source": "cure.resolve_pr_meta",
             "pr": {
                 "host": pr.host,
                 "owner": pr.owner,
@@ -4754,7 +4751,7 @@ def checkout_pr_in_repo(*, repo_dir: Path, pr: PullRequestRef) -> None:
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
             if _supports_public_github_fallback(pr.host):
-                branch = f"reviewflow_pr__{pr.number}"
+                branch = f"cure_pr__{pr.number}"
                 _eprint(f"`gh` is not authenticated for {pr.host}; falling back to public git fetch for PR #{pr.number}.")
                 run_cmd(
                     [
@@ -5627,7 +5624,7 @@ def _pr_flow_impl(
         str(baseline_selection.get("selected_baseline_ref") or base_ref).strip() or base_ref
     )
 
-    base_ref_for_review = f"reviewflow_base__{safe_ref_slug(base_ref)}"
+    base_ref_for_review = f"cure_base__{safe_ref_slug(base_ref)}"
 
     if_reviewed = str(getattr(args, "if_reviewed", "prompt") or "prompt").strip().lower()
     if if_reviewed not in {"prompt", "new", "list", "latest"}:
@@ -5765,7 +5762,7 @@ def _pr_flow_impl(
     )
     set_active_output(out)
     progress.meta["logs"] = {
-        "reviewflow": str(logs_dir / "reviewflow.log"),
+        "cure": str(logs_dir / "cure.log"),
         "chunkhound": str(logs_dir / "chunkhound.log"),
         "codex": str(logs_dir / "codex.log"),
     }
@@ -5815,7 +5812,7 @@ def _pr_flow_impl(
             multipass_max_steps_source = "cli"
         else:
             multipass_max_steps = int(multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS))
-            multipass_max_steps_source = "reviewflow.toml"
+            multipass_max_steps_source = "cure.toml"
     else:
         multipass_max_steps = DEFAULT_MULTIPASS_MAX_STEPS
         multipass_max_steps_source = "skipped:no_review"
@@ -5999,7 +5996,7 @@ def _pr_flow_impl(
             progress.meta.setdefault("multipass", {})["grounding_mode"] = str(
                 multipass_defaults.get("grounding_mode") or DEFAULT_MULTIPASS_GROUNDING_MODE
             )
-            progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "reviewflow.toml"
+            progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "cure.toml"
             cli_max_steps = getattr(args, "multipass_max_steps", None)
             if cli_max_steps is not None:
                 try:
@@ -6018,7 +6015,7 @@ def _pr_flow_impl(
                 multipass_max_steps = int(
                     multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS)
                 )
-                multipass_max_steps_source = "reviewflow.toml"
+                multipass_max_steps_source = "cure.toml"
             progress.meta.setdefault("multipass", {})["max_steps"] = multipass_max_steps
             progress.meta.setdefault("multipass", {})["max_steps_source"] = multipass_max_steps_source
             progress.flush()
@@ -6072,7 +6069,7 @@ def _pr_flow_impl(
                     mp_enabled_source = "cli"
                 else:
                     use_multipass = (profile_resolved == "big") and mp_default_enabled
-                    mp_enabled_source = "reviewflow.toml"
+                    mp_enabled_source = "cure.toml"
 
                 progress.meta.setdefault("multipass", {})["enabled"] = bool(use_multipass)
                 progress.meta.setdefault("multipass", {})["enabled_source"] = mp_enabled_source
@@ -6209,7 +6206,7 @@ def _pr_flow_impl(
                         "GH_CONFIG_DIR": env.get("GH_CONFIG_DIR"),
                         "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
                         "NETRC": env.get("NETRC"),
-                        "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
+                        "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
                     },
                     "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
                 }
@@ -6447,6 +6444,7 @@ def _pr_flow_impl(
                                 if step_runs and isinstance(step_runs[-1], dict) and step_result.resume is not None:
                                     step_runs[-1]["llm_session_id"] = step_result.resume.session_id
                                     step_runs[-1]["llm_provider"] = step_result.resume.provider
+                                progress.flush()
                                 _, step_validation = _validate_or_reuse_step_artifact(
                                     meta=progress.meta,
                                     work_dir=work_dir,
@@ -6528,6 +6526,7 @@ def _pr_flow_impl(
                         if synth_runs and isinstance(synth_runs[-1], dict) and synth_result.resume is not None:
                             synth_runs[-1]["llm_session_id"] = synth_result.resume.session_id
                             synth_runs[-1]["llm_provider"] = synth_result.resume.provider
+                        progress.flush()
                         success_resume_command = record_llm_resume(
                             progress.meta.setdefault("llm", {}), synth_result.resume
                         )
@@ -6863,7 +6862,7 @@ def _resume_flow_impl(
     )
     set_active_output(out)
     progress.meta["logs"] = {
-        "reviewflow": str(logs_dir / "reviewflow.log"),
+        "cure": str(logs_dir / "cure.log"),
         "chunkhound": str(logs_dir / "chunkhound.log"),
         "codex": str(logs_dir / "codex.log"),
     }
@@ -6957,7 +6956,7 @@ def _resume_flow_impl(
                     "GH_CONFIG_DIR": env.get("GH_CONFIG_DIR"),
                     "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
                     "NETRC": env.get("NETRC"),
-                    "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
+                    "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
                 },
                 "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
             }
@@ -7011,7 +7010,7 @@ def _resume_flow_impl(
             multipass_cfg.get("grounding_mode") or DEFAULT_MULTIPASS_GROUNDING_MODE
         )
         progress.meta.setdefault("multipass", {})["grounding_mode"] = grounding_mode
-        progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "reviewflow.toml"
+        progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "cure.toml"
         progress.flush()
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
@@ -7240,6 +7239,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                progress.flush()
                 _, step_validation = _validate_or_reuse_step_artifact(
                     meta=progress.meta,
                     work_dir=work_dir,
@@ -7329,6 +7329,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+                progress.flush()
                 _, synth_validation = _validate_or_reuse_synth_artifact(
                     meta=progress.meta,
                     work_dir=work_dir,
@@ -8071,7 +8072,7 @@ def _zip_flow_impl(
     )
     set_active_output(out)
     zip_progress.meta["logs"] = {
-        "reviewflow": str(zip_logs_dir / "reviewflow.log"),
+        "cure": str(zip_logs_dir / "cure.log"),
         "chunkhound": str(zip_logs_dir / "chunkhound.log"),
         "codex": str(zip_logs_dir / "codex.log"),
     }
@@ -8165,7 +8166,7 @@ def _zip_flow_impl(
                 "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
                 "env": {
-                    "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
+                    "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
                 },
             }
         zip_progress.flush()
@@ -9253,7 +9254,7 @@ def build_interactive_resume_command(
             "GH_CONFIG_DIR": env.get("GH_CONFIG_DIR"),
             "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
             "NETRC": env.get("NETRC"),
-            "REVIEWFLOW_WORK_DIR": env.get("REVIEWFLOW_WORK_DIR"),
+            "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
         }
         meta["codex"] = codex_meta
         if _interactive_session_resume_is_poisoned(session=session):
@@ -9823,7 +9824,7 @@ def _cleanup_payload(
     skipped: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": kind,
         "requested_target": requested_target,
         "matched": matched,
@@ -9909,7 +9910,7 @@ def clean_closed_flow(
             print(
                 json.dumps(
                     _cleanup_payload(
-                        kind="reviewflow.clean.preview",
+                        kind="cure.clean.preview",
                         requested_target="closed",
                         matched=[],
                         deleted=[],
@@ -9966,7 +9967,7 @@ def clean_closed_flow(
         print(
             json.dumps(
                 _cleanup_payload(
-                    kind="reviewflow.clean.preview",
+                    kind="cure.clean.preview",
                     requested_target="closed",
                     matched=matched_json,
                     deleted=[],
@@ -9984,7 +9985,7 @@ def clean_closed_flow(
             print(
                 json.dumps(
                     _cleanup_payload(
-                        kind="reviewflow.clean.result" if auto_yes else "reviewflow.clean.preview",
+                        kind="cure.clean.result" if auto_yes else "cure.clean.preview",
                         requested_target="closed",
                         matched=[],
                         deleted=[],
@@ -10025,7 +10026,7 @@ def clean_closed_flow(
         print(
             json.dumps(
                 _cleanup_payload(
-                    kind="reviewflow.clean.result",
+                    kind="cure.clean.result",
                     requested_target="closed",
                     matched=matched_json,
                     deleted=deleted_json,
@@ -10207,7 +10208,7 @@ def clean_session(
         )
         session_json = _cleanup_session_json(session)
         payload = _cleanup_payload(
-            kind="reviewflow.clean.result",
+            kind="cure.clean.result",
             requested_target=session_id,
             matched=[session_json],
             deleted=[session_json],
@@ -10412,7 +10413,7 @@ def _resolved_doctor_agent_runtime(
 def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> dict[str, Any]:
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
-        "reviewflow_config": _doctor_path_payload(
+        "cure_config": _doctor_path_payload(
             path=runtime.config_path,
             source=runtime.config_source,
             exists=config_exists,
@@ -10473,17 +10474,17 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
     if not runtime.config_enabled:
         checks.append(
             DoctorCheck(
-                name="reviewflow-config",
+                name="cure-config",
                 status="warn",
                 detail=f"{config_prefix} (disabled by --no-config)",
             )
         )
     elif config_path.is_file():
-        checks.append(DoctorCheck(name="reviewflow-config", status="ok", detail=config_prefix))
+        checks.append(DoctorCheck(name="cure-config", status="ok", detail=config_prefix))
     else:
         checks.append(
             DoctorCheck(
-                name="reviewflow-config",
+                name="cure-config",
                 status="fail",
                 detail=f"missing: {config_prefix}",
             )
@@ -10813,21 +10814,6 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def resolve_cli_invocation_name(argv0: str | None) -> str:
-    name = Path(str(argv0 or PRIMARY_CLI_COMMAND)).name.strip().lower()
-    if name == DEPRECATED_CLI_ALIAS:
-        return DEPRECATED_CLI_ALIAS
-    if name == PRIMARY_CLI_COMMAND:
-        return PRIMARY_CLI_COMMAND
-    return PRIMARY_CLI_COMMAND
-
-
-def maybe_warn_deprecated_cli_alias(invocation_name: str, *, stderr: TextIO | None = None) -> None:
-    if str(invocation_name or "").strip().lower() != DEPRECATED_CLI_ALIAS:
-        return
-    print(DEPRECATED_ALIAS_WARNING, file=(stderr or sys.stderr))
-
-
 def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     add_runtime_args(runtime_parent)
@@ -11154,8 +11140,6 @@ def main(
 
 
 def console_main() -> int:
-    invocation_name = resolve_cli_invocation_name(sys.argv[0] if sys.argv else PRIMARY_CLI_COMMAND)
-    maybe_warn_deprecated_cli_alias(invocation_name)
     return main(sys.argv[1:], prog=PRIMARY_CLI_COMMAND)
 
 

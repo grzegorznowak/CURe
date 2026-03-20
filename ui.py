@@ -985,7 +985,7 @@ def build_dashboard_lines(
         logs = meta.get("logs")
         logs = logs if isinstance(logs, dict) else {}
         if logs:
-            dials.append(("logs", _truncate(str(logs.get("reviewflow") or ""), 200)))
+            dials.append(("logs", _truncate(str(logs.get("cure") or logs.get("reviewflow") or ""), 200)))
 
     def _dial_lines_full(*, width: int) -> list[str]:
         width = max(1, int(width))
@@ -1435,7 +1435,7 @@ class Dashboard:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._run, name="reviewflow-dashboard", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="cure-dashboard", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:

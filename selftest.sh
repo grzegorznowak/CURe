@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 python3 -m py_compile \
-  "$repo_root/reviewflow.py" \
+  "$repo_root/cure.py" \
   "$repo_root/run.py" \
   "$repo_root/paths.py" \
   "$repo_root/meta.py" \

@@ -435,7 +435,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
         path = Path(raw)
         return ((session_dir / path).resolve() if not path.is_absolute() else path.resolve())
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
-    for key in ("reviewflow", "chunkhound", "codex"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is not None:
             return candidate.parent
@@ -445,7 +445,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
 def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
     payload: dict[str, str] = {}
-    for key in ("reviewflow", "chunkhound", "codex", "codex_events"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
             suffix = "codex.events.jsonl" if key == "codex_events" else f"{key}.log"
@@ -1159,8 +1159,8 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
         number = 0
     pr_url = f"https://{host}/{owner}/{repo}/pull/{number}" if owner and repo and number > 0 else None
     payload: dict[str, Any] = {
-        "schema_version": 1,
-        "kind": "reviewflow.status",
+        "schema_version": 2,
+        "kind": "cure.status",
         "requested_target": resolved.requested_target,
         "resolved_target": resolved.resolved_target,
         "resolution_strategy": resolved.resolution_strategy,

@@ -85,6 +85,7 @@ def build_env(tmp_root: Path, fake_bin: Path) -> dict[str, str]:
     env["XDG_STATE_HOME"] = str(tmp_root / "xdg_state")
     env["XDG_CACHE_HOME"] = str(tmp_root / "xdg_cache")
     env["TERM"] = "dumb"
+    env.pop("CURE_CONFIG", None)
     env.pop("REVIEWFLOW_CONFIG", None)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
@@ -175,7 +176,7 @@ def write_session(
         _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
         encoding="utf-8",
     )
-    for name in ("reviewflow.log", "chunkhound.log", "codex.log"):
+    for name in ("cure.log", "chunkhound.log", "codex.log"):
         (logs_dir / name).write_text(f"{name}\n", encoding="utf-8")
 
     followups: list[dict[str, object]] = []
@@ -212,7 +213,7 @@ def write_session(
             "review_md": str(review_md),
         },
         "logs": {
-            "reviewflow": str(logs_dir / "reviewflow.log"),
+            "cure": str(logs_dir / "cure.log"),
             "chunkhound": str(logs_dir / "chunkhound.log"),
             "codex": str(logs_dir / "codex.log"),
         },
@@ -286,8 +287,8 @@ def run_pty_watch(
 def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str], sandbox_root: Path) -> None:
     proc = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands", "--json"), env=env)
     payload = json.loads(proc.stdout)
-    ensure(payload["schema_version"] == 1, "commands schema_version mismatch")
-    ensure(payload["kind"] == "reviewflow.commands", "commands kind mismatch")
+    ensure(payload["schema_version"] == 2, "commands schema_version mismatch")
+    ensure(payload["kind"] == "cure.commands", "commands kind mismatch")
     names = [entry["name"] for entry in payload["commands"]]
     ensure(names == ["pr", "followup", "resume", "zip", "clean", "status", "watch"], "commands order mismatch")
     ensure("interactive" not in names, "interactive should be absent from curated catalog")
@@ -310,14 +311,7 @@ def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str]
     ensure("cure watch <session_id|PR_URL>" in human.stdout, "commands human output missing watch")
     ensure("reviewflow" not in human.stdout, "commands human output should not advertise deprecated alias")
 
-    if alias_bin is None:
-        return
-
-    alias_json = run_cmd(cli_cmd(alias_bin, sandbox_root, "commands", "--json"), env=env)
-    ensure("deprecated" in alias_json.stderr.lower(), "alias warning missing from stderr")
-    ensure("cure" in alias_json.stderr, "alias warning should point to cure")
-    alias_payload = json.loads(alias_json.stdout)
-    ensure(alias_payload["kind"] == "reviewflow.commands", "alias commands kind mismatch")
+    _ = alias_bin
 
 
 def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
@@ -523,7 +517,7 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     )
     exact = run_cmd(cli_cmd(binary, exact_root, "clean", "exact-clean", "--json"), env=env)
     exact_payload = json.loads(exact.stdout)
-    ensure(exact_payload["kind"] == "reviewflow.clean.result", "exact clean kind mismatch")
+    ensure(exact_payload["kind"] == "cure.clean.result", "exact clean kind mismatch")
     ensure(exact_payload["deleted"][0]["session_id"] == "exact-clean", "exact clean deleted wrong session")
     ensure(not (exact_root / "exact-clean").exists(), "exact clean did not delete session")
 
@@ -554,14 +548,14 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     )
     preview = run_cmd(cli_cmd(binary, closed_root, "clean", "closed", "--json"), env=env)
     preview_payload = json.loads(preview.stdout)
-    ensure(preview_payload["kind"] == "reviewflow.clean.preview", "closed preview kind mismatch")
+    ensure(preview_payload["kind"] == "cure.clean.preview", "closed preview kind mismatch")
     ensure([item["session_id"] for item in preview_payload["matched"]] == ["closed-clean"], "closed preview mismatch")
     ensure(preview_payload["deleted"] == [], "closed preview should not delete")
     ensure((closed_root / "closed-clean").exists(), "closed preview deleted session")
 
     execute = run_cmd(cli_cmd(binary, closed_root, "clean", "closed", "--yes", "--json"), env=env)
     execute_payload = json.loads(execute.stdout)
-    ensure(execute_payload["kind"] == "reviewflow.clean.result", "closed execute kind mismatch")
+    ensure(execute_payload["kind"] == "cure.clean.result", "closed execute kind mismatch")
     ensure([item["session_id"] for item in execute_payload["deleted"]] == ["closed-clean"], "closed execute mismatch")
     ensure(not (closed_root / "closed-clean").exists(), "closed execute did not delete closed session")
     ensure((closed_root / "open-clean").exists(), "closed execute deleted open session")
@@ -587,7 +581,7 @@ def main() -> int:
         ensure(alias_bin.is_file(), f"missing alias CLI binary: {alias_bin}")
     ensure(script_bin.is_file(), f"missing script binary: {script_bin}")
 
-    with tempfile.TemporaryDirectory(prefix="reviewflow-story26-smoke-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="cure-story26-smoke-") as tmp:
         tmp_root = Path(tmp)
         fake_bin = tmp_root / "bin"
         fake_bin.mkdir(parents=True, exist_ok=True)

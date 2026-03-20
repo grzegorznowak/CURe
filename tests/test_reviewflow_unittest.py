@@ -18,7 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import reviewflow as rf  # noqa: E402
+import cure as rf  # noqa: E402
 import cure  # noqa: E402
 import cure_commands  # noqa: E402
 import cure_flows  # noqa: E402
@@ -90,7 +90,7 @@ class RenderPromptTests(unittest.TestCase):
         )
         rendered = rf.render_prompt(
             template,
-            base_ref_for_review="reviewflow_base__develop",
+            base_ref_for_review="cure_base__develop",
             pr_url="https://github.com/acme/repo/pull/1",
             pr_number=1,
             gh_host="github.com",
@@ -117,14 +117,14 @@ class RenderPromptTests(unittest.TestCase):
         self.assertIn("GH_OWNER=acme", rendered)
         self.assertIn("GH_REPO_NAME=repo", rendered)
         self.assertIn("GH_REPO=acme/repo", rendered)
-        self.assertIn("BASE=reviewflow_base__develop", rendered)
+        self.assertIn("BASE=cure_base__develop", rendered)
         self.assertIn("DESC=hello", rendered)
 
     def test_render_prompt_supports_extra_vars_without_touching_agent_desc(self) -> None:
         template = "X=$X\nDESC=$AGENT_DESC\n"
         rendered = rf.render_prompt(
             template,
-            base_ref_for_review="reviewflow_base__develop",
+            base_ref_for_review="cure_base__develop",
             pr_url="https://github.com/acme/repo/pull/1",
             pr_number=1,
             gh_host="github.com",
@@ -142,7 +142,7 @@ class RenderPromptTests(unittest.TestCase):
         template = "GUIDANCE=$REVIEW_INTELLIGENCE_GUIDANCE\n"
         rendered = rf.render_prompt(
             template,
-            base_ref_for_review="reviewflow_base__develop",
+            base_ref_for_review="cure_base__develop",
             pr_url="https://github.com/acme/repo/pull/1",
             pr_number=1,
             gh_host="github.com",
@@ -159,7 +159,7 @@ class RenderPromptTests(unittest.TestCase):
         template = "X=$X\nGUIDANCE=$REVIEW_INTELLIGENCE_GUIDANCE\n"
         rendered = rf.render_prompt(
             template,
-            base_ref_for_review="reviewflow_base__develop",
+            base_ref_for_review="cure_base__develop",
             pr_url="https://github.com/acme/repo/pull/1",
             pr_number=1,
             gh_host="github.com",
@@ -291,180 +291,6 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
         self.assertIn("REVIEW_INTELLIGENCE_GUIDANCE", prompt_vars)
         self.assertIn("Use GitHub MCP first.", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
         self.assertIn("Code under review first policy", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
-
-
-class PublicGitHubFallbackTests(unittest.TestCase):
-    def _gh_auth_error(self, cmd: list[str]) -> rf.ReviewflowSubprocessError:
-        return rf.ReviewflowSubprocessError(
-            cmd=cmd,
-            cwd=None,
-            exit_code=4,
-            stdout="",
-            stderr="To get started with GitHub CLI, please run:  gh auth login",
-        )
-
-    def test_gh_api_json_falls_back_to_public_github_api(self) -> None:
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = json.dumps(
-            {
-                "title": "Public PR",
-                "base": {"ref": "main"},
-                "head": {"sha": "abc123"},
-            }
-        ).encode("utf-8")
-        with mock.patch.object(
-            rf,
-            "run_cmd",
-            side_effect=self._gh_auth_error(["gh", "api", "--hostname", "github.com", "repos/acme/repo/pulls/1"]),
-        ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response):
-            payload = rf.gh_api_json(
-                host="github.com",
-                path="repos/acme/repo/pulls/1",
-                allow_public_fallback=True,
-            )
-
-        self.assertEqual(payload["title"], "Public PR")
-        self.assertEqual(payload["base"]["ref"], "main")
-        self.assertEqual(payload["head"]["sha"], "abc123")
-
-    def test_gh_api_json_falls_back_to_public_github_api_when_gh_is_missing(self) -> None:
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = json.dumps({"title": "Public PR"}).encode("utf-8")
-        with mock.patch.object(rf, "run_cmd", side_effect=FileNotFoundError("gh")), mock.patch.object(
-            rf.urllib.request,
-            "urlopen",
-            return_value=response,
-        ):
-            payload = rf.gh_api_json(
-                host="github.com",
-                path="repos/acme/repo/pulls/1",
-                allow_public_fallback=True,
-            )
-
-        self.assertEqual(payload["title"], "Public PR")
-
-    def test_gh_api_json_does_not_fallback_for_non_github_hosts_when_gh_is_missing(self) -> None:
-        with mock.patch.object(rf, "run_cmd", side_effect=FileNotFoundError("gh")):
-            with self.assertRaises(rf.ReviewflowError) as ctx:
-                rf.gh_api_json(
-                    host="ghe.example.com",
-                    path="repos/acme/repo/pulls/1",
-                    allow_public_fallback=True,
-                )
-
-        self.assertIn("`gh` is required for PR metadata resolution on ghe.example.com", str(ctx.exception))
-
-    def test_clone_seed_repo_falls_back_to_public_git_clone(self) -> None:
-        seed = ROOT / ".tmp_test_public_seed"
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
-            calls.append(cmd)
-            if cmd[:3] == ["gh", "repo", "clone"]:
-                raise self._gh_auth_error(cmd)
-            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
-
-        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
-            rf.clone_seed_repo(host="github.com", owner="chunkhound", repo="chunkhound", seed=seed)
-
-        self.assertEqual(calls[0], ["gh", "repo", "clone", "chunkhound/chunkhound", str(seed)])
-        self.assertEqual(
-            calls[1],
-            ["git", "clone", "https://github.com/chunkhound/chunkhound.git", str(seed)],
-        )
-
-    def test_clone_seed_repo_falls_back_to_public_git_clone_when_gh_is_missing(self) -> None:
-        seed = ROOT / ".tmp_test_public_seed_missing_gh"
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
-            calls.append(cmd)
-            if cmd[:3] == ["gh", "repo", "clone"]:
-                raise FileNotFoundError("gh")
-            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
-
-        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
-            rf.clone_seed_repo(host="github.com", owner="chunkhound", repo="chunkhound", seed=seed)
-
-        self.assertEqual(calls[0], ["gh", "repo", "clone", "chunkhound/chunkhound", str(seed)])
-        self.assertEqual(
-            calls[1],
-            ["git", "clone", "https://github.com/chunkhound/chunkhound.git", str(seed)],
-        )
-
-    def test_checkout_pr_in_repo_falls_back_to_public_git_fetch(self) -> None:
-        repo_dir = ROOT / ".tmp_test_public_checkout"
-        pr = rf.PullRequestRef(host="github.com", owner="chunkhound", repo="chunkhound", number=219)
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
-            calls.append(cmd)
-            if cmd[:3] == ["gh", "pr", "checkout"]:
-                raise self._gh_auth_error(cmd)
-            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
-
-        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
-            rf.checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
-
-        self.assertEqual(
-            calls[0],
-            ["gh", "pr", "checkout", "219", "-R", "chunkhound/chunkhound", "--force"],
-        )
-        self.assertEqual(
-            calls[1],
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "fetch",
-                "origin",
-                "refs/pull/219/head:reviewflow_pr__219",
-            ],
-        )
-        self.assertEqual(
-            calls[2],
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "checkout",
-                "-B",
-                "reviewflow_pr__219",
-                "reviewflow_pr__219",
-            ],
-        )
-
-    def test_checkout_pr_in_repo_falls_back_to_public_git_fetch_when_gh_is_missing(self) -> None:
-        repo_dir = ROOT / ".tmp_test_public_checkout_missing_gh"
-        pr = rf.PullRequestRef(host="github.com", owner="chunkhound", repo="chunkhound", number=220)
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_: object) -> mock.Mock:
-            calls.append(cmd)
-            if cmd[:3] == ["gh", "pr", "checkout"]:
-                raise FileNotFoundError("gh")
-            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0, cmd=cmd, cwd=None)
-
-        with mock.patch.object(rf, "run_cmd", side_effect=fake_run):
-            rf.checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
-
-        self.assertEqual(
-            calls[0],
-            ["gh", "pr", "checkout", "220", "-R", "chunkhound/chunkhound", "--force"],
-        )
-        self.assertEqual(
-            calls[1],
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "fetch",
-                "origin",
-                "refs/pull/220/head:reviewflow_pr__220",
-            ],
-        )
 
 
 class ChunkHoundConfigTests(unittest.TestCase):
@@ -729,12 +555,12 @@ class CodexConfigTests(unittest.TestCase):
             )
             self.assertIn("-m", flags)
             self.assertIn("cli-model", flags)
-            # model_reasoning_effort should come from reviewflow.toml if CLI is unset.
+            # model_reasoning_effort should come from cure.toml if CLI is unset.
             self.assertIn('model_reasoning_effort="low"', flags)
             # plan_mode_reasoning_effort should come from CLI.
             self.assertIn('plan_mode_reasoning_effort="medium"', flags)
             self.assertEqual(meta["resolved"]["model_source"], "cli")
-            self.assertEqual(meta["resolved"]["model_reasoning_effort_source"], "reviewflow.toml")
+            self.assertEqual(meta["resolved"]["model_reasoning_effort_source"], "cure.toml")
             self.assertEqual(meta["resolved"]["plan_mode_reasoning_effort_source"], "cli")
         finally:
             base.unlink(missing_ok=True)
@@ -1073,7 +899,7 @@ class AgentRuntimeConfigTests(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"REVIEWFLOW_AGENT_RUNTIME_PROFILE": "permissive"},
+                {"CURE_AGENT_RUNTIME_PROFILE": "permissive"},
                 clear=False,
             ):
                 profile, source, _, _ = rf.resolve_agent_runtime_profile(
@@ -1849,7 +1675,7 @@ class PromptTemplateTests(unittest.TestCase):
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("outside the sandbox checkout", text)
-            self.assertIn("$REVIEWFLOW_WORK_DIR", text)
+            self.assertIn("$CURE_WORK_DIR", text)
 
     def test_multipass_grounding_prompts_require_parseable_citation_suffixes(self) -> None:
         step_text = (ROOT / "prompts" / "mrereview_gh_local_big_step.md").read_text(encoding="utf-8")
@@ -3686,7 +3512,7 @@ class ZipFlowTests(unittest.TestCase):
                         "repo": "repo",
                         "number": 9,
                         "base_ref": "main",
-                        "base_ref_for_review": "reviewflow_base__main",
+                        "base_ref_for_review": "cure_base__main",
                         "paths": {
                             "repo_dir": str(host_repo),
                             "work_dir": str(host_work),
@@ -3886,7 +3712,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                     "pr_url": f"https://{host}/acme/repo/pull/9",
                     "title": "Session PR",
                     "base_ref": "main",
-                    "base_ref_for_review": "reviewflow_base__main",
+                    "base_ref_for_review": "cure_base__main",
                     "created_at": "2026-03-10T00:00:00+00:00",
                     "failed_at": "2026-03-10T00:05:00+00:00",
                     "llm": {
@@ -4674,8 +4500,8 @@ class CleanFlowTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertFalse((root / "exact-session").exists())
-            self.assertEqual(payload["schema_version"], 1)
-            self.assertEqual(payload["kind"], "reviewflow.clean.result")
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["kind"], "cure.clean.result")
             self.assertEqual(payload["requested_target"], "exact-session")
             self.assertEqual(len(payload["matched"]), 1)
             self.assertEqual(len(payload["deleted"]), 1)
@@ -5118,8 +4944,8 @@ class CleanFlowTests(unittest.TestCase):
 
                 self.assertEqual(preview_rc, 0)
                 self.assertTrue((root / "closed-pr").exists())
-                self.assertEqual(preview["schema_version"], 1)
-                self.assertEqual(preview["kind"], "reviewflow.clean.preview")
+                self.assertEqual(preview["schema_version"], 2)
+                self.assertEqual(preview["kind"], "cure.clean.preview")
                 self.assertEqual([item["session_id"] for item in preview["matched"]], ["closed-pr"])
                 self.assertEqual(preview["deleted"], [])
 
@@ -5136,8 +4962,8 @@ class CleanFlowTests(unittest.TestCase):
             self.assertEqual(execute_rc, 0)
             self.assertFalse((root / "closed-pr").exists())
             self.assertTrue((root / "open-pr").exists())
-            self.assertEqual(result["schema_version"], 1)
-            self.assertEqual(result["kind"], "reviewflow.clean.result")
+            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["kind"], "cure.clean.result")
             self.assertEqual([item["session_id"] for item in result["deleted"]], ["closed-pr"])
             self.assertEqual(result["summary"]["deleted"], 1)
         finally:
@@ -5242,7 +5068,7 @@ class WorkflowContractTests(unittest.TestCase):
         logs_dir.mkdir(parents=True, exist_ok=True)
         review_md = session_dir / "review.md"
         review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"), encoding="utf-8")
-        for name in ("reviewflow.log", "chunkhound.log", "codex.log"):
+        for name in ("cure.log", "chunkhound.log", "codex.log"):
             (logs_dir / name).write_text(f"{name}\n", encoding="utf-8")
 
         followups: list[dict[str, object]] = []
@@ -5279,7 +5105,7 @@ class WorkflowContractTests(unittest.TestCase):
                 "review_md": str(review_md),
             },
             "logs": {
-                "reviewflow": str(logs_dir / "reviewflow.log"),
+                "cure": str(logs_dir / "cure.log"),
                 "chunkhound": str(logs_dir / "chunkhound.log"),
                 "codex": str(logs_dir / "codex.log"),
             },
@@ -5306,8 +5132,8 @@ class WorkflowContractTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
 
         self.assertEqual(rc, 0)
-        self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["kind"], "reviewflow.commands")
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
         self.assertEqual(names, ["pr", "followup", "resume", "zip", "clean", "status", "watch"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
@@ -5631,8 +5457,8 @@ class WorkflowContractTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
 
             self.assertEqual(rc, 0)
-            self.assertEqual(payload["schema_version"], 1)
-            self.assertEqual(payload["kind"], "reviewflow.status")
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["kind"], "cure.status")
             self.assertEqual(payload["requested_target"]["kind"], "pr_url")
             self.assertEqual(payload["resolved_target"]["session_id"], "running-newer")
             self.assertEqual(payload["resolution_strategy"], "newest_running")
@@ -6116,6 +5942,54 @@ class CodexJsonProgressTests(unittest.TestCase):
             self.assertEqual(verdicts.business, "APPROVE")
             self.assertEqual(verdicts.technical, "REQUEST CHANGES")
 
+    def test_run_logged_cmd_persists_codex_events_even_when_ui_off_and_no_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            meta_path.write_text("{}", encoding="utf-8")
+            logs_dir = root / "logs"
+            events_path = logs_dir / "codex.events.jsonl"
+            output = cure_output.ReviewflowOutput(
+                ui_enabled=False,
+                no_stream=True,
+                stderr=StringIO(),
+                meta_path=meta_path,
+                logs_dir=logs_dir,
+                verbosity=rui.Verbosity.normal,
+            )
+            try:
+                def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                    self.assertTrue(bool(kwargs["stream"]))
+                    self.assertIsNone(kwargs["stream_label"])
+                    sink = kwargs["stream_to"]
+                    assert sink is not None
+                    sink.write('{"type":"thread.started","thread_id":"abc"}\n')
+                    sink.flush()
+                    return mock.Mock(
+                        stdout="",
+                        stderr="",
+                        exit_code=0,
+                        duration_seconds=0.0,
+                        cmd=cmd,
+                        cwd=kwargs.get("cwd"),
+                    )
+
+                with mock.patch.object(cure_output, "run_cmd", side_effect=fake_run_cmd):
+                    output.run_logged_cmd(
+                        ["codex", "exec", "--json", "hello"],
+                        kind="codex",
+                        cwd=root,
+                        env={},
+                        check=True,
+                        stream_requested=False,
+                        codex_json_events_path=events_path,
+                    )
+            finally:
+                output.stop()
+
+            self.assertTrue(events_path.is_file())
+            self.assertIn('"type":"thread.started"', events_path.read_text(encoding="utf-8"))
+
     def test_build_status_payload_includes_live_progress_and_codex_events_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6126,7 +6000,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             repo_dir.mkdir(parents=True, exist_ok=True)
             logs_dir.mkdir(parents=True, exist_ok=True)
             review_md.write_text("# Review\n", encoding="utf-8")
-            for name in ("reviewflow.log", "chunkhound.log", "codex.log", "codex.events.jsonl"):
+            for name in ("cure.log", "chunkhound.log", "codex.log", "codex.events.jsonl"):
                 (logs_dir / name).write_text(name + "\n", encoding="utf-8")
             meta = {
                 "session_id": "session-123",
@@ -6145,7 +6019,7 @@ class CodexJsonProgressTests(unittest.TestCase):
                     "review_md": str(review_md),
                 },
                 "logs": {
-                    "reviewflow": str(logs_dir / "reviewflow.log"),
+                    "cure": str(logs_dir / "cure.log"),
                     "chunkhound": str(logs_dir / "chunkhound.log"),
                     "codex": str(logs_dir / "codex.log"),
                     "codex_events": str(logs_dir / "codex.events.jsonl"),
@@ -6173,7 +6047,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             repo_dir.mkdir(parents=True, exist_ok=True)
             logs_dir.mkdir(parents=True, exist_ok=True)
             review_md.write_text("# Review\n", encoding="utf-8")
-            for name in ("reviewflow.log", "chunkhound.log", "codex.log"):
+            for name in ("cure.log", "chunkhound.log", "codex.log"):
                 (logs_dir / name).write_text(name + "\n", encoding="utf-8")
             meta = {
                 "session_id": "session-idx",
@@ -6192,7 +6066,7 @@ class CodexJsonProgressTests(unittest.TestCase):
                     "review_md": str(review_md),
                 },
                 "logs": {
-                    "reviewflow": str(logs_dir / "reviewflow.log"),
+                    "cure": str(logs_dir / "cure.log"),
                     "chunkhound": str(logs_dir / "chunkhound.log"),
                     "codex": str(logs_dir / "codex.log"),
                 },
@@ -6379,16 +6253,7 @@ class TuiDashboardTests(unittest.TestCase):
         args = p.parse_args(["install", "--chunkhound-source", "git-main"])
         self.assertEqual(args.chunkhound_source, "git-main")
 
-    def test_deprecated_alias_warning_targets_stderr_only(self) -> None:
-        stderr = StringIO()
-        rf.maybe_warn_deprecated_cli_alias("reviewflow", stderr=stderr)
-        self.assertIn("Use `cure` instead.", stderr.getvalue())
-
-        quiet = StringIO()
-        rf.maybe_warn_deprecated_cli_alias("cure", stderr=quiet)
-        self.assertEqual(quiet.getvalue(), "")
-
-    def test_console_main_warns_for_deprecated_alias_and_dispatches(self) -> None:
+    def test_console_main_dispatches_without_alias_warning(self) -> None:
         stderr = StringIO()
         with mock.patch.object(rf.sys, "argv", ["reviewflow", "commands"]), mock.patch.object(
             rf, "main", return_value=9
@@ -6396,7 +6261,7 @@ class TuiDashboardTests(unittest.TestCase):
             rc = rf.console_main()
 
         self.assertEqual(rc, 9)
-        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands"], prog="cure")
 
     def test_parser_accepts_zip_flags(self) -> None:
@@ -6503,10 +6368,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         args = self._runtime_args(config_path="/tmp/cli.toml")
         with mock.patch.dict(
             os.environ,
-            {
-                "CURE_CONFIG": "/tmp/cure-env.toml",
-                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
-            },
+            {"CURE_CONFIG": "/tmp/cure-env.toml"},
             clear=False,
         ):
             self.assertEqual(
@@ -6516,10 +6378,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         args = self._runtime_args()
         with mock.patch.dict(
             os.environ,
-            {
-                "CURE_CONFIG": "/tmp/cure-env.toml",
-                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
-            },
+            {"CURE_CONFIG": "/tmp/cure-env.toml"},
             clear=False,
         ):
             self.assertEqual(
@@ -6533,7 +6392,6 @@ class RuntimeResolutionTests(unittest.TestCase):
             os.environ,
             {
                 "CURE_CONFIG": "",
-                "REVIEWFLOW_CONFIG": "",
                 "XDG_CONFIG_HOME": "/tmp/xdg-config",
             },
             clear=False,
@@ -6550,22 +6408,17 @@ class RuntimeResolutionTests(unittest.TestCase):
             (Path("/tmp/cli.toml"), "cli", False),
         )
 
-    def test_resolve_reviewflow_config_path_falls_back_to_legacy_env(self) -> None:
+    def test_resolve_reviewflow_config_path_rejects_legacy_env(self) -> None:
         args = self._runtime_args()
         with mock.patch.dict(
             os.environ,
-            {
-                "CURE_CONFIG": "",
-                "REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml",
-            },
+            {"REVIEWFLOW_CONFIG": "/tmp/legacy-env.toml"},
             clear=False,
         ):
-            self.assertEqual(
-                rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/legacy-env.toml"), "legacy-env", True),
-            )
+            with self.assertRaisesRegex(rf.ReviewflowError, "REVIEWFLOW_CONFIG is no longer supported. Use CURE_CONFIG instead."):
+                rf.resolve_reviewflow_config_path(args)
 
-    def test_resolve_reviewflow_config_path_falls_back_to_legacy_default_if_present(self) -> None:
+    def test_resolve_reviewflow_config_path_ignores_legacy_default_if_present(self) -> None:
         root = ROOT / ".tmp_test_legacy_config_default"
         cure_cfg = root / "cure" / "cure.toml"
         legacy_cfg = root / "reviewflow" / "reviewflow.toml"
@@ -6574,15 +6427,10 @@ class RuntimeResolutionTests(unittest.TestCase):
             legacy_cfg.parent.mkdir(parents=True, exist_ok=True)
             legacy_cfg.write_text("", encoding="utf-8")
             args = self._runtime_args()
-            with mock.patch.object(rf, "default_reviewflow_config_path", return_value=cure_cfg), mock.patch.object(
-                rf,
-                "legacy_default_reviewflow_config_path",
-                return_value=legacy_cfg,
-                create=True,
-            ):
+            with mock.patch.object(rf, "default_reviewflow_config_path", return_value=cure_cfg):
                 self.assertEqual(
                     rf.resolve_reviewflow_config_path(args),
-                    (legacy_cfg, "legacy-default", True),
+                    (cure_cfg, "default", True),
                 )
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -6600,10 +6448,6 @@ class RuntimeResolutionTests(unittest.TestCase):
                 "CURE_SANDBOX_ROOT": "",
                 "CURE_CACHE_ROOT": "",
                 "CURE_CODEX_CONFIG": "",
-                "REVIEWFLOW_CONFIG": "",
-                "REVIEWFLOW_SANDBOX_ROOT": "",
-                "REVIEWFLOW_CACHE_ROOT": "",
-                "REVIEWFLOW_CODEX_CONFIG": "",
                 "XDG_CONFIG_HOME": "/tmp/xdg-config",
                 "XDG_STATE_HOME": "/tmp/xdg-state",
                 "XDG_CACHE_HOME": "/tmp/xdg-cache",
@@ -6621,7 +6465,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         self.assertEqual(runtime.codex_base_config_path, Path("/home/tester/.codex/config.toml"))
         self.assertEqual(runtime.codex_base_config_source, "default")
 
-    def test_resolve_runtime_prefers_cure_env_over_legacy_env(self) -> None:
+    def test_resolve_runtime_rejects_legacy_envs(self) -> None:
         args = self._runtime_args()
         with mock.patch.object(
             rf,
@@ -6641,15 +6485,21 @@ class RuntimeResolutionTests(unittest.TestCase):
             },
             clear=False,
         ):
-            runtime = rf.resolve_runtime(args)
-        self.assertEqual(runtime.config_path, Path("/tmp/cure-env.toml"))
-        self.assertEqual(runtime.config_source, "env")
-        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/cure-sandboxes"))
-        self.assertEqual(runtime.sandbox_root_source, "env")
-        self.assertEqual(runtime.paths.cache_root, Path("/tmp/cure-cache"))
-        self.assertEqual(runtime.cache_root_source, "env")
-        self.assertEqual(runtime.codex_base_config_path, Path("/tmp/cure-codex.toml"))
-        self.assertEqual(runtime.codex_base_config_source, "env")
+            with self.assertRaisesRegex(rf.ReviewflowError, "REVIEWFLOW_CONFIG is no longer supported. Use CURE_CONFIG instead."):
+                rf.resolve_runtime(args)
+
+    def test_resolve_runtime_rejects_legacy_work_dir_env(self) -> None:
+        args = self._runtime_args()
+        with mock.patch.dict(
+            os.environ,
+            {"REVIEWFLOW_WORK_DIR": "/tmp/legacy-work"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                rf.ReviewflowError,
+                "REVIEWFLOW_WORK_DIR is no longer supported. Use CURE_WORK_DIR instead.",
+            ):
+                rf.resolve_runtime(args)
 
 
 class CanonicalShellOwnershipTests(RuntimeResolutionTests):
@@ -6694,8 +6544,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertEqual(rc, 19)
         cure_main.assert_called_once()
         self.assertEqual(cure_main.call_args.args[0], ["commands", "--json"])
-        self.assertEqual(cure_main.call_args.kwargs["prog"], "cure")
-        self.assertIs(cure_main.call_args.kwargs["_shell_module"], rf)
+        self.assertEqual(cure_main.call_args.kwargs, {})
 
     def test_pyproject_points_public_package_to_cure_console_main(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -6766,7 +6615,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertTrue(init_flow.call_args.args[0].force)
         self.assertIs(init_flow.call_args.kwargs["runtime"], runtime)
 
-    def test_console_main_warns_for_reviewflow_alias_and_dispatches_to_main(self) -> None:
+    def test_console_main_dispatches_for_reviewflow_argv_without_warning_in_owner_tests(self) -> None:
         stderr = StringIO()
         with mock.patch.object(sys, "argv", ["reviewflow", "commands", "--json"]), contextlib.redirect_stderr(
             stderr
@@ -6774,7 +6623,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             rc = rf.console_main()
 
         self.assertEqual(rc, 9)
-        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
 
     def test_resolve_runtime_ignores_relative_xdg_roots(self) -> None:
@@ -6790,10 +6639,6 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
                 "CURE_SANDBOX_ROOT": "",
                 "CURE_CACHE_ROOT": "",
                 "CURE_CODEX_CONFIG": "",
-                "REVIEWFLOW_CONFIG": "",
-                "REVIEWFLOW_SANDBOX_ROOT": "",
-                "REVIEWFLOW_CACHE_ROOT": "",
-                "REVIEWFLOW_CODEX_CONFIG": "",
                 "XDG_CONFIG_HOME": "relative-config",
                 "XDG_STATE_HOME": "relative-state",
                 "XDG_CACHE_HOME": "relative-cache",
@@ -6801,27 +6646,12 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             clear=False,
         ), mock.patch.object(rf, "default_reviewflow_config_path", return_value=Path("/home/tester/.config/cure/cure.toml")), mock.patch.object(
             rf,
-            "legacy_default_reviewflow_config_path",
-            return_value=Path("/home/tester/.config/reviewflow/reviewflow.toml"),
-            create=True,
-        ), mock.patch.object(
-            rf,
             "default_sandbox_root",
             return_value=Path("/home/tester/.local/state/cure/sandboxes"),
         ), mock.patch.object(
             rf,
-            "legacy_default_sandbox_root",
-            return_value=Path("/home/tester/.local/state/reviewflow/sandboxes"),
-            create=True,
-        ), mock.patch.object(
-            rf,
             "default_cache_root",
             return_value=Path("/home/tester/.cache/cure"),
-        ), mock.patch.object(
-            rf,
-            "legacy_default_cache_root",
-            return_value=Path("/home/tester/.cache/reviewflow"),
-            create=True,
         ):
             runtime = rf.resolve_runtime(args)
         self.assertEqual(runtime.config_path, Path("/home/tester/.config/cure/cure.toml"))
@@ -6891,8 +6721,6 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
                 {
                     "CURE_SANDBOX_ROOT": str(root / "env-sandboxes"),
                     "CURE_CACHE_ROOT": str(root / "env-cache"),
-                    "REVIEWFLOW_SANDBOX_ROOT": str(root / "legacy-sandboxes"),
-                    "REVIEWFLOW_CACHE_ROOT": str(root / "legacy-cache"),
                 },
                 clear=False,
             ):
@@ -6927,18 +6755,8 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             args = self._runtime_args(config_path=str(cfg), no_config=True)
             with mock.patch.object(rf, "default_sandbox_root", return_value=root / "default-sandboxes"), mock.patch.object(
                 rf,
-                "legacy_default_sandbox_root",
-                return_value=root / "legacy-sandboxes",
-                create=True,
-            ), mock.patch.object(
-                rf,
                 "default_cache_root",
                 return_value=root / "default-cache",
-            ), mock.patch.object(
-                rf,
-                "legacy_default_cache_root",
-                return_value=root / "legacy-cache",
-                create=True,
             ), mock.patch.object(
                 rf,
                 "default_codex_base_config_path",
@@ -7226,10 +7044,10 @@ class InstallAndDoctorTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:
-        reviewflow_src = (ROOT / "reviewflow.py").read_text(encoding="utf-8")
+        cure_src = (ROOT / "cure.py").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         selftest = (ROOT / "selftest.sh").read_text(encoding="utf-8")
-        for text in (reviewflow_src, readme, selftest):
+        for text in (cure_src, readme, selftest):
             self.assertNotIn("reviewflow.py jira-smoke", text)
             self.assertNotIn("reviewflow.py clean", text)
             self.assertNotIn("reviewflow.py list", text)
@@ -7327,13 +7145,13 @@ class InstallAndDoctorTests(unittest.TestCase):
             ), mock.patch.object(cure_runtime, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
                 checks = rf._doctor_runtime_checks(runtime)
             by_name = {item.name: item for item in checks}
-            self.assertEqual(by_name["reviewflow-config"].status, "ok")
+            self.assertEqual(by_name["cure-config"].status, "ok")
             self.assertEqual(by_name["chunkhound-config"].status, "ok")
             self.assertEqual(by_name["jira-config"].status, "ok")
             self.assertEqual(by_name["codex-config"].status, "ok")
             self.assertEqual(by_name["gh-auth"].status, "ok")
             self.assertEqual(by_name["chunkhound"].status, "ok")
-            self.assertIn("source=cli", by_name["reviewflow-config"].detail)
+            self.assertIn("source=cli", by_name["cure-config"].detail)
             self.assertIn("source=config", by_name["chunkhound-config"].detail)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -7358,7 +7176,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             rc = rf.doctor_flow(argparse.Namespace(), runtime=runtime)
         self.assertEqual(rc, 1)
         text = stdout.getvalue()
-        self.assertIn("[fail] reviewflow-config", text)
+        self.assertIn("[fail] cure-config", text)
         self.assertIn("[fail] chunkhound", text)
         self.assertIn("[warn] jira-config", text)
         self.assertIn("[warn] codex-config", text)
@@ -7406,8 +7224,8 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
             self.assertEqual(rc, 1)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["reviewflow_config"]["source"], "cli")
-            self.assertTrue(payload["reviewflow_config"]["exists"])
+            self.assertEqual(payload["cure_config"]["source"], "cli")
+            self.assertTrue(payload["cure_config"]["exists"])
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
             self.assertEqual(payload["agent_runtime"]["profile"], "strict")
@@ -7423,9 +7241,9 @@ class InstallAndDoctorTests(unittest.TestCase):
             runtime = rf.resolve_runtime(self._runtime_args(config_path=str(root / "reviewflow.toml"), no_config=True))
             checks = rf._doctor_runtime_checks(runtime)
             by_name = {item.name: item for item in checks}
-            self.assertEqual(by_name["reviewflow-config"].status, "warn")
+            self.assertEqual(by_name["cure-config"].status, "warn")
             self.assertEqual(by_name["chunkhound-config"].status, "warn")
-            self.assertIn("disabled by --no-config", by_name["reviewflow-config"].detail)
+            self.assertIn("disabled by --no-config", by_name["cure-config"].detail)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8324,7 +8142,7 @@ class CodexResumeTests(unittest.TestCase):
             session_id="019cd0ef-73cd-79c2-a4b9-dbb34c9a2eed",
             env={
                 "GH_CONFIG_DIR": str(session_dir / "work" / "gh_config"),
-                "REVIEWFLOW_WORK_DIR": str(session_dir / "work"),
+                "CURE_WORK_DIR": str(session_dir / "work"),
             },
             codex_flags=["-m", "gpt-5.2", "--search", "--sandbox", "danger-full-access"],
             codex_config_overrides=['mcp_servers.chunkhound.command="chunkhound"'],
@@ -8333,7 +8151,7 @@ class CodexResumeTests(unittest.TestCase):
 
         self.assertIn(f"cd {repo_dir}", cmd)
         self.assertIn("env GH_CONFIG_DIR=", cmd)
-        self.assertIn("REVIEWFLOW_WORK_DIR=", cmd)
+        self.assertIn("CURE_WORK_DIR=", cmd)
         self.assertIn("codex resume", cmd)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertIn("--add-dir /tmp", cmd)
@@ -8400,7 +8218,7 @@ class CodexResumeTests(unittest.TestCase):
             info = rf.find_codex_resume_info(
                 repo_dir=repo_dir,
                 started_at=datetime(2026, 3, 9, 5, 0, 30, tzinfo=timezone.utc),
-                env={"REVIEWFLOW_WORK_DIR": str(repo_dir.parent / "work")},
+                env={"CURE_WORK_DIR": str(repo_dir.parent / "work")},
                 codex_flags=[],
                 codex_config_overrides=None,
                 add_dirs=[repo_dir.parent],
@@ -8443,7 +8261,7 @@ class CodexResumeTests(unittest.TestCase):
             info = rf.find_codex_resume_info(
                 repo_dir=repo_dir,
                 started_at=datetime(2026, 3, 9, 16, 31, 0, tzinfo=timezone.utc),
-                env={"REVIEWFLOW_WORK_DIR": str(repo_dir.parent / "work")},
+                env={"CURE_WORK_DIR": str(repo_dir.parent / "work")},
                 codex_flags=["-m", "gpt-5.4"],
                 codex_config_overrides=None,
                 add_dirs=None,
@@ -8503,7 +8321,7 @@ class CodexResumeTests(unittest.TestCase):
             info = rf.find_codex_resume_info(
                 repo_dir=repo_dir,
                 started_at=datetime(2026, 3, 10, 10, 0, 0, tzinfo=timezone.utc),
-                env={"REVIEWFLOW_WORK_DIR": str(repo_dir.parent / "work")},
+                env={"CURE_WORK_DIR": str(repo_dir.parent / "work")},
                 codex_flags=[],
                 codex_config_overrides=None,
                 add_dirs=None,
@@ -8994,7 +8812,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 "repo": "repo",
                 "number": 9,
                 "base_ref": "release/1.2",
-                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "base_ref_for_review": "cure_base__release_1_2",
                 "notes": {"no_index": False},
                 "llm": {"provider": "openai", "capabilities": {"supports_resume": True}},
                 "baseline_selection": {
@@ -9092,7 +8910,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 "repo": "repo",
                 "number": 9,
                 "base_ref": "release/1.2",
-                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "base_ref_for_review": "cure_base__release_1_2",
                 "baseline_selection": {
                     "base_ref": "release/1.2",
                     "repo_default_ref": "main",
@@ -9187,7 +9005,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 "repo": "repo",
                 "number": 9,
                 "base_ref": "release/1.2",
-                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "base_ref_for_review": "cure_base__release_1_2",
                 "baseline_selection": {
                     "base_ref": "release/1.2",
                     "repo_default_ref": "main",
@@ -10329,7 +10147,7 @@ class RefactorRegressionTests(unittest.TestCase):
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
             self.assertTrue(session_dir.is_dir())
-            self.assertTrue((session_dir / "work" / "logs" / "reviewflow.log").is_file())
+            self.assertTrue((session_dir / "work" / "logs" / "cure.log").is_file())
             self.assertTrue((session_dir / "work" / "chunkhound" / "chunkhound.json").is_file())
             self.assertTrue(meta["notes"]["no_review"])
             self.assertEqual(meta["status"], "done")
@@ -10952,7 +10770,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                 "owner": "acme",
                 "repo": "repo",
                 "number": 9,
-                "base_ref_for_review": "reviewflow_base__main",
+                "base_ref_for_review": "cure_base__main",
                 "llm": {"provider": "openai", "capabilities": {"supports_resume": True}},
                 "notes": {"no_index": False},
                 "paths": {
@@ -11026,6 +10844,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
 
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
                 stack.enter_context(
                     mock.patch.object(
                         rf,
@@ -11105,6 +10924,547 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             cfg.unlink(missing_ok=True)
 
 
+class _CodexToolProofFlowTests:
+    def _fake_run_cmd(self, *, seed: Path) -> object:
+        class _Result:
+            def __init__(self, stdout: str = "") -> None:
+                self.stdout = stdout
+                self.stderr = ""
+                self.duration_seconds = 0.0
+
+        def runner(cmd: list[str], **kwargs: object) -> _Result:
+            if cmd[:2] == ["git", "clone"]:
+                Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                return _Result()
+            if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                return _Result("https://github.com/acme/repo.git\n")
+            if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                return _Result("true\n")
+            if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+            if cmd[:3] == ["gh", "pr", "checkout"]:
+                return _Result()
+            if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                return _Result()
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        return runner
+
+    def _fake_materialize_chunkhound_env_config(
+        self,
+        *,
+        resolved_config: dict[str, object],
+        output_config_path: Path,
+        database_provider: str,
+        database_path: Path,
+    ) -> None:
+        output_config_path.parent.mkdir(parents=True, exist_ok=True)
+        output_config_path.write_text("{}", encoding="utf-8")
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fake_write_pr_context_file(
+        self,
+        *,
+        work_dir: Path,
+        pr: rf.PullRequestRef,
+        pr_meta: dict[str, object],
+    ) -> Path:
+        context_path = work_dir / "pr-context.md"
+        context_path.write_text("context", encoding="utf-8")
+        return context_path
+
+    def _codex_runtime_policy(self) -> dict[str, object]:
+        return {
+            "env": {},
+            "metadata": {},
+            "staged_paths": {},
+            "add_dirs": [],
+            "codex_config_overrides": [],
+            "codex_flags": [],
+            "dangerously_bypass_approvals_and_sandbox": True,
+        }
+
+    def _write_codex_events(self, *, work_dir: Path, tool_names: list[str]) -> dict[str, object]:
+        logs_dir = work_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        events_path = logs_dir / "codex.events.jsonl"
+        start = events_path.stat().st_size if events_path.exists() else 0
+        events: list[str] = []
+        if not tool_names:
+            events.append(json.dumps({"type": "thread.started", "thread_id": "tool-proof-test"}))
+        for tool_name in tool_names:
+            events.append(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "mcp_tool_call",
+                            "server": "chunkhound",
+                            "tool_name": tool_name,
+                        },
+                    }
+                )
+            )
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(events) + "\n")
+        end = events_path.stat().st_size
+        return {
+            "codex_events_path": str(events_path),
+            "codex_events_start_offset": start,
+            "codex_events_end_offset": end,
+        }
+
+    def _run_pr_flow_for_tool_proof(
+        self,
+        *,
+        root: Path,
+        profile_resolved: str,
+        multipass_enabled: bool,
+        llm_side_effect: Any,
+        expect_error: str | None = None,
+    ) -> tuple[Path, list[str]]:
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        sandbox_root = root / "sandboxes"
+        cache_root = root / "cache"
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        seed = root / "seed"
+        seed.mkdir(parents=True, exist_ok=True)
+        base_db = root / "base.chunkhound.db"
+        base_db.write_text("db", encoding="utf-8")
+        base_cfg = root / "chunkhound-base.json"
+        base_cfg.write_text("{}", encoding="utf-8")
+        config_path = root / "reviewflow.toml"
+        config_path.write_text(
+            f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+            encoding="utf-8",
+        )
+        paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+        args = rf.build_parser().parse_args(
+            [
+                "pr",
+                "https://github.com/acme/repo/pull/14",
+                "--if-reviewed",
+                "new",
+                "--ui",
+                "off",
+                "--quiet",
+                "--no-stream",
+            ]
+        )
+        calls: list[str] = []
+
+        def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+            output_path = Path(str(kwargs["output_path"]))
+            calls.append(output_path.name)
+            return llm_side_effect(output_path, Path(str(kwargs["repo_dir"])).parent / "work")
+
+        with contextlib.ExitStack() as stack:
+            fake_run_cmd = self._fake_run_cmd(seed=seed)
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "gh_api_json",
+                    return_value={
+                        "base": {"ref": "main"},
+                        "head": {"sha": "1111111111111111111111111111111111111111"},
+                        "title": "Tool proof PR",
+                    },
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        {"chunkhound": {"base_config_path": str(base_cfg)}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=self._fake_materialize_chunkhound_env_config,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(rf, "write_pr_context_file", side_effect=self._fake_write_pr_context_file)
+            )
+            stack.enter_context(mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}))
+            stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+            stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+            stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+            stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+            stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+            stack.enter_context(
+                mock.patch.object(
+                    rf.ReviewflowOutput,
+                    "run_logged_cmd",
+                    autospec=True,
+                    side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_review_intelligence_config",
+                    return_value=(
+                        rf.ReviewIntelligenceConfig(
+                            tool_prompt_fragment="Use GitHub MCP first.",
+                            policy_mode="cure_first_unrestricted",
+                        ),
+                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "load_reviewflow_multipass_defaults",
+                    return_value=(
+                        {"enabled": multipass_enabled, "max_steps": 20, "grounding_mode": "off"},
+                        {"multipass": {"enabled": multipass_enabled, "max_steps": 20, "grounding_mode": "off"}},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(rf, "resolve_prompt_profile", return_value=(profile_resolved, "forced:test"))
+            )
+            stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "resolve_llm_config_from_args",
+                    return_value=(
+                        {"provider": "codex", "preset": "test-codex"},
+                        {},
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "prepare_review_agent_runtime",
+                    return_value=self._codex_runtime_policy(),
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+            stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+            if expect_error is not None:
+                with self.assertRaisesRegex(rf.ReviewflowError, expect_error):
+                    rf.pr_flow(
+                        args,
+                        paths=paths,
+                        config_path=config_path,
+                        codex_base_config_path=root / "codex.toml",
+                    )
+            else:
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+                self.assertEqual(rc, 0)
+        return root, calls
+
+    def test_pr_flow_codex_tool_proof_failure_aborts_plan_without_singlepass_fallback(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_plan_failure"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text("not-json-plan\n", encoding="utf-8")
+            adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=["list_mcp_resources"])
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+            expect_error="ChunkHound tool proof failed for multipass plan",
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md"])
+            self.assertEqual(meta["status"], "error")
+            self.assertNotEqual(meta["multipass"]["mode"], "fallback_singlepass")
+            self.assertTrue((session_dir / "work" / "chunkhound_tool_validation.json").is_file())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_codex_tool_proof_success_allows_singlepass_completion(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_singlepass"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_codex_events(
+                work_dir=work_dir,
+                tool_names=["search", "code_research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual([run["review_stage"] for run in report["runs"]], ["singlepass_review"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_codex_tool_proof_success_allows_multipass_completion(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_multipass"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [{"id": "01", "title": "API review", "focus": "tool proof"}],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                tools = ["search", "code_research"]
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: tool proof",
+                            "",
+                            "### Steps taken",
+                            "- checked repo",
+                            "",
+                            "### Findings",
+                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "",
+                            "### Suggested actions",
+                            "- Add checks",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                tools = ["search"]
+            elif output_path.name == "review.md":
+                output_path.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+                tools = []
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=tools)
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual(
+                [run["review_stage"] for run in report["runs"]],
+                ["multipass_plan", "multipass_step", "multipass_synth"],
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_followup_flow_codex_tool_proof_success_allows_completion(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_followup"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "prompt": {"profile_resolved": "normal"},
+                "llm": {"provider": "codex", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:4] == ["git", "-C", str(repo_dir), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd and cmd[0] == "chunkhound":
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=["search"])
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            rf.ReviewIntelligenceConfig(
+                                tool_prompt_fragment="Use GitHub MCP first.",
+                                policy_mode="cure_first_unrestricted",
+                            ),
+                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "codex", "preset": "test-codex"},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(refreshed["followups"]), 1)
+            self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+
 class ExtractionOwnershipTests(unittest.TestCase):
     def _runtime(self) -> argparse.Namespace:
         return argparse.Namespace(
@@ -11177,7 +11537,7 @@ class ExtractionOwnershipTests(unittest.TestCase):
         self.assertTrue(doctor_flow.call_args.args[0].json_output)
         self.assertIs(doctor_flow.call_args.kwargs["runtime"], runtime)
 
-    def test_console_main_warns_and_dispatches_for_deprecated_alias(self) -> None:
+    def test_console_main_dispatches_for_reviewflow_argv_without_warning(self) -> None:
         stderr = StringIO()
         with mock.patch.object(rf, "main", return_value=7) as main_mock, mock.patch.object(
             sys,
@@ -11187,7 +11547,7 @@ class ExtractionOwnershipTests(unittest.TestCase):
             rc = rf.console_main()
 
         self.assertEqual(rc, 7)
-        self.assertIn("Use `cure` instead.", stderr.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
 
 

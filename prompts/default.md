@@ -22,7 +22,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
   - When reporting findings, cite `path:line` whenever possible.
 - Requirement: use `search` at least once; use `code_research` at least once.
 - If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**` lines to `REJECT`.
-- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
+- If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 - Keep shell commands read-only (no edits). Do not run destructive commands.
 
 ## Assessment rules

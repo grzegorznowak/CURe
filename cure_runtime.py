@@ -22,9 +22,6 @@ from paths import (
     default_codex_base_config_path,
     default_reviewflow_config_path,
     default_sandbox_root,
-    legacy_default_cache_root,
-    legacy_default_reviewflow_config_path,
-    legacy_default_sandbox_root,
 )
 from run import ReviewflowSubprocessError, run_cmd
 from ui import Verbosity
@@ -109,6 +106,14 @@ algorithm = "hybrid"
 """
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
+LEGACY_ENV_RENAMES = {
+    "REVIEWFLOW_AGENT_RUNTIME_PROFILE": "CURE_AGENT_RUNTIME_PROFILE",
+    "REVIEWFLOW_CACHE_ROOT": "CURE_CACHE_ROOT",
+    "REVIEWFLOW_CODEX_CONFIG": "CURE_CODEX_CONFIG",
+    "REVIEWFLOW_CONFIG": "CURE_CONFIG",
+    "REVIEWFLOW_SANDBOX_ROOT": "CURE_SANDBOX_ROOT",
+    "REVIEWFLOW_WORK_DIR": "CURE_WORK_DIR",
+}
 
 
 @dataclass(frozen=True)
@@ -163,20 +168,12 @@ def _set_disabled_reviewflow_config_path(path: Path | None) -> None:
 def _loaded_shell_module():
     import sys as _sys
 
-    # Prefer the legacy shim when present so existing reviewflow.* monkeypatches
-    # remain effective; otherwise fall back to the canonical cure shell.
-    return _sys.modules.get("reviewflow") or _sys.modules.get("cure")
+    return _sys.modules.get("cure")
 
 
 def _default_reviewflow_config_path() -> Path:
     rf = _loaded_shell_module()
     return rf.default_reviewflow_config_path() if rf is not None else default_reviewflow_config_path()
-
-
-def _legacy_default_reviewflow_config_path() -> Path:
-    rf = _loaded_shell_module()
-    fn = getattr(rf, "legacy_default_reviewflow_config_path", None) if rf is not None else None
-    return fn() if callable(fn) else legacy_default_reviewflow_config_path()
 
 
 def _default_codex_base_config_path() -> Path:
@@ -189,21 +186,23 @@ def _default_sandbox_root() -> Path:
     return rf.default_sandbox_root() if rf is not None else default_sandbox_root()
 
 
-def _legacy_default_sandbox_root() -> Path:
-    rf = _loaded_shell_module()
-    fn = getattr(rf, "legacy_default_sandbox_root", None) if rf is not None else None
-    return fn() if callable(fn) else legacy_default_sandbox_root()
-
-
 def _default_cache_root() -> Path:
     rf = _loaded_shell_module()
     return rf.default_cache_root() if rf is not None else default_cache_root()
 
 
-def _legacy_default_cache_root() -> Path:
-    rf = _loaded_shell_module()
-    fn = getattr(rf, "legacy_default_cache_root", None) if rf is not None else None
-    return fn() if callable(fn) else legacy_default_cache_root()
+def _legacy_env_rename_error(env_name: str, renamed_to: str) -> ReviewflowError:
+    return ReviewflowError(f"{env_name} is no longer supported. Use {renamed_to} instead.")
+
+
+def _read_supported_env_value(primary_env: str, legacy_env: str | None = None) -> str | None:
+    legacy_name = str(legacy_env or "").strip()
+    if legacy_name:
+        legacy_value = str(os.environ.get(legacy_name) or "").strip()
+        if legacy_value:
+            raise _legacy_env_rename_error(legacy_name, primary_env)
+    value = str(os.environ.get(primary_env) or "").strip()
+    return value or None
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -300,19 +299,17 @@ def _select_path_with_source(
 
 
 def _select_env_path_with_source(*, env_names: tuple[str, ...], base_dir: Path | None = None) -> tuple[Path, str] | None:
-    for idx, env_name in enumerate(env_names):
-        env_path = _resolve_optional_path(os.environ.get(env_name), base_dir=base_dir)
-        if env_path is not None:
-            return env_path, ("env" if idx == 0 else "legacy-env")
+    if not env_names:
+        return None
+    primary_env = env_names[0]
+    for legacy_env in env_names[1:]:
+        legacy_value = _read_supported_env_value(primary_env, legacy_env)
+        if legacy_value is not None:
+            break
+    env_path = _resolve_optional_path(_read_supported_env_value(primary_env), base_dir=base_dir)
+    if env_path is not None:
+        return env_path, "env"
     return None
-
-
-def _select_default_with_legacy_fallback(*, default_value: Path, legacy_default_value: Path) -> tuple[Path, str]:
-    default_path = default_value.resolve(strict=False)
-    legacy_path = legacy_default_value.resolve(strict=False)
-    if not default_path.exists() and legacy_path.exists():
-        return legacy_path, "legacy-default"
-    return default_path, "default"
 
 
 def load_reviewflow_paths_defaults(
@@ -354,10 +351,7 @@ def resolve_reviewflow_config_path(args: argparse.Namespace) -> tuple[Path, str,
         if env_path is not None:
             config_path, config_source = env_path
         else:
-            config_path, config_source = _select_default_with_legacy_fallback(
-                default_value=_default_reviewflow_config_path(),
-                legacy_default_value=_legacy_default_reviewflow_config_path(),
-            )
+            config_path, config_source = _default_reviewflow_config_path(), "default"
     config_enabled = not bool(getattr(args, "no_config", False))
     _set_disabled_reviewflow_config_path(None if config_enabled else config_path)
     return config_path, config_source, config_enabled
@@ -375,10 +369,7 @@ def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tup
         elif path_defaults.get("sandbox_root") is not None:
             sandbox_root, sandbox_root_source = path_defaults["sandbox_root"], "config"
         else:
-            sandbox_root, sandbox_root_source = _select_default_with_legacy_fallback(
-                default_value=_default_sandbox_root(),
-                legacy_default_value=_legacy_default_sandbox_root(),
-            )
+            sandbox_root, sandbox_root_source = _default_sandbox_root(), "default"
 
     cache_root = _resolve_optional_path(getattr(args, "cache_root", None))
     if cache_root is not None:
@@ -390,10 +381,7 @@ def resolve_runtime_paths(args: argparse.Namespace, *, config_path: Path) -> tup
         elif path_defaults.get("cache_root") is not None:
             cache_root, cache_root_source = path_defaults["cache_root"], "config"
         else:
-            cache_root, cache_root_source = _select_default_with_legacy_fallback(
-                default_value=_default_cache_root(),
-                legacy_default_value=_legacy_default_cache_root(),
-            )
+            cache_root, cache_root_source = _default_cache_root(), "default"
     return ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root), sandbox_root_source, cache_root_source
 
 
@@ -411,6 +399,8 @@ def resolve_codex_base_config_path(args: argparse.Namespace, *, config_path: Pat
 
 
 def resolve_runtime(args: argparse.Namespace) -> ReviewflowRuntime:
+    if str(os.environ.get("REVIEWFLOW_WORK_DIR") or "").strip():
+        raise _legacy_env_rename_error("REVIEWFLOW_WORK_DIR", "CURE_WORK_DIR")
     config_path, config_source, config_enabled = resolve_reviewflow_config_path(args)
     paths, sandbox_root_source, cache_root_source = resolve_runtime_paths(args, config_path=config_path)
     codex_base_config_path, codex_base_config_source = resolve_codex_base_config_path(
@@ -972,7 +962,8 @@ def resolve_agent_runtime_profile(
         return cli_profile, "cli", cfg, meta
 
     env_profile = _normalize_agent_runtime_profile(
-        os.environ.get("REVIEWFLOW_AGENT_RUNTIME_PROFILE"), source="env"
+        _read_supported_env_value("CURE_AGENT_RUNTIME_PROFILE", "REVIEWFLOW_AGENT_RUNTIME_PROFILE"),
+        source="env",
     )
     if env_profile is not None:
         return env_profile, "env", cfg, meta
@@ -1045,7 +1036,7 @@ def resolve_llm_config(
     builtin_presets = builtin_llm_presets()
 
     selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
-    preset_source = "cli" if str(cli_preset or "").strip() else "reviewflow.toml"
+    preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
     if selected_name:
         if selected_name in presets:
             base_preset = dict(presets[selected_name])
@@ -1287,7 +1278,7 @@ def resolve_codex_flags(
             return cli.strip(), "cli"
         rf = rf_defaults.get(key)
         if rf:
-            return rf, "reviewflow.toml"
+            return rf, "cure.toml"
         if base and str(base).strip():
             return str(base).strip(), "base_config"
         return None, "unset"
@@ -1621,7 +1612,7 @@ def _doctor_public_pr_probe(pr: PullRequestRef) -> tuple[bool, str]:
         f"https://api.github.com{path}",
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "reviewflow/0.1.0",
+            "User-Agent": "cure/0.1.0",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         method="GET",
@@ -1798,7 +1789,7 @@ def _doctor_runtime_payload(
     target = _resolve_doctor_target_context(pr_url)
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
-        "reviewflow_config": _doctor_path_payload(
+        "cure_config": _doctor_path_payload(
             path=runtime.config_path,
             source=runtime.config_source,
             exists=config_exists,
@@ -1876,11 +1867,11 @@ def _doctor_runtime_checks(
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
     if not runtime.config_enabled:
-        checks.append(DoctorCheck(name="reviewflow-config", status="warn", detail=f"{config_prefix} (disabled by --no-config)"))
+        checks.append(DoctorCheck(name="cure-config", status="warn", detail=f"{config_prefix} (disabled by --no-config)"))
     elif config_path.is_file():
-        checks.append(DoctorCheck(name="reviewflow-config", status="ok", detail=config_prefix))
+        checks.append(DoctorCheck(name="cure-config", status="ok", detail=config_prefix))
     else:
-        checks.append(DoctorCheck(name="reviewflow-config", status="fail", detail=f"missing: {config_prefix}"))
+        checks.append(DoctorCheck(name="cure-config", status="fail", detail=f"missing: {config_prefix}"))
 
     path_defaults, _ = load_reviewflow_paths_defaults(config_path=config_path)
     sandbox_detail = f"{runtime.paths.sandbox_root} (source={runtime.sandbox_root_source})"

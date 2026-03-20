@@ -24,8 +24,7 @@ if TYPE_CHECKING:
 
 
 def _reviewflow():
-    # Compatibility flows still patch reviewflow.* directly in tests and adapters.
-    import reviewflow as rf
+    import cure as rf
 
     return rf
 
@@ -64,8 +63,8 @@ def preferred_cli_invocation(invocation: str) -> str:
 
 def build_commands_catalog_payload() -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "kind": "reviewflow.commands",
+        "schema_version": 2,
+        "kind": "cure.commands",
         "commands": [
             {
                 "name": "pr",

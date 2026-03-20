@@ -89,6 +89,7 @@ Run the first public prove-out as an explicit evidence-gathering exercise, not a
    - install the wheel into an isolated environment
    - verify `cure --help`
    - verify there is no installed `reviewflow` executable
+   - verify `python -c "import reviewflow"` fails
    - run `cure init`
    - run `cure install`
    - run `cure doctor --pr-url <public github PR> --json`

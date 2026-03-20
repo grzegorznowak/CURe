@@ -14,7 +14,7 @@ dependencies = []
 cure = "cure:console_main"
 
 [tool.setuptools]
-py-modules = ["cure", "reviewflow", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_flows", "cure_commands", "chunkhound_summary"]
+py-modules = ["cure", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_flows", "cure_commands", "chunkhound_summary"]
 packages = ["prompts"]
 include-package-data = true
 

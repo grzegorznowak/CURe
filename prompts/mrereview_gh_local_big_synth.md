@@ -16,8 +16,8 @@ Read the plan JSON and all step outputs, then produce the final review.
 $REVIEW_INTELLIGENCE_GUIDANCE
 
 Safety guardrail:
-- Do not read or write outside the sandbox checkout, except CURe scratch space under `$REVIEWFLOW_WORK_DIR`.
-- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
+- Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
+- If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 
 # Mandatory: ChunkHound MCP tools
 If you still need to confirm anything before deciding, use ChunkHound MCP tools (`search` / `code_research`) rather than guessing.

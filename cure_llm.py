@@ -13,7 +13,13 @@ from typing import Any
 
 from cure_errors import ReviewflowError
 from cure_flows import chunkhound_env, ensure_review_config, materialize_chunkhound_env_config
-from cure_output import _shell_join, active_output, normalize_markdown_artifact, safe_cmd_for_meta
+from cure_output import (
+    CodexJsonEventSink,
+    _shell_join,
+    active_output,
+    normalize_markdown_artifact,
+    safe_cmd_for_meta,
+)
 from cure_runtime import (
     CLI_LLM_PROVIDERS,
     HTTP_LLM_PROVIDERS,
@@ -35,11 +41,11 @@ from paths import (
     real_user_home_dir,
 )
 from run import ReviewflowSubprocessError, run_cmd
+from ui import TailBuffer
 
 
 def _reviewflow():
-    # Keep reviewflow as the late-bound patch surface for compatibility tests.
-    import reviewflow as rf
+    import cure as rf
 
     return rf
 
@@ -88,6 +94,9 @@ class CodexResumeInfo:
 @dataclass(frozen=True)
 class CodexRunResult:
     resume: CodexResumeInfo | None = None
+    events_log_path: Path | None = None
+    events_start_offset: int | None = None
+    events_end_offset: int | None = None
 
 
 _LIVE_PROGRESS_TIMELINE_MAX = 8
@@ -142,6 +151,29 @@ def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
         meta.setdefault("logs", {})["codex_events"] = str(path)
         _flush_progress(progress)
     return path
+
+
+def _resolve_codex_display_log_path(*, progress: Any, repo_dir: Path) -> Path:
+    meta = _progress_meta_dict(progress)
+    logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
+    raw_path = str(logs.get("codex") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        return ((repo_dir.parent / path).resolve() if not path.is_absolute() else path.resolve())
+    path = (repo_dir.parent / "work" / "logs" / "codex.log").resolve()
+    if isinstance(meta, dict):
+        meta.setdefault("logs", {})["codex"] = str(path)
+        _flush_progress(progress)
+    return path
+
+
+def _path_size(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return None
 
 
 def _ensure_codex_live_progress(*, progress: Any, events_log_path: Path) -> None:
@@ -259,11 +291,11 @@ def run_codex_exec(
 ) -> CodexRunResult:
     started_at = datetime.now(timezone.utc)
     out = active_output()
-    json_live = bool(stream) and out is not None and bool(getattr(out, "ui_enabled", False))
-    codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir) if json_live else None
+    codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir)
+    codex_display_log_path = _resolve_codex_display_log_path(progress=progress, repo_dir=repo_dir)
+    events_start_offset = _path_size(codex_events_log_path)
     artifact_override: dict[str, str | None] = {"text": None}
-    if codex_events_log_path is not None:
-        _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
+    _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
 
     def _handle_codex_event(event: dict[str, Any]) -> None:
         _record_codex_live_event(progress=progress, event=event)
@@ -284,7 +316,7 @@ def run_codex_exec(
         approval_policy=approval_policy,
         dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
         include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-        json_output=json_live,
+        json_output=True,
     )
     progress.record_cmd(cmd)
     try:
@@ -295,17 +327,37 @@ def run_codex_exec(
                 cwd=repo_dir,
                 env=env,
                 check=True,
-                stream_requested=stream,
+                stream_requested=True,
                 codex_json_events_path=codex_events_log_path,
-                codex_event_callback=(_handle_codex_event if codex_events_log_path is not None else None),
+                codex_event_callback=_handle_codex_event,
             )
         else:
-            run_cmd(cmd, cwd=repo_dir, env=env, check=True, stream=stream, stream_label=stream_label)
+            codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
+            codex_display_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with codex_events_log_path.open("a", encoding="utf-8", buffering=1) as raw_fh, codex_display_log_path.open(
+                "a", encoding="utf-8", buffering=1
+            ) as display_fh:
+                sink = CodexJsonEventSink(
+                    raw_file=raw_fh,
+                    display_file=display_fh,
+                    tail=TailBuffer(max_lines=400),
+                    also_to=None,
+                    on_event=_handle_codex_event,
+                )
+                run_cmd(
+                    cmd,
+                    cwd=repo_dir,
+                    env=env,
+                    check=True,
+                    stream=True,
+                    stream_to=sink,
+                    stream_label=None,
+                )
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
         normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-        if codex_events_log_path is not None:
-            _finalize_codex_live_progress(progress=progress, status="done")
+        _finalize_codex_live_progress(progress=progress, status="done")
+        events_end_offset = _path_size(codex_events_log_path)
         return CodexRunResult(
             resume=find_codex_resume_info(
                 repo_dir=repo_dir,
@@ -314,24 +366,25 @@ def run_codex_exec(
                 codex_flags=codex_flags,
                 codex_config_overrides=codex_config_overrides,
                 add_dirs=add_dirs,
-            )
+            ),
+            events_log_path=codex_events_log_path,
+            events_start_offset=events_start_offset,
+            events_end_offset=events_end_offset,
         )
     except ReviewflowSubprocessError as e:
         msg = (e.stderr or "") + "\n" + (e.stdout or "")
         if "skip-git-repo-check" not in msg and "trusted directory" not in msg:
-            if codex_events_log_path is not None:
-                _finalize_codex_live_progress(progress=progress, status="error")
+            _finalize_codex_live_progress(progress=progress, status="error")
             raise
-        if codex_events_log_path is not None:
-            _record_codex_live_event(
-                progress=progress,
-                event={
-                    "type": "agent_message",
-                    "text": "Retrying review with --skip-git-repo-check.",
-                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "replace_current": True,
-                },
-            )
+        _record_codex_live_event(
+            progress=progress,
+            event={
+                "type": "agent_message",
+                "text": "Retrying review with --skip-git-repo-check.",
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "replace_current": True,
+            },
+        )
         fallback = build_codex_exec_cmd(
             repo_dir=repo_dir,
             codex_flags=codex_flags,
@@ -343,7 +396,7 @@ def run_codex_exec(
             approval_policy=approval_policy,
             dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
             include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-            json_output=json_live,
+            json_output=True,
         )
         progress.record_cmd(fallback)
         out = active_output()
@@ -355,28 +408,40 @@ def run_codex_exec(
                     cwd=repo_dir,
                     env=env,
                     check=True,
-                    stream_requested=stream,
+                    stream_requested=True,
                     codex_json_events_path=codex_events_log_path,
-                    codex_event_callback=(_handle_codex_event if codex_events_log_path is not None else None),
+                    codex_event_callback=_handle_codex_event,
                 )
             else:
-                run_cmd(
-                    fallback,
-                    cwd=repo_dir,
-                    env=env,
-                    check=True,
-                    stream=stream,
-                    stream_label=stream_label,
-                )
+                codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
+                codex_display_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with codex_events_log_path.open("a", encoding="utf-8", buffering=1) as raw_fh, codex_display_log_path.open(
+                    "a", encoding="utf-8", buffering=1
+                ) as display_fh:
+                    sink = CodexJsonEventSink(
+                        raw_file=raw_fh,
+                        display_file=display_fh,
+                        tail=TailBuffer(max_lines=400),
+                        also_to=None,
+                        on_event=_handle_codex_event,
+                    )
+                    run_cmd(
+                        fallback,
+                        cwd=repo_dir,
+                        env=env,
+                        check=True,
+                        stream=True,
+                        stream_to=sink,
+                        stream_label=None,
+                    )
         except ReviewflowSubprocessError:
-            if codex_events_log_path is not None:
-                _finalize_codex_live_progress(progress=progress, status="error")
+            _finalize_codex_live_progress(progress=progress, status="error")
             raise
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
         normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-        if codex_events_log_path is not None:
-            _finalize_codex_live_progress(progress=progress, status="done")
+        _finalize_codex_live_progress(progress=progress, status="done")
+        events_end_offset = _path_size(codex_events_log_path)
         return CodexRunResult(
             resume=find_codex_resume_info(
                 repo_dir=repo_dir,
@@ -385,7 +450,10 @@ def run_codex_exec(
                 codex_flags=codex_flags,
                 codex_config_overrides=codex_config_overrides,
                 add_dirs=add_dirs,
-            )
+            ),
+            events_log_path=codex_events_log_path,
+            events_start_offset=events_start_offset,
+            events_end_offset=events_end_offset,
         )
 
 
@@ -532,7 +600,7 @@ def build_claude_resume_command(
 ) -> str:
     env_prefix = _build_env_prefix_assignments(
         env,
-        ("ANTHROPIC_API_KEY", "GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "REVIEWFLOW_WORK_DIR"),
+        ("ANTHROPIC_API_KEY", "GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR"),
     )
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     resume_cmd = [command]
@@ -732,7 +800,16 @@ def run_llm_exec(
                 cwd=result.resume.cwd,
                 command=result.resume.command,
             )
-        return LlmRunResult(resume=resume, adapter_meta={"transport": "cli-codex", "flags": codex_flags})
+        return LlmRunResult(
+            resume=resume,
+            adapter_meta={
+                "transport": "cli-codex",
+                "flags": codex_flags,
+                "codex_events_path": str(result.events_log_path) if result.events_log_path is not None else None,
+                "codex_events_start_offset": result.events_start_offset,
+                "codex_events_end_offset": result.events_end_offset,
+            },
+        )
     if provider == "claude":
         return rf.run_claude_exec(
             repo_dir=repo_dir,
@@ -820,8 +897,8 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     if netrc:
         env["NETRC"] = str(netrc)
         staged_paths["netrc"] = str(netrc)
-    env["REVIEWFLOW_WORK_DIR"] = str(work_dir)
-    staged_paths["reviewflow_work_dir"] = str(work_dir)
+    env["CURE_WORK_DIR"] = str(work_dir)
+    staged_paths["cure_work_dir"] = str(work_dir)
     rf_jira = write_rf_jira(repo_dir=repo_dir)
     staged_paths["rf_jira"] = str(rf_jira)
     return env, staged_paths
@@ -983,7 +1060,7 @@ def prepare_review_agent_runtime(
                 claude_dir / "mcp.json",
                 {
                     "mcpServers": {
-                        "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                        "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
                             sandbox_repo_dir=repo_dir,
                             chunkhound_config_path=chunkhound_config_path,
                             chunkhound_db_path=chunkhound_db_path,
@@ -1036,7 +1113,7 @@ def prepare_review_agent_runtime(
         system_settings: dict[str, Any] = {}
         if enable_mcp:
             system_settings["mcpServers"] = {
-                "reviewflow-chunkhound": _reviewflow_chunkhound_mcp_entry(
+                "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
                     sandbox_repo_dir=repo_dir,
                     chunkhound_config_path=chunkhound_config_path,
                     chunkhound_db_path=chunkhound_db_path,
@@ -1044,7 +1121,7 @@ def prepare_review_agent_runtime(
                     trust=False,
                 )
             }
-            system_settings["mcp"] = {"allowed": ["reviewflow-chunkhound"]}
+            system_settings["mcp"] = {"allowed": ["cure-chunkhound"]}
         system_settings_path = _write_json_file(work_dir / "gemini" / "system-settings.json", system_settings)
         env["GEMINI_CLI_HOME"] = str(home_root)
         env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(system_settings_path)
@@ -1189,7 +1266,7 @@ def build_codex_resume_command(
     _ = add_dirs
     assignments: list[str] = []
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "REVIEWFLOW_WORK_DIR"):
+    for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR"):
         value = str(env.get(key) or "").strip()
         if value:
             assignments.append(f"{key}={shlex.quote(value)}")

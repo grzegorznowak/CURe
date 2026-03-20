@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from cure_branding import LEGACY_SLUG
+from cure_branding import RUNTIME_SLUG
 from cure_errors import ReviewflowError
 from run import run_cmd
 from ui import Dashboard, TailBuffer, UiState, Verbosity, StreamSink
@@ -175,7 +175,7 @@ class ReviewflowOutput:
         self.verbosity = verbosity
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.reviewflow_log = (self.logs_dir / f"{LEGACY_SLUG}.log").open(
+        self.cure_log = (self.logs_dir / f"{RUNTIME_SLUG}.log").open(
             "a", encoding="utf-8", buffering=1
         )
         self.chunkhound_log = (self.logs_dir / "chunkhound.log").open(
@@ -227,7 +227,7 @@ class ReviewflowOutput:
     def stop(self) -> None:
         if self.dashboard is not None:
             self.dashboard.stop()
-        for fh in (self.reviewflow_log, self.chunkhound_log, self.codex_log):
+        for fh in (self.cure_log, self.chunkhound_log, self.codex_log):
             try:
                 fh.flush()
                 fh.close()
@@ -236,8 +236,8 @@ class ReviewflowOutput:
 
     def log(self, line: str) -> None:
         try:
-            self.reviewflow_log.write(line + "\n")
-            self.reviewflow_log.flush()
+            self.cure_log.write(line + "\n")
+            self.cure_log.flush()
         except Exception:
             pass
         if not self.ui_enabled:
@@ -247,8 +247,8 @@ class ReviewflowOutput:
 
     def eprint(self, line: str) -> None:
         try:
-            self.reviewflow_log.write(line + "\n")
-            self.reviewflow_log.flush()
+            self.cure_log.write(line + "\n")
+            self.cure_log.flush()
         except Exception:
             pass
         if not self.ui_enabled:
@@ -278,13 +278,14 @@ class ReviewflowOutput:
         codex_json_events_path: Path | None = None,
         codex_event_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
-        stream = True if self.ui_enabled else bool(stream_requested)
-        label = self.stream_label(kind) if stream else None
+        capture_codex_json = kind == "codex" and codex_json_events_path is not None
+        stream = True if (self.ui_enabled or capture_codex_json) else bool(stream_requested)
+        label = None if capture_codex_json else (self.stream_label(kind) if stream else None)
         if stream:
             sink: TextIO = self.stream_sink(kind)
             raw_fh: TextIO | None = None
             try:
-                if kind == "codex" and codex_json_events_path is not None:
+                if capture_codex_json:
                     codex_json_events_path.parent.mkdir(parents=True, exist_ok=True)
                     raw_fh = codex_json_events_path.open("a", encoding="utf-8", buffering=1)
                     also_to = (

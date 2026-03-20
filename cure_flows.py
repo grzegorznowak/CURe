@@ -43,8 +43,7 @@ from run import ReviewflowSubprocessError, merged_env, run_cmd
 
 
 def _reviewflow():
-    # Keep reviewflow as the late-bound patch surface for compatibility tests.
-    import reviewflow as rf
+    import cure as rf
 
     return rf
 
@@ -270,6 +269,8 @@ def chunkhound_prompt_contracts() -> dict[str, ChunkHoundPromptContract]:
 def chunkhound_prompt_contract_for_template(name: str) -> ChunkHoundPromptContract | None:
     return _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS.get(str(name).strip())
 
+
+
 def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, str]:
     return {"REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(cfg)}
 
@@ -482,7 +483,7 @@ def _github_public_api_json(*, path: str) -> dict[str, Any]:
         f"https://api.github.com{normalized}",
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "reviewflow/0.1.0",
+            "User-Agent": "cure/0.1.0",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         method="GET",
@@ -509,10 +510,6 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
     cmd = ["gh", "api", "--hostname", host, path]
     try:
         result = _run_cmd(cmd)
-    except FileNotFoundError:
-        _handle_missing_gh(host=host, action="PR metadata resolution", allow_public_fallback=allow_public_fallback)
-        _eprint(f"`gh` is not installed; falling back to the public GitHub API for {host}.")
-        return _github_public_api_json(path=path)
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
             if allow_public_fallback and _supports_public_github_fallback(host):
@@ -548,7 +545,7 @@ def write_pr_context_file(
     write_json(
         path,
         {
-            "source": "reviewflow.resolve_pr_meta",
+            "source": "cure.resolve_pr_meta",
             "pr": {
                 "host": pr.host,
                 "owner": pr.owner,
@@ -572,18 +569,6 @@ def clone_seed_repo(*, host: str, owner: str, repo: str, seed: Path) -> None:
     cmd = ["gh", "repo", "clone", repo_id_for_gh(host, owner, repo), str(seed)]
     try:
         _run_cmd(cmd)
-        return
-    except FileNotFoundError:
-        _handle_missing_gh(host=host, action="seed clone", allow_public_fallback=True)
-        _eprint(f"`gh` is not installed; falling back to public git clone for {host}.")
-        _run_cmd(
-            [
-                "git",
-                "clone",
-                _public_github_repo_clone_url(host=host, owner=owner, repo=repo),
-                str(seed),
-            ]
-        )
         return
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
@@ -614,26 +599,10 @@ def checkout_pr_in_repo(*, repo_dir: Path, pr: PullRequestRef) -> None:
     try:
         _run_cmd(cmd, cwd=repo_dir)
         return
-    except FileNotFoundError:
-        _handle_missing_gh(host=pr.host, action="PR checkout", allow_public_fallback=True)
-        branch = f"reviewflow_pr__{pr.number}"
-        _eprint(f"`gh` is not installed; falling back to public git fetch for PR #{pr.number}.")
-        _run_cmd(
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "fetch",
-                "origin",
-                f"refs/pull/{pr.number}/head:{branch}",
-            ]
-        )
-        _run_cmd(["git", "-C", str(repo_dir), "checkout", "-B", branch, branch])
-        return
     except ReviewflowSubprocessError as e:
         if _looks_like_gh_auth_error(e):
             if _supports_public_github_fallback(pr.host):
-                branch = f"reviewflow_pr__{pr.number}"
+                branch = f"cure_pr__{pr.number}"
                 _eprint(f"`gh` is not authenticated for {pr.host}; falling back to public git fetch for PR #{pr.number}.")
                 _run_cmd(
                     [

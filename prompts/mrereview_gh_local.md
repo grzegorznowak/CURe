@@ -19,8 +19,8 @@ Take pre-existing PR and ticket discussion history into account so you do not re
 and so you have the most current understanding of goals and issues.
 
 Safety guardrail:
-- Do not read or write outside the sandbox checkout, except CURe scratch space under `$REVIEWFLOW_WORK_DIR`.
-- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
+- Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
+- If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 
 If you must ABORT:
 - Output using the format below.

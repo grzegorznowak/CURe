@@ -21,8 +21,8 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:
-- Do not read or write outside the sandbox checkout, except CURe scratch space under `$REVIEWFLOW_WORK_DIR`.
-- If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
+- Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
+- If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 
 If you must ABORT:
 - Output using the format below.
