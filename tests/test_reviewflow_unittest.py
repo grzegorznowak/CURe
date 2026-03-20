@@ -6893,6 +6893,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("inspect the active local setup before creating a fresh one", readme)
         self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", readme)
         self.assertIn("Do not silently adopt it in this public contract.", readme)
+        self.assertIn("`repo_local_chunkhound` payload", readme)
+        self.assertIn("`repo-local-chunkhound` check", readme)
+        self.assertIn("`executor-network` advisory check", readme)
         self.assertIn("Codex and Claude executor paths need internet / network access", readme)
         self.assertLess(readme.index("## Quickstart"), readme.index("## What CURe Is For"))
         self.assertIn("Hard Rule", skill)
@@ -6927,6 +6930,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("inspect the active local setup before creating fresh config files", skill)
         self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", skill)
         self.assertIn("Do not silently adopt it.", skill)
+        self.assertIn("`repo_local_chunkhound` payload", skill)
+        self.assertIn("`repo-local-chunkhound` check", skill)
+        self.assertIn("`executor-network` checks", skill)
         self.assertIn("Codex and Claude executor paths need internet / network access", skill)
         self.assertNotIn("pip install", readme)
 
@@ -6954,6 +6960,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
         self.assertIn("if repo-root `chunkhound.json` or `.chunkhound.json` exists, summarize it as a setup hint", skill)
         self.assertIn("ask the operator whether it should be reused; do not silently adopt it", skill)
+        self.assertIn("Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks", skill)
         self.assertIn("the active executor path is Codex or Claude", skill)
         self.assertIn("the required internet / network access for code-under-review context", skill)
 
@@ -7230,6 +7237,254 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["sandbox_root"]["source"], "config")
             self.assertEqual(payload["agent_runtime"]["profile"], "strict")
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_json_includes_repo_local_chunkhound_payload(self) -> None:
+        root = ROOT / ".tmp_test_doctor_repo_local_chunkhound"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound-base.json"
+        repo_root = root / "repo"
+        invocation_cwd = repo_root / "src"
+        repo_local_cfg = repo_root / "chunkhound.json"
+        repo_local_db = repo_root / ".chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_local_db.mkdir(parents=True, exist_ok=True)
+            invocation_cwd.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir(parents=True, exist_ok=True)
+            (root / "cache").mkdir(parents=True, exist_ok=True)
+            base_cfg.write_text(
+                json.dumps(
+                    {
+                        "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
+                        "research": {"algorithm": "hybrid"},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (repo_local_db / "chunks.db").write_text("db", encoding="utf-8")
+            repo_local_cfg.write_text(
+                json.dumps(
+                    {
+                        "database": {"provider": "duckdb", "path": ".chunkhound"},
+                        "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
+                        "research": {"algorithm": "hybrid"},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": f"/usr/bin/{name}",
+                    "gh": f"/usr/bin/{name}",
+                    "jira": f"/usr/bin/{name}",
+                    "codex": f"/usr/bin/{name}",
+                }.get(name)
+
+            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
+                    return mock.Mock(stdout="", stderr="", exit_code=0)
+                raise AssertionError(f"unexpected runtime command: {cmd}")
+
+            def fake_rf_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(invocation_cwd), "rev-parse", "--show-toplevel"]:
+                    return mock.Mock(stdout=f"{repo_root}\n", stderr="", exit_code=0)
+                raise AssertionError(f"unexpected reviewflow command: {cmd}")
+
+            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch.object(cure_runtime, "run_cmd", side_effect=fake_runtime_run_cmd), mock.patch.object(
+                rf,
+                "run_cmd",
+                side_effect=fake_rf_run_cmd,
+            ), mock.patch.object(
+                cure_runtime.Path,
+                "cwd",
+                return_value=invocation_cwd,
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            candidate = payload["repo_local_chunkhound"]
+            self.assertEqual(candidate["candidate_state"], "candidate")
+            self.assertEqual(candidate["config_path"], str(repo_local_cfg.resolve()))
+            self.assertEqual(candidate["repo_root"], str(repo_root.resolve()))
+            self.assertEqual(candidate["db_provider"], "duckdb")
+            self.assertEqual(candidate["db_path"], str(repo_local_db.resolve()))
+            self.assertEqual(candidate["runtime_match_state"], "compatible")
+            by_name = {item["name"]: item for item in payload["checks"]}
+            self.assertEqual(by_name["repo-local-chunkhound"]["status"], "warn")
+            self.assertIn("ask-first repo-local ChunkHound candidate", by_name["repo-local-chunkhound"]["detail"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_adds_executor_network_advisory_for_claude(self) -> None:
+        root = ROOT / ".tmp_test_doctor_executor_network_claude"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                        "[llm]",
+                        'default_preset = "claude_default"',
+                        "",
+                        "[llm_presets.claude_default]",
+                        'preset = "claude-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": f"/usr/bin/{name}",
+                    "gh": f"/usr/bin/{name}",
+                    "jira": f"/usr/bin/{name}",
+                    "codex": f"/usr/bin/{name}",
+                    "claude": f"/usr/bin/{name}",
+                }.get(name)
+
+            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
+                    return mock.Mock(stdout="", stderr="", exit_code=0)
+                raise AssertionError(f"unexpected runtime command: {cmd}")
+
+            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch.object(cure_runtime, "run_cmd", side_effect=fake_runtime_run_cmd), mock.patch.object(
+                rf,
+                "run_cmd",
+                side_effect=RuntimeError("not a git worktree"),
+            ), mock.patch.object(
+                cure_runtime.Path,
+                "cwd",
+                return_value=root,
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            by_name = {item["name"]: item for item in payload["checks"]}
+            self.assertEqual(by_name["executor-network"]["status"], "warn")
+            self.assertIn("claude executor needs internet / network access", by_name["executor-network"]["detail"])
+            self.assertIn("does not prove external sandbox access", by_name["executor-network"]["detail"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_skips_executor_network_advisory_for_gemini(self) -> None:
+        root = ROOT / ".tmp_test_doctor_executor_network_gemini"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                        "[agent_runtime]",
+                        'profile = "balanced"',
+                        "",
+                        "[llm]",
+                        'default_preset = "gemini_default"',
+                        "",
+                        "[llm_presets.gemini_default]",
+                        'preset = "gemini-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": f"/usr/bin/{name}",
+                    "gh": f"/usr/bin/{name}",
+                    "jira": f"/usr/bin/{name}",
+                    "codex": f"/usr/bin/{name}",
+                    "gemini": f"/usr/bin/{name}",
+                }.get(name)
+
+            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
+                    return mock.Mock(stdout="", stderr="", exit_code=0)
+                raise AssertionError(f"unexpected runtime command: {cmd}")
+
+            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch.object(cure_runtime, "run_cmd", side_effect=fake_runtime_run_cmd), mock.patch.object(
+                rf,
+                "run_cmd",
+                side_effect=RuntimeError("not a git worktree"),
+            ), mock.patch.object(
+                cure_runtime.Path,
+                "cwd",
+                return_value=root,
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            check_names = {item["name"] for item in payload["checks"]}
+            self.assertNotIn("executor-network", check_names)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

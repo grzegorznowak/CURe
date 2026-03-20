@@ -51,6 +51,7 @@ When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent
 ```
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
+Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for this now: its `repo_local_chunkhound` payload and `repo-local-chunkhound` check report the same ask-first setup hint in machine-readable and text forms.
 
 4. For disposable agent bootstrap, prefer a temp XDG root instead of editing `~/.config/cure` by hand:
 
@@ -77,6 +78,7 @@ That indexed ChunkHound-backed path is the default and recommended public review
 ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
 
 Codex and Claude executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state.
+When `cure doctor` resolves Codex or Claude, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
 
 6. `cure init` writes the non-secret local config files if they are missing:
 
@@ -333,6 +335,8 @@ If local CURe config already exists, inspect it before overwriting it:
 - check the active `cure.toml`
 - inspect the JSON resolved from `[chunkhound].base_config_path`
 - treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt
+
+Prefer `cure doctor --pr-url <PR_URL> --json` as the readiness summary after that inspection. It now reports `repo_local_chunkhound` plus the `repo-local-chunkhound` and `executor-network` checks so the operator does not need to infer those details from raw files alone.
 
 Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
 

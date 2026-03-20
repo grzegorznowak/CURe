@@ -1657,6 +1657,97 @@ def _doctor_optional_check(*, name: str, detail: str) -> DoctorCheck:
     return DoctorCheck(name=name, status="warn", detail=detail)
 
 
+def _doctor_repo_local_chunkhound_payload(
+    *,
+    runtime: ReviewflowRuntime,
+    target: DoctorTargetContext | None,
+) -> dict[str, Any]:
+    from cure_flows import discover_repo_local_chunkhound_config
+
+    resolved_runtime_config: dict[str, Any] | None = None
+    if runtime.config_enabled:
+        try:
+            _, _, resolved_runtime_config = load_chunkhound_runtime_config(
+                config_path=runtime.config_path,
+                require=True,
+            )
+        except ReviewflowError:
+            resolved_runtime_config = None
+
+    return discover_repo_local_chunkhound_config(
+        invocation_cwd=Path.cwd(),
+        pr=(target.pr if target is not None else None),
+        resolved_runtime_config=resolved_runtime_config,
+    )
+
+
+def _doctor_repo_local_chunkhound_check(discovery: dict[str, Any]) -> DoctorCheck:
+    state = str(discovery.get("candidate_state") or "absent").strip() or "absent"
+    reason = str(discovery.get("reason") or "").strip() or None
+    repo_root = str(discovery.get("repo_root") or "").strip() or "<unknown>"
+    config_path = str(discovery.get("config_path") or "").strip() or "<none>"
+    db_provider = str(discovery.get("db_provider") or "").strip() or "<unknown>"
+    db_path = str(discovery.get("db_path") or "").strip() or "<none>"
+    repo_identity = str(discovery.get("repo_identity") or "").strip() or "<unknown>"
+    expected_repo_identity = str(discovery.get("expected_repo_identity") or "").strip() or "<not_requested>"
+    runtime_match_state = str(discovery.get("runtime_match_state") or "not_requested").strip() or "not_requested"
+    target_match_state = str(discovery.get("target_match_state") or "not_requested").strip() or "not_requested"
+
+    if state == "candidate":
+        return DoctorCheck(
+            name="repo-local-chunkhound",
+            status="warn",
+            detail=(
+                "ask-first repo-local ChunkHound candidate found at "
+                f"{config_path} (repo_root={repo_root}; db_provider={db_provider}; "
+                f"db_path={db_path}; runtime_match={runtime_match_state}; "
+                f"target_match={target_match_state})"
+            ),
+        )
+
+    if reason == "missing_repo_root_config":
+        return DoctorCheck(
+            name="repo-local-chunkhound",
+            status="ok",
+            detail=f"no repo-root chunkhound.json or .chunkhound.json detected under {repo_root}",
+        )
+
+    if reason == "cwd_not_git_worktree":
+        return DoctorCheck(
+            name="repo-local-chunkhound",
+            status="warn",
+            detail="current working directory is not a git worktree; repo-local ChunkHound hint detection skipped",
+        )
+
+    return DoctorCheck(
+        name="repo-local-chunkhound",
+        status="warn",
+        detail=(
+            f"repo-local ChunkHound hint not ready to assume "
+            f"(state={state}; reason={reason or 'unknown'}; config_path={config_path}; "
+            f"repo_root={repo_root}; db_provider={db_provider}; db_path={db_path}; "
+            f"runtime_match={runtime_match_state}; target_match={target_match_state}; "
+            f"repo_identity={repo_identity}; expected_repo_identity={expected_repo_identity})"
+        ),
+    )
+
+
+def _doctor_executor_network_check(agent_runtime: dict[str, Any]) -> DoctorCheck | None:
+    if not bool(agent_runtime.get("supported")):
+        return None
+    provider = str(agent_runtime.get("provider") or "").strip().lower()
+    if provider not in {"codex", "claude"}:
+        return None
+    return DoctorCheck(
+        name="executor-network",
+        status="warn",
+        detail=(
+            f"{provider} executor needs internet / network access to obtain code-under-review context; "
+            "this advisory does not prove external sandbox access in every environment"
+        ),
+    )
+
+
 def _doctor_acknowledged_sources(*, target: DoctorTargetContext | None) -> dict[str, Any]:
     gh = _doctor_executable_check("gh")
     git = _doctor_executable_check("git")
@@ -1787,6 +1878,7 @@ def _doctor_runtime_payload(
     pr_url: str | None = None,
 ) -> dict[str, Any]:
     target = _resolve_doctor_target_context(pr_url)
+    repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
         "cure_config": _doctor_path_payload(
@@ -1812,6 +1904,7 @@ def _doctor_runtime_payload(
         ),
         "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
         "acknowledged_sources": _doctor_acknowledged_sources(target=target),
+        "repo_local_chunkhound": repo_local_chunkhound,
     }
     if target is not None:
         payload["target"] = {
@@ -1864,6 +1957,7 @@ def _doctor_runtime_checks(
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
     agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile)
+    repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
     if not runtime.config_enabled:
@@ -2052,6 +2146,10 @@ def _doctor_runtime_checks(
                 detail=f"{gh_auth.detail} (target-dependent; public github.com PR lifecycle flows can use fallback)",
             )
         )
+    checks.append(_doctor_repo_local_chunkhound_check(repo_local_chunkhound))
+    executor_network = _doctor_executor_network_check(agent_runtime)
+    if executor_network is not None:
+        checks.append(executor_network)
     return checks
 
 

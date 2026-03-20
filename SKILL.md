@@ -64,6 +64,7 @@ Check:
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it.
+Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for this when possible: its `repo_local_chunkhound` payload and `repo-local-chunkhound` check surface the same ask-first hint.
 
 4. Choose the package-first bootstrap path that matches the session.
 
@@ -338,6 +339,7 @@ Required behavior:
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
+- Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
 - Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
