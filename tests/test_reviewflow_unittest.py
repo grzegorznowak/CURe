@@ -3757,8 +3757,11 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
         session_dir = root / session_id
         repo_dir = session_dir / "repo"
         work_dir = session_dir / "work"
+        chunkhound_dir = work_dir / "chunkhound"
         repo_dir.mkdir(parents=True, exist_ok=True)
         work_dir.mkdir(parents=True, exist_ok=True)
+        chunkhound_dir.mkdir(parents=True, exist_ok=True)
+        (chunkhound_dir / ".chunkhound.db").write_text("db", encoding="utf-8")
         (session_dir / "meta.json").write_text(
             json.dumps(
                 {
@@ -3782,6 +3785,9 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                     "paths": {
                         "repo_dir": str(repo_dir),
                         "work_dir": str(work_dir),
+                        "chunkhound_cwd": str(chunkhound_dir),
+                        "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                        "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
                     },
                 }
             ),
@@ -8423,6 +8429,666 @@ class EnsureBaseCacheTests(unittest.TestCase):
             shutil.rmtree(tmp_cache, ignore_errors=True)
 
 
+class BaselineSelectionTests(unittest.TestCase):
+    def test_resolve_pr_review_baseline_selection_prefers_default_branch_within_threshold(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
+        pr_meta = {
+            "base": {
+                "ref": "release/1.2",
+                "repo": {"default_branch": "main"},
+            }
+        }
+        compare_payload = {
+            "ahead_by": 12,
+            "behind_by": 4,
+            "files": [
+                {"filename": "a.py", "additions": 10, "deletions": 3},
+                {"filename": "b.py", "additions": 5, "deletions": 2},
+            ],
+        }
+
+        with mock.patch.object(rf, "gh_api_json", return_value=compare_payload) as gh_api_json:
+            selection = rf.resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+
+        self.assertEqual(selection["base_ref"], "release/1.2")
+        self.assertEqual(selection["repo_default_ref"], "main")
+        self.assertEqual(selection["selected_baseline_ref"], "main")
+        self.assertEqual(selection["selection_reason"], "default_within_threshold")
+        self.assertEqual(
+            selection["divergence"],
+            {
+                "source": "github_compare",
+                "files_truncated": False,
+                "ahead_by": 12,
+                "behind_by": 4,
+                "changed_files": 2,
+                "additions": 15,
+                "deletions": 5,
+                "changed_lines": 20,
+            },
+        )
+        gh_api_json.assert_called_once()
+
+    def test_resolve_pr_review_baseline_selection_uses_target_branch_when_commit_distance_exceeded(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
+        pr_meta = {
+            "base": {
+                "ref": "release/1.2",
+                "repo": {"default_branch": "main"},
+            }
+        }
+        compare_payload = {
+            "ahead_by": 251,
+            "behind_by": 1,
+            "files": [{"filename": "a.py", "additions": 1, "deletions": 1}],
+        }
+
+        with mock.patch.object(rf, "gh_api_json", return_value=compare_payload):
+            selection = rf.resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+
+        self.assertEqual(selection["selected_baseline_ref"], "release/1.2")
+        self.assertEqual(selection["selection_reason"], "target_diverged")
+
+    def test_resolve_pr_review_baseline_selection_uses_target_branch_when_diff_volume_exceeded(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
+        pr_meta = {
+            "base": {
+                "ref": "release/1.2",
+                "repo": {"default_branch": "main"},
+            }
+        }
+        compare_payload = {
+            "ahead_by": 5,
+            "behind_by": 5,
+            "files": [{"filename": "huge.patch", "additions": 75001, "deletions": 25001}],
+        }
+
+        with mock.patch.object(rf, "gh_api_json", return_value=compare_payload):
+            selection = rf.resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+
+        self.assertEqual(selection["selected_baseline_ref"], "release/1.2")
+        self.assertEqual(selection["selection_reason"], "target_diverged")
+        self.assertEqual(selection["divergence"]["changed_lines"], 100002)
+
+    def test_resolve_pr_review_baseline_selection_falls_back_when_default_branch_missing(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
+        pr_meta = {"base": {"ref": "release/1.2", "repo": {}}}
+
+        with mock.patch.object(rf, "gh_api_json", side_effect=AssertionError("compare should not run")):
+            selection = rf.resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+
+        self.assertEqual(selection["selected_baseline_ref"], "release/1.2")
+        self.assertEqual(selection["selection_reason"], "default_ref_unavailable")
+        self.assertIsNone(selection["repo_default_ref"])
+        self.assertEqual(selection["divergence"]["source"], "default_ref_unavailable")
+        self.assertIsNone(selection["divergence"]["files_truncated"])
+
+    def test_resolve_pr_review_baseline_selection_treats_compare_file_cap_as_diverged(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
+        pr_meta = {
+            "base": {
+                "ref": "release/1.2",
+                "repo": {"default_branch": "main"},
+            }
+        }
+        compare_payload = {
+            "ahead_by": 5,
+            "behind_by": 5,
+            "files": [{"filename": f"f{i}.py", "additions": 1, "deletions": 1} for i in range(300)],
+        }
+
+        with mock.patch.object(rf, "gh_api_json", return_value=compare_payload):
+            selection = rf.resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+
+        self.assertEqual(selection["selected_baseline_ref"], "release/1.2")
+        self.assertEqual(selection["selection_reason"], "target_diverged")
+        self.assertEqual(selection["divergence"]["source"], "github_compare_truncated_files")
+        self.assertTrue(selection["divergence"]["files_truncated"])
+        self.assertEqual(selection["divergence"]["changed_files"], 300)
+        self.assertEqual(selection["divergence"]["changed_lines"], 600)
+
+    def test_pr_flow_uses_selected_baseline_and_records_metadata(self) -> None:
+        root = ROOT / ".tmp_test_pr_selected_baseline"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            sandbox_root = root / "sandboxes"
+            cache_root = root / "cache"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            seed = root / "seed"
+            seed.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path = root / "reviewflow.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                    return _Result()
+                if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                    return _Result("https://github.com/acme/repo.git\n")
+                if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                    return _Result("true\n")
+                if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd[:3] == ["gh", "pr", "checkout"]:
+                    return _Result()
+                if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+            def fake_write_pr_context_file(*, work_dir: Path, pr: rf.PullRequestRef, pr_meta: dict[str, object]) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {
+                                    "ref": "release/1.2",
+                                    "repo": {"default_branch": "main"},
+                                },
+                                "head": {"sha": "1111111111111111111111111111111111111111"},
+                                "title": "Baseline selection PR",
+                            },
+                            {
+                                "ahead_by": 12,
+                                "behind_by": 4,
+                                "files": [
+                                    {"filename": "a.py", "additions": 10, "deletions": 3},
+                                    {"filename": "b.py", "additions": 5, "deletions": 2},
+                                ],
+                            },
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file)
+                )
+                ensure_base_cache = stack.enter_context(
+                    mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)})
+                )
+                stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+                stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+                stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+                stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        side_effect=AssertionError("review setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        side_effect=AssertionError("multipass defaults should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_prompt_profile",
+                        side_effect=AssertionError("prompt selection should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "require_builtin_review_intelligence",
+                        side_effect=AssertionError("review validation should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        side_effect=AssertionError("llm resolution should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=AssertionError("runtime setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("review execution should be skipped"),
+                    )
+                )
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(ensure_base_cache.call_args.kwargs["base_ref"], "main")
+            session_dir = Path(stdout.getvalue().strip())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["base_ref"], "release/1.2")
+            self.assertEqual(
+                meta["baseline_selection"],
+                {
+                    "base_ref": "release/1.2",
+                    "repo_default_ref": "main",
+                    "selected_baseline_ref": "main",
+                    "selection_reason": "default_within_threshold",
+                    "divergence": {
+                        "source": "github_compare",
+                        "files_truncated": False,
+                        "ahead_by": 12,
+                        "behind_by": 4,
+                        "changed_files": 2,
+                        "additions": 15,
+                        "deletions": 5,
+                        "changed_lines": 20,
+                    },
+                },
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_resume_flow_restores_missing_session_db_from_selected_baseline(self) -> None:
+        root = ROOT / ".tmp_test_resume_selected_baseline_restore"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text("review", encoding="utf-8")
+            base_db = root / "shared-base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "error",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "failed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "release/1.2",
+                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "notes": {"no_index": False},
+                "llm": {"provider": "openai", "capabilities": {"supports_resume": True}},
+                "baseline_selection": {
+                    "base_ref": "release/1.2",
+                    "repo_default_ref": "main",
+                    "selected_baseline_ref": "main",
+                    "selection_reason": "default_within_threshold",
+                    "divergence": {
+                        "source": "github_compare",
+                        "files_truncated": False,
+                        "ahead_by": 12,
+                        "behind_by": 4,
+                        "changed_files": 2,
+                        "additions": 15,
+                        "deletions": 5,
+                        "changed_lines": 20,
+                    },
+                },
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(work_dir / "chunkhound"),
+                    "chunkhound_db": str(work_dir / "chunkhound" / ".chunkhound.db"),
+                    "chunkhound_config": str(work_dir / "chunkhound" / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="plan",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}) as ensure_base_cache,
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    side_effect=RuntimeError("resume stopped after restore"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "resume stopped after restore"):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            ensure_base_cache.assert_called_once()
+            self.assertEqual(ensure_base_cache.call_args.kwargs["base_ref"], "main")
+            restored_db = work_dir / "chunkhound" / ".chunkhound.db"
+            self.assertTrue(restored_db.is_file())
+            self.assertEqual(restored_db.read_text(encoding="utf-8"), "db")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_followup_flow_restores_missing_session_db_from_selected_baseline(self) -> None:
+        root = ROOT / ".tmp_test_followup_selected_baseline_restore"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text("review", encoding="utf-8")
+            base_db = root / "shared-base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "release/1.2",
+                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "baseline_selection": {
+                    "base_ref": "release/1.2",
+                    "repo_default_ref": "main",
+                    "selected_baseline_ref": "main",
+                    "selection_reason": "default_within_threshold",
+                    "divergence": {
+                        "source": "github_compare",
+                        "files_truncated": False,
+                        "ahead_by": 12,
+                        "behind_by": 4,
+                        "changed_files": 2,
+                        "additions": 15,
+                        "deletions": 5,
+                        "changed_lines": 20,
+                    },
+                },
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(work_dir / "chunkhound"),
+                    "chunkhound_db": str(work_dir / "chunkhound" / ".chunkhound.db"),
+                    "chunkhound_config": str(work_dir / "chunkhound" / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)}) as ensure_base_cache,
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    side_effect=RuntimeError("followup stopped after restore"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "followup stopped after restore"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            ensure_base_cache.assert_called_once()
+            self.assertEqual(ensure_base_cache.call_args.kwargs["base_ref"], "main")
+            restored_db = work_dir / "chunkhound" / ".chunkhound.db"
+            self.assertTrue(restored_db.is_file())
+            self.assertEqual(restored_db.read_text(encoding="utf-8"), "db")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_followup_flow_prefers_legacy_repo_local_chunkhound_db_before_baseline_restore(self) -> None:
+        root = ROOT / ".tmp_test_followup_legacy_repo_db_precedence"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text("review", encoding="utf-8")
+            legacy_db = repo_dir / ".chunkhound.db"
+            legacy_db.write_text("legacy-db", encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "release/1.2",
+                "base_ref_for_review": "reviewflow_base__release_1_2",
+                "baseline_selection": {
+                    "base_ref": "release/1.2",
+                    "repo_default_ref": "main",
+                    "selected_baseline_ref": "main",
+                    "selection_reason": "default_within_threshold",
+                    "divergence": {
+                        "source": "github_compare",
+                        "files_truncated": False,
+                        "ahead_by": 12,
+                        "behind_by": 4,
+                        "changed_files": 2,
+                        "additions": 15,
+                        "deletions": 5,
+                        "changed_lines": 20,
+                    },
+                },
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(work_dir / "chunkhound"),
+                    "chunkhound_db": str(work_dir / "chunkhound" / ".chunkhound.db"),
+                    "chunkhound_config": str(work_dir / "chunkhound" / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+            captured: dict[str, Path] = {}
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                captured["database_path"] = database_path
+                raise RuntimeError("followup stopped after chunkhound path selection")
+
+            with (
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "ensure_base_cache",
+                    side_effect=AssertionError("baseline restore should not run"),
+                ),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        {"chunkhound": {"base_config_path": str(base_cfg)}},
+                        {},
+                    ),
+                ),
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=fake_materialize_chunkhound_env_config,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "followup stopped after chunkhound path selection"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            self.assertEqual(captured["database_path"], legacy_db.resolve())
+            self.assertEqual(legacy_db.read_text(encoding="utf-8"), "legacy-db")
+            self.assertFalse((work_dir / "chunkhound" / ".chunkhound.db").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+
 class RefactorRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         rf._set_disabled_reviewflow_config_path(None)
@@ -9574,6 +10240,11 @@ class ExtractionOwnershipTests(unittest.TestCase):
 
         self.assertIs(rf.render_prompt, flow_surface.render_prompt)
         self.assertIs(rf.resolve_prompt_profile, flow_surface.resolve_prompt_profile)
+        self.assertIs(rf.resolve_pr_review_baseline_selection, flow_surface.resolve_pr_review_baseline_selection)
+        self.assertIs(
+            rf.restore_session_chunkhound_db_from_baseline,
+            flow_surface.restore_session_chunkhound_db_from_baseline,
+        )
         self.assertIs(rf.commands_flow, command_surface.commands_flow)
         self.assertIs(rf.status_flow, command_surface.status_flow)
         self.assertIs(rf.watch_flow, command_surface.watch_flow)

@@ -5622,6 +5622,10 @@ def _pr_flow_impl(
 
     if not base_ref:
         raise ReviewflowError("Failed to resolve baseRefName via `gh pr view`.")
+    baseline_selection = resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
+    selected_baseline_ref = (
+        str(baseline_selection.get("selected_baseline_ref") or base_ref).strip() or base_ref
+    )
 
     base_ref_for_review = f"reviewflow_base__{safe_ref_slug(base_ref)}"
 
@@ -5709,6 +5713,7 @@ def _pr_flow_impl(
             "base_ref": base_ref,
             "base_ref_for_review": base_ref_for_review,
             "head_sha": head_sha,
+            "baseline_selection": baseline_selection,
             "paths": {
                 "session_dir": str(session_dir),
                 "repo_dir": str(repo_dir),
@@ -5831,7 +5836,7 @@ def _pr_flow_impl(
                     paths=paths,
                     config_path=effective_config_path,
                     pr=pr,
-                    base_ref=base_ref,
+                    base_ref=selected_baseline_ref,
                     ttl_hours=int(args.base_ttl_hours),
                     refresh=bool(args.refresh_base),
                     quiet=quiet,
@@ -5843,7 +5848,7 @@ def _pr_flow_impl(
         seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
         if not seed.exists():
             raise ReviewflowError(
-                f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {base_ref}`."
+                f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {selected_baseline_ref}`."
             )
 
         with phase("seed_sanity", progress=progress, quiet=quiet):
@@ -6792,6 +6797,15 @@ def _resume_flow_impl(
 
     pr = parse_pr_url(pr_url)
     ensure_review_config(paths, config_path=effective_config_path)
+    restore_session_chunkhound_db_from_baseline(
+        meta=meta,
+        paths=paths,
+        config_path=effective_config_path,
+        pr=pr,
+        chunkhound_db_path=chunkhound_db_path,
+        quiet=quiet,
+        no_stream=no_stream,
+    )
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
         config_path=effective_config_path,
         require=True,
@@ -7412,20 +7426,15 @@ def _followup_flow_impl(
     if (not chunkhound_db_path.exists()) and (repo_dir / ".chunkhound.db").exists():
         # Legacy sessions stored the DB under the sandbox repo.
         chunkhound_db_path = (repo_dir / ".chunkhound.db").resolve()
-
-    if not chunkhound_db_path.exists():
-        base_cache = meta.get("base_cache") if isinstance(meta.get("base_cache"), dict) else {}
-        base_db_raw = str((base_cache or {}).get("db_path") or "").strip()
-        base_db_path = Path(base_db_raw).resolve() if base_db_raw else None
-        if base_db_path and base_db_path.exists():
-            # Bring the base DB into the session work dir for faster top-ups.
-            if chunkhound_db_path.exists():
-                if chunkhound_db_path.is_dir():
-                    shutil.rmtree(chunkhound_db_path, ignore_errors=True)
-                else:
-                    chunkhound_db_path.unlink(missing_ok=True)
-            chunkhound_db_path.parent.mkdir(parents=True, exist_ok=True)
-            copy_duckdb_files(base_db_path, chunkhound_db_path)
+    restore_session_chunkhound_db_from_baseline(
+        meta=meta,
+        paths=paths,
+        config_path=effective_config_path,
+        pr=pr,
+        chunkhound_db_path=chunkhound_db_path,
+        quiet=quiet,
+        no_stream=no_stream,
+    )
 
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
         config_path=effective_config_path,
@@ -10696,7 +10705,9 @@ from cure_flows import (
     parse_multipass_plan_json,
     prompt_template_name_for_profile,
     render_prompt,
+    resolve_pr_review_baseline_selection,
     resolve_prompt_profile,
+    restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
 )
 from cure_llm import (

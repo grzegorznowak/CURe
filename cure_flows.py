@@ -9,6 +9,7 @@ import re
 import shutil
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,14 @@ def _run_cmd(cmd: list[str], **kwargs: Any):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+PR_BASELINE_MAX_AHEAD_COMMITS = 250
+PR_BASELINE_MAX_BEHIND_COMMITS = 250
+PR_BASELINE_MAX_CHANGED_FILES = 1500
+PR_BASELINE_MAX_CHANGED_LINES = 100000
+GITHUB_COMPARE_FILES_HARD_LIMIT = 300
+DEFAULT_BASE_CACHE_TTL_HOURS = 24
 
 
 @contextlib.contextmanager
@@ -464,6 +473,13 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
         raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
     return payload
 
+
+def _compat_gh_api_json(**kwargs: Any) -> dict[str, Any]:
+    target = getattr(_reviewflow(), "gh_api_json", None)
+    if target is None or target is gh_api_json:
+        return gh_api_json(**kwargs)
+    return target(**kwargs)
+
 def write_pr_context_file(
     *,
     work_dir: Path,
@@ -750,6 +766,210 @@ def _compat_cache_prime(**kwargs: Any) -> dict[str, Any]:
         return cache_prime(**kwargs)
     return target(**kwargs)
 
+
+def _compat_ensure_base_cache(**kwargs: Any) -> dict[str, Any]:
+    target = getattr(_reviewflow(), "ensure_base_cache", None)
+    if target is None or target is ensure_base_cache:
+        return ensure_base_cache(**kwargs)
+    return target(**kwargs)
+
+
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _zero_divergence_payload(*, source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "files_truncated": False,
+        "ahead_by": 0,
+        "behind_by": 0,
+        "changed_files": 0,
+        "additions": 0,
+        "deletions": 0,
+        "changed_lines": 0,
+    }
+
+
+def _unavailable_divergence_payload(*, source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "files_truncated": None,
+        "ahead_by": None,
+        "behind_by": None,
+        "changed_files": None,
+        "additions": None,
+        "deletions": None,
+        "changed_lines": None,
+    }
+
+
+def resolve_pr_review_baseline_selection(
+    *,
+    pr: PullRequestRef,
+    pr_meta: dict[str, Any],
+) -> dict[str, Any]:
+    base = pr_meta.get("base") if isinstance(pr_meta.get("base"), dict) else {}
+    base_ref = str(base.get("ref") or "").strip()
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    repo_default_ref = str(base_repo.get("default_branch") or "").strip()
+    selection: dict[str, Any] = {
+        "base_ref": base_ref,
+        "repo_default_ref": repo_default_ref or None,
+        "selected_baseline_ref": base_ref,
+        "selection_reason": "default_ref_unavailable",
+        "divergence": _unavailable_divergence_payload(source="default_ref_unavailable"),
+    }
+    if not base_ref:
+        raise ReviewflowError("Failed to resolve baseRefName via PR metadata.")
+    if not repo_default_ref:
+        return selection
+    if repo_default_ref == base_ref:
+        selection["repo_default_ref"] = repo_default_ref
+        selection["selected_baseline_ref"] = repo_default_ref
+        selection["selection_reason"] = "target_is_default"
+        selection["divergence"] = _zero_divergence_payload(source="target_is_default")
+        return selection
+
+    compare_path = "repos/{owner}/{repo}/compare/{default_ref}...{target_ref}".format(
+        owner=pr.owner,
+        repo=pr.repo,
+        default_ref=urllib.parse.quote(repo_default_ref, safe=""),
+        target_ref=urllib.parse.quote(base_ref, safe=""),
+    )
+    compare = _compat_gh_api_json(
+        host=pr.host,
+        path=compare_path,
+        allow_public_fallback=True,
+    )
+    files = compare.get("files")
+    if not isinstance(files, list):
+        raise ReviewflowError(
+            "GitHub compare payload is missing the `files` list needed for baseline selection."
+        )
+
+    additions = 0
+    deletions = 0
+    changed_files = 0
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        changed_files += 1
+        additions += _coerce_int(item.get("additions"))
+        deletions += _coerce_int(item.get("deletions"))
+    changed_lines = additions + deletions
+    files_truncated = len(files) >= GITHUB_COMPARE_FILES_HARD_LIMIT
+    divergence = {
+        "source": ("github_compare_truncated_files" if files_truncated else "github_compare"),
+        "files_truncated": files_truncated,
+        "ahead_by": _coerce_int(compare.get("ahead_by")),
+        "behind_by": _coerce_int(compare.get("behind_by")),
+        "changed_files": changed_files,
+        "additions": additions,
+        "deletions": deletions,
+        "changed_lines": changed_lines,
+    }
+    selection["repo_default_ref"] = repo_default_ref
+    selection["divergence"] = divergence
+
+    within_threshold = (
+        divergence["ahead_by"] <= PR_BASELINE_MAX_AHEAD_COMMITS
+        and divergence["behind_by"] <= PR_BASELINE_MAX_BEHIND_COMMITS
+        and (not files_truncated)
+        and divergence["changed_files"] <= PR_BASELINE_MAX_CHANGED_FILES
+        and divergence["changed_lines"] <= PR_BASELINE_MAX_CHANGED_LINES
+    )
+    if within_threshold:
+        selection["selected_baseline_ref"] = repo_default_ref
+        selection["selection_reason"] = "default_within_threshold"
+    else:
+        selection["selected_baseline_ref"] = base_ref
+        selection["selection_reason"] = "target_diverged"
+    return selection
+
+
+def resolve_session_baseline_selection(*, meta: dict[str, Any]) -> dict[str, Any]:
+    baseline = meta.get("baseline_selection") if isinstance(meta.get("baseline_selection"), dict) else {}
+    base_ref = str((baseline or {}).get("base_ref") or meta.get("base_ref") or "").strip()
+    repo_default_ref = str((baseline or {}).get("repo_default_ref") or "").strip() or None
+    selected_baseline_ref = str((baseline or {}).get("selected_baseline_ref") or base_ref).strip() or base_ref
+    selection_reason = str((baseline or {}).get("selection_reason") or "").strip()
+    if not selection_reason:
+        if repo_default_ref and repo_default_ref == selected_baseline_ref == base_ref:
+            selection_reason = "target_is_default"
+        elif repo_default_ref and repo_default_ref == selected_baseline_ref:
+            selection_reason = "default_within_threshold"
+        elif repo_default_ref:
+            selection_reason = "target_diverged"
+        else:
+            selection_reason = "default_ref_unavailable"
+    divergence = (baseline or {}).get("divergence")
+    if not isinstance(divergence, dict):
+        if selection_reason == "target_is_default":
+            divergence = _zero_divergence_payload(source="legacy_target_is_default")
+        elif selection_reason == "default_ref_unavailable":
+            divergence = _unavailable_divergence_payload(source="legacy_default_ref_unavailable")
+        else:
+            divergence = _unavailable_divergence_payload(source="legacy_missing")
+    return {
+        "base_ref": base_ref,
+        "repo_default_ref": repo_default_ref,
+        "selected_baseline_ref": selected_baseline_ref,
+        "selection_reason": selection_reason,
+        "divergence": divergence,
+    }
+
+
+def restore_session_chunkhound_db_from_baseline(
+    *,
+    meta: dict[str, Any],
+    paths: ReviewflowPaths,
+    config_path: Path | None,
+    pr: PullRequestRef,
+    chunkhound_db_path: Path,
+    quiet: bool = False,
+    no_stream: bool = False,
+) -> dict[str, Any] | None:
+    if chunkhound_db_path.exists():
+        return None
+
+    base_cache = meta.get("base_cache") if isinstance(meta.get("base_cache"), dict) else {}
+    base_db_raw = str((base_cache or {}).get("db_path") or "").strip()
+    base_db_path = Path(base_db_raw).resolve() if base_db_raw else None
+    if not (base_db_path and base_db_path.exists()):
+        baseline = resolve_session_baseline_selection(meta=meta)
+        selected_baseline_ref = str(baseline.get("selected_baseline_ref") or "").strip()
+        if not selected_baseline_ref:
+            return None
+        base_cache = _compat_ensure_base_cache(
+            paths=paths,
+            config_path=config_path,
+            pr=pr,
+            base_ref=selected_baseline_ref,
+            ttl_hours=DEFAULT_BASE_CACHE_TTL_HOURS,
+            refresh=False,
+            quiet=quiet,
+            no_stream=no_stream,
+        )
+        meta["base_cache"] = base_cache
+        base_db_raw = str((base_cache or {}).get("db_path") or "").strip()
+        base_db_path = Path(base_db_raw).resolve() if base_db_raw else None
+
+    if not (base_db_path and base_db_path.exists()):
+        return None
+
+    if chunkhound_db_path.exists():
+        if chunkhound_db_path.is_dir():
+            shutil.rmtree(chunkhound_db_path, ignore_errors=True)
+        else:
+            chunkhound_db_path.unlink(missing_ok=True)
+    chunkhound_db_path.parent.mkdir(parents=True, exist_ok=True)
+    copy_duckdb_files(base_db_path, chunkhound_db_path)
+    return base_cache if isinstance(base_cache, dict) else None
+
 def cache_status(*, paths: ReviewflowPaths, host: str, owner: str, repo: str, base_ref: str) -> int:
     base_root = base_dir(paths, host, owner, repo, base_ref)
     meta_path = base_root / "meta.json"
@@ -893,6 +1113,7 @@ __all__ = [
     'clone_seed_repo',
     'compute_pr_stats',
     'copy_duckdb_files',
+    'DEFAULT_BASE_CACHE_TTL_HOURS',
     'ensure_base_cache',
     'ensure_clean_git_worktree',
     'ensure_review_config',
@@ -909,6 +1130,9 @@ __all__ = [
     'render_prompt',
     'require_gh_auth',
     'resolve_prompt_profile',
+    'resolve_pr_review_baseline_selection',
+    'resolve_session_baseline_selection',
+    'restore_session_chunkhound_db_from_baseline',
     'review_intelligence_prompt_vars',
     'chunkhound_env',
     'same_device',
