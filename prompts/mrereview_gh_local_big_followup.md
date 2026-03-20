@@ -43,6 +43,9 @@ If you must ABORT:
    - `git diff <base>...HEAD`
    - `git log --oneline --decorate <base>..HEAD`
 4. Mandatory: use ChunkHound MCP tools at least once:
+   - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
+   - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
+   - Availability is proven only by a successful `search` or `code_research` tool call.
    - Run at least one `search` query for a symbol/pattern relevant to the follow-up.
    - Run at least one `code_research` query for cross-file/architecture understanding.
    - Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent).

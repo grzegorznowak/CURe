@@ -64,6 +64,8 @@ That indexed ChunkHound-backed path is the default and recommended public review
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
+ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
+
 5. `cure init` writes the non-secret local config files if they are missing:
 
 ```text

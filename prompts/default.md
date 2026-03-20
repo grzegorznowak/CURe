@@ -14,10 +14,13 @@ Use the configured review-intelligence guidance below when you need PR, ticket, 
 $REVIEW_INTELLIGENCE_GUIDANCE
 - Prefer ChunkHound MCP tools for fast context (`search` + `code_research`).
   - Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
+  - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
+  - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
+  - Availability is proven only by a successful `search` or `code_research` tool call.
   - Use `search` to locate symbols, references, and similar patterns.
   - Use `code_research` for deeper cross-file/architecture questions.
   - When reporting findings, cite `path:line` whenever possible.
-- Requirement: use `search` at least once; use `code_research` at least once if any cross-file behavior is discussed.
+- Requirement: use `search` at least once; use `code_research` at least once.
 - If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**` lines to `REJECT`.
 - If you must write scratch files, write only under `$REVIEWFLOW_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 - Keep shell commands read-only (no edits). Do not run destructive commands.

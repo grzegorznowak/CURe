@@ -22,6 +22,9 @@ Safety guardrail:
 # Mandatory: ChunkHound MCP tools
 If you still need to confirm anything before deciding, use ChunkHound MCP tools (`search` / `code_research`) rather than guessing.
 Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
+Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
+ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
+Availability is proven only by a successful `search` or `code_research` tool call.
 If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**` lines to `REJECT`.
 
 # Assessment Rules

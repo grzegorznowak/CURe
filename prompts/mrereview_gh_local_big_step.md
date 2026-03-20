@@ -24,6 +24,9 @@ Safety guardrail:
 1. Use local `git` + sources to execute ONLY this step. Do not attempt to fully review the PR end-to-end here.
 2. Mandatory: use ChunkHound MCP tools:
    - Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
+   - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
+   - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
+   - Availability is proven only by a successful `search` or `code_research` tool call.
    - Run at least one `search` query relevant to this step.
    - If this step is cross-file/architectural, also run a `code_research` query.
    - In `Steps taken`, include the queries you used (1 line each).
