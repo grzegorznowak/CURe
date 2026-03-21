@@ -1208,6 +1208,11 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
             parsed = None
         if parsed is not None:
             chunkhound_payload = {"last_index": parsed}
+    access = chunkhound_meta.get("access") if isinstance(chunkhound_meta.get("access"), dict) else None
+    if access is not None:
+        if chunkhound_payload is None:
+            chunkhound_payload = {}
+        chunkhound_payload["access"] = dict(access)
 
     host = _normalize_pr_identity_value(meta.get("host")) or "github.com"
     owner = _normalize_pr_identity_value(meta.get("owner"))

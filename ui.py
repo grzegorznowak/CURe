@@ -572,6 +572,30 @@ def _support_summary_items(*, meta: dict, chunkhound_tail: list[str]) -> list[tu
     error_meta = meta.get("error")
     if isinstance(error_meta, dict):
         failure_message = str(error_meta.get("message") or "").strip()
+    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
+    chunkhound_access = (
+        chunkhound_meta.get("access") if isinstance(chunkhound_meta.get("access"), dict) else {}
+    )
+    access_stage = str(chunkhound_access.get("preflight_stage") or "").strip()
+    access_status = str(chunkhound_access.get("preflight_stage_status") or "").strip()
+    access_error = str(chunkhound_access.get("error") or "").strip()
+    access_elapsed = chunkhound_access.get("elapsed_seconds")
+    if access_stage and (
+        str(meta.get("phase") or "").strip() == "chunkhound_access_preflight"
+        or (not bool(chunkhound_access.get("preflight_ok")))
+        or access_status in {"running", "error", "timeout"}
+    ):
+        access_bits = [access_stage]
+        if access_status:
+            access_bits.append(access_status)
+        if isinstance(access_elapsed, (int, float)):
+            access_bits.append(f"{float(access_elapsed):.1f}s")
+        if access_error and access_status in {"error", "timeout"}:
+            compact = " ".join(access_error.split())
+            if len(compact) > 80:
+                compact = compact[:79] + "…"
+            access_bits.append(compact)
+        items.append(("ChunkHound", " ".join(access_bits)))
 
     if failure_message and "JIRA_CONFIG_FILE" in failure_message:
         items.append(("Preflight", failure_message))

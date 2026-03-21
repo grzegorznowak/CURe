@@ -3687,6 +3687,29 @@ def _watch_line_for_payload(payload: dict[str, Any]) -> str:
     llm_summary = str((llm or {}).get("summary") or "").strip()
     if llm_summary:
         parts.append(llm_summary)
+    chunkhound = payload.get("chunkhound") if isinstance(payload.get("chunkhound"), dict) else {}
+    access = chunkhound.get("access") if isinstance(chunkhound.get("access"), dict) else {}
+    access_stage = str((access or {}).get("preflight_stage") or "").strip()
+    access_status = str((access or {}).get("preflight_stage_status") or "").strip()
+    access_error = str((access or {}).get("error") or "").strip()
+    access_elapsed = access.get("elapsed_seconds")
+    show_access = bool(access_stage) and (
+        str(payload.get("phase") or "").strip() == "chunkhound_access_preflight"
+        or (not bool(access.get("preflight_ok")))
+        or access_status in {"running", "error", "timeout"}
+    )
+    if show_access:
+        access_bits = [f"chunkhound={access_stage}"]
+        if access_status:
+            access_bits.append(access_status)
+        if isinstance(access_elapsed, (int, float)):
+            access_bits.append(f"{float(access_elapsed):.1f}s")
+        if access_error and access_status in {"error", "timeout"}:
+            compact_error = " ".join(access_error.split())
+            if len(compact_error) > 80:
+                compact_error = compact_error[:79] + "…"
+            access_bits.append(compact_error)
+        parts.append(" ".join(access_bits))
     return " ".join(parts)
 
 
@@ -5725,6 +5748,53 @@ def _apply_review_intelligence_runtime_meta(
     return review_intelligence_payload
 
 
+_CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS = 45.0
+_CHUNKHOUND_HELPER_STAGE_LINE_RE = re.compile(
+    r"^preflight stage=(?P<stage>\S+) status=(?P<status>\S+)(?: detail=(?P<detail>.*))?$"
+)
+
+
+def _trim_chunkhound_diag_text(text: object, *, max_chars: int = 4000) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[-max_chars:]
+
+
+def _parse_chunkhound_helper_stage_line(line: str) -> dict[str, str] | None:
+    match = _CHUNKHOUND_HELPER_STAGE_LINE_RE.match(str(line or "").strip())
+    if match is None:
+        return None
+    detail = _trim_chunkhound_diag_text(match.group("detail") or "", max_chars=240)
+    payload = {
+        "stage": str(match.group("stage") or "").strip(),
+        "status": str(match.group("status") or "").strip(),
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+def _build_chunkhound_access_stage_trace_entry(
+    *,
+    stage: str,
+    status: str,
+    started_at: float,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "stage": str(stage or "").strip() or "unknown",
+        "status": str(status or "").strip() or "unknown",
+        "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
+    }
+    detail_text = _trim_chunkhound_diag_text(detail or "")
+    if detail_text:
+        entry["detail"] = detail_text
+    return entry
+
+
 def _record_chunkhound_access_meta(
     *,
     meta: dict[str, Any],
@@ -5736,30 +5806,300 @@ def _record_chunkhound_access_meta(
     if not isinstance(chunkhound_meta, dict):
         chunkhound_meta = {}
         meta["chunkhound"] = chunkhound_meta
-    access_meta = {
-        "provider": str((runtime_policy.get("metadata") or {}).get("provider") or ""),
-        "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
-        "helper_env_var": "CURE_CHUNKHOUND_HELPER",
-        "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
-        "chunkhound_path": str(payload.get("chunkhound_path") or ""),
-        "chunkhound_runtime_python": str(payload.get("chunkhound_runtime_python") or ""),
-        "chunkhound_module_path": str(payload.get("chunkhound_module_path") or ""),
-        "daemon_lock_path": str(payload.get("daemon_lock_path") or ""),
-        "daemon_socket_path": str(payload.get("daemon_socket_path") or ""),
-        "daemon_log_path": str(payload.get("daemon_log_path") or ""),
-        "daemon_pid": payload.get("daemon_pid"),
-        "daemon_runtime_dir": str(payload.get("daemon_runtime_dir") or ""),
-        "daemon_registry_entry_path": str(payload.get("daemon_registry_entry_path") or ""),
-        "preflight_ok": bool(payload.get("ok")),
-    }
+    existing_access = chunkhound_meta.get("access")
+    access_meta = dict(existing_access) if isinstance(existing_access, dict) else {}
+    access_meta.update(
+        {
+            "provider": str((runtime_policy.get("metadata") or {}).get("provider") or ""),
+            "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
+            "helper_env_var": "CURE_CHUNKHOUND_HELPER",
+            "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
+            "preflight_ok": bool(payload.get("ok")),
+            "updated_at": _utc_now_iso(),
+        }
+    )
+    for key in (
+        "chunkhound_path",
+        "chunkhound_runtime_python",
+        "chunkhound_module_path",
+        "daemon_lock_path",
+        "daemon_socket_path",
+        "daemon_log_path",
+        "daemon_runtime_dir",
+        "daemon_registry_entry_path",
+        "preflight_stage",
+        "preflight_stage_status",
+        "chunkhound_command",
+    ):
+        if key in payload or key not in access_meta:
+            access_meta[key] = payload.get(key)
+    for key in ("daemon_pid", "elapsed_seconds", "outer_timeout_seconds", "helper_exit_code"):
+        if key in payload or key not in access_meta:
+            access_meta[key] = payload.get(key)
+    if isinstance(payload.get("stage_trace"), list):
+        access_meta["stage_trace"] = payload.get("stage_trace")
+    if isinstance(payload.get("available_tools"), list):
+        access_meta["available_tools"] = payload.get("available_tools")
+    if isinstance(payload.get("missing_tools"), list):
+        access_meta["missing_tools"] = payload.get("missing_tools")
     error = str(payload.get("error") or "").strip()
     if error:
         access_meta["error"] = error
+    elif bool(payload.get("ok")):
+        access_meta.pop("error", None)
     daemon_metadata_error = str(payload.get("daemon_metadata_error") or "").strip()
     if daemon_metadata_error:
         access_meta["daemon_metadata_error"] = daemon_metadata_error
+    elif bool(payload.get("ok")):
+        access_meta.pop("daemon_metadata_error", None)
+    stderr_tail = _trim_chunkhound_diag_text(payload.get("stderr_tail") or "")
+    if stderr_tail:
+        access_meta["stderr_tail"] = stderr_tail
+    helper_stderr_tail = _trim_chunkhound_diag_text(payload.get("helper_stderr_tail") or "")
+    if helper_stderr_tail:
+        access_meta["helper_stderr_tail"] = helper_stderr_tail
     chunkhound_meta["access"] = access_meta
     return access_meta
+
+
+def _run_chunkhound_helper_preflight(
+    *,
+    cmd: list[str],
+    repo_dir: Path,
+    env: dict[str, str],
+    runtime_policy: dict[str, Any],
+    meta: dict[str, Any],
+    progress: SessionProgress | None,
+) -> dict[str, Any]:
+    helper_path = str(cmd[0])
+    started_at = time.monotonic()
+    observed_trace: list[dict[str, Any]] = []
+    helper_stdout = bytearray()
+    helper_stderr = bytearray()
+    stderr_line_buffer = ""
+    out = active_output()
+
+    def _write_chunkhound_log(text: str) -> None:
+        if not text or out is None:
+            return
+        try:
+            out.stream_sink("chunkhound").write(text)
+        except Exception:
+            pass
+
+    def _helper_stderr_tail_text() -> str:
+        return _trim_chunkhound_diag_text(helper_stderr.decode("utf-8", errors="replace"))
+
+    def _flush_stage(stage: str, status: str, detail: str | None = None) -> None:
+        observed_trace.append(
+            _build_chunkhound_access_stage_trace_entry(
+                stage=stage,
+                status=status,
+                started_at=started_at,
+                detail=detail,
+            )
+        )
+        payload: dict[str, Any] = {
+            "ok": False,
+            "helper_path": helper_path,
+            "preflight_stage": stage,
+            "preflight_stage_status": status,
+            "stage_trace": list(observed_trace),
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
+            "outer_timeout_seconds": _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS,
+            "helper_stderr_tail": _helper_stderr_tail_text(),
+        }
+        if detail:
+            payload["error"] = detail
+        _record_chunkhound_access_meta(
+            meta=meta,
+            env=env,
+            runtime_policy=runtime_policy,
+            payload=payload,
+        )
+        if progress is not None:
+            progress.flush()
+
+    def _consume_stderr_lines(text: str) -> None:
+        nonlocal stderr_line_buffer
+        if not text:
+            return
+        stderr_line_buffer += text
+        while "\n" in stderr_line_buffer:
+            raw_line, stderr_line_buffer = stderr_line_buffer.split("\n", 1)
+            parsed = _parse_chunkhound_helper_stage_line(raw_line)
+            if parsed is None:
+                continue
+            _flush_stage(
+                parsed["stage"],
+                parsed["status"],
+                parsed.get("detail"),
+            )
+
+    _record_chunkhound_access_meta(
+        meta=meta,
+        env=env,
+        runtime_policy=runtime_policy,
+        payload={
+            "ok": False,
+            "helper_path": helper_path,
+            "preflight_stage": "spawn",
+            "preflight_stage_status": "running",
+            "stage_trace": [],
+            "elapsed_seconds": 0.0,
+            "outer_timeout_seconds": _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS,
+        },
+    )
+    if progress is not None:
+        progress.flush()
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    open_fds: dict[int, str] = {
+        proc.stdout.fileno(): "stdout",
+        proc.stderr.fileno(): "stderr",
+    }
+    timed_out = False
+    while open_fds:
+        remaining = _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        if remaining <= 0:
+            timed_out = True
+            break
+        readable, _, _ = select.select(list(open_fds.keys()), [], [], min(0.2, remaining))
+        if not readable:
+            continue
+        for fd in readable:
+            kind = open_fds.get(fd)
+            if not kind:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                open_fds.pop(fd, None)
+                continue
+            text = chunk.decode("utf-8", errors="replace")
+            _write_chunkhound_log(text)
+            if kind == "stdout":
+                helper_stdout.extend(chunk)
+            else:
+                helper_stderr.extend(chunk)
+                if len(helper_stderr) > 16000:
+                    del helper_stderr[:-16000]
+                _consume_stderr_lines(text)
+
+    if timed_out:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        extra_stdout, extra_stderr = proc.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        extra_stdout, extra_stderr = proc.communicate()
+    if extra_stdout:
+        helper_stdout.extend(extra_stdout)
+        _write_chunkhound_log(extra_stdout.decode("utf-8", errors="replace"))
+    if extra_stderr:
+        helper_stderr.extend(extra_stderr)
+        if len(helper_stderr) > 16000:
+            del helper_stderr[:-16000]
+        extra_text = extra_stderr.decode("utf-8", errors="replace")
+        _write_chunkhound_log(extra_text)
+        _consume_stderr_lines(extra_text)
+    if stderr_line_buffer.strip():
+        parsed = _parse_chunkhound_helper_stage_line(stderr_line_buffer.strip())
+        if parsed is not None:
+            _flush_stage(parsed["stage"], parsed["status"], parsed.get("detail"))
+        stderr_line_buffer = ""
+
+    stdout_text = helper_stdout.decode("utf-8", errors="replace").strip()
+    stderr_text = helper_stderr.decode("utf-8", errors="replace").strip()
+    result_payload: dict[str, Any] = {
+        "helper_path": helper_path,
+        "helper_exit_code": None if timed_out else int(proc.returncode or 0),
+        "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
+        "outer_timeout_seconds": _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS,
+        "helper_stderr_tail": _trim_chunkhound_diag_text(stderr_text),
+    }
+
+    if timed_out:
+        last = observed_trace[-1] if observed_trace else {}
+        timed_out_stage = str(last.get("stage") or "helper_command").strip() or "helper_command"
+        timed_out_status = str(last.get("status") or "timeout").strip() or "timeout"
+        if timed_out_status == "running":
+            timed_out_status = "timeout"
+        result_payload.update(
+            {
+                "ok": False,
+                "preflight_stage": timed_out_stage,
+                "preflight_stage_status": timed_out_status,
+                "stage_trace": list(observed_trace),
+                "error": (
+                    "helper preflight timed out after "
+                    f"{_CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS:.1f}s while waiting for stage {timed_out_stage}"
+                ),
+            }
+        )
+        return result_payload
+
+    if stdout_text:
+        try:
+            parsed = json.loads(stdout_text)
+        except Exception:
+            result_payload.update(
+                {
+                    "ok": False,
+                    "stage_trace": list(observed_trace),
+                    "error": "helper preflight returned malformed JSON",
+                }
+            )
+            return result_payload
+        if isinstance(parsed, dict):
+            result_payload.update(parsed)
+        else:
+            result_payload.update(
+                {
+                    "ok": False,
+                    "stage_trace": list(observed_trace),
+                    "error": "helper preflight did not return a JSON object",
+                }
+            )
+            return result_payload
+    else:
+        result_payload.update(
+            {
+                "ok": False,
+                "stage_trace": list(observed_trace),
+                "error": (
+                    _trim_chunkhound_diag_text(stderr_text)
+                    or f"helper preflight exited with status {proc.returncode}"
+                ),
+            }
+        )
+        return result_payload
+
+    if "stage_trace" not in result_payload and observed_trace:
+        result_payload["stage_trace"] = list(observed_trace)
+    if "helper_stderr_tail" not in result_payload and stderr_text:
+        result_payload["helper_stderr_tail"] = _trim_chunkhound_diag_text(stderr_text)
+    return result_payload
 
 
 def _run_chunkhound_access_preflight(
@@ -5808,40 +6148,15 @@ def _run_chunkhound_access_preflight(
     cmd = [str(helper_path), "preflight"]
     if progress is not None:
         progress.record_cmd(cmd)
-    out = active_output()
-    if out is not None:
-        result = out.run_logged_cmd(
-            cmd,
-            kind="chunkhound",
-            cwd=repo_dir,
-            env=env,
-            check=False,
-            stream_requested=stream,
-        )
-    else:
-        result = run_cmd(
-            cmd,
-            cwd=repo_dir,
-            env=env,
-            check=False,
-            stream=stream,
-            stream_label="chunkhound",
-        )
-
-    stdout_text = str(result.stdout or "").strip()
-    if stdout_text:
-        try:
-            parsed = json.loads(stdout_text)
-            if isinstance(parsed, dict):
-                payload = parsed
-            else:
-                payload["error"] = "helper preflight did not return a JSON object"
-        except Exception:
-            payload["error"] = "helper preflight returned malformed JSON"
-            payload["raw_stdout"] = stdout_text
-    if int(result.exit_code) != 0 and not str(payload.get("error") or "").strip():
-        stderr_text = str(result.stderr or "").strip()
-        payload["error"] = stderr_text or f"helper preflight exited with status {result.exit_code}"
+    _ = stream
+    payload = _run_chunkhound_helper_preflight(
+        cmd=cmd,
+        repo_dir=repo_dir,
+        env=env,
+        runtime_policy=runtime_policy,
+        meta=meta,
+        progress=progress,
+    )
 
     access_meta = _record_chunkhound_access_meta(
         meta=meta,
@@ -5859,8 +6174,7 @@ def _run_chunkhound_access_preflight(
         if str(name).strip()
     }
     if (
-        int(result.exit_code) != 0
-        or not bool(payload.get("ok"))
+        (not bool(payload.get("ok")))
         or "search" not in available_tool_names
         or "code_research" not in available_tool_names
     ):

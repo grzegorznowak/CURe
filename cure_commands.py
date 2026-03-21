@@ -54,6 +54,29 @@ def _watch_line_for_payload(payload: dict[str, object]) -> str:
         if len(current_text) > 80:
             current_text = current_text[:79] + "…"
         parts.append(f"current={current_text}")
+    chunkhound = payload.get("chunkhound") if isinstance(payload.get("chunkhound"), dict) else {}
+    access = chunkhound.get("access") if isinstance(chunkhound.get("access"), dict) else {}
+    access_stage = str((access or {}).get("preflight_stage") or "").strip()
+    access_status = str((access or {}).get("preflight_stage_status") or "").strip()
+    access_error = str((access or {}).get("error") or "").strip()
+    access_elapsed = access.get("elapsed_seconds")
+    show_access = bool(access_stage) and (
+        str(payload.get("phase") or "").strip() == "chunkhound_access_preflight"
+        or (not bool(access.get("preflight_ok")))
+        or access_status in {"running", "error", "timeout"}
+    )
+    if show_access:
+        access_bits = [f"chunkhound={access_stage}"]
+        if access_status:
+            access_bits.append(access_status)
+        if isinstance(access_elapsed, (int, float)):
+            access_bits.append(f"{float(access_elapsed):.1f}s")
+        if access_error and access_status in {"error", "timeout"}:
+            compact_error = " ".join(access_error.split())
+            if len(compact_error) > 80:
+                compact_error = compact_error[:79] + "…"
+            access_bits.append(compact_error)
+        parts.append(" ".join(access_bits))
     return " ".join(parts)
 
 

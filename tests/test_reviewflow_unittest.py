@@ -6171,6 +6171,8 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertFalse(payload["ok"])
             self.assertIn("did not start within 30.0s", payload["error"])
+            self.assertEqual(payload["preflight_stage"], "initialize")
+            self.assertEqual(payload["preflight_stage_status"], "error")
             self.assertEqual(payload["chunkhound_path"], str(fake_chunkhound))
             self.assertEqual(payload["chunkhound_runtime_python"], str(fake_runtime))
             self.assertEqual(payload["daemon_lock_path"], str(derived_lock))
@@ -6179,6 +6181,424 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(payload["daemon_pid"], 777)
             self.assertEqual(payload["daemon_runtime_dir"], str(runtime_dir))
             self.assertEqual(payload["daemon_registry_entry_path"], str(derived_registry))
+            trace = payload.get("stage_trace")
+            self.assertIsInstance(trace, list)
+            self.assertEqual(trace[-1]["stage"], "initialize")
+            self.assertEqual(trace[-1]["status"], "error")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_generated_chunkhound_helper_times_out_during_initialize(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_initialize_timeout"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-init/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-init/daemon.log',",
+                        "        'daemon_socket_path': '',",
+                        "        'daemon_pid': None,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-init',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-init/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    time.sleep(60)",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 10.0', '"initialize": 0.2')
+            helper_path.write_text(helper_text, encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["preflight_stage"], "initialize")
+            self.assertEqual(payload["preflight_stage_status"], "timeout")
+            self.assertIn("timed out after 0.2s", payload["error"])
+            trace = payload.get("stage_trace")
+            self.assertIsInstance(trace, list)
+            self.assertEqual(trace[-1]["stage"], "initialize")
+            self.assertEqual(trace[-1]["status"], "timeout")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_generated_chunkhound_helper_times_out_during_tools_list(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tools_list_timeout"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "",
+                        "def read_message():",
+                        "    headers = {}",
+                        "    while True:",
+                        "        line = sys.stdin.buffer.readline()",
+                        "        if line in (b'\\r\\n', b'\\n', b''):",
+                        "            break",
+                        "        key, _, value = line.decode('utf-8', errors='replace').partition(':')",
+                        "        headers[key.strip().lower()] = value.strip()",
+                        "    length = int(headers.get('content-length', '0'))",
+                        "    body = sys.stdin.buffer.read(length)",
+                        "    return json.loads(body.decode('utf-8'))",
+                        "",
+                        "def write_message(payload):",
+                        "    raw = json.dumps(payload).encode('utf-8')",
+                        "    sys.stdout.buffer.write(f'Content-Length: {len(raw)}\\r\\n\\r\\n'.encode('utf-8') + raw)",
+                        "    sys.stdout.buffer.flush()",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-tools/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-tools/daemon.log',",
+                        "        'daemon_socket_path': '',",
+                        "        'daemon_pid': None,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-tools',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-tools/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    init_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {}}})",
+                        "    _ = read_message()",
+                        "    _ = read_message()",
+                        "    time.sleep(60)",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            helper_text = helper_path.read_text(encoding="utf-8").replace('"tools/list": 10.0', '"tools/list": 0.2')
+            helper_path.write_text(helper_text, encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["preflight_stage"], "tools/list")
+            self.assertEqual(payload["preflight_stage_status"], "timeout")
+            self.assertIn("timed out after 0.2s", payload["error"])
+            trace = payload.get("stage_trace")
+            self.assertIsInstance(trace, list)
+            self.assertEqual(trace[-1]["stage"], "tools/list")
+            self.assertEqual(trace[-1]["status"], "timeout")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_generated_chunkhound_helper_tools_list_timeout_ignores_repeated_nonmatching_messages(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tools_list_nonmatching_timeout"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "",
+                        "def read_message():",
+                        "    headers = {}",
+                        "    while True:",
+                        "        line = sys.stdin.buffer.readline()",
+                        "        if line in (b'\\r\\n', b'\\n', b''):",
+                        "            break",
+                        "        key, _, value = line.decode('utf-8', errors='replace').partition(':')",
+                        "        headers[key.strip().lower()] = value.strip()",
+                        "    length = int(headers.get('content-length', '0'))",
+                        "    body = sys.stdin.buffer.read(length)",
+                        "    return json.loads(body.decode('utf-8'))",
+                        "",
+                        "def write_message(payload):",
+                        "    raw = json.dumps(payload).encode('utf-8')",
+                        "    sys.stdout.buffer.write(f'Content-Length: {len(raw)}\\r\\n\\r\\n'.encode('utf-8') + raw)",
+                        "    sys.stdout.buffer.flush()",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-tools-nonmatching/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-tools-nonmatching/daemon.log',",
+                        "        'daemon_socket_path': '',",
+                        "        'daemon_pid': None,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-tools-nonmatching',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-tools-nonmatching/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    init_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {}}})",
+                        "    _ = read_message()",
+                        "    tools_msg = read_message()",
+                        "    for idx in range(8):",
+                        "        write_message({'jsonrpc': '2.0', 'method': 'notifications/progress', 'params': {'seq': idx, 'requested_id': tools_msg.get('id')}})",
+                        "        time.sleep(0.05)",
+                        "    time.sleep(60)",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            helper_text = helper_path.read_text(encoding="utf-8").replace('"tools/list": 10.0', '"tools/list": 0.2')
+            helper_path.write_text(helper_text, encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["preflight_stage"], "tools/list")
+            self.assertEqual(payload["preflight_stage_status"], "timeout")
+            self.assertIn("timed out after 0.2s", payload["error"])
+            trace = payload.get("stage_trace")
+            self.assertIsInstance(trace, list)
+            self.assertEqual(trace[-1]["stage"], "tools/list")
+            self.assertEqual(trace[-1]["status"], "timeout")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_generated_chunkhound_helper_drains_noisy_stderr_without_deadlock(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_noisy_stderr"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "from pathlib import Path",
+                        "",
+                        "def read_message():",
+                        "    headers = {}",
+                        "    while True:",
+                        "        line = sys.stdin.buffer.readline()",
+                        "        if line in (b'\\r\\n', b'\\n', b''):",
+                        "            break",
+                        "        key, _, value = line.decode('utf-8', errors='replace').partition(':')",
+                        "        headers[key.strip().lower()] = value.strip()",
+                        "    length = int(headers.get('content-length', '0'))",
+                        "    body = sys.stdin.buffer.read(length)",
+                        "    return json.loads(body.decode('utf-8'))",
+                        "",
+                        "def write_message(payload):",
+                        "    raw = json.dumps(payload).encode('utf-8')",
+                        "    sys.stdout.buffer.write(f'Content-Length: {len(raw)}\\r\\n\\r\\n'.encode('utf-8') + raw)",
+                        "    sys.stdout.buffer.flush()",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-noisy/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-noisy/daemon.log',",
+                        "        'daemon_socket_path': '/tmp/chunkhound-noisy.sock',",
+                        "        'daemon_pid': 888,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-noisy',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-noisy/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    sys.stderr.write('NOISY-' * 20000)",
+                        "    sys.stderr.flush()",
+                        "    init_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {}}})",
+                        "    _ = read_message()",
+                        "    tools_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': tools_msg.get('id'), 'result': {'tools': [{'name': 'search'}, {'name': 'code_research'}]}})",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["preflight_stage"], "complete")
+            self.assertIn("search", payload["available_tools"])
+            self.assertIn("code_research", payload["available_tools"])
+            self.assertIn("NOISY-", payload["stderr_tail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -6296,6 +6716,11 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         '    "daemon_pid": 5150,',
                         f'    "daemon_runtime_dir": {json.dumps("/tmp/chunkhound-runtime")},',
                         f'    "daemon_registry_entry_path": {json.dumps("/tmp/chunkhound-runtime/registry/repo.json")},',
+                        '    "preflight_stage": "initialize",',
+                        '    "preflight_stage_status": "timeout",',
+                        '    "stage_trace": [{"stage": "spawn", "status": "ok", "elapsed_seconds": 0.01}, {"stage": "initialize", "status": "timeout", "elapsed_seconds": 0.25}],',
+                        '    "elapsed_seconds": 0.25,',
+                        '    "stderr_tail": "daemon stalled during initialize",',
                         "}",
                         'print(json.dumps(payload, sort_keys=True))',
                     ]
@@ -6327,7 +6752,63 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(access["daemon_log_path"], "/tmp/chunkhound-runtime/daemon.log")
             self.assertEqual(access["daemon_runtime_dir"], "/tmp/chunkhound-runtime")
             self.assertEqual(access["daemon_registry_entry_path"], "/tmp/chunkhound-runtime/registry/repo.json")
+            self.assertEqual(access["preflight_stage"], "initialize")
+            self.assertEqual(access["preflight_stage_status"], "timeout")
+            self.assertEqual(access["stage_trace"][-1]["stage"], "initialize")
+            self.assertEqual(access["stderr_tail"], "daemon stalled during initialize")
             self.assertFalse(access["preflight_ok"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_chunkhound_access_preflight_outer_timeout_uses_last_reported_stage(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_access_preflight_outer_timeout"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            helper_path = root / "work" / "bin" / "cure-chunkhound"
+            helper_path.parent.mkdir(parents=True, exist_ok=True)
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import sys",
+                        "import time",
+                        "sys.stderr.write('preflight stage=spawn status=ok\\n')",
+                        "sys.stderr.write('preflight stage=initialize status=ok\\n')",
+                        "sys.stderr.write('preflight stage=tools/list status=running\\n')",
+                        "sys.stderr.flush()",
+                        "time.sleep(5)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            helper_path.chmod(0o755)
+            runtime_policy = {
+                "metadata": {"provider": "codex", "chunkhound_access_mode": "cli_helper_daemon"},
+                "staged_paths": {"chunkhound_helper": str(helper_path)},
+            }
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            env = {"CURE_CHUNKHOUND_HELPER": str(helper_path)}
+
+            with mock.patch.object(rf, "_CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS", 0.2):
+                with self.assertRaisesRegex(rf.ReviewflowError, "timed out after 0.2s while waiting for stage tools/list"):
+                    rf._run_chunkhound_access_preflight(
+                        repo_dir=repo_dir,
+                        env=env,
+                        runtime_policy=runtime_policy,
+                        stream=False,
+                        meta=meta,
+                    )
+
+            access = meta["chunkhound"]["access"]
+            self.assertEqual(access["preflight_stage"], "tools/list")
+            self.assertEqual(access["preflight_stage_status"], "timeout")
+            self.assertEqual(access["stage_trace"][-1]["stage"], "tools/list")
+            self.assertEqual(access["stage_trace"][-1]["status"], "running")
+            self.assertAlmostEqual(access["outer_timeout_seconds"], 0.2)
+            self.assertIn("tools/list", access["helper_stderr_tail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -6401,6 +6882,25 @@ class CodexJsonProgressTests(unittest.TestCase):
         }
         line = cure_commands._watch_line_for_payload(payload)
         self.assertIn("current=Checking changed files and narrowing scope", line)
+
+    def test_watch_line_for_payload_appends_chunkhound_preflight_summary(self) -> None:
+        payload = {
+            "session_id": "session-456",
+            "status": "running",
+            "phase": "chunkhound_access_preflight",
+            "pr": {"owner": "acme", "repo": "repo", "number": 12},
+            "chunkhound": {
+                "access": {
+                    "preflight_stage": "tools/list",
+                    "preflight_stage_status": "timeout",
+                    "elapsed_seconds": 12.4,
+                    "error": "helper preflight timed out after 12.4s while waiting for stage tools/list",
+                    "preflight_ok": False,
+                }
+            },
+        }
+        line = cure_commands._watch_line_for_payload(payload)
+        self.assertIn("chunkhound=tools/list timeout 12.4s", line)
 
     def test_run_codex_exec_json_mode_keeps_review_artifact_when_final_message_is_status_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6650,6 +7150,55 @@ class CodexJsonProgressTests(unittest.TestCase):
 
         self.assertIn("live_progress", payload)
         self.assertIn("codex_events", payload["logs"])
+
+    def test_build_status_payload_includes_chunkhound_access_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-456"
+            repo_dir = session_dir / "repo"
+            logs_dir = session_dir / "work" / "logs"
+            review_md = session_dir / "review.md"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            review_md.write_text("# Review\n", encoding="utf-8")
+            for name in ("cure.log", "chunkhound.log", "codex.log"):
+                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-456",
+                "status": "error",
+                "phase": "chunkhound_access_preflight",
+                "phases": {"chunkhound_access_preflight": {"status": "error"}},
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 12,
+                "created_at": "2026-03-17T12:00:00+00:00",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(session_dir / "work"),
+                    "logs_dir": str(logs_dir),
+                    "review_md": str(review_md),
+                },
+                "logs": {
+                    "cure": str(logs_dir / "cure.log"),
+                    "chunkhound": str(logs_dir / "chunkhound.log"),
+                    "codex": str(logs_dir / "codex.log"),
+                },
+                "chunkhound": {
+                    "access": {
+                        "preflight_stage": "initialize",
+                        "preflight_stage_status": "timeout",
+                        "preflight_ok": False,
+                    }
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            payload = rf.build_status_payload("session-456", sandbox_root=root)
+
+        self.assertIn("chunkhound", payload)
+        self.assertIn("access", payload["chunkhound"])
+        self.assertEqual(payload["chunkhound"]["access"]["preflight_stage"], "initialize")
 
     def test_build_status_payload_includes_chunkhound_last_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8946,6 +9495,43 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Now: Checking changed files", joined)
         self.assertIn("[12:00:00] Codex session started.", joined)
         self.assertNotIn("─ Activity", joined)
+
+    def test_dashboard_shows_chunkhound_preflight_stage_summary(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "chunkhound_access_preflight",
+            "phases": {"chunkhound_access_preflight": {"status": "running"}},
+            "chunkhound": {
+                "access": {
+                    "preflight_stage": "tools/list",
+                    "preflight_stage_status": "timeout",
+                    "elapsed_seconds": 8.2,
+                    "error": "helper preflight timed out while waiting for tools/list",
+                    "preflight_ok": False,
+                }
+            },
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=[],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("ChunkHound:", joined)
+        self.assertIn("tools/list timeout 8.2s", joined)
 
     def test_dashboard_done_uses_review_snapshot_in_primary_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
