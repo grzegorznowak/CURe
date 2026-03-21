@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -1279,10 +1280,13 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 self.assertTrue(helper_path.is_file())
                 self.assertEqual(helper_path.parent, work / "bin")
                 self.assertEqual(balanced["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+                self.assertEqual(balanced["env"]["PYTHONSAFEPATH"], "1")
                 self.assertEqual(balanced["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
                 helper_text = helper_path.read_text(encoding="utf-8")
                 self.assertIn("chunkhound mcp", helper_text)
                 self.assertIn("code_research", helper_text)
+                self.assertIn("DaemonDiscovery", helper_text)
+                self.assertIn("chunkhound_runtime_python", helper_text)
                 self.assertFalse(
                     any(
                         entry.startswith("mcp_servers.chunkhound.")
@@ -6084,6 +6088,100 @@ class CodexCommandTests(unittest.TestCase):
 
 
 class ChunkHoundAccessPreflightTests(unittest.TestCase):
+    def test_generated_chunkhound_helper_reports_dynamic_daemon_metadata_on_timeout_failure(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_dynamic_metadata"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+            runtime_dir = (root / "runtime-state").resolve()
+            derived_lock = (repo_dir / "derived-state" / "daemon.lock").resolve()
+            derived_log = derived_lock.with_name("daemon.log")
+            derived_registry = (runtime_dir / "registry" / "repo.json").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "from pathlib import Path",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        f"    runtime_dir = Path({json.dumps(str(runtime_dir))})",
+                        f"    derived_lock = Path({json.dumps(str(derived_lock))})",
+                        f"    derived_log = Path({json.dumps(str(derived_log))})",
+                        f"    derived_registry = Path({json.dumps(str(derived_registry))})",
+                        "    payload = {",
+                        f"        'daemon_lock_path': {json.dumps(str(derived_lock))},",
+                        f"        'daemon_log_path': {json.dumps(str(derived_log))},",
+                        "        'daemon_socket_path': '/tmp/chunkhound-timeout.sock',",
+                        "        'daemon_pid': 777,",
+                        f"        'daemon_runtime_dir': {json.dumps(str(runtime_dir))},",
+                        f"        'daemon_registry_entry_path': {json.dumps(str(derived_registry))},",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    sys.stderr.write('ChunkHound daemon did not start within 30.0s while waiting for IPC readiness\\n')",
+                        "    raise SystemExit(1)",
+                        "raise SystemExit(2)",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertIn("did not start within 30.0s", payload["error"])
+            self.assertEqual(payload["chunkhound_path"], str(fake_chunkhound))
+            self.assertEqual(payload["chunkhound_runtime_python"], str(fake_runtime))
+            self.assertEqual(payload["daemon_lock_path"], str(derived_lock))
+            self.assertEqual(payload["daemon_log_path"], str(derived_log))
+            self.assertEqual(payload["daemon_socket_path"], "/tmp/chunkhound-timeout.sock")
+            self.assertEqual(payload["daemon_pid"], 777)
+            self.assertEqual(payload["daemon_runtime_dir"], str(runtime_dir))
+            self.assertEqual(payload["daemon_registry_entry_path"], str(derived_registry))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_chunkhound_access_preflight_records_success_metadata(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_access_preflight_success"
         try:
@@ -6168,6 +6266,68 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(meta["chunkhound"]["access"]["helper_path"], str(helper_path))
             self.assertIn("malformed JSON", meta["chunkhound"]["access"]["error"])
             self.assertFalse(meta["chunkhound"]["access"]["preflight_ok"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_chunkhound_access_preflight_persists_timeout_diagnostics(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_access_preflight_timeout"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            helper_path = root / "work" / "bin" / "cure-chunkhound"
+            helper_path.parent.mkdir(parents=True, exist_ok=True)
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "payload = {",
+                        '    "ok": False,',
+                        '    "command": "preflight",',
+                        '    "error": "ChunkHound daemon did not start within 30.0s while waiting for IPC readiness",',
+                        f'    "helper_path": {json.dumps(str(helper_path))},',
+                        f'    "chunkhound_path": {json.dumps("/usr/bin/chunkhound")},',
+                        f'    "chunkhound_runtime_python": {json.dumps("/usr/bin/python3")},',
+                        f'    "chunkhound_module_path": {json.dumps("/opt/chunkhound/site-packages/chunkhound/__init__.py")},',
+                        f'    "daemon_lock_path": {json.dumps("/tmp/chunkhound-runtime/daemon.lock")},',
+                        f'    "daemon_socket_path": {json.dumps("/tmp/chunkhound-runtime.sock")},',
+                        f'    "daemon_log_path": {json.dumps("/tmp/chunkhound-runtime/daemon.log")},',
+                        '    "daemon_pid": 5150,',
+                        f'    "daemon_runtime_dir": {json.dumps("/tmp/chunkhound-runtime")},',
+                        f'    "daemon_registry_entry_path": {json.dumps("/tmp/chunkhound-runtime/registry/repo.json")},',
+                        "}",
+                        'print(json.dumps(payload, sort_keys=True))',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            helper_path.chmod(0o755)
+            runtime_policy = {
+                "metadata": {"provider": "codex", "chunkhound_access_mode": "cli_helper_daemon"},
+                "staged_paths": {"chunkhound_helper": str(helper_path)},
+            }
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            env = {"CURE_CHUNKHOUND_HELPER": str(helper_path), "PYTHONSAFEPATH": "1"}
+
+            with self.assertRaisesRegex(rf.ReviewflowError, "did not start within 30.0s"):
+                rf._run_chunkhound_access_preflight(
+                    repo_dir=repo_dir,
+                    env=env,
+                    runtime_policy=runtime_policy,
+                    stream=False,
+                    meta=meta,
+                )
+
+            access = meta["chunkhound"]["access"]
+            self.assertEqual(access["chunkhound_path"], "/usr/bin/chunkhound")
+            self.assertEqual(access["chunkhound_runtime_python"], "/usr/bin/python3")
+            self.assertEqual(access["daemon_lock_path"], "/tmp/chunkhound-runtime/daemon.lock")
+            self.assertEqual(access["daemon_log_path"], "/tmp/chunkhound-runtime/daemon.log")
+            self.assertEqual(access["daemon_runtime_dir"], "/tmp/chunkhound-runtime")
+            self.assertEqual(access["daemon_registry_entry_path"], "/tmp/chunkhound-runtime/registry/repo.json")
+            self.assertFalse(access["preflight_ok"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -7321,6 +7481,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.2", readme)
         self.assertIn("cure init", readme)
         self.assertIn("cure doctor --pr-url <PR_URL> --json", readme)
+        self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", readme)
+        self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", readme)
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
         self.assertIn("cure watch <session_id|PR_URL>", readme)
@@ -7377,6 +7539,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("XDG_CONFIG_HOME", skill)
         self.assertIn("cure install", skill)
         self.assertIn("`cure install` provisions ChunkHound only", skill)
+        self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", skill)
+        self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", skill)
         self.assertIn("Run `cure init` before `cure install` or `cure doctor`.", skill)
         self.assertIn("[[review_intelligence.sources]]", skill)
         self.assertIn('name = "github"', skill)
@@ -7453,6 +7617,8 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn('`"$CURE_CHUNKHOUND_HELPER" research ...`', text)
             self.assertIn("helper `research` satisfies the `code_research` requirement", text)
             self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
+            self.assertIn("`PYTHONSAFEPATH=1`", text)
+            self.assertIn("helper preflight times out", text)
 
     def test_docs_reset_agent_local_setup_contract(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -7575,6 +7741,16 @@ class InstallAndDoctorTests(unittest.TestCase):
             run_cmd.call_args.args[0],
             rf.build_chunkhound_install_command(chunkhound_source="git-main"),
         )
+
+    def test_install_flow_reuses_existing_chunkhound_on_path_by_default(self) -> None:
+        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
+            shutil,
+            "which",
+            side_effect=lambda name: "/usr/bin/uv" if name == "uv" else "/usr/bin/chunkhound",
+        ):
+            rc = rf.install_flow(argparse.Namespace())
+        self.assertEqual(rc, 0)
+        run_cmd.assert_not_called()
 
     def test_install_flow_errors_when_chunkhound_still_missing_from_path(self) -> None:
         calls: list[list[str]] = []
@@ -12856,6 +13032,55 @@ class CodexToolProofFlowTests(unittest.TestCase):
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, [])
             self.assertEqual(meta["status"], "error")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_helper_preflight_timeout_persists_access_metadata(self) -> None:
+        root = ROOT / ".tmp_test_codex_helper_preflight_timeout"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            raise AssertionError("review generation should not start when helper preflight fails")
+
+        def helper_preflight_timeout(*, meta: dict[str, Any], **_: Any) -> None:
+            meta.setdefault("chunkhound", {})["access"] = {
+                "provider": "codex",
+                "mode": "cli_helper_daemon",
+                "helper_env_var": "CURE_CHUNKHOUND_HELPER",
+                "helper_path": "/tmp/session/work/bin/cure-chunkhound",
+                "chunkhound_path": "/usr/bin/chunkhound",
+                "chunkhound_runtime_python": "/usr/bin/python3",
+                "chunkhound_module_path": "/opt/chunkhound/site-packages/chunkhound/__init__.py",
+                "daemon_lock_path": "/tmp/chunkhound-runtime/daemon.lock",
+                "daemon_socket_path": "/tmp/chunkhound-runtime.sock",
+                "daemon_log_path": "/tmp/chunkhound-runtime/daemon.log",
+                "daemon_pid": 5150,
+                "daemon_runtime_dir": "/tmp/chunkhound-runtime",
+                "daemon_registry_entry_path": "/tmp/chunkhound-runtime/registry/repo.json",
+                "preflight_ok": False,
+                "error": "ChunkHound daemon did not start within 30.0s while waiting for IPC readiness",
+            }
+            raise rf.ReviewflowError(
+                "ChunkHound helper preflight failed before review generation: "
+                "ChunkHound daemon did not start within 30.0s while waiting for IPC readiness."
+            )
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+            expect_error="ChunkHound helper preflight failed before review generation",
+            helper_preflight_side_effect=helper_preflight_timeout,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, [])
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["chunkhound"]["access"]["chunkhound_runtime_python"], "/usr/bin/python3")
+            self.assertEqual(meta["chunkhound"]["access"]["daemon_lock_path"], "/tmp/chunkhound-runtime/daemon.lock")
+            self.assertEqual(meta["chunkhound"]["access"]["daemon_runtime_dir"], "/tmp/chunkhound-runtime")
+            self.assertFalse(meta["chunkhound"]["access"]["preflight_ok"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

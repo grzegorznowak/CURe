@@ -916,6 +916,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -927,8 +930,32 @@ CHUNKHOUND_CWD = Path({json.dumps(str(helper_cwd))})
 CHUNKHOUND_CONFIG = Path({json.dumps(str(helper_cfg))})
 CHUNKHOUND_DB = Path({json.dumps(str(helper_db))})
 HELPER_PATH = Path(__file__).resolve()
-DAEMON_LOCK_PATH = (REPO_DIR / ".chunkhound" / "daemon.lock").resolve()
-DAEMON_LOG_PATH = (REPO_DIR / ".chunkhound" / "daemon.log").resolve()
+CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
+DAEMON_METADATA_PROBE = "\\n".join(
+    [
+        "import json",
+        "import sys",
+        "from pathlib import Path",
+        "payload = dict(ok=False, daemon_lock_path='', daemon_log_path='', daemon_socket_path='', daemon_pid=None, daemon_runtime_dir='', daemon_registry_entry_path='', chunkhound_runtime_python=sys.executable, chunkhound_module_path='', daemon_metadata_error='')",
+        "try:",
+        "    import chunkhound",
+        "    from chunkhound.daemon.discovery import DaemonDiscovery",
+        "    repo_dir = Path(sys.argv[1]).resolve()",
+        "    discovery = DaemonDiscovery(repo_dir)",
+        "    payload['ok'] = True",
+        "    payload['daemon_lock_path'] = str(discovery.get_lock_path())",
+        "    payload['daemon_log_path'] = str(discovery.get_lock_path().with_name('daemon.log'))",
+        "    payload['daemon_runtime_dir'] = str(discovery.get_runtime_dir())",
+        "    payload['daemon_registry_entry_path'] = str(discovery.get_registry_entry_path())",
+        "    payload['chunkhound_module_path'] = str(Path(chunkhound.__file__).resolve())",
+        "    lock = discovery.read_lock() or dict()",
+        "    payload['daemon_socket_path'] = str(lock.get('socket_path') or '')",
+        "    payload['daemon_pid'] = lock.get('pid')",
+        "except Exception as exc:",
+        "    payload['daemon_metadata_error'] = str(exc)",
+        "print(json.dumps(payload, sort_keys=True))",
+    ]
+)
 
 
 def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
@@ -937,21 +964,105 @@ def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
     return exit_code
 
 
-def _read_lock() -> dict[str, Any]:
+def _read_lock(path_text: str) -> dict[str, Any]:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return {{}}
+    lock_path = Path(raw)
     try:
-        raw = json.loads(DAEMON_LOCK_PATH.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {{}}
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {{}}
     except Exception:
         return {{}}
 
 
 def _base_cmd() -> list[str]:
-    return ["chunkhound", "mcp", "--config", str(CHUNKHOUND_CONFIG), str(REPO_DIR)]
+    return [CHUNKHOUND_BIN, "mcp", "--config", str(CHUNKHOUND_CONFIG), str(REPO_DIR)]
+
+
+def _chunkhound_runtime_cmd() -> list[str] | None:
+    if CHUNKHOUND_BIN == "chunkhound":
+        return None
+    launcher = Path(CHUNKHOUND_BIN)
+    try:
+        first_line = launcher.read_text(encoding="utf-8").splitlines()[0].strip()
+    except Exception:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    shebang = first_line[2:].strip()
+    if not shebang:
+        return None
+    try:
+        cmd = shlex.split(shebang)
+    except ValueError:
+        return None
+    return cmd or None
+
+
+def _daemon_metadata_payload() -> dict[str, Any]:
+    payload: dict[str, Any] = {{
+        "chunkhound_path": str(CHUNKHOUND_BIN),
+        "chunkhound_runtime_python": "",
+        "chunkhound_module_path": "",
+        "daemon_lock_path": "",
+        "daemon_socket_path": "",
+        "daemon_log_path": "",
+        "daemon_pid": None,
+        "daemon_runtime_dir": "",
+        "daemon_registry_entry_path": "",
+        "daemon_metadata_error": "",
+    }}
+    runtime_cmd = _chunkhound_runtime_cmd()
+    if runtime_cmd is None:
+        payload["daemon_metadata_error"] = "unable to resolve chunkhound runtime interpreter"
+        return payload
+    env = os.environ.copy()
+    env["PYTHONSAFEPATH"] = "1"
+    try:
+        result = subprocess.run(
+            runtime_cmd + ["-c", DAEMON_METADATA_PROBE, str(REPO_DIR)],
+            cwd=str(CHUNKHOUND_CWD),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+    except Exception as exc:
+        payload["daemon_metadata_error"] = str(exc)
+        return payload
+    stdout_text = str(result.stdout or "").strip()
+    if not stdout_text:
+        stderr_text = str(result.stderr or "").strip()
+        payload["daemon_metadata_error"] = stderr_text or "chunkhound runtime probe returned no output"
+        return payload
+    try:
+        parsed = json.loads(stdout_text)
+    except Exception:
+        payload["daemon_metadata_error"] = "chunkhound runtime probe returned malformed JSON"
+        return payload
+    if not isinstance(parsed, dict):
+        payload["daemon_metadata_error"] = "chunkhound runtime probe returned a non-object payload"
+        return payload
+    for key in payload:
+        if key in parsed:
+            payload[key] = parsed.get(key)
+    lock_payload = _read_lock(str(payload.get("daemon_lock_path") or ""))
+    if not str(payload.get("daemon_socket_path") or "").strip():
+        payload["daemon_socket_path"] = str(lock_payload.get("socket_path") or "")
+    if payload.get("daemon_pid") is None:
+        payload["daemon_pid"] = lock_payload.get("pid")
+    if not str(payload.get("daemon_log_path") or "").strip() and str(payload.get("daemon_lock_path") or "").strip():
+        payload["daemon_log_path"] = str(Path(str(payload["daemon_lock_path"])).with_name("daemon.log"))
+    return payload
 
 
 class JsonRpcSession:
     def __init__(self) -> None:
         self._next_id = 1
+        env = os.environ.copy()
+        env["PYTHONSAFEPATH"] = "1"
         self.proc = subprocess.Popen(
             _base_cmd(),
             cwd=str(CHUNKHOUND_CWD),
@@ -959,6 +1070,7 @@ class JsonRpcSession:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
+            env=env,
         )
         if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
             raise RuntimeError("chunkhound mcp stdio pipes are unavailable")
@@ -1095,18 +1207,26 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
         for tool in tools
         if isinstance(tool, dict) and str(tool.get("name") or "").strip()
     )
-    lock_payload = _read_lock()
-    return {{
+    daemon_meta = _daemon_metadata_payload()
+    payload = {{
         "ok": "search" in available and "code_research" in available,
         "command": "preflight",
         "available_tools": available,
         "helper_path": str(HELPER_PATH),
-        "daemon_lock_path": str(DAEMON_LOCK_PATH),
-        "daemon_socket_path": str(lock_payload.get("socket_path") or ""),
-        "daemon_log_path": str(DAEMON_LOG_PATH),
-        "daemon_pid": lock_payload.get("pid"),
+        "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
+        "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
+        "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
+        "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
+        "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
+        "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
+        "daemon_pid": daemon_meta.get("daemon_pid"),
+        "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
+        "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
         "chunkhound_command": _base_cmd(),
     }}
+    if str(daemon_meta.get("daemon_metadata_error") or "").strip():
+        payload["daemon_metadata_error"] = str(daemon_meta.get("daemon_metadata_error") or "")
+    return payload
 
 
 def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
@@ -1126,10 +1246,15 @@ def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
             "path": args.path,
             "result": result,
             "helper_path": str(HELPER_PATH),
+            "chunkhound_path": str(preflight.get("chunkhound_path") or ""),
+            "chunkhound_runtime_python": str(preflight.get("chunkhound_runtime_python") or ""),
+            "chunkhound_module_path": str(preflight.get("chunkhound_module_path") or ""),
             "daemon_lock_path": preflight.get("daemon_lock_path"),
             "daemon_socket_path": preflight.get("daemon_socket_path"),
             "daemon_log_path": preflight.get("daemon_log_path"),
             "daemon_pid": preflight.get("daemon_pid"),
+            "daemon_runtime_dir": preflight.get("daemon_runtime_dir"),
+            "daemon_registry_entry_path": preflight.get("daemon_registry_entry_path"),
         }}
     finally:
         session.close()
@@ -1161,13 +1286,22 @@ def main() -> int:
         try:
             payload = _run_preflight(session, args)
         except Exception as exc:
+            daemon_meta = _daemon_metadata_payload()
             return _emit({{
                 "ok": False,
                 "command": "preflight",
                 "error": str(exc),
                 "helper_path": str(HELPER_PATH),
-                "daemon_lock_path": str(DAEMON_LOCK_PATH),
-                "daemon_log_path": str(DAEMON_LOG_PATH),
+                "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
+                "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
+                "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
+                "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
+                "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
+                "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
+                "daemon_pid": daemon_meta.get("daemon_pid"),
+                "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
+                "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
+                "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
             }}, exit_code=1)
         finally:
             session.close()
@@ -1176,6 +1310,7 @@ def main() -> int:
         payload = _run_tool(args)
         return _emit(payload, exit_code=0)
     except Exception as exc:
+        daemon_meta = _daemon_metadata_payload()
         return _emit({{
             "ok": False,
             "command": args.command,
@@ -1184,8 +1319,16 @@ def main() -> int:
             "path": getattr(args, "path", None),
             "error": str(exc),
             "helper_path": str(HELPER_PATH),
-            "daemon_lock_path": str(DAEMON_LOCK_PATH),
-            "daemon_log_path": str(DAEMON_LOG_PATH),
+            "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
+            "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
+            "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
+            "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
+            "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
+            "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
+            "daemon_pid": daemon_meta.get("daemon_pid"),
+            "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
+            "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
+            "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
         }}, exit_code=1)
 
 
@@ -1318,6 +1461,7 @@ def prepare_review_agent_runtime(
     runtime["command"] = command
     if provider == "codex":
         if enable_mcp:
+            env["PYTHONSAFEPATH"] = "1"
             chunkhound_helper = write_chunkhound_helper(
                 work_dir=work_dir,
                 repo_dir=repo_dir,

@@ -200,6 +200,7 @@ cure install
 ```
 
 `cure install` provisions ChunkHound only.
+It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly.
 
 9. Confirm readiness:
 
@@ -220,6 +221,8 @@ cure resume <session_id|PR_URL>
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
 Built-in Codex review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution with JSON output, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in Codex contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
+
+Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
 Codex and Claude executor paths need internet / network access to obtain code-under-review context. If the sandbox blocks that access, ask the operator for help instead of pretending CURe can always bootstrap fully autonomously.
 

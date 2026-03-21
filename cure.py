@@ -5741,15 +5741,23 @@ def _record_chunkhound_access_meta(
         "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
         "helper_env_var": "CURE_CHUNKHOUND_HELPER",
         "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
+        "chunkhound_path": str(payload.get("chunkhound_path") or ""),
+        "chunkhound_runtime_python": str(payload.get("chunkhound_runtime_python") or ""),
+        "chunkhound_module_path": str(payload.get("chunkhound_module_path") or ""),
         "daemon_lock_path": str(payload.get("daemon_lock_path") or ""),
         "daemon_socket_path": str(payload.get("daemon_socket_path") or ""),
         "daemon_log_path": str(payload.get("daemon_log_path") or ""),
         "daemon_pid": payload.get("daemon_pid"),
+        "daemon_runtime_dir": str(payload.get("daemon_runtime_dir") or ""),
+        "daemon_registry_entry_path": str(payload.get("daemon_registry_entry_path") or ""),
         "preflight_ok": bool(payload.get("ok")),
     }
     error = str(payload.get("error") or "").strip()
     if error:
         access_meta["error"] = error
+    daemon_metadata_error = str(payload.get("daemon_metadata_error") or "").strip()
+    if daemon_metadata_error:
+        access_meta["daemon_metadata_error"] = daemon_metadata_error
     chunkhound_meta["access"] = access_meta
     return access_meta
 
@@ -5779,8 +5787,10 @@ def _run_chunkhound_access_preflight(
     payload: dict[str, Any] = {
         "ok": False,
         "helper_path": str(helper_path),
-        "daemon_lock_path": str((repo_dir / ".chunkhound" / "daemon.lock").resolve()),
-        "daemon_log_path": str((repo_dir / ".chunkhound" / "daemon.log").resolve()),
+        "daemon_lock_path": "",
+        "daemon_socket_path": "",
+        "daemon_log_path": "",
+        "daemon_pid": None,
     }
     if not helper_path.is_file():
         payload["error"] = f"missing helper at {helper_path}"
@@ -10854,8 +10864,13 @@ def _chunkhound_not_on_path_error(*, uv_path: str | None) -> ReviewflowError:
 
 
 def install_flow(args: argparse.Namespace) -> int:
+    explicit_source = hasattr(args, "chunkhound_source")
     chunkhound_source = str(getattr(args, "chunkhound_source", "release") or "release").strip()
     uv_path = shutil.which("uv")
+    existing_chunkhound = shutil.which("chunkhound")
+    if existing_chunkhound and not explicit_source:
+        _eprint(f"Reusing existing ChunkHound on PATH: {existing_chunkhound}")
+        return 0
     cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
     _eprint(f"Installing ChunkHound from source={chunkhound_source}")
     run_cmd(cmd)
@@ -11598,7 +11613,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     ins.add_argument(
         "--chunkhound-source",
         choices=["release", "git-main"],
-        default="release",
+        default=argparse.SUPPRESS,
         help="ChunkHound source to install (default: release)",
     )
 
