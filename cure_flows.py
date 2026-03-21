@@ -70,7 +70,7 @@ ChunkHoundToolRequirement = Literal["required", "guidance", "conditional"]
 class ChunkHoundPromptContract:
     search_requirement: ChunkHoundToolRequirement
     code_research_requirement: ChunkHoundToolRequirement
-    availability_proof: str = "real_tool_call"
+    availability_proof: str = "successful_execution"
     resource_discovery_rule: str = "neutral_expected_empty"
 
 
@@ -285,6 +285,15 @@ _CHUNKHOUND_PROOF_DISCOVERY_TOOLS = {
     "list_mcp_resources",
     "list_mcp_resource_templates",
 }
+_CHUNKHOUND_NATIVE_PROOF_SOURCES = {"chunkhound", "codex"}
+_CHUNKHOUND_MANUAL_MCP_COMMAND_PATTERNS = (
+    re.compile(r"(?<![\w.-])(?:uv\s+run\s+)?chunkhound\s+mcp(?![\w.-])", re.IGNORECASE),
+    re.compile(
+        r"['\"]uv['\"]\s*,\s*['\"]run['\"]\s*,\s*['\"]chunkhound['\"]\s*,\s*['\"]mcp['\"]",
+        re.IGNORECASE,
+    ),
+    re.compile(r"['\"]chunkhound['\"]\s*,\s*['\"]mcp['\"]", re.IGNORECASE),
+)
 
 
 def _first_nonempty_string(*values: object) -> str:
@@ -312,7 +321,7 @@ def _chunkhound_tool_targets_expected_server(*, item: dict[str, Any], raw_tool_n
     ).lower()
     if raw.startswith("chunkhound."):
         return True
-    if server and server != "chunkhound":
+    if server and server not in _CHUNKHOUND_NATIVE_PROOF_SOURCES:
         return False
     return True
 
@@ -390,6 +399,102 @@ def _iter_codex_tool_call_events(text: str) -> list[tuple[str, dict[str, Any]]]:
     return calls
 
 
+def _iter_codex_command_execution_events(text: str) -> list[tuple[str, dict[str, Any]]]:
+    commands: list[tuple[str, dict[str, Any]]] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(payload.get("type") or "").strip()
+        item = payload.get("item")
+        item = item if isinstance(item, dict) else {}
+        if str(item.get("type") or "").strip() == "command_execution":
+            commands.append((event_type, item))
+            continue
+        if str(payload.get("type") or "").strip() == "command_execution":
+            commands.append((event_type, payload))
+    return commands
+
+
+def _command_execution_succeeded(event_type: str, item: dict[str, Any]) -> bool:
+    if _extract_tool_status(event_type, item) is False:
+        return False
+    exit_code = item.get("exit_code")
+    if isinstance(exit_code, int):
+        return exit_code == 0
+    return _extract_tool_status(event_type, item) is True
+
+
+def _command_matches_chunkhound_mcp(command: object) -> re.Match[str] | None:
+    text = str(command or "")
+    for pattern in _CHUNKHOUND_MANUAL_MCP_COMMAND_PATTERNS:
+        match = pattern.search(text)
+        if match is not None:
+            return match
+    return None
+
+
+def _manual_chunkhound_command_excerpt(command: object) -> str | None:
+    text = " ".join(str(command or "").split())
+    if not text:
+        return None
+    match = _command_matches_chunkhound_mcp(text)
+    if match is None:
+        excerpt = text[:180]
+        if len(excerpt) < len(text):
+            excerpt = excerpt.rstrip() + "..."
+        return excerpt
+
+    start = max(0, match.start() - 48)
+    end = min(len(text), match.end() + 132)
+    excerpt = text[start:end]
+    if start > 0:
+        excerpt = "..." + excerpt
+    if end < len(text):
+        excerpt = excerpt.rstrip() + "..."
+    return excerpt
+
+
+def _parse_manual_chunkhound_output(payload_text: object) -> dict[str, Any] | None:
+    text = str(payload_text or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if 0 <= first_brace < last_brace:
+        candidates.append(text[first_brace : last_brace + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _manual_chunkhound_result_succeeded(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("isError") is True or result.get("error"):
+        return False
+    for key in ("content", "structured_content", "result"):
+        value = result.get(key)
+        if isinstance(value, (dict, list)) and bool(value):
+            return True
+    text = result.get("text")
+    if isinstance(text, str) and text.strip():
+        return True
+    return False
+
+
 def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset: int | None) -> str:
     with path.open("rb") as fh:
         if isinstance(start_offset, int) and start_offset > 0:
@@ -433,6 +538,8 @@ def validate_codex_chunkhound_tool_proof(
         "prompt_template_name": str(prompt_template_name or "").strip(),
         "required_tools": required_tools,
         "observed_successful_calls": [],
+        "observed_successful_call_details": [],
+        "observed_evidence_sources": [],
         "ignored_discovery_calls": [],
         "valid": False,
         "failure_reason": None,
@@ -461,7 +568,9 @@ def validate_codex_chunkhound_tool_proof(
         return report
 
     observed_successful_calls: list[str] = []
+    observed_successful_call_details: list[dict[str, Any]] = []
     ignored_discovery_calls: list[str] = []
+    observed_evidence_sources: set[str] = set()
     for event_type, item in _iter_codex_tool_call_events(events_text):
         raw_tool_name = _extract_tool_name(item)
         normalized_tool_name = _normalize_chunkhound_tool_name(raw_tool_name)
@@ -477,14 +586,58 @@ def validate_codex_chunkhound_tool_proof(
             continue
         if normalized_tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
             continue
-        if _extract_tool_status(event_type, item) is True and normalized_tool_name not in observed_successful_calls:
-            observed_successful_calls.append(normalized_tool_name)
+        if _extract_tool_status(event_type, item) is True:
+            if normalized_tool_name not in observed_successful_calls:
+                observed_successful_calls.append(normalized_tool_name)
+            detail = {
+                "tool_name": normalized_tool_name,
+                "evidence_source": "mcp_tool_call",
+                "item_id": _first_nonempty_string(item.get("id")) or None,
+                "server": _first_nonempty_string(
+                    item.get("server"),
+                    item.get("server_name"),
+                    item.get("mcp_server"),
+                )
+                or None,
+                "command_excerpt": None,
+            }
+            if detail not in observed_successful_call_details:
+                observed_successful_call_details.append(detail)
+            observed_evidence_sources.add("mcp_tool_call")
+
+    for event_type, item in _iter_codex_command_execution_events(events_text):
+        if not _command_execution_succeeded(event_type, item):
+            continue
+        command = _first_nonempty_string(item.get("command"))
+        if _command_matches_chunkhound_mcp(command) is None:
+            continue
+        payload = _parse_manual_chunkhound_output(item.get("aggregated_output"))
+        if payload is None:
+            continue
+        command_excerpt = _manual_chunkhound_command_excerpt(command)
+        for tool_name in required_tools:
+            if not _manual_chunkhound_result_succeeded(payload.get(f"{tool_name}_result")):
+                continue
+            if tool_name not in observed_successful_calls:
+                observed_successful_calls.append(tool_name)
+            detail = {
+                "tool_name": tool_name,
+                "evidence_source": "manual_chunkhound_mcp",
+                "item_id": _first_nonempty_string(item.get("id")) or None,
+                "server": None,
+                "command_excerpt": command_excerpt,
+            }
+            if detail not in observed_successful_call_details:
+                observed_successful_call_details.append(detail)
+            observed_evidence_sources.add("manual_chunkhound_mcp")
 
     report["observed_successful_calls"] = observed_successful_calls
+    report["observed_successful_call_details"] = observed_successful_call_details
+    report["observed_evidence_sources"] = sorted(observed_evidence_sources)
     report["ignored_discovery_calls"] = ignored_discovery_calls
     missing_tools = [tool for tool in required_tools if tool not in observed_successful_calls]
     if missing_tools:
-        report["failure_reason"] = "missing successful ChunkHound tool call(s): " + ", ".join(
+        report["failure_reason"] = "missing successful ChunkHound execution(s): " + ", ".join(
             missing_tools
         )
         return report
@@ -522,11 +675,28 @@ def validate_and_record_codex_chunkhound_tool_proof(
         if isinstance(runs, list):
             existing_runs = [item for item in runs if isinstance(item, dict)]
     runs = [*existing_runs, run_report]
+    latest_evidence_sources = sorted(
+        {
+            str(source).strip()
+            for source in run_report.get("observed_evidence_sources") or []
+            if str(source).strip()
+        }
+    )
+    evidence_sources = sorted(
+        {
+            str(source).strip()
+            for item in runs
+            for source in (item.get("observed_evidence_sources") or [])
+            if str(source).strip()
+        }
+    )
     report_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "updated_at": _utc_now_iso(),
         "provider": "codex",
         "valid": bool(run_report.get("valid")),
+        "latest_evidence_sources": latest_evidence_sources,
+        "evidence_sources": evidence_sources,
         "runs": runs,
     }
     write_json(report_path, report_payload)
@@ -542,6 +712,8 @@ def validate_and_record_codex_chunkhound_tool_proof(
         "run_count": len(runs),
         "latest_review_stage": run_report["review_stage"],
         "latest_run_valid": bool(run_report["valid"]),
+        "evidence_sources": evidence_sources,
+        "latest_evidence_sources": latest_evidence_sources,
         "failure_reason": run_report.get("failure_reason"),
     }
     return run_report
