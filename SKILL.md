@@ -216,7 +216,7 @@ cure resume <session_id|PR_URL>
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
-ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
+ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when `search` or `code_research` executes successfully. Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
 
 Codex and Claude executor paths need internet / network access to obtain code-under-review context. If the sandbox blocks that access, ask the operator for help instead of pretending CURe can always bootstrap fully autonomously.
 

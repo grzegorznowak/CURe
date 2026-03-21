@@ -8,7 +8,33 @@ It is for two audiences:
 
 If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
 
-## Quickstart
+## Quick Links
+
+- [Why CURe](#why-cure)
+- [Install And First Review](#install-and-first-review)
+- [Example Flows](#example-flows)
+- [Agent And Setup Notes](#agent-and-setup-notes)
+- [Core Commands](#core-commands)
+- [Secondary Standalone Install](#secondary-standalone-install)
+- [Advanced / Pre-Provisioned Environments](#advanced--pre-provisioned-environments)
+- [Minimal Config](#minimal-config)
+- [Jira CLI](#jira-cli)
+- [Tests](#tests)
+
+## Why CURe
+
+Use CURe when you want to:
+- review a GitHub PR from a disposable sandbox instead of the working repo
+- standardize how humans and agents start, observe, resume, and clean review runs
+- give an agent a single documented path from fresh install or existing local setup to "review in progress"
+
+CURe is different from an ad-hoc manual agent review because the project checkout stays untouched, the review state stays on disk, and the workflow is resumable instead of prompt-by-prompt improvisation.
+
+CURe is not for:
+- ad-hoc in-place repo review where the agent should work directly in the project checkout
+- environments that cannot install tools or authenticate the required external systems
+
+## Install And First Review
 
 For a human operator, the default kickoff is one sentence:
 
@@ -28,43 +54,17 @@ The operator should not need to provide a local checkout path, a config path, or
 
 If the operator asked to use CURe, the agent should bootstrap CURe and run `cure`. It should not do a manual review outside CURe.
 
-## What CURe Is For
-
-Use CURe when you want to:
-- review a GitHub PR from a disposable sandbox instead of the working repo
-- standardize how humans and agents start, observe, resume, and clean review runs
-- give an agent a single documented path from fresh install or existing local setup to "review in progress"
-
-CURe is not for:
-- ad-hoc in-place repo review where the agent should work directly in the project checkout
-- environments that cannot install tools or authenticate the required external systems
-
-## Agent Bootstrap From That Prompt
-
-When the only instruction is `use <CURE_REPO_URL> to review <PR_URL>`, the agent should:
-1. Ensure the local environment has `git`, `curl`, and `ca-certificates`. On fresh Debian-like containers such as `node:latest`, install them if they are missing.
-2. Install `uv` if it is missing.
-3. If CURe is already partially configured, inspect the active local setup before creating a fresh one:
-
-```text
-- the active `cure.toml`
-- the JSON file resolved from `[chunkhound].base_config_path`
-- repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
-```
-
-If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
-Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for this now: its `repo_local_chunkhound` payload and `repo-local-chunkhound` check report the same ask-first setup hint in machine-readable and text forms.
-
-4. For disposable agent bootstrap, prefer a temp XDG root instead of editing `~/.config/cure` by hand:
+Persistent human install:
 
 ```bash
-tmp_root="$(mktemp -d)"
-export XDG_CONFIG_HOME="$tmp_root/config"
-export XDG_STATE_HOME="$tmp_root/state"
-export XDG_CACHE_HOME="$tmp_root/cache"
+uv tool install cureview
+cure init
+cure install
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
 ```
 
-5. Bootstrap CURe from the public package instead of cloning the repo:
+Ephemeral agent run path:
 
 ```bash
 uvx --from cureview cure init
@@ -73,27 +73,155 @@ uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
 
-That indexed ChunkHound-backed path is the default and recommended public review workflow. Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.
+Keep the README focused on the landing page and first success. For the full agent bootstrap contract, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
+
+## Example Flows
+
+### Example 1: clean public package install to first review
+
+This is the primary public path and matches the package prove-out used for the first successful public release:
+
+```bash
+uv tool install cureview
+cure init
+cure install
+cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json
+cure pr https://github.com/chunkhound/chunkhound/pull/220 --if-reviewed new
+```
+
+The `v0.1.2` public release prove-out verified that `uv tool install cureview`, `cure init`, `cure install`, and `cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json` all worked in a clean temp-home install, and that the installed tool exposed `cure` without the deprecated `reviewflow` CLI.
+
+### Example 2: ephemeral agent bootstrap from the one-sentence kickoff
+
+Use the canonical agent run surface when the review happens inside a disposable sandbox or agent session:
+
+```bash
+tmp_root="$(mktemp -d)"
+export XDG_CONFIG_HOME="$tmp_root/config"
+export XDG_STATE_HOME="$tmp_root/state"
+export XDG_CACHE_HOME="$tmp_root/cache"
+
+uvx --from cureview cure init
+uvx --from cureview cure install
+uvx --from cureview cure doctor --pr-url <PR_URL> --json
+uvx --from cureview cure pr <PR_URL> --if-reviewed new
+```
+
+If CURe is already partially configured, inspect the active local setup before creating a fresh one:
+
+```text
+- the active `cure.toml`
+- the JSON file resolved from `[chunkhound].base_config_path`
+- repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
+```
+
+### Example 3: what a finished review produces
+
+A normal review run leaves behind resumable session state plus a review artifact with stable headings:
+
+```text
+<session_dir>/
+  meta.json
+  review.md
+```
+
+```markdown
+**Summary**: ...
+## Business / Product Assessment
+### In Scope Issues
+## Technical Assessment
+### In Scope Issues
+```
+
+Review output uses two independent lenses:
+- Business / Product Assessment uses product/ticket scope.
+- Technical Assessment uses implementation scope.
+
+## Agent And Setup Notes
+
+Ensure `git`, `curl`, and `ca-certificates` are present before bootstrap. Install `uv` if it is missing.
+
+Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-first setup. Its `repo_local_chunkhound` payload plus the `repo-local-chunkhound` check and `executor-network` advisory check surface the same setup hints in machine-readable and text forms.
+
+If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
+
+That indexed ChunkHound-backed path is the default and recommended public review workflow.
+
+```bash
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+cure resume <session_id|PR_URL>
+```
+
+Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
-ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when a real `search` or `code_research` call succeeds.
+ChunkHound is a tools-first MCP server. Empty `list_mcp_resources` / `list_mcp_resource_templates` results are expected and are not an outage signal. Treat availability as proven only when `search` or `code_research` executes successfully. Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
 
-Codex and Claude executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state.
-When `cure doctor` resolves Codex or Claude, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
+Codex and Claude executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state. When `cure doctor` resolves Codex or Claude, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
 
-6. `cure init` writes the non-secret local config files if they are missing:
+Need the full bootstrap contract for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 
-```text
-<resolved config dir>/cure.toml
-<resolved config dir>/chunkhound-base.json
+## Core Commands
+
+Recommended indexed review loop:
+
+```bash
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+cure resume <session_id|PR_URL>
 ```
 
-7. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues.
-8. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
-9. Otherwise, stop only after writing the exact local config path, the minimal snippet to add, the required env var name, and the rerun command.
+Initialize non-secret bootstrap files:
 
-For public `github.com` PRs, `cure doctor --pr-url <PR_URL> --json` is the readiness gate for `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those flows, and `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required for PR checkout.
+```bash
+cure init
+```
+
+Start a fresh review:
+
+```bash
+cure pr <PR_URL> --if-reviewed new
+```
+
+Check status:
+
+```bash
+cure status <session_id|PR_URL> --json
+```
+
+Watch a run:
+
+```bash
+cure watch <session_id|PR_URL>
+```
+
+Resume or follow up:
+
+```bash
+cure resume <session_id|PR_URL>
+cure followup <session_id>
+```
+
+Synthesize a final review:
+
+```bash
+cure zip <PR_URL>
+```
+
+Clean up old sessions:
+
+```bash
+cure clean closed --json
+cure clean <session_id>
+```
+
+Show the machine-readable command catalog:
+
+```bash
+cure commands --json
+```
 
 ## Secondary Standalone Install
 
@@ -130,6 +258,80 @@ cure pr <PR_URL> --if-reviewed new
 ```
 
 If your platform is not covered by the standalone assets, fall back to the package path instead of inventing a separate bootstrap recipe.
+
+## Advanced / Pre-Provisioned Environments
+
+Persistent human install should use the public package:
+
+```bash
+uv tool install cureview
+cure init
+cure install
+cure doctor --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new
+```
+
+Teams that already manage a local CURe checkout can keep using that as a secondary local-development flow:
+- keep CURe in a stable local path
+- refresh it with `git -C <CURE_SOURCE> pull --ff-only`
+- install it with `uv tool install /path/to/cure`
+- keep any project-specific wrappers or config beside that checkout
+
+If local CURe config already exists, inspect it before overwriting it:
+- check the active `cure.toml`
+- inspect the JSON resolved from `[chunkhound].base_config_path`
+- treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt
+
+Prefer `cure doctor --pr-url <PR_URL> --json` as the readiness summary after that inspection. It now reports `repo_local_chunkhound` plus the `repo-local-chunkhound` and `executor-network` checks so the operator does not need to infer those details from raw files alone.
+
+Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
+
+For the full bootstrap contract around fresh installs, existing local setup, and operator handoff, use [SKILL.md](SKILL.md).
+
+## Minimal Config
+
+Default config path:
+
+```text
+~/.config/cure/cure.toml
+```
+
+By default `cure init` also writes:
+
+```text
+~/.config/cure/chunkhound-base.json
+```
+
+If you need a disposable or non-default layout, set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` before `cure init`, or pass `--config`, `--sandbox-root`, and `--cache-root` directly to `cure init`.
+
+Minimal config written by `cure init`:
+
+```toml
+[paths]
+sandbox_root = "/absolute/path/to/sandboxes"
+cache_root = "/absolute/path/to/cache"
+
+[review_intelligence]
+tool_prompt_fragment = """
+Preferred review-intelligence tools:
+- Use GitHub MCP for PR context when available.
+- Otherwise use gh CLI / gh api.
+- Use any additional tools or sources that materially improve understanding of the code under review.
+"""
+
+[chunkhound]
+base_config_path = "/absolute/path/to/chunkhound-base.json"
+
+[multipass]
+# strict = fail closed on invalid grounding
+# warn   = record findings and continue
+# off    = skip grounding validation
+grounding_mode = "strict"
+```
+
+If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
+
+If no supported key is present, the agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review.
 
 ## Jira CLI
 
@@ -314,156 +516,6 @@ env -u JIRA_API_TOKEN jira issue view "${JIRA_PROJECT_KEY}-123" --plain
 #### `404 Not Found` Or “Issue Does Not Exist Or You Do Not Have Permission”
 
 Jira often returns `404` when you are not authorized to view an issue. Resolve auth first, then confirm you have project and issue permissions.
-
-## Advanced / Pre-Provisioned Environments
-
-Persistent human install should use the public package:
-
-```bash
-uv tool install cureview
-cure init
-cure install
-cure doctor --pr-url <PR_URL> --json
-cure pr <PR_URL> --if-reviewed new
-```
-
-Teams that already manage a local CURe checkout can keep using that as a secondary local-development flow:
-- keep CURe in a stable local path
-- refresh it with `git -C <CURE_SOURCE> pull --ff-only`
-- install it with `uv tool install /path/to/cure`
-- keep any project-specific wrappers or config beside that checkout
-
-If local CURe config already exists, inspect it before overwriting it:
-- check the active `cure.toml`
-- inspect the JSON resolved from `[chunkhound].base_config_path`
-- treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt
-
-Prefer `cure doctor --pr-url <PR_URL> --json` as the readiness summary after that inspection. It now reports `repo_local_chunkhound` plus the `repo-local-chunkhound` and `executor-network` checks so the operator does not need to infer those details from raw files alone.
-
-Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
-
-## Minimal Config
-
-Default config path:
-
-```text
-~/.config/cure/cure.toml
-```
-
-By default `cure init` also writes:
-
-```text
-~/.config/cure/chunkhound-base.json
-```
-
-If you need a disposable or non-default layout, set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` before `cure init`, or pass `--config`, `--sandbox-root`, and `--cache-root` directly to `cure init`.
-
-Minimal config written by `cure init`:
-
-```toml
-[paths]
-sandbox_root = "/absolute/path/to/sandboxes"
-cache_root = "/absolute/path/to/cache"
-
-[review_intelligence]
-tool_prompt_fragment = """
-Preferred review-intelligence tools:
-- Use GitHub MCP for PR context when available.
-- Otherwise use gh CLI / gh api.
-- Use any additional tools or sources that materially improve understanding of the code under review.
-"""
-
-[chunkhound]
-base_config_path = "/absolute/path/to/chunkhound-base.json"
-
-[multipass]
-# strict = fail closed on invalid grounding
-# warn   = record findings and continue
-# off    = skip grounding validation
-grounding_mode = "strict"
-```
-
-If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If no supported key is present, the agent should stop with an exact remediation recipe instead of improvising a manual review.
-
-## Core Commands
-
-Recommended indexed review loop:
-
-```bash
-cure doctor --pr-url <PR_URL> --json
-cure pr <PR_URL> --if-reviewed new
-cure resume <session_id|PR_URL>
-```
-
-Initialize non-secret bootstrap files:
-
-```bash
-cure init
-```
-
-Start a fresh review:
-
-```bash
-cure pr <PR_URL> --if-reviewed new
-```
-
-Check status:
-
-```bash
-cure status <session_id|PR_URL> --json
-```
-
-Watch a run:
-
-```bash
-cure watch <session_id|PR_URL>
-```
-
-Resume or follow up:
-
-```bash
-cure resume <session_id|PR_URL>
-cure followup <session_id>
-```
-
-Synthesize a final review:
-
-```bash
-cure zip <PR_URL>
-```
-
-Clean up old sessions:
-
-```bash
-cure clean closed --json
-cure clean <session_id>
-```
-
-Show the machine-readable command catalog:
-
-```bash
-cure commands --json
-```
-
-## What CURe Produces
-
-CURe produces:
-- a sandbox session directory
-- review markdown artifacts
-- optional follow-up and zip artifacts
-- machine-readable session state for status/watch tooling
-
-Review output uses two independent lenses:
-- Business / Product Assessment uses product/ticket scope.
-- Technical Assessment uses implementation scope.
-
-## Practical Premise
-
-The value proposition is simple:
-- humans should only need a short kickoff prompt
-- agents bootstrap the review workflow instead of improvising one
-- the project checkout stays untouched
-- reviews become repeatable instead of prompt-by-prompt improvisation
 
 ## Tests
 
