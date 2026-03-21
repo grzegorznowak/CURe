@@ -151,12 +151,13 @@ sandbox_root = "/absolute/path/to/sandboxes"
 cache_root = "/absolute/path/to/cache"
 
 [review_intelligence]
-tool_prompt_fragment = """
-Preferred review-intelligence tools:
-- Use GitHub MCP for PR context when available.
-- Otherwise use gh CLI / gh api.
-- Use any additional tools or sources that materially improve understanding of the code under review.
-"""
+[[review_intelligence.sources]]
+name = "github"
+mode = "auto"
+
+[[review_intelligence.sources]]
+name = "jira"
+mode = "when-referenced"
 
 [chunkhound]
 base_config_path = "/absolute/path/to/chunkhound-base.json"

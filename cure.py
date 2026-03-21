@@ -203,14 +203,17 @@ MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9][A-Za-z0-9._/-]*):([1-9][0-9]*)`?")
+REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
+_BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
-tool_prompt_fragment = \"\"\"
-Preferred review-intelligence tools:
-- Use GitHub MCP for PR context when available.
-- Otherwise use gh CLI / gh api.
-- Use any additional tools or sources that materially improve understanding of the code under review.
-\"\"\"
+[[review_intelligence.sources]]
+name = "github"
+mode = "auto"
+
+[[review_intelligence.sources]]
+name = "jira"
+mode = "when-referenced"
 """
 
 CHUNKHOUND_CONFIG_EXAMPLE = """[chunkhound]
@@ -1460,18 +1463,80 @@ def resolve_codex_flags(
 
 
 @dataclass(frozen=True)
+class ReviewIntelligenceSource:
+    name: str
+    mode: str
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ReviewIntelligenceConfig:
-    tool_prompt_fragment: str
-    policy_mode: str = DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE
+    notes: tuple[str, ...] = ()
+    sources: tuple[ReviewIntelligenceSource, ...] = ()
 
 
 def _resolve_review_intelligence_config_error(*, path: Path) -> ReviewflowError:
     return ReviewflowError(
-        "Built-in prompt profiles require `[review_intelligence].tool_prompt_fragment` "
+        "Built-in prompt profiles require at least one active `[[review_intelligence.sources]]` entry "
         f"in {path}.\n"
         "Example:\n"
         f"{REVIEW_INTELLIGENCE_CONFIG_EXAMPLE.rstrip()}"
     )
+
+
+def _review_intelligence_notes(raw: object, *, field_name: str) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        note = raw.strip()
+        return (note,) if note else ()
+    if not isinstance(raw, list):
+        raise ReviewflowError(f"Invalid {field_name}: expected a string or array of strings.")
+    notes: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ReviewflowError(f"Invalid {field_name}: expected a string or array of strings.")
+        note = item.strip()
+        if not note:
+            raise ReviewflowError(f"Invalid {field_name}: notes must not be empty.")
+        notes.append(note)
+    return tuple(notes)
+
+
+def _review_intelligence_sources(cfg: ReviewIntelligenceConfig) -> tuple[ReviewIntelligenceSource, ...]:
+    return tuple(source for source in cfg.sources if source.mode != "off")
+
+
+def _review_intelligence_source_mode(cfg: ReviewIntelligenceConfig, name: str) -> str | None:
+    wanted = str(name or "").strip().lower()
+    for source in cfg.sources:
+        if source.name == wanted:
+            return source.mode
+    return None
+
+
+def _review_intelligence_source_guidance(source: ReviewIntelligenceSource) -> str:
+    if source.name == "github":
+        detail = (
+            "Use GitHub context when PR metadata, discussion, or linked issues materially clarify the change. "
+            "Prefer staged PR context first, then `gh` / `gh api` if needed."
+        )
+    elif source.name == "jira":
+        if source.mode == "when-referenced":
+            detail = (
+                "Use Jira when the change, PR, or commits reference a ticket and that context would clarify the review."
+            )
+        elif source.mode == "required":
+            detail = "Jira context is required for this review; confirm the relevant ticket context before finalizing."
+        else:
+            detail = "Use Jira when ticket context is readily available and materially clarifies the change."
+    else:
+        detail = (
+            f"Use `{source.name}` only if it is available and materially improves understanding of the code under review."
+        )
+    if source.notes:
+        detail = f"{detail} {' '.join(source.notes)}"
+    return f"- `{source.name}` (`{source.mode}`): {detail}"
 
 
 def _review_intelligence_meta_dict(
@@ -1481,14 +1546,21 @@ def _review_intelligence_meta_dict(
         "config_path": str(path),
         "loaded": loaded,
         "review_intelligence": {
-            "tool_prompt_fragment": cfg.tool_prompt_fragment,
-            "policy_mode": cfg.policy_mode,
+            "notes": list(cfg.notes),
+            "sources": [
+                {
+                    "name": source.name,
+                    "mode": source.mode,
+                    "notes": list(source.notes),
+                }
+                for source in cfg.sources
+            ],
         },
     }
 
 
 def load_review_intelligence_config(
-    *, config_path: Path | None = None, require_tool_prompt_fragment: bool = False
+    *, config_path: Path | None = None, require_active_sources: bool = False
 ) -> tuple[ReviewIntelligenceConfig, dict[str, Any]]:
     path = config_path or default_reviewflow_config_path()
     raw = load_toml(path)
@@ -1497,58 +1569,112 @@ def load_review_intelligence_config(
 
     legacy_keys = {
         key
-        for key in ("allow_hosts", "timeout_seconds", "max_bytes", "external_fetch_gateway")
+        for key in (
+            "allow_hosts",
+            "external_fetch_gateway",
+            "max_bytes",
+            "policy_mode",
+            "timeout_seconds",
+            "tool_prompt_fragment",
+        )
         if key in review_intelligence
     }
     if legacy_keys:
         raise ReviewflowError(
-            "Legacy review-intelligence URL policy fields are no longer supported: "
+            "Legacy review-intelligence config keys are no longer supported: "
             f"{', '.join(sorted(legacy_keys))}\n"
-            "Use the reduced schema:\n"
+            "Use the structured schema:\n"
             f"{REVIEW_INTELLIGENCE_CONFIG_EXAMPLE.rstrip()}"
         )
     if isinstance(raw, dict) and ("crawl" in raw):
         raise ReviewflowError(
             "Deprecated `[crawl]` config is no longer supported.\n"
-            "Use the reduced schema:\n"
+            "Use the structured schema:\n"
             f"{REVIEW_INTELLIGENCE_CONFIG_EXAMPLE.rstrip()}"
         )
 
-    tool_prompt_fragment = str(review_intelligence.get("tool_prompt_fragment") or "").strip()
-    if require_tool_prompt_fragment and (not tool_prompt_fragment):
-        raise _resolve_review_intelligence_config_error(path=path)
-
-    cfg = ReviewIntelligenceConfig(
-        tool_prompt_fragment=tool_prompt_fragment,
-        policy_mode=DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
+    notes = _review_intelligence_notes(
+        review_intelligence.get("notes"),
+        field_name="[review_intelligence].notes",
     )
+    sources_raw = review_intelligence.get("sources")
+    if sources_raw is None:
+        sources_raw = []
+    if not isinstance(sources_raw, list):
+        raise ReviewflowError("Invalid `[review_intelligence].sources`: expected an array of tables.")
+
+    seen_source_names: set[str] = set()
+    sources: list[ReviewIntelligenceSource] = []
+    for idx, raw_source in enumerate(sources_raw):
+        if not isinstance(raw_source, dict):
+            raise ReviewflowError("Invalid `[review_intelligence].sources`: expected an array of tables.")
+        name = str(raw_source.get("name") or "").strip().lower()
+        if not name:
+            raise ReviewflowError(
+                f"Invalid `[review_intelligence].sources[{idx}].name`: expected a non-empty string."
+            )
+        if name in seen_source_names:
+            raise ReviewflowError(f"Duplicate review-intelligence source name: {name}")
+        seen_source_names.add(name)
+
+        mode = str(raw_source.get("mode") or "").strip().lower()
+        if mode not in REVIEW_INTELLIGENCE_SOURCE_MODES:
+            allowed = ", ".join(sorted(REVIEW_INTELLIGENCE_SOURCE_MODES))
+            raise ReviewflowError(
+                f"Invalid review-intelligence source mode for `{name}`: expected one of {allowed}."
+            )
+        if mode == "required" and name not in _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES:
+            allowed = ", ".join(sorted(_BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES))
+            raise ReviewflowError(
+                f"Unknown required review-intelligence source `{name}`. Only built-in sources may be `required`: {allowed}."
+            )
+        source_notes = _review_intelligence_notes(
+            raw_source.get("notes"),
+            field_name=f"[review_intelligence].sources[{idx}].notes",
+        )
+        sources.append(
+            ReviewIntelligenceSource(
+                name=name,
+                mode=mode,
+                notes=source_notes,
+            )
+        )
+
+    cfg = ReviewIntelligenceConfig(notes=notes, sources=tuple(sources))
+    if require_active_sources:
+        require_builtin_review_intelligence(cfg, config_path=path)
     return cfg, _review_intelligence_meta_dict(cfg, path=path, loaded=bool(raw))
 
 
 def build_review_intelligence_guidance(cfg: ReviewIntelligenceConfig) -> str:
-    lines = ["## Review-Intelligence Guidance"]
-    if cfg.tool_prompt_fragment:
-        lines.append(cfg.tool_prompt_fragment)
+    lines = [
+        "## Review-Intelligence Guidance",
+        "- Start with the staged PR context when it is already available.",
+        "- Use local `git` as the authoritative source for code changes.",
+        "- Use additional review-intelligence sources only when they materially improve understanding of the code under review.",
+    ]
+    active_sources = _review_intelligence_sources(cfg)
+    if active_sources:
         lines.append("")
-    lines.extend(
-        [
-            "Code under review first policy:",
-            "- Use any source or tool that materially improves understanding of the code under review.",
-            "- Favor depth, relevance, and evidence over source restrictions.",
-            "- Avoid spending time on context that does not improve understanding of the code under review or the change under review.",
-        ]
-    )
+        lines.append("Configured sources:")
+        lines.extend(_review_intelligence_source_guidance(source) for source in active_sources)
+    if cfg.notes:
+        lines.append("")
+        lines.append("Additional notes:")
+        lines.extend(f"- {note}" for note in cfg.notes)
     return "\n".join(lines).strip() + "\n"
 
 
 def require_builtin_review_intelligence(
     cfg: ReviewIntelligenceConfig, *, config_path: Path | None = None
 ) -> None:
-    if cfg.tool_prompt_fragment:
+    if _review_intelligence_sources(cfg):
         return
     raise _resolve_review_intelligence_config_error(
         path=(config_path or default_reviewflow_config_path())
     )
+
+
 def build_codex_exec_cmd(
     *,
     repo_dir: Path,
@@ -5547,8 +5673,7 @@ if __name__ == "__main__":
 
 
 def _review_intelligence_requires_jira(cfg: ReviewIntelligenceConfig) -> bool:
-    text = str(getattr(cfg, "tool_prompt_fragment", "") or "").lower()
-    return ("jira" in text) or ("rf-jira" in text)
+    return _review_intelligence_source_mode(cfg, "jira") == "required"
 
 
 def _chunkhound_helper_path(runtime_policy: dict[str, Any] | None) -> str:
@@ -5713,7 +5838,7 @@ def _run_review_intelligence_preflight(
     staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
     rf_jira_raw = str((staged_paths or {}).get("rf_jira") or "").strip()
     jira_cfg = str(env.get("JIRA_CONFIG_FILE") or "").strip()
-    jira_required = bool(jira_cfg or _review_intelligence_requires_jira(review_intelligence_cfg))
+    jira_required = _review_intelligence_requires_jira(review_intelligence_cfg)
     if not jira_required:
         return
     if not jira_cfg:
@@ -6003,7 +6128,7 @@ def _pr_flow_impl(
     if not bool(args.no_review):
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
             config_path=effective_config_path,
-            require_tool_prompt_fragment=False,
+            require_active_sources=False,
         )
         progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
         multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
@@ -6200,7 +6325,7 @@ def _pr_flow_impl(
         else:
             review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
                 config_path=effective_config_path,
-                require_tool_prompt_fragment=False,
+                require_active_sources=False,
             )
             progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
             multipass_defaults, multipass_defaults_meta = load_reviewflow_multipass_defaults(
@@ -7145,7 +7270,7 @@ def _resume_flow_impl(
 
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
             config_path=effective_config_path,
-            require_tool_prompt_fragment=False,
+            require_active_sources=False,
         )
         require_builtin_review_intelligence(
             review_intelligence_cfg, config_path=effective_config_path
@@ -7796,7 +7921,7 @@ def _followup_flow_impl(
 
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
             config_path=effective_config_path,
-            require_tool_prompt_fragment=False,
+            require_active_sources=False,
         )
         require_builtin_review_intelligence(
             review_intelligence_cfg, config_path=effective_config_path
@@ -10992,6 +11117,7 @@ from cure_runtime import (
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
     DoctorCheck,
     ReviewIntelligenceConfig,
+    ReviewIntelligenceSource,
     ReviewflowChunkHoundConfig,
     ReviewflowRuntime,
     _default_jira_config_path,

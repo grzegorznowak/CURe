@@ -72,6 +72,39 @@ def _sectioned_review_markdown(*, business: str, technical: str) -> str:
     )
 
 
+def _review_intelligence_cfg(
+    *,
+    notes: tuple[str, ...] = (),
+    github_mode: str | None = "auto",
+    jira_mode: str | None = "when-referenced",
+    extra_sources: tuple[tuple[str, str], ...] = (),
+) -> rf.ReviewIntelligenceConfig:
+    sources: list[rf.ReviewIntelligenceSource] = []
+    if github_mode is not None:
+        sources.append(rf.ReviewIntelligenceSource(name="github", mode=github_mode))
+    if jira_mode is not None:
+        sources.append(rf.ReviewIntelligenceSource(name="jira", mode=jira_mode))
+    for name, mode in extra_sources:
+        sources.append(rf.ReviewIntelligenceSource(name=name, mode=mode))
+    return rf.ReviewIntelligenceConfig(notes=tuple(notes), sources=tuple(sources))
+
+
+def _review_intelligence_meta(cfg: rf.ReviewIntelligenceConfig) -> dict[str, object]:
+    return {
+        "review_intelligence": {
+            "notes": list(cfg.notes),
+            "sources": [
+                {
+                    "name": source.name,
+                    "mode": source.mode,
+                    "notes": list(source.notes),
+                }
+                for source in cfg.sources
+            ],
+        }
+    }
+
+
 class RenderPromptTests(unittest.TestCase):
     def test_render_prompt_replaces_all_placeholders(self) -> None:
         template = "\n".join(
@@ -185,12 +218,16 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[review_intelligence]",
-                        'tool_prompt_fragment = """',
-                        "Preferred review-intelligence tools:",
-                        "- Use GitHub MCP for PR context when available.",
-                        "- Otherwise use gh CLI / gh api.",
-                        "- Use any additional tools or sources that materially improve understanding of the code under review.",
-                        '"""',
+                        'notes = ["Start with staged PR context first."]',
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "github"',
+                        'mode = "auto"',
+                        'notes = ["Prefer staged PR context first, then use gh / gh api when needed."]',
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "jira"',
+                        'mode = "when-referenced"',
                         "",
                     ]
                 ),
@@ -198,22 +235,41 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
             )
             review_intelligence, meta = rf.load_review_intelligence_config(config_path=cfg)
             self.assertTrue(meta.get("loaded"))
-            self.assertIn("Use GitHub MCP", review_intelligence.tool_prompt_fragment)
-            self.assertEqual(review_intelligence.policy_mode, "cure_first_unrestricted")
+            self.assertEqual(review_intelligence.notes, ("Start with staged PR context first.",))
+            self.assertEqual(len(review_intelligence.sources), 2)
+            self.assertEqual(review_intelligence.sources[0].name, "github")
+            self.assertEqual(review_intelligence.sources[0].mode, "auto")
+            self.assertEqual(review_intelligence.sources[1].name, "jira")
+            self.assertEqual(review_intelligence.sources[1].mode, "when-referenced")
             persisted = meta["review_intelligence"]
-            self.assertEqual(persisted["policy_mode"], "cure_first_unrestricted")
+            self.assertEqual(persisted["notes"], ["Start with staged PR context first."])
+            self.assertEqual(
+                persisted["sources"],
+                [
+                    {
+                        "name": "github",
+                        "mode": "auto",
+                        "notes": ["Prefer staged PR context first, then use gh / gh api when needed."],
+                    },
+                    {
+                        "name": "jira",
+                        "mode": "when-referenced",
+                        "notes": [],
+                    },
+                ],
+            )
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_review_intelligence_config_rejects_legacy_url_policy_fields(self) -> None:
+    def test_load_review_intelligence_config_rejects_legacy_free_text_fields(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_review_intelligence_legacy.toml"
         try:
             cfg.write_text(
                 "\n".join(
                     [
                         "[review_intelligence]",
-                        'tool_prompt_fragment = "Use GitHub MCP first."',
-                        'allow_hosts = ["github.com"]',
+                        'tool_prompt_fragment = "Use gh."',
+                        'policy_mode = "cure_first_unrestricted"',
                         "",
                     ]
                 ),
@@ -221,7 +277,31 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
             )
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 rf.load_review_intelligence_config(config_path=cfg)
-            self.assertIn("Legacy review-intelligence URL policy fields are no longer supported", str(ctx.exception))
+            self.assertIn("Legacy review-intelligence config keys are no longer supported", str(ctx.exception))
+            self.assertIn("tool_prompt_fragment", str(ctx.exception))
+            self.assertIn("policy_mode", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_review_intelligence_config_rejects_invalid_source_mode(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_review_intelligence_invalid_mode.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[review_intelligence]",
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "github"',
+                        'mode = "sometimes"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_review_intelligence_config(config_path=cfg)
+            self.assertIn("Invalid review-intelligence source mode", str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -232,7 +312,10 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[review_intelligence]",
-                        'tool_prompt_fragment = "Use GitHub MCP first."',
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "github"',
+                        'mode = "auto"',
                         "",
                         "[crawl]",
                         'allow_hosts = ["github.com"]',
@@ -247,7 +330,7 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_review_intelligence_config_requires_tool_prompt_fragment_for_builtin_prompts(self) -> None:
+    def test_load_review_intelligence_config_requires_active_source_for_builtin_prompts(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_review_intelligence_missing.toml"
         try:
             cfg.write_text(
@@ -255,42 +338,93 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
                     [
                         "[review_intelligence]",
                         "",
+                        "[[review_intelligence.sources]]",
+                        'name = "github"',
+                        'mode = "off"',
+                        "",
                     ]
                 ),
                 encoding="utf-8",
             )
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 rf.load_review_intelligence_config(
-                    config_path=cfg, require_tool_prompt_fragment=True
+                    config_path=cfg, require_active_sources=True
                 )
-            self.assertIn("[review_intelligence].tool_prompt_fragment", str(ctx.exception))
-            self.assertIn("Use GitHub MCP for PR context when available.", str(ctx.exception))
+            self.assertIn("[[review_intelligence.sources]]", str(ctx.exception))
+            self.assertIn('mode = "auto"', str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_build_review_intelligence_guidance_uses_cure_first_policy(self) -> None:
-        cfg = rf.ReviewIntelligenceConfig(
-            tool_prompt_fragment="Use GitHub MCP first.",
-            policy_mode="cure_first_unrestricted",
+    def test_load_review_intelligence_config_rejects_unknown_required_source(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_review_intelligence_unknown_required.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[review_intelligence]",
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "confluence"',
+                        'mode = "required"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_review_intelligence_config(config_path=cfg)
+            self.assertIn("Unknown required review-intelligence source", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_build_review_intelligence_guidance_uses_structured_source_registry(self) -> None:
+        cfg = _review_intelligence_cfg(
+            notes=("Start with staged PR context first.",),
+            jira_mode="required",
         )
         guidance = rf.build_review_intelligence_guidance(cfg)
-        self.assertIn("Use GitHub MCP first.", guidance)
-        self.assertIn("Code under review first policy", guidance)
-        self.assertIn("materially improves understanding of the code under review", guidance)
-        self.assertNotIn("codebase-under-review (CURe)", guidance)
-        self.assertNotIn("rf-fetch-url", guidance)
+        self.assertIn("Start with the staged PR context", guidance)
+        self.assertIn("Use local `git` as the authoritative source for code changes.", guidance)
+        self.assertIn("`github` (`auto`)", guidance)
+        self.assertIn("`jira` (`required`)", guidance)
+        self.assertIn("Additional notes:", guidance)
+        self.assertIn("materially improve understanding of the code under review", guidance)
+        self.assertNotIn("GitHub MCP", guidance)
 
     def test_review_intelligence_prompt_vars_include_guidance(self) -> None:
-        cfg = rf.ReviewIntelligenceConfig(
-            tool_prompt_fragment="Use GitHub MCP first.",
-            policy_mode="cure_first_unrestricted",
-        )
+        cfg = _review_intelligence_cfg()
 
         prompt_vars = rf.review_intelligence_prompt_vars(cfg)
 
         self.assertIn("REVIEW_INTELLIGENCE_GUIDANCE", prompt_vars)
-        self.assertIn("Use GitHub MCP first.", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
-        self.assertIn("Code under review first policy", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+        self.assertIn("Configured sources:", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+        self.assertIn("`github` (`auto`)", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+        self.assertIn("Use local `git` as the authoritative source", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+
+    def test_default_review_intelligence_example_renders_compact_guidance(self) -> None:
+        cfg_path = ROOT / ".tmp_test_review_intelligence_default_example.toml"
+        try:
+            cfg_path.write_text(rf.REVIEW_INTELLIGENCE_CONFIG_EXAMPLE, encoding="utf-8")
+            cfg, _ = rf.load_review_intelligence_config(
+                config_path=cfg_path,
+                require_active_sources=True,
+            )
+            guidance = rf.build_review_intelligence_guidance(cfg)
+            self.assertEqual(cfg.notes, ())
+            self.assertEqual(
+                [(source.name, source.mode, source.notes) for source in cfg.sources],
+                [
+                    ("github", "auto", ()),
+                    ("jira", "when-referenced", ()),
+                ],
+            )
+            self.assertNotIn("Additional notes:", guidance)
+            self.assertEqual(guidance.count("Start with the staged PR context when it is already available."), 1)
+            self.assertEqual(guidance.count("Prefer staged PR context first"), 1)
+            self.assertIn("`github` (`auto`)", guidance)
+            self.assertIn("`jira` (`when-referenced`)", guidance)
+        finally:
+            cfg_path.unlink(missing_ok=True)
 
 
 class ChunkHoundConfigTests(unittest.TestCase):
@@ -3949,11 +4083,8 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                     rf,
                     "load_review_intelligence_config",
                     return_value=(
-                        rf.ReviewIntelligenceConfig(
-                            tool_prompt_fragment="Use GitHub MCP first.",
-                            policy_mode="cure_first_unrestricted",
-                        ),
-                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        _review_intelligence_cfg(),
+                        _review_intelligence_meta(_review_intelligence_cfg()),
                     ),
                 ),
                 mock.patch.object(rf, "require_builtin_review_intelligence"),
@@ -5388,7 +5519,7 @@ class WorkflowContractTests(unittest.TestCase):
             flow_mock.assert_called_once_with(args, **expected_kwargs)
 
     def test_review_intelligence_preflight_skips_when_jira_is_not_in_play(self) -> None:
-        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use GitHub only.")
+        cfg = _review_intelligence_cfg(jira_mode="when-referenced")
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp) / "repo"
             repo_dir.mkdir()
@@ -5400,7 +5531,7 @@ class WorkflowContractTests(unittest.TestCase):
             ):
                 rf._run_review_intelligence_preflight(
                     repo_dir=repo_dir,
-                    env={},
+                    env={"JIRA_CONFIG_FILE": str(repo_dir / "jira.yml")},
                     runtime_policy={"staged_paths": {"rf_jira": str(helper)}},
                     review_intelligence_cfg=cfg,
                     stream=False,
@@ -5408,7 +5539,7 @@ class WorkflowContractTests(unittest.TestCase):
         run_cmd.assert_not_called()
 
     def test_review_intelligence_preflight_fails_fast_when_jira_is_required_without_config(self) -> None:
-        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use Jira ticket context first.")
+        cfg = _review_intelligence_cfg(jira_mode="required")
         with self.assertRaises(rf.ReviewflowError) as ctx:
             rf._run_review_intelligence_preflight(
                 repo_dir=Path("/tmp/repo"),
@@ -5420,7 +5551,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("JIRA_CONFIG_FILE", str(ctx.exception))
 
     def test_review_intelligence_preflight_runs_rf_jira_me_before_review(self) -> None:
-        cfg = rf.ReviewIntelligenceConfig(tool_prompt_fragment="Use Jira when available.")
+        cfg = _review_intelligence_cfg(jira_mode="required")
         progress = mock.Mock()
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp) / "repo"
@@ -7110,6 +7241,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("XDG_CACHE_HOME", readme)
         self.assertIn("~/.config/cure/cure.toml", readme)
         self.assertIn("~/.config/cure/chunkhound-base.json", readme)
+        self.assertIn("[[review_intelligence.sources]]", readme)
+        self.assertIn('name = "github"', readme)
+        self.assertIn('mode = "when-referenced"', readme)
+        self.assertNotIn("tool_prompt_fragment", readme)
         self.assertIn("VOYAGE_API_KEY", readme)
         self.assertIn("OPENAI_API_KEY", readme)
         self.assertIn("the project checkout stays untouched", readme)
@@ -7149,6 +7284,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure install", skill)
         self.assertIn("`cure install` provisions ChunkHound only", skill)
         self.assertIn("Run `cure init` before `cure install` or `cure doctor`.", skill)
+        self.assertIn("[[review_intelligence.sources]]", skill)
+        self.assertIn('name = "github"', skill)
+        self.assertIn('mode = "when-referenced"', skill)
+        self.assertNotIn("tool_prompt_fragment", skill)
         self.assertIn("If `VOYAGE_API_KEY` exists, `cure init` writes:", skill)
         self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:", skill)
         self.assertIn("If a required embedding secret is still missing", skill)
@@ -7309,6 +7448,8 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn(str(runtime.paths.cache_root), config_text)
             self.assertIn(str(base_path), config_text)
             self.assertIn("[review_intelligence]", config_text)
+            self.assertIn("[[review_intelligence.sources]]", config_text)
+            self.assertNotIn("tool_prompt_fragment", config_text)
             base_payload = json.loads(base_path.read_text(encoding="utf-8"))
             self.assertEqual(base_payload["embedding"]["provider"], "voyage")
             self.assertEqual(base_payload["embedding"]["model"], "voyage-code-3")
@@ -10831,11 +10972,8 @@ class RefactorRegressionTests(unittest.TestCase):
                         rf,
                         "load_review_intelligence_config",
                         return_value=(
-                            rf.ReviewIntelligenceConfig(
-                                tool_prompt_fragment="Use GitHub MCP first.",
-                                policy_mode="cure_first_unrestricted",
-                            ),
-                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
                         ),
                     )
                 )
@@ -10894,8 +11032,10 @@ class RefactorRegressionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "stop after prompt render"):
                     rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
 
-            self.assertIn("Use GitHub MCP first.", captured["prompt"])
-            self.assertIn("Code under review first policy", captured["prompt"])
+            self.assertIn("Configured sources:", captured["prompt"])
+            self.assertIn("`github` (`auto`)", captured["prompt"])
+            self.assertIn("Use local `git` as the authoritative source for code changes.", captured["prompt"])
+            self.assertNotIn("GitHub MCP", captured["prompt"])
             self.assertIn("Context: ", captured["prompt"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -11129,11 +11269,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     rf,
                     "load_review_intelligence_config",
                     return_value=(
-                        rf.ReviewIntelligenceConfig(
-                            tool_prompt_fragment="Use GitHub MCP first.",
-                            policy_mode="cure_first_unrestricted",
-                        ),
-                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        _review_intelligence_cfg(),
+                        _review_intelligence_meta(_review_intelligence_cfg()),
                     ),
                 )
             )
@@ -11392,11 +11529,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                         rf,
                         "load_review_intelligence_config",
                         return_value=(
-                            rf.ReviewIntelligenceConfig(
-                                tool_prompt_fragment="Use GitHub MCP first.",
-                                policy_mode="cure_first_unrestricted",
-                            ),
-                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
                         ),
                     )
                 )
@@ -12128,11 +12262,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     rf,
                     "load_review_intelligence_config",
                     return_value=(
-                        rf.ReviewIntelligenceConfig(
-                            tool_prompt_fragment="Use GitHub MCP first.",
-                            policy_mode="cure_first_unrestricted",
-                        ),
-                        {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                        _review_intelligence_cfg(),
+                        _review_intelligence_meta(_review_intelligence_cfg()),
                     ),
                 )
             )
@@ -12625,11 +12756,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "load_review_intelligence_config",
                         return_value=(
-                            rf.ReviewIntelligenceConfig(
-                                tool_prompt_fragment="Use GitHub MCP first.",
-                                policy_mode="cure_first_unrestricted",
-                            ),
-                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
                         ),
                     )
                 )
@@ -12787,11 +12915,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "load_review_intelligence_config",
                         return_value=(
-                            rf.ReviewIntelligenceConfig(
-                                tool_prompt_fragment="Use GitHub MCP first.",
-                                policy_mode="cure_first_unrestricted",
-                            ),
-                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
                         ),
                     )
                 )
@@ -13043,11 +13168,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "load_review_intelligence_config",
                         return_value=(
-                            rf.ReviewIntelligenceConfig(
-                                tool_prompt_fragment="Use GitHub MCP first.",
-                                policy_mode="cure_first_unrestricted",
-                            ),
-                            {"review_intelligence": {"tool_prompt_fragment": "Use GitHub MCP first."}},
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
                         ),
                     )
                 )
