@@ -6982,9 +6982,11 @@ class InstallAndDoctorTests(unittest.TestCase):
     def test_readme_documents_uv_tool_install_flow(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        jira_reference_url = "https://github.com/grzegorznowak/CURe/blob/main/JIRA.md"
         self.assertIn("use <CURE_REPO_URL> to review <PR_URL>", readme)
         self.assertIn("use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220", readme)
         self.assertIn("start with [SKILL.md](SKILL.md)", readme)
+        self.assertIn(jira_reference_url, readme)
         self.assertIn("uv tool install cureview", readme)
         self.assertIn("uvx --from cureview cure init", readme)
         self.assertIn("Secondary Standalone Install", readme)
@@ -7027,6 +7029,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Canonical Agent Prompt", skill)
         self.assertIn("Use CURe from <CURE_REPO_URL> to review <PR_URL>.", skill)
         self.assertIn("If the operator asked to use CURe, do not perform a manual review outside CURe.", skill)
+        self.assertIn("[JIRA.md](JIRA.md)", skill)
         self.assertIn("curl -LsSf https://astral.sh/uv/install.sh | sh", skill)
         self.assertIn("https://docs.astral.sh/uv/getting-started/installation/", skill)
         self.assertIn("uv tool install cureview", skill)
@@ -7127,6 +7130,48 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn(".chunkhound.json", text)
             self.assertIn("ask the operator whether it should be reused", text)
             self.assertIn("Codex and Claude executor paths need internet / network access", text)
+
+    def test_jira_docs_extracted_from_readme(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        jira = (ROOT / "JIRA.md").read_text(encoding="utf-8")
+        jira_reference_url = "https://github.com/grzegorznowak/CURe/blob/main/JIRA.md"
+
+        self.assertIn("## Jira CLI", readme)
+        self.assertIn("Normal public GitHub PR review flows do not require Jira.", readme)
+        self.assertIn(jira_reference_url, readme)
+        self.assertNotIn("[JIRA.md](JIRA.md)", readme)
+        self.assertIn("JIRA_CONFIG_FILE", readme)
+        self.assertLess(readme.index("## Core Commands"), readme.index("## Jira CLI"))
+
+        for text in [
+            "### Jira Site Details",
+            "### Install",
+            "### Auth",
+            "### Configure `jira-cli`",
+            "### Common Queries",
+            "### Troubleshooting",
+            "read:board-scope.admin:jira-software",
+        ]:
+            self.assertNotIn(text, readme)
+
+        self.assertIn("[JIRA.md](JIRA.md)", skill)
+
+        for text in [
+            "Use this only when the workflow actually needs Jira context.",
+            "## Jira Site Details",
+            "## Install",
+            "## Auth",
+            "### Token Scopes",
+            "## Configure `jira-cli`",
+            "## Common Queries",
+            "## Security Notes",
+            "## Troubleshooting",
+            "machine api.atlassian.com",
+            "JIRA_CONFIG_FILE=/absolute/path/to/.config.yml",
+            "env -u JIRA_API_TOKEN jira serverinfo",
+        ]:
+            self.assertIn(text, jira)
 
     def test_init_flow_writes_public_bootstrap_files(self) -> None:
         root = ROOT / ".tmp_test_cure_init"
