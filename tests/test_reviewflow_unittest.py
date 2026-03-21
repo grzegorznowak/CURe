@@ -1072,6 +1072,20 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 self.assertIn("CODEX_THREAD_ID", balanced["metadata"]["env_keys"])
                 self.assertIn("--sandbox", balanced["codex_flags"])
                 self.assertIn("workspace-write", balanced["codex_flags"])
+                helper_path = Path(str(balanced["staged_paths"]["chunkhound_helper"]))
+                self.assertTrue(helper_path.is_file())
+                self.assertEqual(helper_path.parent, work / "bin")
+                self.assertEqual(balanced["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+                self.assertEqual(balanced["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
+                helper_text = helper_path.read_text(encoding="utf-8")
+                self.assertIn("chunkhound mcp", helper_text)
+                self.assertIn("code_research", helper_text)
+                self.assertFalse(
+                    any(
+                        entry.startswith("mcp_servers.chunkhound.")
+                        for entry in balanced["codex_config_overrides"]
+                    )
+                )
 
                 strict = rf.prepare_review_agent_runtime(
                     args=self._runtime_args(profile="strict"),
@@ -5813,7 +5827,7 @@ class CodexCommandTests(unittest.TestCase):
         self.assertIn("--json", cmd)
         self.assertLess(cmd.index("--json"), cmd.index("--output-last-message"))
 
-    def test_build_codex_exec_cmd_injects_chunkhound_mcp_with_startup_timeout(self) -> None:
+    def test_codex_mcp_overrides_only_disable_global_chunkhound_server(self) -> None:
         repo = ROOT
         ch_cfg = ROOT / ".tmp_test_chunkhound_env.json"
         overrides = rf.codex_mcp_overrides_for_reviewflow(
@@ -5822,16 +5836,13 @@ class CodexCommandTests(unittest.TestCase):
             chunkhound_config_path=ch_cfg,
             paths=rf.DEFAULT_PATHS,
         )
-        ch_args_entry = next(o for o in overrides if o.startswith("mcp_servers.chunkhound.args="))
-        ch_args = json.loads(ch_args_entry.split("=", 1)[1])
-        ch_env_entry = next(o for o in overrides if o.startswith("mcp_servers.chunkhound.env_vars="))
-        ch_env_vars = json.loads(ch_env_entry.split("=", 1)[1])
-        self.assertNotIn("--exclude", ch_args)
-        self.assertNotIn("--db", ch_args)
-        self.assertNotIn("--database-provider", ch_args)
-        self.assertIn("--config", ch_args)
-        self.assertIn(str(ch_cfg), ch_args)
-        self.assertIn("CHUNKHOUND_LLM_API_KEY", ch_env_vars)
+        self.assertTrue(
+            any(o.startswith("mcp_servers.chunk-hound.command=") for o in overrides)
+        )
+        self.assertTrue(
+            any(o == "mcp_servers.chunk-hound.enabled=false" for o in overrides)
+        )
+        self.assertFalse(any(o.startswith("mcp_servers.chunkhound.") for o in overrides))
         cmd = rf.build_codex_exec_cmd(
             repo_dir=repo,
             codex_flags=["-m", "gpt-5.2"],
@@ -5840,10 +5851,98 @@ class CodexCommandTests(unittest.TestCase):
             prompt="hello",
         )
         joined = " ".join(cmd)
-        self.assertIn("mcp_servers.chunkhound.startup_timeout_sec=20", joined)
         self.assertIn("mcp_servers.chunk-hound.enabled=false", joined)
         self.assertIn(str(repo), joined)
         self.assertNotIn("--no-daemon", joined)
+
+
+class ChunkHoundAccessPreflightTests(unittest.TestCase):
+    def test_chunkhound_access_preflight_records_success_metadata(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_access_preflight_success"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            helper_path = root / "work" / "bin" / "cure-chunkhound"
+            helper_path.parent.mkdir(parents=True, exist_ok=True)
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "payload = {",
+                        '    "ok": True,',
+                        '    "command": "preflight",',
+                        '    "available_tools": ["search", "code_research"],',
+                        f'    "helper_path": {json.dumps(str(helper_path))},',
+                        f'    "daemon_lock_path": {json.dumps(str((repo_dir / ".chunkhound" / "daemon.lock").resolve()))},',
+                        f'    "daemon_socket_path": {json.dumps("/tmp/chunkhound-test.sock")},',
+                        f'    "daemon_log_path": {json.dumps(str((repo_dir / ".chunkhound" / "daemon.log").resolve()))},',
+                        '    "daemon_pid": 4242,',
+                        "}",
+                        'print(json.dumps(payload, sort_keys=True))',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            helper_path.chmod(0o755)
+            runtime_policy = {
+                "metadata": {"provider": "codex", "chunkhound_access_mode": "cli_helper_daemon"},
+                "staged_paths": {"chunkhound_helper": str(helper_path)},
+            }
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            env = {"CURE_CHUNKHOUND_HELPER": str(helper_path)}
+
+            access = rf._run_chunkhound_access_preflight(
+                repo_dir=repo_dir,
+                env=env,
+                runtime_policy=runtime_policy,
+                stream=False,
+                meta=meta,
+            )
+
+            assert access is not None
+            self.assertEqual(access["mode"], "cli_helper_daemon")
+            self.assertEqual(access["helper_env_var"], "CURE_CHUNKHOUND_HELPER")
+            self.assertEqual(access["helper_path"], str(helper_path))
+            self.assertEqual(access["daemon_socket_path"], "/tmp/chunkhound-test.sock")
+            self.assertEqual(access["daemon_pid"], 4242)
+            self.assertTrue(meta["chunkhound"]["access"]["preflight_ok"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_chunkhound_access_preflight_rejects_malformed_json_and_persists_error(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_access_preflight_bad_json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            helper_path = root / "work" / "bin" / "cure-chunkhound"
+            helper_path.parent.mkdir(parents=True, exist_ok=True)
+            helper_path.write_text("#!/usr/bin/env sh\nprintf 'not-json\\n'\n", encoding="utf-8")
+            helper_path.chmod(0o755)
+            runtime_policy = {
+                "metadata": {"provider": "codex", "chunkhound_access_mode": "cli_helper_daemon"},
+                "staged_paths": {"chunkhound_helper": str(helper_path)},
+            }
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            env = {"CURE_CHUNKHOUND_HELPER": str(helper_path)}
+
+            with self.assertRaisesRegex(rf.ReviewflowError, "malformed JSON"):
+                rf._run_chunkhound_access_preflight(
+                    repo_dir=repo_dir,
+                    env=env,
+                    runtime_policy=runtime_policy,
+                    stream=False,
+                    meta=meta,
+                )
+
+            self.assertEqual(meta["chunkhound"]["access"]["helper_path"], str(helper_path))
+            self.assertIn("malformed JSON", meta["chunkhound"]["access"]["error"])
+            self.assertFalse(meta["chunkhound"]["access"]["preflight_ok"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class CodexJsonProgressTests(unittest.TestCase):
@@ -11827,6 +11926,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         multipass_enabled: bool,
         llm_side_effect: Any,
         expect_error: str | None = None,
+        helper_preflight_side_effect: Any | None = None,
     ) -> tuple[Path, list[str]]:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
@@ -11962,6 +12062,18 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     return_value=self._codex_runtime_policy(),
                 )
             )
+            if helper_preflight_side_effect is None:
+                stack.enter_context(
+                    mock.patch.object(rf, "_run_chunkhound_access_preflight", return_value=None)
+                )
+            else:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_run_chunkhound_access_preflight",
+                        side_effect=helper_preflight_side_effect,
+                    )
+                )
             stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
             stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
             if expect_error is not None:
@@ -12245,6 +12357,30 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(report["latest_evidence_sources"], [])
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["manual_chunkhound_mcp"])
             self.assertEqual(report["runs"][1]["observed_evidence_sources"], ["manual_chunkhound_mcp"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_helper_preflight_failure_aborts_before_review_generation(self) -> None:
+        root = ROOT / ".tmp_test_codex_helper_preflight_failure"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            raise AssertionError("review generation should not start when helper preflight fails")
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+            expect_error="ChunkHound helper preflight failed before review generation",
+            helper_preflight_side_effect=rf.ReviewflowError(
+                "ChunkHound helper preflight failed before review generation: helper failed."
+            ),
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, [])
+            self.assertEqual(meta["status"], "error")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

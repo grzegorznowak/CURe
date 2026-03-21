@@ -100,6 +100,8 @@ class CodexRunResult:
 
 
 _LIVE_PROGRESS_TIMELINE_MAX = 8
+_CURE_CHUNKHOUND_HELPER_ENV = "CURE_CHUNKHOUND_HELPER"
+_CURE_CHUNKHOUND_ACCESS_MODE = "cli_helper_daemon"
 
 
 def _looks_like_codex_review_artifact(text: str) -> bool:
@@ -860,20 +862,7 @@ def codex_mcp_overrides_for_reviewflow(
     overrides.append(f"mcp_servers.chunk-hound.args={json.dumps(['mcp', str(sandbox_repo_dir)])}")
     overrides.append("mcp_servers.chunk-hound.enabled=false")
     overrides.append("mcp_servers.chunk-hound.tool_timeout_sec=12000")
-    if not enable_sandbox_chunkhound:
-        return overrides
-    ch_db = chunkhound_db_path or (sandbox_repo_dir / ".chunkhound.db")
-    ch_cwd = chunkhound_cwd or sandbox_repo_dir
-    ch_cfg = chunkhound_config_path or (ch_cwd / "chunkhound.json")
-    ch_args = ["mcp", "--config", str(ch_cfg), str(sandbox_repo_dir)]
-    if chunkhound_config_path is None:
-        ch_args[3:3] = ["--database-provider", "duckdb", "--db", str(ch_db)]
-    overrides.append(f"mcp_servers.chunkhound.command={toml_string('chunkhound')}")
-    overrides.append(f"mcp_servers.chunkhound.args={json.dumps(ch_args)}")
-    overrides.append(f"mcp_servers.chunkhound.cwd={toml_string(str(ch_cwd))}")
-    overrides.append(f"mcp_servers.chunkhound.env_vars={json.dumps(['CHUNKHOUND_EMBEDDING__API_KEY', 'CHUNKHOUND_LLM_API_KEY', 'VOYAGE_API_KEY', 'OPENAI_API_KEY'])}")
-    overrides.append("mcp_servers.chunkhound.startup_timeout_sec=20")
-    overrides.append("mcp_servers.chunkhound.tool_timeout_sec=12000")
+    _ = enable_sandbox_chunkhound, chunkhound_db_path, chunkhound_cwd, chunkhound_config_path
     return overrides
 
 
@@ -906,6 +895,306 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     rf_jira = write_rf_jira(repo_dir=repo_dir)
     staged_paths["rf_jira"] = str(rf_jira)
     return env, staged_paths
+
+
+def write_chunkhound_helper(
+    *,
+    work_dir: Path,
+    repo_dir: Path,
+    chunkhound_config_path: Path | None,
+    chunkhound_db_path: Path | None,
+    chunkhound_cwd: Path | None,
+) -> Path:
+    repo_root = repo_dir.resolve(strict=False)
+    helper_cwd = (chunkhound_cwd or repo_root).resolve(strict=False)
+    helper_cfg = (chunkhound_config_path or (helper_cwd / "chunkhound.json")).resolve(strict=False)
+    helper_db = (chunkhound_db_path or (repo_root / ".chunkhound.db")).resolve(strict=False)
+    helper_path = (work_dir / "bin" / "cure-chunkhound").resolve(strict=False)
+    helper_path.parent.mkdir(parents=True, exist_ok=True)
+    script = f"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+REPO_DIR = Path({json.dumps(str(repo_root))})
+CHUNKHOUND_CWD = Path({json.dumps(str(helper_cwd))})
+CHUNKHOUND_CONFIG = Path({json.dumps(str(helper_cfg))})
+CHUNKHOUND_DB = Path({json.dumps(str(helper_db))})
+HELPER_PATH = Path(__file__).resolve()
+DAEMON_LOCK_PATH = (REPO_DIR / ".chunkhound" / "daemon.lock").resolve()
+DAEMON_LOG_PATH = (REPO_DIR / ".chunkhound" / "daemon.log").resolve()
+
+
+def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\\n")
+    sys.stdout.flush()
+    return exit_code
+
+
+def _read_lock() -> dict[str, Any]:
+    try:
+        raw = json.loads(DAEMON_LOCK_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {{}}
+    except Exception:
+        return {{}}
+
+
+def _base_cmd() -> list[str]:
+    return ["chunkhound", "mcp", "--config", str(CHUNKHOUND_CONFIG), str(REPO_DIR)]
+
+
+class JsonRpcSession:
+    def __init__(self) -> None:
+        self._next_id = 1
+        self.proc = subprocess.Popen(
+            _base_cmd(),
+            cwd=str(CHUNKHOUND_CWD),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
+            raise RuntimeError("chunkhound mcp stdio pipes are unavailable")
+
+    def close(self) -> None:
+        try:
+            if self.proc.stdin is not None:
+                self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+    def _read_message(self) -> dict[str, Any]:
+        headers: dict[str, str] = {{}}
+        while True:
+            line = self.proc.stdout.readline()
+            if line == b"":
+                stderr_text = b""
+                try:
+                    stderr_text = self.proc.stderr.read() or b""
+                except Exception:
+                    pass
+                detail = stderr_text.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "chunkhound mcp closed its stdio stream")
+            if line in {{b"\\r\\n", b"\\n"}}:
+                break
+            key, _, value = line.decode("utf-8", errors="replace").partition(":")
+            headers[key.strip().lower()] = value.strip()
+        try:
+            length = int(headers["content-length"])
+        except Exception as exc:
+            raise RuntimeError("invalid MCP content-length header") from exc
+        body = self.proc.stdout.read(length)
+        if len(body) != length:
+            raise RuntimeError("incomplete MCP message body")
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("unexpected MCP payload type")
+        return payload
+
+    def _write_message(self, payload: dict[str, Any]) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        message = f"Content-Length: {{len(raw)}}\\r\\n\\r\\n".encode("utf-8") + raw
+        self.proc.stdin.write(message)
+        self.proc.stdin.flush()
+
+    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_id = self._next_id
+        self._next_id += 1
+        payload: dict[str, Any] = {{"jsonrpc": "2.0", "id": request_id, "method": method}}
+        if params is not None:
+            payload["params"] = params
+        self._write_message(payload)
+        while True:
+            message = self._read_message()
+            if message.get("id") == request_id:
+                return message
+
+    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        payload: dict[str, Any] = {{"jsonrpc": "2.0", "method": method}}
+        if params is not None:
+            payload["params"] = params
+        self._write_message(payload)
+
+
+def _extract_result_content(response: dict[str, Any]) -> Any:
+    if "error" in response:
+        error = response.get("error")
+        raise RuntimeError(json.dumps(error, sort_keys=True))
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return result
+    if bool(result.get("isError")):
+        raise RuntimeError(json.dumps(result, sort_keys=True))
+    content = result.get("content")
+    if isinstance(content, list) and content:
+        first = content[0] if isinstance(content[0], dict) else {{}}
+        text = str(first.get("text") or "")
+        stripped = text.strip()
+        if stripped:
+            try:
+                return json.loads(stripped)
+            except Exception:
+                return stripped
+    return result
+
+
+def _tool_payload(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    if args.command == "search":
+        payload: dict[str, Any] = {{
+            "query": args.query,
+            "type": args.type,
+            "page_size": args.page_size,
+            "offset": args.offset,
+        }}
+        if args.path:
+            payload["path"] = args.path
+        return "search", payload
+    payload = {{"query": args.query}}
+    if args.path:
+        payload["path"] = args.path
+    return "code_research", payload
+
+
+def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[str, Any]:
+    init_response = session.request(
+        "initialize",
+        {{
+            "protocolVersion": "2025-03-26",
+            "capabilities": {{}},
+            "clientInfo": {{"name": "cure-chunkhound-helper", "version": "1"}},
+        }},
+    )
+    if "error" in init_response:
+        raise RuntimeError(json.dumps(init_response["error"], sort_keys=True))
+    session.notify("notifications/initialized", {{}})
+    tools_response = session.request("tools/list", {{}})
+    if "error" in tools_response:
+        raise RuntimeError(json.dumps(tools_response["error"], sort_keys=True))
+    tools_payload = tools_response.get("result") if isinstance(tools_response.get("result"), dict) else {{}}
+    tools = tools_payload.get("tools") if isinstance(tools_payload, dict) else []
+    available = sorted(
+        str(tool.get("name") or "").strip()
+        for tool in tools
+        if isinstance(tool, dict) and str(tool.get("name") or "").strip()
+    )
+    lock_payload = _read_lock()
+    return {{
+        "ok": "search" in available and "code_research" in available,
+        "command": "preflight",
+        "available_tools": available,
+        "helper_path": str(HELPER_PATH),
+        "daemon_lock_path": str(DAEMON_LOCK_PATH),
+        "daemon_socket_path": str(lock_payload.get("socket_path") or ""),
+        "daemon_log_path": str(DAEMON_LOG_PATH),
+        "daemon_pid": lock_payload.get("pid"),
+        "chunkhound_command": _base_cmd(),
+    }}
+
+
+def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
+    session = JsonRpcSession()
+    try:
+        preflight = _run_preflight(session, args)
+        if not preflight.get("ok"):
+            raise RuntimeError("required ChunkHound tools are unavailable")
+        tool_name, payload = _tool_payload(args)
+        response = session.request("tools/call", {{"name": tool_name, "arguments": payload}})
+        result = _extract_result_content(response)
+        return {{
+            "ok": True,
+            "command": args.command,
+            "tool_name": tool_name,
+            "query": args.query,
+            "path": args.path,
+            "result": result,
+            "helper_path": str(HELPER_PATH),
+            "daemon_lock_path": preflight.get("daemon_lock_path"),
+            "daemon_socket_path": preflight.get("daemon_socket_path"),
+            "daemon_log_path": preflight.get("daemon_log_path"),
+            "daemon_pid": preflight.get("daemon_pid"),
+        }}
+    finally:
+        session.close()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=str(HELPER_PATH), description="CURe-managed ChunkHound helper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("preflight")
+
+    search_parser = subparsers.add_parser("search")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--type", choices=["regex", "semantic"], default="semantic")
+    search_parser.add_argument("--path")
+    search_parser.add_argument("--page-size", type=int, default=10)
+    search_parser.add_argument("--offset", type=int, default=0)
+
+    research_parser = subparsers.add_parser("research")
+    research_parser.add_argument("query")
+    research_parser.add_argument("--path")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.command == "preflight":
+        session = JsonRpcSession()
+        try:
+            payload = _run_preflight(session, args)
+        except Exception as exc:
+            return _emit({{
+                "ok": False,
+                "command": "preflight",
+                "error": str(exc),
+                "helper_path": str(HELPER_PATH),
+                "daemon_lock_path": str(DAEMON_LOCK_PATH),
+                "daemon_log_path": str(DAEMON_LOG_PATH),
+            }}, exit_code=1)
+        finally:
+            session.close()
+        return _emit(payload, exit_code=0 if payload.get("ok") else 1)
+    try:
+        payload = _run_tool(args)
+        return _emit(payload, exit_code=0)
+    except Exception as exc:
+        return _emit({{
+            "ok": False,
+            "command": args.command,
+            "tool_name": "code_research" if args.command == "research" else "search",
+            "query": getattr(args, "query", None),
+            "path": getattr(args, "path", None),
+            "error": str(exc),
+            "helper_path": str(HELPER_PATH),
+            "daemon_lock_path": str(DAEMON_LOCK_PATH),
+            "daemon_log_path": str(DAEMON_LOG_PATH),
+        }}, exit_code=1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+    helper_path.write_text(script, encoding="utf-8")
+    helper_path.chmod(0o755)
+    return helper_path
 
 
 SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
@@ -1028,6 +1317,16 @@ def prepare_review_agent_runtime(
     command = _require_provider_command(str(resolved.get("command") or provider), provider=provider)
     runtime["command"] = command
     if provider == "codex":
+        if enable_mcp:
+            chunkhound_helper = write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=chunkhound_config_path,
+                chunkhound_db_path=chunkhound_db_path,
+                chunkhound_cwd=chunkhound_cwd,
+            )
+            env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
+            runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
         codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta, include_sandbox=False)
         if profile == "balanced":
             runtime["sandbox_mode"] = "workspace-write"
@@ -1149,6 +1448,11 @@ def prepare_review_agent_runtime(
         "approval_mode": runtime["approval_mode"],
         "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
         "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
+        "chunkhound_access_mode": (
+            _CURE_CHUNKHOUND_ACCESS_MODE
+            if provider == "codex" and bool(runtime["staged_paths"].get("chunkhound_helper"))
+            else None
+        ),
         "env_keys": sorted(env.keys()),
         "add_dirs": [str(path) for path in add_dirs],
         "staged_paths": dict(runtime["staged_paths"]),

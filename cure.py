@@ -2132,8 +2132,7 @@ def codex_mcp_overrides_for_reviewflow(
     chunkhound_config_path: Path | None = None,
     paths: ReviewflowPaths,
 ) -> list[str]:
-    """Return Codex `-c` overrides to disable global MCP servers we don't want, and to optionally
-    add a sandbox-scoped ChunkHound MCP server.
+    """Return Codex `-c` overrides to disable global MCP servers we don't want.
 
     Notes:
     - We intentionally disable any non-sandbox `chunk-hound` server from the base Codex config so
@@ -2149,31 +2148,7 @@ def codex_mcp_overrides_for_reviewflow(
     overrides.append(f"mcp_servers.chunk-hound.args={json.dumps(['mcp', str(sandbox_repo_dir)])}")
     overrides.append("mcp_servers.chunk-hound.enabled=false")
     overrides.append("mcp_servers.chunk-hound.tool_timeout_sec=12000")
-
-    if not enable_sandbox_chunkhound:
-        return overrides
-
-    ch_db = chunkhound_db_path or (sandbox_repo_dir / ".chunkhound.db")
-    ch_cwd = chunkhound_cwd or sandbox_repo_dir
-    ch_cfg = chunkhound_config_path or (ch_cwd / "chunkhound.json")
-    ch_args = [
-        "mcp",
-        "--config",
-        str(ch_cfg),
-        str(sandbox_repo_dir),
-    ]
-    if chunkhound_config_path is None:
-        # Backwards-compatible mode: pin DB/provider via CLI overrides.
-        # When using a session-local config, prefer not to hot-patch config via CLI.
-        ch_args[3:3] = ["--database-provider", "duckdb", "--db", str(ch_db)]
-    overrides.append(f"mcp_servers.chunkhound.command={toml_string('chunkhound')}")
-    overrides.append(f"mcp_servers.chunkhound.args={json.dumps(ch_args)}")
-    overrides.append(f"mcp_servers.chunkhound.cwd={toml_string(str(ch_cwd))}")
-    overrides.append(
-        f"mcp_servers.chunkhound.env_vars={json.dumps(['CHUNKHOUND_EMBEDDING__API_KEY', 'CHUNKHOUND_LLM_API_KEY', 'VOYAGE_API_KEY', 'OPENAI_API_KEY'])}"
-    )
-    overrides.append("mcp_servers.chunkhound.startup_timeout_sec=20")
-    overrides.append("mcp_servers.chunkhound.tool_timeout_sec=12000")
+    _ = enable_sandbox_chunkhound, chunkhound_db_path, chunkhound_cwd, chunkhound_config_path
     return overrides
 
 
@@ -5576,6 +5551,156 @@ def _review_intelligence_requires_jira(cfg: ReviewIntelligenceConfig) -> bool:
     return ("jira" in text) or ("rf-jira" in text)
 
 
+def _chunkhound_helper_path(runtime_policy: dict[str, Any] | None) -> str:
+    staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
+    return str((staged_paths or {}).get("chunkhound_helper") or "").strip()
+
+
+def _chunkhound_helper_refs(runtime_policy: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "rf_jira": ((runtime_policy or {}).get("staged_paths") or {}).get("rf_jira"),
+        "chunkhound": ((runtime_policy or {}).get("staged_paths") or {}).get("chunkhound_helper"),
+    }
+
+
+def _record_chunkhound_access_meta(
+    *,
+    meta: dict[str, Any],
+    env: dict[str, str],
+    runtime_policy: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    chunkhound_meta = meta.get("chunkhound")
+    if not isinstance(chunkhound_meta, dict):
+        chunkhound_meta = {}
+        meta["chunkhound"] = chunkhound_meta
+    access_meta = {
+        "provider": str((runtime_policy.get("metadata") or {}).get("provider") or ""),
+        "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
+        "helper_env_var": "CURE_CHUNKHOUND_HELPER",
+        "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
+        "daemon_lock_path": str(payload.get("daemon_lock_path") or ""),
+        "daemon_socket_path": str(payload.get("daemon_socket_path") or ""),
+        "daemon_log_path": str(payload.get("daemon_log_path") or ""),
+        "daemon_pid": payload.get("daemon_pid"),
+        "preflight_ok": bool(payload.get("ok")),
+    }
+    error = str(payload.get("error") or "").strip()
+    if error:
+        access_meta["error"] = error
+    chunkhound_meta["access"] = access_meta
+    return access_meta
+
+
+def _run_chunkhound_access_preflight(
+    *,
+    repo_dir: Path,
+    env: dict[str, str],
+    runtime_policy: dict[str, Any],
+    stream: bool,
+    meta: dict[str, Any],
+    progress: SessionProgress | None = None,
+) -> dict[str, Any] | None:
+    metadata = runtime_policy.get("metadata") if isinstance(runtime_policy, dict) else {}
+    if str((metadata or {}).get("provider") or "").strip() != "codex":
+        return None
+    helper_raw = _chunkhound_helper_path(runtime_policy)
+    if not helper_raw:
+        if str((metadata or {}).get("chunkhound_access_mode") or "").strip():
+            raise ReviewflowError(
+                "ChunkHound helper preflight failed before review generation: "
+                "CURe did not stage a ChunkHound helper for this Codex run."
+            )
+        return None
+
+    helper_path = Path(helper_raw).resolve()
+    payload: dict[str, Any] = {
+        "ok": False,
+        "helper_path": str(helper_path),
+        "daemon_lock_path": str((repo_dir / ".chunkhound" / "daemon.lock").resolve()),
+        "daemon_log_path": str((repo_dir / ".chunkhound" / "daemon.log").resolve()),
+    }
+    if not helper_path.is_file():
+        payload["error"] = f"missing helper at {helper_path}"
+        _record_chunkhound_access_meta(
+            meta=meta,
+            env=env,
+            runtime_policy=runtime_policy,
+            payload=payload,
+        )
+        raise ReviewflowError(
+            "ChunkHound helper preflight failed before review generation: "
+            f"staged helper is missing at {helper_path}."
+        )
+
+    cmd = [str(helper_path), "preflight"]
+    if progress is not None:
+        progress.record_cmd(cmd)
+    out = active_output()
+    if out is not None:
+        result = out.run_logged_cmd(
+            cmd,
+            kind="chunkhound",
+            cwd=repo_dir,
+            env=env,
+            check=False,
+            stream_requested=stream,
+        )
+    else:
+        result = run_cmd(
+            cmd,
+            cwd=repo_dir,
+            env=env,
+            check=False,
+            stream=stream,
+            stream_label="chunkhound",
+        )
+
+    stdout_text = str(result.stdout or "").strip()
+    if stdout_text:
+        try:
+            parsed = json.loads(stdout_text)
+            if isinstance(parsed, dict):
+                payload = parsed
+            else:
+                payload["error"] = "helper preflight did not return a JSON object"
+        except Exception:
+            payload["error"] = "helper preflight returned malformed JSON"
+            payload["raw_stdout"] = stdout_text
+    if int(result.exit_code) != 0 and not str(payload.get("error") or "").strip():
+        stderr_text = str(result.stderr or "").strip()
+        payload["error"] = stderr_text or f"helper preflight exited with status {result.exit_code}"
+
+    access_meta = _record_chunkhound_access_meta(
+        meta=meta,
+        env=env,
+        runtime_policy=runtime_policy,
+        payload=payload,
+    )
+    if progress is not None:
+        progress.flush()
+
+    available_tools = payload.get("available_tools") if isinstance(payload.get("available_tools"), list) else []
+    available_tool_names = {
+        str(name).strip()
+        for name in available_tools
+        if str(name).strip()
+    }
+    if (
+        int(result.exit_code) != 0
+        or not bool(payload.get("ok"))
+        or "search" not in available_tool_names
+        or "code_research" not in available_tool_names
+    ):
+        reason = str(payload.get("error") or "").strip() or "helper preflight did not prove required ChunkHound tools"
+        raise ReviewflowError(
+            "ChunkHound helper preflight failed before review generation: "
+            f"{reason}."
+        )
+
+    return access_meta
+
+
 def _run_review_intelligence_preflight(
     *,
     repo_dir: Path,
@@ -6170,7 +6295,7 @@ def _pr_flow_impl(
                 if bool(getattr(args, "no_index", False)) and (not bool(getattr(args, "no_review", False))):
                     raise ReviewflowError(
                         "--no-index is not supported with the built-in prompt profiles. "
-                        "These prompts require sandbox-scoped ChunkHound MCP; run without --no-index, "
+                        "These prompts require CURe-managed ChunkHound helper access; run without --no-index, "
                         "or use a custom --prompt/--prompt-file that does not require ChunkHound."
                     )
 
@@ -6296,8 +6421,9 @@ def _pr_flow_impl(
                         "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
                         "NETRC": env.get("NETRC"),
                         "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
+                        "CURE_CHUNKHOUND_HELPER": env.get("CURE_CHUNKHOUND_HELPER"),
                     },
-                    "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+                    "helpers": _chunkhound_helper_refs(runtime_policy),
                 }
                 codex_meta = progress.meta["codex"]
             progress.meta["agent_runtime"] = runtime_policy["metadata"]
@@ -6306,9 +6432,19 @@ def _pr_flow_impl(
                 resolution_meta=llm_resolution_meta,
                 env=env,
                 adapter_meta=adapter_meta,
-                helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+                helpers=_chunkhound_helper_refs(runtime_policy),
             )
             progress.flush()
+
+            with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
+                _run_chunkhound_access_preflight(
+                    repo_dir=repo_dir,
+                    env=env,
+                    runtime_policy=runtime_policy,
+                    stream=stream,
+                    meta=progress.meta,
+                    progress=progress,
+                )
 
             with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
                 _run_review_intelligence_preflight(
@@ -6324,11 +6460,11 @@ def _pr_flow_impl(
             if str(llm_resolved.get("provider") or "") == "codex":
                 if not args.no_index:
                     log(
-                        "Codex MCP: sandbox ChunkHound enabled (daemon; startup_timeout_sec=20)",
+                        "Codex ChunkHound helper: daemon preflight ready",
                         quiet=quiet,
                     )
                 else:
-                    log("Codex MCP: sandbox ChunkHound disabled (--no-index)", quiet=quiet)
+                    log("Codex ChunkHound helper: disabled (--no-index)", quiet=quiet)
             else:
                 log(
                     f"LLM preset: {llm_resolved.get('preset')} ({llm_resolved.get('provider')})",
@@ -6827,7 +6963,7 @@ def _resume_flow_impl(
 
     if bool(getattr(args, "no_index", False)):
         raise ReviewflowError(
-            "resume does not support --no-index. Multipass resumption requires sandbox-scoped ChunkHound MCP."
+            "resume does not support --no-index. Multipass resumption requires CURe-managed ChunkHound helper access."
         )
 
     from_phase = str(getattr(args, "from_phase", "auto") or "auto").strip().lower()
@@ -7081,8 +7217,9 @@ def _resume_flow_impl(
                     "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
                     "NETRC": env.get("NETRC"),
                     "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
+                    "CURE_CHUNKHOUND_HELPER": env.get("CURE_CHUNKHOUND_HELPER"),
                 },
-                "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+                "helpers": _chunkhound_helper_refs(runtime_policy),
             }
         progress.meta["agent_runtime"] = runtime_policy["metadata"]
         progress.meta["llm"] = build_llm_meta(
@@ -7090,9 +7227,19 @@ def _resume_flow_impl(
             resolution_meta=llm_resolution_meta,
             env=env,
             adapter_meta=adapter_meta,
-            helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+            helpers=_chunkhound_helper_refs(runtime_policy),
         )
         progress.flush()
+
+        with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
+            _run_chunkhound_access_preflight(
+                repo_dir=repo_dir,
+                env=env,
+                runtime_policy=runtime_policy,
+                stream=stream,
+                meta=progress.meta,
+                progress=progress,
+            )
 
         with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
             _run_review_intelligence_preflight(
@@ -7108,11 +7255,11 @@ def _resume_flow_impl(
         if str(llm_resolved.get("provider") or "") == "codex":
             if not no_index:
                 log(
-                    "Codex MCP: sandbox ChunkHound enabled (daemon; startup_timeout_sec=20)",
+                    "Codex ChunkHound helper: daemon preflight ready",
                     quiet=quiet,
                 )
             else:
-                log("Codex MCP: sandbox ChunkHound disabled (--no-index)", quiet=quiet)
+                log("Codex ChunkHound helper: disabled (--no-index)", quiet=quiet)
 
         templates = multipass_prompt_template_names()
 
@@ -7801,7 +7948,7 @@ def _followup_flow_impl(
                 "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
             },
-            helpers={"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+            helpers=_chunkhound_helper_refs(runtime_policy),
         )
         meta["agent_runtime"] = runtime_policy["metadata"]
         if codex_meta is not None:
@@ -7812,8 +7959,25 @@ def _followup_flow_impl(
                 ],
                 "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
                 "flags": codex_flags,
-                "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+                "env": {
+                    "GH_CONFIG_DIR": env.get("GH_CONFIG_DIR"),
+                    "JIRA_CONFIG_FILE": env.get("JIRA_CONFIG_FILE"),
+                    "NETRC": env.get("NETRC"),
+                    "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
+                    "CURE_CHUNKHOUND_HELPER": env.get("CURE_CHUNKHOUND_HELPER"),
+                },
+                "helpers": _chunkhound_helper_refs(runtime_policy),
             }
+
+        with phase("chunkhound_access_preflight", progress=None, quiet=quiet):
+            _run_chunkhound_access_preflight(
+                repo_dir=repo_dir,
+                env=env,
+                runtime_policy=runtime_policy,
+                stream=stream,
+                meta=meta,
+                progress=progress,
+            )
 
         with phase("followup_review", progress=None, quiet=quiet):
             followup_result = run_llm_exec(
@@ -7872,7 +8036,7 @@ def _followup_flow_impl(
                 "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
-            "helpers": {"rf_jira": runtime_policy["staged_paths"].get("rf_jira")},
+            "helpers": _chunkhound_helper_refs(runtime_policy),
             "agent_runtime": runtime_policy["metadata"],
             "review_intelligence": dict(review_intelligence_meta["review_intelligence"]),
         }
