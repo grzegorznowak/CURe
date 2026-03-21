@@ -165,6 +165,8 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 
 If the base JSON file is missing, `cure init` creates it with `{}` first, then layers the embedding config below when a supported key already exists in the environment.
 
+That structured `review_intelligence` registry is also the source for capability-aware prompt guidance plus the additive `review_intelligence` block in session metadata and `cure doctor --json`. Only `required` sources are preflighted; optional sources stay lazy and surface as `available`, `unavailable`, or `unknown` from facts CURe already staged.
+
 7. Auto-wire embeddings from the current environment when possible.
 
 If `VOYAGE_API_KEY` exists, `cure init` writes:

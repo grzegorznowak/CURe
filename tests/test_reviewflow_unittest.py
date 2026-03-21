@@ -385,8 +385,8 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
         guidance = rf.build_review_intelligence_guidance(cfg)
         self.assertIn("Start with the staged PR context", guidance)
         self.assertIn("Use local `git` as the authoritative source for code changes.", guidance)
-        self.assertIn("`github` (`auto`)", guidance)
-        self.assertIn("`jira` (`required`)", guidance)
+        self.assertIn("`github` (`auto`, `unknown`)", guidance)
+        self.assertIn("`jira` (`required`, `unknown`)", guidance)
         self.assertIn("Additional notes:", guidance)
         self.assertIn("materially improve understanding of the code under review", guidance)
         self.assertNotIn("GitHub MCP", guidance)
@@ -398,7 +398,7 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
 
         self.assertIn("REVIEW_INTELLIGENCE_GUIDANCE", prompt_vars)
         self.assertIn("Configured sources:", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
-        self.assertIn("`github` (`auto`)", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
+        self.assertIn("`github` (`auto`, `unknown`)", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
         self.assertIn("Use local `git` as the authoritative source", prompt_vars["REVIEW_INTELLIGENCE_GUIDANCE"])
 
     def test_default_review_intelligence_example_renders_compact_guidance(self) -> None:
@@ -421,10 +421,79 @@ class ReviewIntelligenceConfigTests(unittest.TestCase):
             self.assertNotIn("Additional notes:", guidance)
             self.assertEqual(guidance.count("Start with the staged PR context when it is already available."), 1)
             self.assertEqual(guidance.count("Prefer staged PR context first"), 1)
-            self.assertIn("`github` (`auto`)", guidance)
-            self.assertIn("`jira` (`when-referenced`)", guidance)
+            self.assertIn("`github` (`auto`, `unknown`)", guidance)
+            self.assertIn("`jira` (`when-referenced`, `unknown`)", guidance)
         finally:
             cfg_path.unlink(missing_ok=True)
+
+    def test_resolve_review_intelligence_capabilities_uses_runtime_facts(self) -> None:
+        cfg = _review_intelligence_cfg(
+            jira_mode="required",
+            extra_sources=(("confluence", "when-referenced"),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pr_context = root / "pr-context.md"
+            pr_context.write_text("context", encoding="utf-8")
+            gh_cfg = root / "gh"
+            gh_cfg.mkdir()
+            jira_cfg = root / "jira.yml"
+            jira_cfg.write_text("jira", encoding="utf-8")
+            helper = root / "rf-jira"
+            helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            helper.chmod(0o755)
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            with mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"gh", "jira"} else None,
+            ):
+                summary = rf.resolve_review_intelligence_capabilities(
+                    cfg,
+                    env={
+                        "GH_CONFIG_DIR": str(gh_cfg),
+                        "JIRA_CONFIG_FILE": str(jira_cfg),
+                    },
+                    runtime_policy={"staged_paths": {"rf_jira": str(helper)}},
+                    pr=pr,
+                    staged_pr_context_path=pr_context,
+                )
+
+        sources = {source["name"]: source for source in summary["sources"]}
+        self.assertEqual(sources["github"]["status"], "available")
+        self.assertEqual(sources["jira"]["status"], "available")
+        self.assertTrue(sources["jira"]["preflight_required"])
+        self.assertEqual(sources["confluence"]["status"], "unknown")
+        self.assertEqual(summary["status_counts"]["available"], 2)
+        self.assertEqual(summary["status_counts"]["unknown"], 1)
+
+    def test_build_review_intelligence_guidance_surfaces_capability_states(self) -> None:
+        cfg = _review_intelligence_cfg(jira_mode="required")
+        capability_summary = {
+            "required_sources": ["jira"],
+            "status_counts": {"available": 1, "unavailable": 1, "unknown": 0},
+            "sources": [
+                {
+                    "name": "github",
+                    "mode": "auto",
+                    "status": "available",
+                },
+                {
+                    "name": "jira",
+                    "mode": "required",
+                    "status": "unavailable",
+                },
+            ],
+        }
+
+        guidance = rf.build_review_intelligence_guidance(
+            cfg,
+            capability_summary=capability_summary,
+        )
+
+        self.assertIn("do not broad-probe optional sources up front", guidance)
+        self.assertIn("`github` (`auto`, `available`)", guidance)
+        self.assertIn("`jira` (`required`, `unavailable`)", guidance)
 
 
 class ChunkHoundConfigTests(unittest.TestCase):
@@ -5550,6 +5619,29 @@ class WorkflowContractTests(unittest.TestCase):
             )
         self.assertIn("JIRA_CONFIG_FILE", str(ctx.exception))
 
+    def test_review_intelligence_preflight_fails_when_required_github_capability_is_unavailable(self) -> None:
+        cfg = _review_intelligence_cfg(github_mode="required", jira_mode="off")
+        with self.assertRaises(rf.ReviewflowError) as ctx:
+            rf._run_review_intelligence_preflight(
+                repo_dir=Path("/tmp/repo"),
+                env={},
+                runtime_policy={"staged_paths": {}},
+                review_intelligence_cfg=cfg,
+                review_intelligence_capabilities={
+                    "sources": [
+                        {
+                            "name": "github",
+                            "mode": "required",
+                            "status": "unavailable",
+                            "detail": "no staged PR context",
+                            "preflight_required": True,
+                        }
+                    ]
+                },
+                stream=False,
+            )
+        self.assertIn("GitHub context is required but unavailable", str(ctx.exception))
+
     def test_review_intelligence_preflight_runs_rf_jira_me_before_review(self) -> None:
         cfg = _review_intelligence_cfg(jira_mode="required")
         progress = mock.Mock()
@@ -7247,6 +7339,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertNotIn("tool_prompt_fragment", readme)
         self.assertIn("VOYAGE_API_KEY", readme)
         self.assertIn("OPENAI_API_KEY", readme)
+        self.assertIn("`available`, `unavailable`, or `unknown`", readme)
+        self.assertIn("Only `mode = \"required\"` sources are preflighted", readme)
         self.assertIn("the project checkout stays untouched", readme)
         self.assertIn("./selftest.sh", readme)
         self.assertIn("fresh or partially configured environments", readme)
@@ -7290,6 +7384,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertNotIn("tool_prompt_fragment", skill)
         self.assertIn("If `VOYAGE_API_KEY` exists, `cure init` writes:", skill)
         self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:", skill)
+        self.assertIn("`available`, `unavailable`, or `unknown`", skill)
+        self.assertIn("Only `required` sources are preflighted", skill)
         self.assertIn("If a required embedding secret is still missing", skill)
         self.assertIn("fresh or partially configured environment with explicit readiness checks", skill)
         self.assertIn("inspect the active local setup before creating fresh config files", skill)
@@ -7647,6 +7743,95 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["sandbox_root"]["source"], "config")
             self.assertEqual(payload["agent_runtime"]["profile"], "strict")
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_json_reports_review_intelligence_capabilities(self) -> None:
+        root = ROOT / ".tmp_test_doctor_review_intelligence_json"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        jira_cfg = root / "jira.yml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            jira_cfg.write_text("jira", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[review_intelligence]",
+                        "[[review_intelligence.sources]]",
+                        'name = "github"',
+                        'mode = "auto"',
+                        "",
+                        "[[review_intelligence.sources]]",
+                        'name = "jira"',
+                        'mode = "required"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+
+            def fake_which(name: str) -> str | None:
+                return {
+                    "chunkhound": f"/usr/bin/{name}",
+                    "gh": f"/usr/bin/{name}",
+                    "jira": f"/usr/bin/{name}",
+                    "codex": f"/usr/bin/{name}",
+                    "git": f"/usr/bin/{name}",
+                }.get(name)
+
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({"title": "Public PR"}).encode("utf-8")
+
+            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
+                    return mock.Mock(stdout="", stderr="", exit_code=0)
+                raise AssertionError(f"unexpected runtime command: {cmd}")
+
+            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=False), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=fake_which,
+            ), mock.patch.object(
+                cure_runtime,
+                "run_cmd",
+                side_effect=fake_runtime_run_cmd,
+            ), mock.patch.object(
+                rf.urllib.request,
+                "urlopen",
+                return_value=response,
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(
+                    argparse.Namespace(
+                        json_output=True,
+                        pr_url="https://github.com/acme/repo/pull/1",
+                    ),
+                    runtime=runtime,
+                )
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            review_intelligence = payload["review_intelligence"]
+            capability_sources = {
+                source["name"]: source for source in review_intelligence["capabilities"]["sources"]
+            }
+            self.assertEqual(capability_sources["github"]["status"], "available")
+            self.assertEqual(capability_sources["jira"]["status"], "available")
+            self.assertEqual(review_intelligence["capabilities"]["required_sources"], ["jira"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -10919,6 +11104,14 @@ class RefactorRegressionTests(unittest.TestCase):
                 captured["prompt"] = prompt
                 raise RuntimeError("stop after prompt render")
 
+            staged_gh = root / "staged-gh"
+            staged_gh.mkdir(parents=True, exist_ok=True)
+            staged_jira_cfg = root / "jira.yml"
+            staged_jira_cfg.write_text("jira", encoding="utf-8")
+            staged_jira_helper = root / "rf-jira"
+            staged_jira_helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            staged_jira_helper.chmod(0o755)
+
             with contextlib.ExitStack() as stack:
                 stack.enter_context(
                     mock.patch.object(
@@ -10997,6 +11190,13 @@ class RefactorRegressionTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
                 stack.enter_context(
                     mock.patch.object(
+                        shutil,
+                        "which",
+                        side_effect=lambda name: f"/usr/bin/{name}" if name in {"gh", "jira"} else None,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
                         rf,
                         "resolve_llm_config_from_args",
                         return_value=(
@@ -11010,9 +11210,12 @@ class RefactorRegressionTests(unittest.TestCase):
                         rf,
                         "prepare_review_agent_runtime",
                         return_value={
-                            "env": {},
+                            "env": {
+                                "GH_CONFIG_DIR": str(staged_gh),
+                                "JIRA_CONFIG_FILE": str(staged_jira_cfg),
+                            },
                             "metadata": {},
-                            "staged_paths": {},
+                            "staged_paths": {"rf_jira": str(staged_jira_helper)},
                             "add_dirs": [],
                         },
                     )
@@ -11033,10 +11236,18 @@ class RefactorRegressionTests(unittest.TestCase):
                     rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
 
             self.assertIn("Configured sources:", captured["prompt"])
-            self.assertIn("`github` (`auto`)", captured["prompt"])
+            self.assertIn("`github` (`auto`, `available`)", captured["prompt"])
             self.assertIn("Use local `git` as the authoritative source for code changes.", captured["prompt"])
             self.assertNotIn("GitHub MCP", captured["prompt"])
             self.assertIn("Context: ", captured["prompt"])
+            session_dirs = sorted(sandbox_root.iterdir())
+            self.assertEqual(len(session_dirs), 1)
+            meta = json.loads((session_dirs[0] / "meta.json").read_text(encoding="utf-8"))
+            capability_sources = {
+                source["name"]: source["capability"] for source in meta["review_intelligence"]["sources"]
+            }
+            self.assertEqual(capability_sources["github"]["status"], "available")
+            self.assertEqual(meta["review_intelligence"]["capabilities"]["status_counts"]["available"], 2)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

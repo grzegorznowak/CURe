@@ -334,6 +334,8 @@ If an embedding key is already present in the environment, `cure init` adds the 
 
 If no supported key is present, the agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review.
 
+The structured `review_intelligence` source registry now feeds prompt guidance, session metadata, and `cure doctor --json` capability summaries. Only `mode = "required"` sources are preflighted before review generation; optional sources stay lazy and surface as `available`, `unavailable`, or `unknown` based on the runtime facts CURe already has.
+
 ## Jira CLI
 
 Use this only when the workflow actually needs Jira context. Normal public GitHub PR review flows do not require Jira.

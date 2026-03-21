@@ -747,8 +747,17 @@ def validate_and_record_codex_chunkhound_tool_proof(
 
 
 
-def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, str]:
-    return {"REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(cfg)}
+def review_intelligence_prompt_vars(
+    cfg: ReviewIntelligenceConfig,
+    *,
+    capability_summary: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    return {
+        "REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(
+            cfg,
+            capability_summary=capability_summary,
+        )
+    }
 
 def render_prompt(
     template_text: str,

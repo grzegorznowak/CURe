@@ -85,6 +85,7 @@ DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
+REVIEW_INTELLIGENCE_CAPABILITY_STATES = {"available", "unavailable", "unknown"}
 
 REVIEW_INTELLIGENCE_CONFIG_EXAMPLE = """[review_intelligence]
 [[review_intelligence.sources]]
@@ -1387,28 +1388,409 @@ def _review_intelligence_source_mode(cfg: ReviewIntelligenceConfig, name: str) -
     return None
 
 
-def _review_intelligence_source_guidance(source: ReviewIntelligenceSource) -> str:
-    if source.name == "github":
-        detail = (
-            "Use GitHub context when PR metadata, discussion, or linked issues materially clarify the change. "
-            "Prefer staged PR context first, then `gh` / `gh api` if needed."
+def _review_intelligence_capability_signal(
+    *, status: str, detail: str, path: str | None = None, host: str | None = None
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"status": status, "detail": detail}
+    if path:
+        payload["path"] = path
+    if host:
+        payload["host"] = host
+    return payload
+
+
+def _review_intelligence_status_counts(sources: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {state: 0 for state in sorted(REVIEW_INTELLIGENCE_CAPABILITY_STATES)}
+    for source in sources:
+        status = str(source.get("status") or "").strip().lower()
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _runtime_capability_status(name: str) -> tuple[str, str]:
+    path = shutil.which(name)
+    if path:
+        return "available", path
+    return "unavailable", "not found on PATH"
+
+
+def _doctor_check_to_capability(check: DoctorCheck, *, missing_is_unknown: bool = False) -> tuple[str, str]:
+    if check.status == "ok":
+        return "available", check.detail
+    if missing_is_unknown:
+        return "unknown", check.detail
+    return "unavailable", check.detail
+
+
+def _review_intelligence_runtime_github_capability(
+    *,
+    source: ReviewIntelligenceSource,
+    env: dict[str, str],
+    pr: PullRequestRef | None,
+    staged_pr_context_path: Path | None,
+) -> dict[str, Any]:
+    gh_cfg = _resolve_optional_path(env.get("GH_CONFIG_DIR"))
+    gh_cli_status, gh_cli_detail = _runtime_capability_status("gh")
+    staged_pr_context_available = bool(staged_pr_context_path is not None and staged_pr_context_path.is_file())
+    gh_cfg_available = bool(gh_cfg is not None and gh_cfg.is_dir())
+    host = str(pr.host if pr is not None else "").strip() or None
+    public_supported = bool(host and _supports_public_github_fallback(host))
+    if public_supported:
+        public_status = "unknown"
+        public_detail = (
+            "public github.com fallback is target-compatible but not preflighted for this run"
         )
+    elif host:
+        public_status = "unavailable"
+        public_detail = "public GitHub fallback is not supported for this host"
+    else:
+        public_status = "unknown"
+        public_detail = "public fallback stays target-dependent until a PR target is known"
+
+    gh_auth_status = "available" if gh_cli_status == "available" and gh_cfg_available else "unknown"
+    if gh_auth_status == "available":
+        gh_auth_detail = f"staged gh config dir ready at {gh_cfg}"
+    elif gh_cli_status == "available":
+        gh_auth_detail = "gh is installed, but CURe did not stage authenticated gh config for this run"
+    else:
+        gh_auth_detail = "gh is unavailable, so authenticated gh access is unavailable"
+
+    if staged_pr_context_available:
+        status = "available"
+        detail = "staged PR context is already available; use it first for GitHub context"
+    elif gh_auth_status == "available":
+        status = "available"
+        detail = "authenticated gh access is staged for this review when extra GitHub context is needed"
+    elif public_status == "unknown":
+        status = "unknown"
+        detail = "extra GitHub context was not preflighted; use staged context first and probe only if needed"
+    else:
+        status = "unavailable"
+        detail = "no staged or preflighted GitHub context is available beyond the local checkout"
+
+    return {
+        "name": source.name,
+        "mode": source.mode,
+        "family": "github",
+        "required": (source.mode == "required"),
+        "preflight_required": (source.mode == "required"),
+        "status": status,
+        "detail": detail,
+        "signals": {
+            "staged_pr_context": _review_intelligence_capability_signal(
+                status=("available" if staged_pr_context_available else "unavailable"),
+                detail=(
+                    f"staged PR context ready at {staged_pr_context_path}"
+                    if staged_pr_context_available
+                    else "no staged PR context path is available"
+                ),
+                path=(str(staged_pr_context_path) if staged_pr_context_available else None),
+            ),
+            "gh_cli": _review_intelligence_capability_signal(
+                status=gh_cli_status,
+                detail=gh_cli_detail,
+            ),
+            "gh_auth": _review_intelligence_capability_signal(
+                status=gh_auth_status,
+                detail=gh_auth_detail,
+                path=(str(gh_cfg) if gh_cfg_available else None),
+            ),
+            "public_fallback": _review_intelligence_capability_signal(
+                status=public_status,
+                detail=public_detail,
+                host=host,
+            ),
+        },
+    }
+
+
+def _review_intelligence_runtime_jira_capability(
+    *,
+    source: ReviewIntelligenceSource,
+    env: dict[str, str],
+    runtime_policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
+    jira_cfg = _resolve_optional_path(env.get("JIRA_CONFIG_FILE"))
+    jira_cfg_available = bool(jira_cfg is not None and jira_cfg.is_file())
+    rf_jira = _resolve_optional_path((staged_paths or {}).get("rf_jira"))
+    rf_jira_available = bool(rf_jira is not None and rf_jira.is_file())
+    jira_cli_status, jira_cli_detail = _runtime_capability_status("jira")
+
+    missing: list[str] = []
+    if not jira_cfg_available:
+        missing.append("staged Jira config")
+    if not rf_jira_available:
+        missing.append("rf-jira helper")
+    if jira_cli_status != "available":
+        missing.append("jira CLI")
+
+    if not missing:
+        status = "available"
+        detail = "staged Jira config and helper are ready if ticket context becomes relevant"
+    else:
+        status = "unavailable"
+        detail = "missing " + ", ".join(missing)
+
+    return {
+        "name": source.name,
+        "mode": source.mode,
+        "family": "jira",
+        "required": (source.mode == "required"),
+        "preflight_required": (source.mode == "required"),
+        "status": status,
+        "detail": detail,
+        "signals": {
+            "config": _review_intelligence_capability_signal(
+                status=("available" if jira_cfg_available else "unavailable"),
+                detail=(
+                    f"staged Jira config ready at {jira_cfg}"
+                    if jira_cfg_available
+                    else "CURe did not stage a Jira config for this run"
+                ),
+                path=(str(jira_cfg) if jira_cfg_available else None),
+            ),
+            "helper": _review_intelligence_capability_signal(
+                status=("available" if rf_jira_available else "unavailable"),
+                detail=(
+                    f"rf-jira helper ready at {rf_jira}"
+                    if rf_jira_available
+                    else "rf-jira helper was not staged for this run"
+                ),
+                path=(str(rf_jira) if rf_jira_available else None),
+            ),
+            "jira_cli": _review_intelligence_capability_signal(
+                status=jira_cli_status,
+                detail=jira_cli_detail,
+            ),
+        },
+    }
+
+
+def _review_intelligence_doctor_github_capability(
+    *,
+    source: ReviewIntelligenceSource,
+    target: DoctorTargetContext | None,
+) -> dict[str, Any]:
+    gh = _doctor_executable_check("gh")
+    gh_auth = _doctor_gh_auth_check(host=(target.pr.host if target is not None else "github.com"))
+    gh_status, gh_detail = _doctor_check_to_capability(gh, missing_is_unknown=(target is None))
+    gh_auth_status, gh_auth_detail = _doctor_check_to_capability(gh_auth, missing_is_unknown=(target is None))
+    if target is not None:
+        if target.public_fallback_supported and target.public_pr_metadata_reachable:
+            public_status = "available"
+            public_detail = target.public_pr_metadata_detail
+        elif target.public_fallback_supported:
+            public_status = "unavailable"
+            public_detail = target.public_pr_metadata_detail
+        else:
+            public_status = "unavailable"
+            public_detail = "public GitHub fallback is not supported for this host"
+    else:
+        public_status = "unknown"
+        public_detail = "public fallback stays target-dependent until `doctor --pr-url` is provided"
+
+    if gh_auth_status == "available" or public_status == "available":
+        status = "available"
+        detail = (
+            "authenticated gh access is available"
+            if gh_auth_status == "available"
+            else "public GitHub fallback is reachable for this target"
+        )
+    elif target is None:
+        status = "unknown"
+        detail = "target-specific GitHub capability stays lazy until a PR target is known"
+    else:
+        status = "unavailable"
+        detail = "no authenticated gh access or reachable public GitHub fallback is available"
+
+    return {
+        "name": source.name,
+        "mode": source.mode,
+        "family": "github",
+        "required": (source.mode == "required"),
+        "preflight_required": (source.mode == "required"),
+        "status": status,
+        "detail": detail,
+        "signals": {
+            "staged_pr_context": _review_intelligence_capability_signal(
+                status=("available" if target is not None else "unknown"),
+                detail=(
+                    "doctor target supplied; normal review flows will stage PR context first"
+                    if target is not None
+                    else "doctor has not resolved a PR target, so staged PR context is unknown"
+                ),
+            ),
+            "gh_cli": _review_intelligence_capability_signal(
+                status=gh_status,
+                detail=gh_detail,
+            ),
+            "gh_auth": _review_intelligence_capability_signal(
+                status=gh_auth_status,
+                detail=gh_auth_detail,
+                host=(target.pr.host if target is not None else "github.com"),
+            ),
+            "public_fallback": _review_intelligence_capability_signal(
+                status=public_status,
+                detail=public_detail,
+                host=(target.pr.host if target is not None else None),
+            ),
+        },
+    }
+
+
+def _review_intelligence_doctor_jira_capability(source: ReviewIntelligenceSource) -> dict[str, Any]:
+    jira = _doctor_executable_check("jira")
+    jira_cfg = _default_jira_config_path()
+    jira_cli_status, jira_cli_detail = _doctor_check_to_capability(jira)
+    jira_cfg_available = jira_cfg.is_file()
+    if jira_cfg_available and jira_cli_status == "available":
+        status = "available"
+        detail = "jira CLI and config are present for Jira-backed review context"
+    else:
+        status = "unavailable"
+        detail = "jira CLI or config is missing"
+    return {
+        "name": source.name,
+        "mode": source.mode,
+        "family": "jira",
+        "required": (source.mode == "required"),
+        "preflight_required": (source.mode == "required"),
+        "status": status,
+        "detail": detail,
+        "signals": {
+            "config": _review_intelligence_capability_signal(
+                status=("available" if jira_cfg_available else "unavailable"),
+                detail=(str(jira_cfg) if jira_cfg_available else f"missing: {jira_cfg}"),
+                path=str(jira_cfg),
+            ),
+            "jira_cli": _review_intelligence_capability_signal(
+                status=jira_cli_status,
+                detail=jira_cli_detail,
+            ),
+        },
+    }
+
+
+def resolve_review_intelligence_capabilities(
+    cfg: ReviewIntelligenceConfig,
+    *,
+    env: dict[str, str] | None = None,
+    runtime_policy: dict[str, Any] | None = None,
+    pr: PullRequestRef | None = None,
+    staged_pr_context_path: Path | None = None,
+    doctor_target: DoctorTargetContext | None = None,
+) -> dict[str, Any]:
+    resolved_sources: list[dict[str, Any]] = []
+    env_dict = env if isinstance(env, dict) else {}
+    for source in _review_intelligence_sources(cfg):
+        if source.name == "github":
+            if doctor_target is not None or (env is None and runtime_policy is None and pr is None):
+                capability = _review_intelligence_doctor_github_capability(source=source, target=doctor_target)
+            else:
+                capability = _review_intelligence_runtime_github_capability(
+                    source=source,
+                    env=env_dict,
+                    pr=pr,
+                    staged_pr_context_path=staged_pr_context_path,
+                )
+        elif source.name == "jira":
+            if doctor_target is not None or (env is None and runtime_policy is None and pr is None):
+                capability = _review_intelligence_doctor_jira_capability(source)
+            else:
+                capability = _review_intelligence_runtime_jira_capability(
+                    source=source,
+                    env=env_dict,
+                    runtime_policy=runtime_policy,
+                )
+        else:
+            capability = {
+                "name": source.name,
+                "mode": source.mode,
+                "family": "custom",
+                "required": (source.mode == "required"),
+                "preflight_required": False,
+                "status": "unknown",
+                "detail": "CURe has no built-in capability resolver for this source family in v1",
+                "signals": {},
+            }
+        resolved_sources.append(capability)
+
+    return {
+        "required_sources": [
+            source["name"]
+            for source in resolved_sources
+            if bool(source.get("required"))
+        ],
+        "status_counts": _review_intelligence_status_counts(resolved_sources),
+        "sources": resolved_sources,
+    }
+
+
+def attach_review_intelligence_capabilities(
+    review_intelligence_meta: dict[str, Any],
+    capability_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    base = dict(review_intelligence_meta)
+    if not capability_summary:
+        return base
+    capability_sources = capability_summary.get("sources") if isinstance(capability_summary, dict) else []
+    capability_by_name = {
+        str(item.get("name") or "").strip().lower(): dict(item)
+        for item in capability_sources
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    sources = base.get("sources") if isinstance(base.get("sources"), list) else []
+    enriched_sources: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        enriched = dict(source)
+        capability = capability_by_name.get(str(source.get("name") or "").strip().lower())
+        if capability is not None:
+            enriched["capability"] = capability
+        enriched_sources.append(enriched)
+    base["sources"] = enriched_sources
+    base["capabilities"] = dict(capability_summary)
+    return base
+
+
+def _review_intelligence_source_guidance(
+    source: ReviewIntelligenceSource, *, capability: dict[str, Any] | None = None
+) -> str:
+    capability_status = str((capability or {}).get("status") or "unknown").strip().lower() or "unknown"
+    if source.name == "github":
+        if capability_status == "available":
+            detail = (
+                "Staged PR context is already available. Use it first, then use `gh` / public GitHub context only "
+                "when extra PR discussion or linked-issue context materially helps."
+            )
+        elif capability_status == "unavailable":
+            detail = "Rely on staged PR context and local `git`; extra GitHub context is not currently available."
+        else:
+            detail = (
+                "Prefer staged PR context first. Additional GitHub context may be available, but do not probe for it "
+                "broadly before it is needed."
+            )
     elif source.name == "jira":
         if source.mode == "when-referenced":
-            detail = (
-                "Use Jira when the change, PR, or commits reference a ticket and that context would clarify the review."
-            )
+            detail = "Use Jira only when the change, PR, or commits reference a ticket and that context would clarify the review."
         elif source.mode == "required":
             detail = "Jira context is required for this review; confirm the relevant ticket context before finalizing."
         else:
             detail = "Use Jira when ticket context is readily available and materially clarifies the change."
+        if capability_status == "unavailable":
+            detail = f"{detail} Jira access is currently unavailable."
+        elif capability_status == "unknown":
+            detail = f"{detail} Availability remains lazy until the review actually needs it."
     else:
         detail = (
             f"Use `{source.name}` only if it is available and materially improves understanding of the code under review."
         )
     if source.notes:
         detail = f"{detail} {' '.join(source.notes)}"
-    return f"- `{source.name}` (`{source.mode}`): {detail}"
+    return f"- `{source.name}` (`{source.mode}`, `{capability_status}`): {detail}"
 
 
 def _review_intelligence_meta_dict(
@@ -1518,18 +1900,36 @@ def load_review_intelligence_config(
     return cfg, _review_intelligence_meta_dict(cfg, path=path, loaded=bool(raw))
 
 
-def build_review_intelligence_guidance(cfg: ReviewIntelligenceConfig) -> str:
+def build_review_intelligence_guidance(
+    cfg: ReviewIntelligenceConfig,
+    *,
+    capability_summary: dict[str, Any] | None = None,
+) -> str:
     lines = [
         "## Review-Intelligence Guidance",
         "- Start with the staged PR context when it is already available.",
         "- Use local `git` as the authoritative source for code changes.",
         "- Use additional review-intelligence sources only when they materially improve understanding of the code under review.",
     ]
+    capability_sources = capability_summary.get("sources") if isinstance(capability_summary, dict) else []
+    capability_by_name = {
+        str(source.get("name") or "").strip().lower(): source
+        for source in capability_sources
+        if isinstance(source, dict) and str(source.get("name") or "").strip()
+    }
+    if capability_by_name:
+        lines.append("- Treat `available` sources as opportunistic helpers, and do not broad-probe optional sources up front.")
     active_sources = _review_intelligence_sources(cfg)
     if active_sources:
         lines.append("")
         lines.append("Configured sources:")
-        lines.extend(_review_intelligence_source_guidance(source) for source in active_sources)
+        lines.extend(
+            _review_intelligence_source_guidance(
+                source,
+                capability=capability_by_name.get(source.name),
+            )
+            for source in active_sources
+        )
     if cfg.notes:
         lines.append("")
         lines.append("Additional notes:")
@@ -2016,6 +2416,37 @@ def _doctor_runtime_payload(
     target = _resolve_doctor_target_context(pr_url)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
     config_exists = runtime.config_path.is_file()
+    if runtime.config_enabled:
+        try:
+            review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
+                config_path=runtime.config_path,
+                require_active_sources=False,
+            )
+            review_intelligence_payload = attach_review_intelligence_capabilities(
+                review_intelligence_meta["review_intelligence"],
+                resolve_review_intelligence_capabilities(
+                    review_intelligence_cfg,
+                    doctor_target=target,
+                ),
+            )
+        except ReviewflowError as e:
+            review_intelligence_payload = {
+                "config_path": str(runtime.config_path),
+                "loaded": False,
+                "error": str(e).splitlines()[0],
+            }
+    else:
+        review_intelligence_payload = {
+            "config_path": str(runtime.config_path),
+            "loaded": False,
+            "enabled": False,
+            "sources": [],
+            "capabilities": {
+                "required_sources": [],
+                "status_counts": {state: 0 for state in sorted(REVIEW_INTELLIGENCE_CAPABILITY_STATES)},
+                "sources": [],
+            },
+        }
     payload: dict[str, Any] = {
         "cure_config": _doctor_path_payload(
             path=runtime.config_path,
@@ -2040,6 +2471,7 @@ def _doctor_runtime_payload(
         ),
         "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
         "acknowledged_sources": _doctor_acknowledged_sources(target=target),
+        "review_intelligence": review_intelligence_payload,
         "repo_local_chunkhound": repo_local_chunkhound,
     }
     if target is not None:
@@ -2326,6 +2758,7 @@ __all__ = [
     "build_http_response_request",
     "build_llm_meta",
     "build_review_intelligence_guidance",
+    "attach_review_intelligence_capabilities",
     "builtin_llm_presets",
     "fingerprint_chunkhound_reviewflow_config",
     "load_chunkhound_runtime_config",
@@ -2349,6 +2782,7 @@ __all__ = [
     "resolve_llm_config",
     "resolve_llm_config_from_args",
     "resolve_reviewflow_config_path",
+    "resolve_review_intelligence_capabilities",
     "resolve_runtime",
     "resolve_runtime_paths",
     "resolve_ui_enabled",

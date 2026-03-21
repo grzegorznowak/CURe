@@ -5688,6 +5688,43 @@ def _chunkhound_helper_refs(runtime_policy: dict[str, Any] | None) -> dict[str, 
     }
 
 
+def _review_intelligence_pr_context_path(meta: dict[str, Any]) -> Path | None:
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    raw = str((meta_paths or {}).get("pr_context") or "").strip()
+    return Path(raw).resolve() if raw else None
+
+
+def _review_intelligence_runtime_capabilities(
+    *,
+    review_intelligence_cfg: ReviewIntelligenceConfig,
+    env: dict[str, str],
+    runtime_policy: dict[str, Any],
+    pr: PullRequestRef,
+    staged_pr_context_path: Path | None,
+) -> dict[str, Any]:
+    return resolve_review_intelligence_capabilities(
+        review_intelligence_cfg,
+        env=env,
+        runtime_policy=runtime_policy,
+        pr=pr,
+        staged_pr_context_path=staged_pr_context_path,
+    )
+
+
+def _apply_review_intelligence_runtime_meta(
+    *,
+    meta: dict[str, Any],
+    review_intelligence_meta: dict[str, Any],
+    capability_summary: dict[str, Any],
+) -> dict[str, Any]:
+    review_intelligence_payload = attach_review_intelligence_capabilities(
+        review_intelligence_meta["review_intelligence"],
+        capability_summary,
+    )
+    meta["review_intelligence"] = review_intelligence_payload
+    return review_intelligence_payload
+
+
 def _record_chunkhound_access_meta(
     *,
     meta: dict[str, Any],
@@ -5832,9 +5869,35 @@ def _run_review_intelligence_preflight(
     env: dict[str, str],
     runtime_policy: dict[str, Any],
     review_intelligence_cfg: ReviewIntelligenceConfig,
+    review_intelligence_capabilities: dict[str, Any] | None = None,
     stream: bool,
     progress: SessionProgress | None = None,
 ) -> None:
+    capability_sources = (
+        review_intelligence_capabilities.get("sources")
+        if isinstance(review_intelligence_capabilities, dict)
+        else []
+    )
+    for source in capability_sources if isinstance(capability_sources, list) else []:
+        if not isinstance(source, dict) or not bool(source.get("preflight_required")):
+            continue
+        name = str(source.get("name") or "").strip().lower()
+        status = str(source.get("status") or "").strip().lower()
+        if name == "github":
+            if status != "available":
+                detail = str(source.get("detail") or "").strip() or "required GitHub context is unavailable"
+                raise ReviewflowError(
+                    "Review-intelligence preflight failed before review generation: "
+                    f"GitHub context is required but unavailable ({detail})."
+                )
+            continue
+        if name != "jira" and status != "available":
+            detail = str(source.get("detail") or "").strip() or f"required source `{name}` is unavailable"
+            raise ReviewflowError(
+                "Review-intelligence preflight failed before review generation: "
+                f"{detail}."
+            )
+
     staged_paths = runtime_policy.get("staged_paths") if isinstance(runtime_policy, dict) else {}
     rf_jira_raw = str((staged_paths or {}).get("rf_jira") or "").strip()
     jira_cfg = str(env.get("JIRA_CONFIG_FILE") or "").strip()
@@ -6123,6 +6186,7 @@ def _pr_flow_impl(
     profile_template_name: str | None = None
     use_multipass = False
     review_intelligence_cfg: ReviewIntelligenceConfig | None = None
+    review_intelligence_capabilities: dict[str, Any] | None = None
     multipass_defaults: dict[str, Any] = {}
     multipass_max_steps: int | None = None
     if not bool(args.no_review):
@@ -6559,6 +6623,18 @@ def _pr_flow_impl(
                 adapter_meta=adapter_meta,
                 helpers=_chunkhound_helper_refs(runtime_policy),
             )
+            review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
+                review_intelligence_cfg=review_intelligence_cfg,
+                env=env,
+                runtime_policy=runtime_policy,
+                pr=pr,
+                staged_pr_context_path=pr_context_path,
+            )
+            _apply_review_intelligence_runtime_meta(
+                meta=progress.meta,
+                review_intelligence_meta=review_intelligence_meta,
+                capability_summary=review_intelligence_capabilities,
+            )
             progress.flush()
 
             with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
@@ -6577,6 +6653,7 @@ def _pr_flow_impl(
                     env=env,
                     runtime_policy=runtime_policy,
                     review_intelligence_cfg=review_intelligence_cfg,
+                    review_intelligence_capabilities=review_intelligence_capabilities,
                     stream=stream,
                     progress=progress,
                 )
@@ -6630,7 +6707,10 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         head_ref="HEAD",
                         extra_vars={
-                            **review_intelligence_prompt_vars(review_intelligence_cfg),
+                            **review_intelligence_prompt_vars(
+                                review_intelligence_cfg,
+                                capability_summary=review_intelligence_capabilities,
+                            ),
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
@@ -6765,7 +6845,10 @@ def _pr_flow_impl(
                                 agent_desc=agent_desc,
                                 head_ref="HEAD",
                                 extra_vars={
-                                    **review_intelligence_prompt_vars(review_intelligence_cfg),
+                                    **review_intelligence_prompt_vars(
+                                        review_intelligence_cfg,
+                                        capability_summary=review_intelligence_capabilities,
+                                    ),
                                     "PLAN_JSON_PATH": str(plan_json_path),
                                     "STEP_ID": step_id,
                                     "STEP_TITLE": step_title,
@@ -6862,7 +6945,10 @@ def _pr_flow_impl(
                             agent_desc=agent_desc,
                             head_ref="HEAD",
                             extra_vars={
-                                **review_intelligence_prompt_vars(review_intelligence_cfg),
+                                **review_intelligence_prompt_vars(
+                                    review_intelligence_cfg,
+                                    capability_summary=review_intelligence_capabilities,
+                                ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                             },
@@ -6970,7 +7056,10 @@ def _pr_flow_impl(
                     if not prompt and not args.no_review:
                         raise ReviewflowError("No prompt provided and no prompt template could be loaded.")
                     if prompt:
-                        prompt_extra_vars = review_intelligence_prompt_vars(review_intelligence_cfg)
+                        prompt_extra_vars = review_intelligence_prompt_vars(
+                            review_intelligence_cfg,
+                            capability_summary=review_intelligence_capabilities,
+                        )
                         prompt_extra_vars["PR_CONTEXT_PATH"] = str(pr_context_path)
                         rendered = render_prompt(
                             prompt,
@@ -7354,6 +7443,18 @@ def _resume_flow_impl(
             adapter_meta=adapter_meta,
             helpers=_chunkhound_helper_refs(runtime_policy),
         )
+        review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
+            review_intelligence_cfg=review_intelligence_cfg,
+            env=env,
+            runtime_policy=runtime_policy,
+            pr=pr,
+            staged_pr_context_path=_review_intelligence_pr_context_path(progress.meta),
+        )
+        _apply_review_intelligence_runtime_meta(
+            meta=progress.meta,
+            review_intelligence_meta=review_intelligence_meta,
+            capability_summary=review_intelligence_capabilities,
+        )
         progress.flush()
 
         with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
@@ -7372,6 +7473,7 @@ def _resume_flow_impl(
                 env=env,
                 runtime_policy=runtime_policy,
                 review_intelligence_cfg=review_intelligence_cfg,
+                review_intelligence_capabilities=review_intelligence_capabilities,
                 stream=stream,
                 progress=progress,
             )
@@ -7473,7 +7575,10 @@ def _resume_flow_impl(
                     agent_desc=agent_desc,
                     head_ref="HEAD",
                     extra_vars={
-                        **review_intelligence_prompt_vars(review_intelligence_cfg),
+                        **review_intelligence_prompt_vars(
+                            review_intelligence_cfg,
+                            capability_summary=review_intelligence_capabilities,
+                        ),
                         "MAX_STEPS": str(max_steps),
                     },
                 )
@@ -7611,7 +7716,10 @@ def _resume_flow_impl(
                     agent_desc=agent_desc,
                     head_ref="HEAD",
                     extra_vars={
-                        **review_intelligence_prompt_vars(review_intelligence_cfg),
+                        **review_intelligence_prompt_vars(
+                            review_intelligence_cfg,
+                            capability_summary=review_intelligence_capabilities,
+                        ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_ID": step_id,
                         "STEP_TITLE": step_title,
@@ -7709,7 +7817,10 @@ def _resume_flow_impl(
                     agent_desc=agent_desc,
                     head_ref="HEAD",
                     extra_vars={
-                        **review_intelligence_prompt_vars(review_intelligence_cfg),
+                        **review_intelligence_prompt_vars(
+                            review_intelligence_cfg,
+                            capability_summary=review_intelligence_capabilities,
+                        ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
                     },
@@ -7957,12 +8068,25 @@ def _followup_flow_impl(
             paths=paths,
         )
         env = dict(runtime_policy["env"])
+        review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
+            review_intelligence_cfg=review_intelligence_cfg,
+            env=env,
+            runtime_policy=runtime_policy,
+            pr=pr,
+            staged_pr_context_path=_review_intelligence_pr_context_path(meta),
+        )
+        _apply_review_intelligence_runtime_meta(
+            meta=meta,
+            review_intelligence_meta=review_intelligence_meta,
+            capability_summary=review_intelligence_capabilities,
+        )
         with phase("review_intelligence_preflight", progress=None, quiet=quiet):
             _run_review_intelligence_preflight(
                 repo_dir=repo_dir,
                 env=env,
                 runtime_policy=runtime_policy,
                 review_intelligence_cfg=review_intelligence_cfg,
+                review_intelligence_capabilities=review_intelligence_capabilities,
                 stream=stream,
             )
         codex_meta: dict[str, Any] | None = None
@@ -8055,7 +8179,10 @@ def _followup_flow_impl(
             agent_desc=agent_desc,
             head_ref="HEAD",
             extra_vars={
-                **review_intelligence_prompt_vars(review_intelligence_cfg),
+                **review_intelligence_prompt_vars(
+                    review_intelligence_cfg,
+                    capability_summary=review_intelligence_capabilities,
+                ),
                 "PREVIOUS_REVIEW_MD": str(review_md_path),
                 "HEAD_SHA_BEFORE": head_before,
                 "HEAD_SHA_AFTER": head_after,
@@ -8163,7 +8290,7 @@ def _followup_flow_impl(
             },
             "helpers": _chunkhound_helper_refs(runtime_policy),
             "agent_runtime": runtime_policy["metadata"],
-            "review_intelligence": dict(review_intelligence_meta["review_intelligence"]),
+            "review_intelligence": dict(meta["review_intelligence"]),
         }
         if codex_meta is not None:
             followup_entry["codex"] = {"config": codex_meta, "flags": codex_flags}
@@ -11128,6 +11255,7 @@ from cure_runtime import (
     _resolved_doctor_agent_runtime,
     _set_disabled_reviewflow_config_path,
     _string_dict,
+    attach_review_intelligence_capabilities,
     apply_llm_env,
     build_curated_subprocess_env,
     build_http_response_request,
@@ -11155,6 +11283,7 @@ from cure_runtime import (
     resolve_codex_flags,
     resolve_llm_config,
     resolve_llm_config_from_args,
+    resolve_review_intelligence_capabilities,
     resolve_reviewflow_config_path,
     resolve_runtime,
     resolve_runtime_paths,
