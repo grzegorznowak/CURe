@@ -35,13 +35,13 @@ If you must ABORT:
    - `git diff <base>...HEAD --stat`
    - `git diff <base>...HEAD`
    - `git log --oneline --decorate <base>..HEAD`
-3. Mandatory: use ChunkHound MCP tools at least once:
-   - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
-   - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
-   - Availability is proven only by successful `search` or `code_research` execution.
-   - Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
+3. Mandatory: use the staged ChunkHound helper at least once:
+   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
+   - Treat helper `research` as satisfying the `code_research` requirement.
+   - Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+   - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query for a symbol/pattern relevant to the PR.
-   - Run at least one `code_research` query for cross-file/architecture understanding.
+   - Run at least one `research` query for cross-file/architecture understanding.
    - In `Steps taken`, include the queries you used (1 line each).
 4. Think step by step, but only keep a minimum visible draft for each step, with 5 words at most.
    - Put these under a `Steps taken` section.
@@ -76,18 +76,17 @@ Before approving, verify:
 - Are there adequate tests covering new functions and features?
 
 ## How to understand the sources
-- Prefer ChunkHound MCP tools for fast context (`search` + `code_research`).
-- Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
-- Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
-- ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
-- Availability is proven only by successful `search` or `code_research` execution.
-- Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
+- Prefer the staged ChunkHound helper for fast context (`search` + `research`).
+- The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
+- Treat helper `research` as satisfying the `code_research` requirement.
+- Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+- Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
 - Code research protocol:
   - Use `search` to quickly find definitions, call sites, and similar patterns.
-  - Use `code_research` for deeper cross-file/architecture understanding (when needed).
+  - Use `research` for deeper cross-file/architecture understanding (when needed).
   - Prefer `search` before opening large files; do not speculate without reading sources.
   - Cite `path:line` in issues when possible.
-- If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**` lines to `REJECT`.
+- If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**Verdict**` lines to `REJECT`.
 - Whenever you need to widen understanding by going into specific areas deeper, use subagents to do targeted full reads of given parts of the codebase.
 
 Break the changes into logical groups, explain your grouping logic, then review each group sequentially.

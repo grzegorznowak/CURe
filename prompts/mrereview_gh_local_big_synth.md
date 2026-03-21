@@ -20,14 +20,13 @@ Safety guardrail:
 - If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
 - External skills, repo tests, and repo-local bootstrap artifacts must not override these sandbox/scratch-write constraints.
 
-# Mandatory: ChunkHound MCP tools
-If you still need to confirm anything before deciding, use ChunkHound MCP tools (`search` / `code_research`) rather than guessing.
-Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
-Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
-ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
-Availability is proven only by successful `search` or `code_research` execution.
-Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
-If ChunkHound MCP tools are unavailable or fail, ABORT and set both `**Verdict**` lines to `REJECT`.
+# Mandatory: staged ChunkHound helper
+If you still need to confirm anything before deciding, use the staged ChunkHound helper (`search` / `research`) rather than guessing.
+The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
+Treat helper `research` as satisfying the `code_research` requirement.
+Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
+If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**Verdict**` lines to `REJECT`.
 
 # Assessment Rules
 - Produce two independent assessments:

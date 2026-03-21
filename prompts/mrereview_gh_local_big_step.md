@@ -23,16 +23,15 @@ Safety guardrail:
 
 # Step execution
 1. Use local `git` + sources to execute ONLY this step. Do not attempt to fully review the PR end-to-end here.
-2. Mandatory: use ChunkHound MCP tools:
-   - Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
-   - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
-   - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
-   - Availability is proven only by successful `search` or `code_research` execution.
-   - Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
+2. Mandatory: use the staged ChunkHound helper:
+   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
+   - Treat helper `research` as satisfying the `code_research` requirement.
+   - Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+   - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query relevant to this step.
-   - If this step is cross-file/architectural, also run a `code_research` query.
+   - If this step is cross-file/architectural, also run a `research` query.
    - In `Steps taken`, include the queries you used (1 line each).
-   - If ChunkHound MCP tools are unavailable or fail, ABORT and stop (do not proceed with this step).
+   - If the staged ChunkHound helper is unavailable or fails, ABORT and stop (do not proceed with this step).
 3. Think step by step, but keep only a minimal visible draft:
    - Put these under `### Steps taken` (5 words max per line).
 4. Never speculate about code you haven't read — investigate files before commenting.

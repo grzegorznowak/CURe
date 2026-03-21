@@ -26,16 +26,15 @@ If you must ABORT:
    - `git diff <base>...HEAD --stat`
    - `git diff <base>...HEAD`
    - `git log --oneline --decorate <base>..HEAD`
-3. Mandatory: use ChunkHound MCP tools at least once:
-   - Tool names can appear as `chunkhound.search` / `chunkhound.code_research` (equivalent to `search` / `code_research`).
-   - Do not use `list_mcp_resources` or `list_mcp_resource_templates` as the ChunkHound availability check.
-   - ChunkHound is a tools-first MCP server, so empty resource/template results are expected and are not an outage signal.
-   - Availability is proven only by successful `search` or `code_research` execution.
-   - Native MCP tool calls are preferred, but recognized `chunkhound mcp` execution also counts.
+3. Mandatory: use the staged ChunkHound helper at least once:
+   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
+   - Treat helper `research` as satisfying the `code_research` requirement.
+   - Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+   - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query for a symbol/pattern relevant to the PR.
-   - Run at least one `code_research` query for cross-file/architecture understanding.
+   - Run at least one `research` query for cross-file/architecture understanding.
    - In `Steps taken`, include the queries you used (1 line each).
-   - If ChunkHound MCP tools are unavailable or fail, ABORT (no plan steps) and set `"abort": true` in the JSON output.
+   - If the staged ChunkHound helper is unavailable or fails, ABORT (no plan steps) and set `"abort": true` in the JSON output.
 4. Build a step-by-step review plan:
    - The plan may contain any number of steps, but MUST NOT exceed `$MAX_STEPS` steps.
    - Each step must be narrow enough to run independently without bloating context.

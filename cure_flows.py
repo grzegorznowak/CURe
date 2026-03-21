@@ -286,14 +286,7 @@ _CHUNKHOUND_PROOF_DISCOVERY_TOOLS = {
     "list_mcp_resource_templates",
 }
 _CHUNKHOUND_NATIVE_PROOF_SOURCES = {"chunkhound", "codex"}
-_CHUNKHOUND_MANUAL_MCP_COMMAND_PATTERNS = (
-    re.compile(r"(?<![\w.-])(?:uv\s+run\s+)?chunkhound\s+mcp(?![\w.-])", re.IGNORECASE),
-    re.compile(
-        r"['\"]uv['\"]\s*,\s*['\"]run['\"]\s*,\s*['\"]chunkhound['\"]\s*,\s*['\"]mcp['\"]",
-        re.IGNORECASE,
-    ),
-    re.compile(r"['\"]chunkhound['\"]\s*,\s*['\"]mcp['\"]", re.IGNORECASE),
-)
+_CHUNKHOUND_HELPER_ENV_PATTERN = re.compile(r"(?<![\w.-])\$\{?CURE_CHUNKHOUND_HELPER\}?(?![\w.-])")
 
 
 def _first_nonempty_string(*values: object) -> str:
@@ -431,20 +424,31 @@ def _command_execution_succeeded(event_type: str, item: dict[str, Any]) -> bool:
     return _extract_tool_status(event_type, item) is True
 
 
-def _command_matches_chunkhound_mcp(command: object) -> re.Match[str] | None:
+def _command_matches_chunkhound_helper_env(command: object) -> re.Match[str] | None:
+    return _CHUNKHOUND_HELPER_ENV_PATTERN.search(str(command or ""))
+
+
+def _command_uses_staged_chunkhound_helper(*, command: object, helper_path: object) -> bool:
     text = str(command or "")
-    for pattern in _CHUNKHOUND_MANUAL_MCP_COMMAND_PATTERNS:
-        match = pattern.search(text)
-        if match is not None:
-            return match
-    return None
+    if not text:
+        return False
+    if _command_matches_chunkhound_helper_env(text) is not None:
+        return True
+    helper = str(helper_path or "").strip()
+    if not helper:
+        return False
+    helper_patterns = (
+        re.compile(rf"(?<![\w./-]){re.escape(helper)}(?![\w./-])"),
+        re.compile(rf"['\"]{re.escape(helper)}['\"]"),
+    )
+    return any(pattern.search(text) is not None for pattern in helper_patterns)
 
 
-def _manual_chunkhound_command_excerpt(command: object) -> str | None:
+def _chunkhound_helper_command_excerpt(command: object) -> str | None:
     text = " ".join(str(command or "").split())
     if not text:
         return None
-    match = _command_matches_chunkhound_mcp(text)
+    match = _command_matches_chunkhound_helper_env(text)
     if match is None:
         excerpt = text[:180]
         if len(excerpt) < len(text):
@@ -461,7 +465,7 @@ def _manual_chunkhound_command_excerpt(command: object) -> str | None:
     return excerpt
 
 
-def _parse_manual_chunkhound_output(payload_text: object) -> dict[str, Any] | None:
+def _parse_chunkhound_helper_output(payload_text: object) -> dict[str, Any] | None:
     text = str(payload_text or "").strip()
     if not text:
         return None
@@ -480,19 +484,40 @@ def _parse_manual_chunkhound_output(payload_text: object) -> dict[str, Any] | No
     return None
 
 
-def _manual_chunkhound_result_succeeded(result: object) -> bool:
-    if not isinstance(result, dict):
-        return False
-    if result.get("isError") is True or result.get("error"):
-        return False
-    for key in ("content", "structured_content", "result"):
-        value = result.get(key)
-        if isinstance(value, (dict, list)) and bool(value):
+def _chunkhound_helper_result_succeeded(result: object) -> bool:
+    if isinstance(result, dict):
+        if result.get("isError") is True or result.get("error"):
+            return False
+        for key in ("content", "structured_content", "result"):
+            value = result.get(key)
+            if isinstance(value, (dict, list)) and bool(value):
+                return True
+        text = result.get("text")
+        if isinstance(text, str) and text.strip():
             return True
-    text = result.get("text")
-    if isinstance(text, str) and text.strip():
-        return True
+        return False
+    if isinstance(result, list):
+        return bool(result)
+    if isinstance(result, str):
+        return bool(result.strip())
     return False
+
+
+def _chunkhound_helper_tool_name(payload: object) -> str:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return ""
+    helper_path = str(payload.get("helper_path") or "").strip()
+    if not helper_path:
+        return ""
+    if not _chunkhound_helper_result_succeeded(payload.get("result")):
+        return ""
+    command_name = str(payload.get("command") or "").strip().lower()
+    tool_name = _normalize_chunkhound_tool_name(payload.get("tool_name"))
+    if command_name == "search" and tool_name == "search":
+        return "search"
+    if command_name == "research" and tool_name == "code_research":
+        return "code_research"
+    return ""
 
 
 def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset: int | None) -> str:
@@ -609,27 +634,29 @@ def validate_codex_chunkhound_tool_proof(
         if not _command_execution_succeeded(event_type, item):
             continue
         command = _first_nonempty_string(item.get("command"))
-        if _command_matches_chunkhound_mcp(command) is None:
-            continue
-        payload = _parse_manual_chunkhound_output(item.get("aggregated_output"))
+        payload = _parse_chunkhound_helper_output(item.get("aggregated_output"))
         if payload is None:
             continue
-        command_excerpt = _manual_chunkhound_command_excerpt(command)
-        for tool_name in required_tools:
-            if not _manual_chunkhound_result_succeeded(payload.get(f"{tool_name}_result")):
-                continue
-            if tool_name not in observed_successful_calls:
-                observed_successful_calls.append(tool_name)
-            detail = {
-                "tool_name": tool_name,
-                "evidence_source": "manual_chunkhound_mcp",
-                "item_id": _first_nonempty_string(item.get("id")) or None,
-                "server": None,
-                "command_excerpt": command_excerpt,
-            }
-            if detail not in observed_successful_call_details:
-                observed_successful_call_details.append(detail)
-            observed_evidence_sources.add("manual_chunkhound_mcp")
+        if not _command_uses_staged_chunkhound_helper(
+            command=command,
+            helper_path=payload.get("helper_path"),
+        ):
+            continue
+        tool_name = _chunkhound_helper_tool_name(payload)
+        if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+            continue
+        if tool_name not in observed_successful_calls:
+            observed_successful_calls.append(tool_name)
+        detail = {
+            "tool_name": tool_name,
+            "evidence_source": "cli_helper_command_execution",
+            "item_id": _first_nonempty_string(item.get("id")) or None,
+            "server": None,
+            "command_excerpt": _chunkhound_helper_command_excerpt(command),
+        }
+        if detail not in observed_successful_call_details:
+            observed_successful_call_details.append(detail)
+        observed_evidence_sources.add("cli_helper_command_execution")
 
     report["observed_successful_calls"] = observed_successful_calls
     report["observed_successful_call_details"] = observed_successful_call_details
