@@ -941,6 +941,10 @@ _PREFLIGHT_STAGE_TIMEOUTS = {{
     "tools/list": 10.0,
     "daemon_metadata": 5.0,
 }}
+_TOOL_CALL_TIMEOUTS = {{
+    "search": 15.0,
+    "code_research": 45.0,
+}}
 _TRANSPORT_MODES = ("json_line", "mcp_framed")
 DAEMON_METADATA_PROBE = "\\n".join(
     [
@@ -1471,6 +1475,61 @@ def _build_preflight_payload(
     return payload
 
 
+def _tool_name_for_command(command: str) -> str:
+    return "code_research" if str(command or "").strip() == "research" else "search"
+
+
+def _tool_timeout_seconds(tool_name: str) -> float:
+    raw_timeout = _TOOL_CALL_TIMEOUTS.get(str(tool_name or "").strip(), _TOOL_CALL_TIMEOUTS["search"])
+    return float(raw_timeout)
+
+
+def _copy_stage_trace(trace: object) -> list[dict[str, Any]]:
+    if not isinstance(trace, list):
+        return []
+    return [dict(item) for item in trace if isinstance(item, dict)]
+
+
+def _tool_payload_base(
+    *,
+    args: argparse.Namespace,
+    preflight: dict[str, Any],
+    transport_mode: str,
+    tool_name: str,
+    stage_trace: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = {{
+        "command": args.command,
+        "tool_name": tool_name,
+        "query": getattr(args, "query", None),
+        "path": getattr(args, "path", None),
+        "helper_path": str(HELPER_PATH),
+        "chunkhound_path": str(preflight.get("chunkhound_path") or ""),
+        "chunkhound_runtime_python": str(preflight.get("chunkhound_runtime_python") or ""),
+        "chunkhound_module_path": str(preflight.get("chunkhound_module_path") or ""),
+        "daemon_lock_path": preflight.get("daemon_lock_path"),
+        "daemon_socket_path": preflight.get("daemon_socket_path"),
+        "daemon_log_path": preflight.get("daemon_log_path"),
+        "daemon_pid": preflight.get("daemon_pid"),
+        "daemon_runtime_dir": preflight.get("daemon_runtime_dir"),
+        "daemon_registry_entry_path": preflight.get("daemon_registry_entry_path"),
+        "mcp_transport": transport_mode,
+        "preflight_stage": str(preflight.get("preflight_stage") or ""),
+        "preflight_stage_status": str(preflight.get("preflight_stage_status") or ""),
+        "stage_trace": stage_trace,
+    }}
+    preflight_elapsed = preflight.get("elapsed_seconds")
+    if isinstance(preflight_elapsed, (int, float)):
+        payload["preflight_elapsed_seconds"] = round(float(preflight_elapsed), 3)
+    stderr_tail = _trim_tail_text(preflight.get("stderr_tail") or "")
+    if stderr_tail:
+        payload["stderr_tail"] = stderr_tail
+    daemon_metadata_error = str(preflight.get("daemon_metadata_error") or "").strip()
+    if daemon_metadata_error:
+        payload["daemon_metadata_error"] = daemon_metadata_error
+    return payload
+
+
 def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[str, Any]:
     _ = args
     started_at = time.monotonic()
@@ -1756,41 +1815,97 @@ def _run_tool_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str
     session = JsonRpcSession(transport_mode=transport_mode)
     try:
         preflight = _run_preflight(session, args)
+        tool_name = _tool_name_for_command(args.command)
         if not preflight.get("ok"):
             return {{
                 **preflight,
                 "mcp_transport": transport_mode,
                 "command": args.command,
-                "tool_name": "code_research" if args.command == "research" else "search",
+                "tool_name": tool_name,
                 "query": getattr(args, "query", None),
                 "path": getattr(args, "path", None),
             }}
         tool_name, payload = _tool_payload(args)
-        response = session.request(
-            "tools/call",
-            {{"name": tool_name, "arguments": payload}},
-            stage="tools/call",
-            timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["tools/list"],
+        tool_timeout_seconds = _tool_timeout_seconds(tool_name)
+        stage_trace = _copy_stage_trace(preflight.get("stage_trace"))
+        stage_started = time.monotonic()
+        base_payload = _tool_payload_base(
+            args=args,
+            preflight=preflight,
+            transport_mode=transport_mode,
+            tool_name=tool_name,
+            stage_trace=stage_trace,
         )
-        result = _extract_result_content(response)
+        try:
+            response = session.request(
+                "tools/call",
+                {{"name": tool_name, "arguments": payload}},
+                stage="tools/call",
+                timeout_seconds=tool_timeout_seconds,
+            )
+            result = _extract_result_content(response)
+        except PreflightStageError as exc:
+            stage_status = "timeout" if exc.timeout else "error"
+            detail = str(exc)
+            stage_trace.append(
+                _stage_trace_entry(
+                    stage="tools/call",
+                    status=stage_status,
+                    started_at=stage_started,
+                    timeout_seconds=tool_timeout_seconds,
+                    detail=detail,
+                )
+            )
+            failure_payload = {{
+                **base_payload,
+                "ok": False,
+                "error": detail,
+                "execution_stage": "tools/call",
+                "execution_stage_status": stage_status,
+                "execution_timeout_seconds": tool_timeout_seconds,
+            }}
+            stderr_tail = _trim_tail_text(exc.stderr_tail)
+            if stderr_tail:
+                failure_payload["stderr_tail"] = stderr_tail
+            return failure_payload
+        except Exception as exc:
+            detail = str(exc)
+            stage_trace.append(
+                _stage_trace_entry(
+                    stage="tools/call",
+                    status="error",
+                    started_at=stage_started,
+                    timeout_seconds=tool_timeout_seconds,
+                    detail=detail,
+                )
+            )
+            failure_payload = {{
+                **base_payload,
+                "ok": False,
+                "error": detail,
+                "execution_stage": "tools/call",
+                "execution_stage_status": "error",
+                "execution_timeout_seconds": tool_timeout_seconds,
+            }}
+            stderr_tail = _trim_tail_text(session._stderr_tail_text())
+            if stderr_tail:
+                failure_payload["stderr_tail"] = stderr_tail
+            return failure_payload
+        stage_trace.append(
+            _stage_trace_entry(
+                stage="tools/call",
+                status="ok",
+                started_at=stage_started,
+                timeout_seconds=tool_timeout_seconds,
+            )
+        )
         return {{
+            **base_payload,
             "ok": True,
-            "command": args.command,
-            "tool_name": tool_name,
-            "query": args.query,
-            "path": args.path,
             "result": result,
-            "helper_path": str(HELPER_PATH),
-            "chunkhound_path": str(preflight.get("chunkhound_path") or ""),
-            "chunkhound_runtime_python": str(preflight.get("chunkhound_runtime_python") or ""),
-            "chunkhound_module_path": str(preflight.get("chunkhound_module_path") or ""),
-            "daemon_lock_path": preflight.get("daemon_lock_path"),
-            "daemon_socket_path": preflight.get("daemon_socket_path"),
-            "daemon_log_path": preflight.get("daemon_log_path"),
-            "daemon_pid": preflight.get("daemon_pid"),
-            "daemon_runtime_dir": preflight.get("daemon_runtime_dir"),
-            "daemon_registry_entry_path": preflight.get("daemon_registry_entry_path"),
-            "mcp_transport": transport_mode,
+            "execution_stage": "tools/call",
+            "execution_stage_status": "ok",
+            "execution_timeout_seconds": tool_timeout_seconds,
         }}
     finally:
         session.close()

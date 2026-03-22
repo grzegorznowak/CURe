@@ -6375,6 +6375,138 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_generated_chunkhound_helper_uses_tool_specific_tools_call_timeouts(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_call_timeouts"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "",
+                        "def read_message():",
+                        "    raw = sys.stdin.buffer.readline()",
+                        "    if not raw:",
+                        "        raise SystemExit(0)",
+                        "    return json.loads(raw.decode('utf-8'))",
+                        "",
+                        "def write_message(payload):",
+                        "    sys.stdout.write(json.dumps(payload) + '\\n')",
+                        "    sys.stdout.flush()",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-tool-call/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-tool-call/daemon.log',",
+                        "        'daemon_socket_path': '/tmp/chunkhound-tool-call.sock',",
+                        "        'daemon_pid': 321,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-tool-call',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-tool-call/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    init_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
+                        "    _ = read_message()",
+                        "    tools_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': tools_msg.get('id'), 'result': {'tools': [{'name': 'search'}, {'name': 'code_research'}]}})",
+                        "    call_msg = read_message()",
+                        "    tool_name = call_msg.get('params', {}).get('name')",
+                        "    if tool_name == 'search':",
+                        "        time.sleep(0.1)",
+                        "        write_message({'jsonrpc': '2.0', 'id': call_msg.get('id'), 'result': {'content': [{'type': 'text', 'text': '{\"results\": [{\"file_path\": \"demo.py\", \"content\": \"needle\"}], \"pagination\": {\"offset\": 0, \"total_results\": 1}}'}]}})",
+                        "        raise SystemExit(0)",
+                        "    time.sleep(0.35)",
+                        "    write_message({'jsonrpc': '2.0', 'id': call_msg.get('id'), 'result': {'content': [{'type': 'text', 'text': 'slow research'}]}})",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            helper_text = (
+                helper_path.read_text(encoding="utf-8")
+                .replace('"search": 15.0', '"search": 0.4')
+                .replace('"code_research": 45.0', '"code_research": 0.2')
+            )
+            helper_path.write_text(helper_text, encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            search_result = subprocess.run(
+                [str(helper_path), "search", "needle"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            research_result = subprocess.run(
+                [str(helper_path), "research", "cross-file question"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(search_result.returncode, 0)
+            search_payload = json.loads(search_result.stdout)
+            self.assertTrue(search_payload["ok"])
+            self.assertEqual(search_payload["execution_stage"], "tools/call")
+            self.assertEqual(search_payload["execution_stage_status"], "ok")
+            self.assertEqual(search_payload["execution_timeout_seconds"], 0.4)
+            self.assertEqual(search_payload["stage_trace"][-1]["stage"], "tools/call")
+            self.assertEqual(search_payload["stage_trace"][-1]["status"], "ok")
+
+            self.assertEqual(research_result.returncode, 1)
+            research_payload = json.loads(research_result.stdout)
+            self.assertFalse(research_payload["ok"])
+            self.assertEqual(research_payload["tool_name"], "code_research")
+            self.assertEqual(research_payload["execution_stage"], "tools/call")
+            self.assertEqual(research_payload["execution_stage_status"], "timeout")
+            self.assertEqual(research_payload["execution_timeout_seconds"], 0.2)
+            self.assertIn("timed out after 0.2s waiting for stage tools/call", research_payload["error"])
+            self.assertEqual(research_payload["stage_trace"][-1]["stage"], "tools/call")
+            self.assertEqual(research_payload["stage_trace"][-1]["status"], "timeout")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_generated_chunkhound_helper_falls_back_to_framed_transport(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_transport_fallback"
         try:
@@ -13046,6 +13178,56 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_chunkhound_tool_proof_accepts_cli_shaped_helper_results(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_cli_payloads"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_failed_call_details"], [])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_mixed_discovery_and_helper_execution_passes(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_mixed"
         try:
@@ -13095,6 +13277,237 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertEqual(report["observed_successful_calls"], [])
             self.assertEqual(report["observed_evidence_sources"], [])
             self.assertIn("code_research", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_helper_ok_false_fails_closed(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_ok_false"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": False,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "error": "helper search failed",
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "error",
+                            "execution_timeout_seconds": 15.0,
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["code_research"])
+            self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "search")
+            self.assertEqual(report["observed_failed_call_details"][0]["stage"], "tools/call")
+            self.assertIn("search failed during tools/call (error)", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_helper_missing_result_fails_closed(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_missing_result"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["code_research"])
+            self.assertIn("search", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_search_metadata_only_result_fails_closed(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_search_metadata_only"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["code_research"])
+            self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "search")
+            self.assertIn("search", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_research_metadata_only_result_fails_closed(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_research_metadata_only"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"metadata": {"tokens": 17}},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search"])
+            self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "code_research")
+            self.assertIn("code_research", str(report["failure_reason"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_reports_tools_call_timeout_diagnostics(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_timeout_diagnostics"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "research": {
+                            "ok": False,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "error": "timed out after 45.0s waiting for stage tools/call",
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "timeout",
+                            "execution_timeout_seconds": 45.0,
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search"])
+            self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "code_research")
+            self.assertEqual(report["observed_failed_call_details"][0]["stage_status"], "timeout")
+            self.assertIn("code_research failed during tools/call (timeout) after 45.0s", str(report["failure_reason"]))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -13299,11 +13712,14 @@ class CodexToolProofFlowTests(unittest.TestCase):
         work_dir: Path,
         commands: list[str],
         command: str | None = None,
+        raw_outputs: dict[str, object] | None = None,
     ) -> dict[str, object]:
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
         payloads: list[dict[str, object]] = []
         for command_name in commands:
-            if command_name == "preflight":
+            if raw_outputs and command_name in raw_outputs:
+                payload = raw_outputs[command_name]
+            elif command_name == "preflight":
                 payload = {
                     "ok": True,
                     "command": "preflight",
@@ -13607,6 +14023,115 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(meta["status"], "error")
             self.assertNotEqual(meta["multipass"]["mode"], "fallback_singlepass")
             self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search"])
+            self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_codex_helper_cli_shaped_search_proof_allows_multipass_completion(self) -> None:
+        root = ROOT / ".tmp_test_codex_helper_cli_search_multipass"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [{"id": "01", "title": "API review", "focus": "tool proof"}],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "tool proof",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "flow proof",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                    },
+                )
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: tool proof",
+                            "",
+                            "### Steps taken",
+                            "- checked repo",
+                            "",
+                            "### Findings",
+                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "",
+                            "### Suggested actions",
+                            "- Add checks",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                )
+            elif output_path.name == "review.md":
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                )
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
         finally:
             shutil.rmtree(root, ignore_errors=True)

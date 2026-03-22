@@ -484,40 +484,154 @@ def _parse_chunkhound_helper_output(payload_text: object) -> dict[str, Any] | No
     return None
 
 
-def _chunkhound_helper_result_succeeded(result: object) -> bool:
-    if isinstance(result, dict):
-        if result.get("isError") is True or result.get("error"):
-            return False
-        for key in ("content", "structured_content", "result"):
-            value = result.get(key)
-            if isinstance(value, (dict, list)) and bool(value):
-                return True
-        text = result.get("text")
-        if isinstance(text, str) and text.strip():
-            return True
+def _parse_chunkhound_helper_json_text(payload_text: object) -> object | None:
+    text = str(payload_text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _chunkhound_helper_search_payload_succeeded(payload: object) -> bool:
+    return isinstance(payload, dict) and "results" in payload and isinstance(payload.get("results"), list)
+
+
+def _chunkhound_helper_research_payload_succeeded(payload: object) -> bool:
+    if isinstance(payload, str):
+        return bool(payload.strip())
+    if isinstance(payload, list):
+        return any(_chunkhound_helper_research_payload_succeeded(item) for item in payload)
+    if not isinstance(payload, dict):
         return False
+    for key in ("text", "markdown", "summary", "answer", "report", "analysis", "response"):
+        if key in payload and _chunkhound_helper_research_payload_succeeded(payload.get(key)):
+            return True
+    return False
+
+
+def _chunkhound_helper_content_succeeded(*, content: object, command_name: str) -> bool:
+    if not isinstance(content, list):
+        return False
+    if command_name == "search":
+        for item in content:
+            if isinstance(item, str) and _chunkhound_helper_search_payload_succeeded(
+                _parse_chunkhound_helper_json_text(item)
+            ):
+                return True
+            if isinstance(item, dict) and _chunkhound_helper_search_payload_succeeded(
+                _parse_chunkhound_helper_json_text(item.get("text"))
+            ):
+                return True
+        return False
+    return any(
+        _chunkhound_helper_research_payload_succeeded(
+            item.get("text") if isinstance(item, dict) else item
+        )
+        for item in content
+    )
+
+
+def _chunkhound_helper_result_succeeded(*, result: object, command_name: str) -> bool:
+    if isinstance(result, dict):
+        if result.get("isError") is True or result.get("error") or result.get("ok") is False:
+            return False
+        if _chunkhound_helper_content_succeeded(content=result.get("content"), command_name=command_name):
+            return True
+        structured = result.get("structured_content")
+        nested = result.get("result")
+        text = result.get("text")
+        if command_name == "search":
+            return any(
+                (
+                    _chunkhound_helper_search_payload_succeeded(structured),
+                    _chunkhound_helper_search_payload_succeeded(nested),
+                    _chunkhound_helper_search_payload_succeeded(_parse_chunkhound_helper_json_text(text)),
+                    _chunkhound_helper_search_payload_succeeded(result),
+                )
+            )
+        return any(
+            (
+                _chunkhound_helper_research_payload_succeeded(structured),
+                _chunkhound_helper_research_payload_succeeded(nested),
+                _chunkhound_helper_research_payload_succeeded(text),
+                _chunkhound_helper_research_payload_succeeded(result),
+            )
+        )
+    if command_name == "search":
+        return _chunkhound_helper_search_payload_succeeded(result) or _chunkhound_helper_search_payload_succeeded(
+            _parse_chunkhound_helper_json_text(result)
+        )
     if isinstance(result, list):
-        return bool(result)
+        return any(_chunkhound_helper_research_payload_succeeded(item) for item in result)
     if isinstance(result, str):
         return bool(result.strip())
     return False
 
 
-def _chunkhound_helper_tool_name(payload: object) -> str:
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
+def _chunkhound_helper_declared_tool_name(payload: object) -> str:
+    if not isinstance(payload, dict):
         return ""
     helper_path = str(payload.get("helper_path") or "").strip()
     if not helper_path:
         return ""
-    if not _chunkhound_helper_result_succeeded(payload.get("result")):
-        return ""
     command_name = str(payload.get("command") or "").strip().lower()
     tool_name = _normalize_chunkhound_tool_name(payload.get("tool_name"))
-    if command_name == "search" and tool_name == "search":
+    if command_name == "search" and tool_name in {"", "search"}:
         return "search"
-    if command_name == "research" and tool_name == "code_research":
+    if command_name == "research" and tool_name in {"", "code_research"}:
         return "code_research"
     return ""
+
+
+def _chunkhound_helper_tool_name(payload: object) -> str:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return ""
+    tool_name = _chunkhound_helper_declared_tool_name(payload)
+    if not tool_name:
+        return ""
+    command_name = str(payload.get("command") or "").strip().lower()
+    if not _chunkhound_helper_result_succeeded(
+        result=payload.get("result"),
+        command_name=command_name,
+    ):
+        return ""
+    return tool_name
+
+
+def _chunkhound_helper_failure_detail(
+    *,
+    payload: dict[str, Any],
+    item_id: str | None,
+    command: object,
+) -> dict[str, Any]:
+    stage = _first_nonempty_string(
+        payload.get("execution_stage"),
+        payload.get("preflight_stage"),
+    ) or "unknown"
+    stage_status = _first_nonempty_string(
+        payload.get("execution_stage_status"),
+        payload.get("preflight_stage_status"),
+    ) or ("error" if payload.get("ok") is False else "unknown")
+    timeout_value = payload.get("execution_timeout_seconds")
+    timeout_seconds = float(timeout_value) if isinstance(timeout_value, (int, float)) else None
+    detail = _first_nonempty_string(
+        payload.get("error"),
+        payload.get("stderr_tail"),
+        payload.get("daemon_metadata_error"),
+    )
+    return {
+        "tool_name": _chunkhound_helper_declared_tool_name(payload),
+        "evidence_source": "cli_helper_command_execution",
+        "item_id": item_id,
+        "server": None,
+        "command_excerpt": _chunkhound_helper_command_excerpt(command),
+        "stage": stage,
+        "stage_status": stage_status,
+        "timeout_seconds": timeout_seconds,
+        "detail": detail or None,
+    }
 
 
 def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset: int | None) -> str:
@@ -564,6 +678,7 @@ def validate_codex_chunkhound_tool_proof(
         "required_tools": required_tools,
         "observed_successful_calls": [],
         "observed_successful_call_details": [],
+        "observed_failed_call_details": [],
         "observed_evidence_sources": [],
         "ignored_discovery_calls": [],
         "valid": False,
@@ -594,8 +709,10 @@ def validate_codex_chunkhound_tool_proof(
 
     observed_successful_calls: list[str] = []
     observed_successful_call_details: list[dict[str, Any]] = []
+    observed_failed_call_details: list[dict[str, Any]] = []
     ignored_discovery_calls: list[str] = []
     observed_evidence_sources: set[str] = set()
+    latest_failed_helper_calls: dict[str, dict[str, Any]] = {}
     for event_type, item in _iter_codex_tool_call_events(events_text):
         raw_tool_name = _extract_tool_name(item)
         normalized_tool_name = _normalize_chunkhound_tool_name(raw_tool_name)
@@ -631,8 +748,6 @@ def validate_codex_chunkhound_tool_proof(
             observed_evidence_sources.add("mcp_tool_call")
 
     for event_type, item in _iter_codex_command_execution_events(events_text):
-        if not _command_execution_succeeded(event_type, item):
-            continue
         command = _first_nonempty_string(item.get("command"))
         payload = _parse_chunkhound_helper_output(item.get("aggregated_output"))
         if payload is None:
@@ -644,6 +759,27 @@ def validate_codex_chunkhound_tool_proof(
             continue
         tool_name = _chunkhound_helper_tool_name(payload)
         if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+            declared_tool = _chunkhound_helper_declared_tool_name(payload)
+            if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                continue
+            failure_detail = _chunkhound_helper_failure_detail(
+                payload=payload,
+                item_id=_first_nonempty_string(item.get("id")) or None,
+                command=command,
+            )
+            if failure_detail not in observed_failed_call_details:
+                observed_failed_call_details.append(failure_detail)
+            latest_failed_helper_calls[declared_tool] = failure_detail
+            continue
+        if not _command_execution_succeeded(event_type, item):
+            failure_detail = _chunkhound_helper_failure_detail(
+                payload=payload,
+                item_id=_first_nonempty_string(item.get("id")) or None,
+                command=command,
+            )
+            if failure_detail not in observed_failed_call_details:
+                observed_failed_call_details.append(failure_detail)
+            latest_failed_helper_calls[tool_name] = failure_detail
             continue
         if tool_name not in observed_successful_calls:
             observed_successful_calls.append(tool_name)
@@ -660,13 +796,33 @@ def validate_codex_chunkhound_tool_proof(
 
     report["observed_successful_calls"] = observed_successful_calls
     report["observed_successful_call_details"] = observed_successful_call_details
+    report["observed_failed_call_details"] = observed_failed_call_details
     report["observed_evidence_sources"] = sorted(observed_evidence_sources)
     report["ignored_discovery_calls"] = ignored_discovery_calls
     missing_tools = [tool for tool in required_tools if tool not in observed_successful_calls]
     if missing_tools:
-        report["failure_reason"] = "missing successful ChunkHound execution(s): " + ", ".join(
-            missing_tools
-        )
+        failure_reason = "missing successful ChunkHound execution(s): " + ", ".join(missing_tools)
+        diagnostics: list[str] = []
+        for tool in missing_tools:
+            detail = latest_failed_helper_calls.get(tool)
+            if not isinstance(detail, dict):
+                continue
+            stage = str(detail.get("stage") or "unknown").strip() or "unknown"
+            stage_status = str(detail.get("stage_status") or "unknown").strip() or "unknown"
+            timeout_seconds = detail.get("timeout_seconds")
+            timeout_suffix = (
+                f" after {float(timeout_seconds):.1f}s"
+                if isinstance(timeout_seconds, (int, float))
+                else ""
+            )
+            detail_text = str(detail.get("detail") or "").strip()
+            diagnostic = f"{tool} failed during {stage} ({stage_status}){timeout_suffix}"
+            if detail_text:
+                diagnostic += f": {detail_text}"
+            diagnostics.append(diagnostic)
+        if diagnostics:
+            failure_reason += "; helper diagnostics: " + "; ".join(diagnostics)
+        report["failure_reason"] = failure_reason
         return report
 
     report["valid"] = True
