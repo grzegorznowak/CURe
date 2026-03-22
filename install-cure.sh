@@ -11,7 +11,7 @@ Usage:
   install-cure.sh [--version <tag>] [--bin-dir <dir>]
 
 Options:
-  --version <tag>  Install a specific release tag such as v0.1.2.
+  --version <tag>  Install a specific release tag such as v0.1.3.
   --bin-dir <dir>  Install into this directory instead of ~/.local/bin.
   -h, --help       Show this help text.
 

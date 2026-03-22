@@ -61,7 +61,7 @@ Tagged releases also build a secondary standalone channel after the package publ
 Pinned standalone install example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.3
 ```
 
 Latest standalone install example:
