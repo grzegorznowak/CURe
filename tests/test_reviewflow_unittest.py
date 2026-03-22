@@ -2006,6 +2006,31 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
 
+    def test_big_plan_template_discourages_overlap_heavy_decomposition(self) -> None:
+        text = (ROOT / "prompts" / "mrereview_gh_local_big_plan.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Use the fewest genuinely independent steps needed for strong review coverage; treat `$MAX_STEPS` as a hard cap, not a target.",
+            text,
+        )
+        self.assertIn(
+            "Cluster work by distinct root-cause family, failure contract, or primary evidence surface rather than by overlapping semantic labels.",
+            text,
+        )
+        self.assertIn(
+            "Merge candidate steps that would re-read the same changed-file cluster or investigate the same implementation fault line from multiple entrypoints.",
+            text,
+        )
+        self.assertIn(
+            "Keep tests, regressions, and gap-checking inside the subsystem step that owns the risk unless they require a truly independent pass.",
+            text,
+        )
+        self.assertIn(
+            "Avoid label-only fragmentation: do not split lifecycle, recovery, acceptance, caller-semantics, or background-flow checks into separate steps when they inspect the same code paths or invariants.",
+            text,
+        )
+
     def test_chunkhound_prompt_contract_wording_matches_per_template_requirements(self) -> None:
         prompt_texts = {
             "default.md": (ROOT / "prompts" / "default.md").read_text(encoding="utf-8"),

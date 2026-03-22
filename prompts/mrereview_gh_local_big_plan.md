@@ -36,9 +36,13 @@ If you must ABORT:
    - In `Steps taken`, include the queries you used (1 line each).
    - If the staged ChunkHound helper is unavailable or fails, ABORT (no plan steps) and set `"abort": true` in the JSON output.
 4. Build a step-by-step review plan:
-   - The plan may contain any number of steps, but MUST NOT exceed `$MAX_STEPS` steps.
-   - Each step must be narrow enough to run independently without bloating context.
-   - Each step must have a clear goal and focus area.
+   - Use the fewest genuinely independent steps needed for strong review coverage; treat `$MAX_STEPS` as a hard cap, not a target.
+   - Cluster work by distinct root-cause family, failure contract, or primary evidence surface rather than by overlapping semantic labels.
+   - Merge candidate steps that would re-read the same changed-file cluster or investigate the same implementation fault line from multiple entrypoints.
+   - Keep tests, regressions, and gap-checking inside the subsystem step that owns the risk unless they require a truly independent pass.
+   - Avoid label-only fragmentation: do not split lifecycle, recovery, acceptance, caller-semantics, or background-flow checks into separate steps when they inspect the same code paths or invariants.
+   - Each retained step must still be narrow enough to run independently without bloating context.
+   - Each retained step must have a clear goal and focus area.
 
 # Output
 Provide:
