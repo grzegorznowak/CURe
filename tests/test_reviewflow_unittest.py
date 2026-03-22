@@ -10089,7 +10089,7 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
 
     def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
         footer = cure_output.format_review_artifact_footer(
-            review_head_sha="abcdef1234567890abcdef1234567890abcdef12",
+            review_head_sha="sha1234-example-review-head",
             model="gpt-5.2",
             reasoning_effort="high",
             input_tokens=18_400,
@@ -10102,7 +10102,7 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             footer,
-            "_CURe review · sha abcdef1 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+            "_CURe review · sha sha1234 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
         )
 
     def test_upsert_review_artifact_footer_is_idempotent_and_replaces_existing_footer(self) -> None:
