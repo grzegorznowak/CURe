@@ -941,6 +941,7 @@ _PREFLIGHT_STAGE_TIMEOUTS = {{
     "tools/list": 10.0,
     "daemon_metadata": 5.0,
 }}
+_TRANSPORT_MODES = ("json_line", "mcp_framed")
 DAEMON_METADATA_PROBE = "\\n".join(
     [
         "import json",
@@ -1107,8 +1108,11 @@ class PreflightStageError(RuntimeError):
 
 
 class JsonRpcSession:
-    def __init__(self) -> None:
+    def __init__(self, *, transport_mode: str = "json_line") -> None:
         self._next_id = 1
+        self._transport_mode = str(transport_mode or "").strip() or "json_line"
+        if self._transport_mode not in _TRANSPORT_MODES:
+            raise ValueError(f"unsupported transport mode: {{self._transport_mode}}")
         env = os.environ.copy()
         env["PYTHONSAFEPATH"] = "1"
         self.proc = subprocess.Popen(
@@ -1188,7 +1192,7 @@ class JsonRpcSession:
                     self._stderr_open = False
         return saw_data
 
-    def _try_extract_message(self) -> dict[str, Any] | None:
+    def _try_extract_framed_message(self) -> dict[str, Any] | None:
         if not self._stdout_buffer:
             return None
         header_end = self._stdout_buffer.find(b"\\r\\n\\r\\n")
@@ -1219,6 +1223,39 @@ class JsonRpcSession:
         if not isinstance(payload, dict):
             raise RuntimeError("unexpected MCP payload type")
         return payload
+
+    def _try_extract_json_line_message(self) -> dict[str, Any] | None:
+        if not self._stdout_buffer:
+            return None
+        newline_idx = self._stdout_buffer.find(b"\\n")
+        if newline_idx < 0:
+            return None
+        raw_line = bytes(self._stdout_buffer[: newline_idx + 1])
+        del self._stdout_buffer[: newline_idx + 1]
+        line = raw_line.strip()
+        if not line:
+            return None
+        payload = json.loads(line.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("unexpected JSON-RPC payload type")
+        return payload
+
+    def _try_extract_message(self) -> dict[str, Any] | None:
+        while self._stdout_buffer[:1] in (b"\\r", b"\\n", b" ", b"\\t"):
+            del self._stdout_buffer[:1]
+        if not self._stdout_buffer:
+            return None
+        if self._stdout_buffer.startswith(b"Content-Length:"):
+            return self._try_extract_framed_message()
+        if self._stdout_buffer[:1] in (b"{{", b"["):
+            return self._try_extract_json_line_message()
+        if b"\\r\\n\\r\\n" in self._stdout_buffer or b"\\n\\n" in self._stdout_buffer:
+            return self._try_extract_framed_message()
+        newline_idx = self._stdout_buffer.find(b"\\n")
+        if newline_idx < 0:
+            return None
+        preview = bytes(self._stdout_buffer[: newline_idx + 1]).decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"unexpected chunkhound mcp stdout: {{_trim_tail_text(preview, max_chars=240)}}")
 
     def _closed_stream_detail(self, stage: str) -> str:
         detail = self._stderr_tail_text()
@@ -1257,7 +1294,10 @@ class JsonRpcSession:
 
     def _write_message(self, payload: dict[str, Any], *, stage: str) -> None:
         raw = json.dumps(payload).encode("utf-8")
-        message = f"Content-Length: {{len(raw)}}\\r\\n\\r\\n".encode("utf-8") + raw
+        if self._transport_mode == "json_line":
+            message = raw + b"\\n"
+        else:
+            message = f"Content-Length: {{len(raw)}}\\r\\n\\r\\n".encode("utf-8") + raw
         try:
             self.proc.stdin.write(message)
             self.proc.stdin.flush()
@@ -1682,13 +1722,44 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
     )
 
 
-def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
-    session = JsonRpcSession()
+def _should_retry_with_alternate_transport(payload: dict[str, Any]) -> bool:
+    if bool(payload.get("ok")):
+        return False
+    stage = str(payload.get("preflight_stage") or "").strip()
+    status = str(payload.get("preflight_stage_status") or "").strip()
+    return stage in {"initialize", "notifications/initialized", "tools/list"} and status in {"error", "timeout"}
+
+
+def _run_preflight_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str, Any]:
+    session = JsonRpcSession(transport_mode=transport_mode)
+    try:
+        payload = _run_preflight(session, args)
+    finally:
+        session.close()
+    payload["mcp_transport"] = transport_mode
+    return payload
+
+
+def _run_preflight_with_fallback(args: argparse.Namespace) -> dict[str, Any]:
+    last_payload: dict[str, Any] | None = None
+    for idx, transport_mode in enumerate(_TRANSPORT_MODES):
+        payload = _run_preflight_once(args, transport_mode=transport_mode)
+        if payload.get("ok"):
+            return payload
+        last_payload = payload
+        if idx + 1 >= len(_TRANSPORT_MODES) or not _should_retry_with_alternate_transport(payload):
+            return payload
+    return last_payload or {{"ok": False, "command": "preflight", "error": "no transport modes available"}}
+
+
+def _run_tool_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str, Any]:
+    session = JsonRpcSession(transport_mode=transport_mode)
     try:
         preflight = _run_preflight(session, args)
         if not preflight.get("ok"):
             return {{
                 **preflight,
+                "mcp_transport": transport_mode,
                 "command": args.command,
                 "tool_name": "code_research" if args.command == "research" else "search",
                 "query": getattr(args, "query", None),
@@ -1719,9 +1790,29 @@ def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
             "daemon_pid": preflight.get("daemon_pid"),
             "daemon_runtime_dir": preflight.get("daemon_runtime_dir"),
             "daemon_registry_entry_path": preflight.get("daemon_registry_entry_path"),
+            "mcp_transport": transport_mode,
         }}
     finally:
         session.close()
+
+
+def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
+    last_payload: dict[str, Any] | None = None
+    for idx, transport_mode in enumerate(_TRANSPORT_MODES):
+        payload = _run_tool_once(args, transport_mode=transport_mode)
+        if payload.get("ok"):
+            return payload
+        last_payload = payload
+        if idx + 1 >= len(_TRANSPORT_MODES) or not _should_retry_with_alternate_transport(payload):
+            return payload
+    return last_payload or {{
+        "ok": False,
+        "command": args.command,
+        "tool_name": "code_research" if args.command == "research" else "search",
+        "query": getattr(args, "query", None),
+        "path": getattr(args, "path", None),
+        "error": "no transport modes available",
+    }}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1746,9 +1837,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     if args.command == "preflight":
-        session = JsonRpcSession()
         try:
-            payload = _run_preflight(session, args)
+            payload = _run_preflight_with_fallback(args)
         except Exception as exc:
             daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
             return _emit({{
@@ -1767,8 +1857,6 @@ def main() -> int:
                 "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
                 "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
             }}, exit_code=1)
-        finally:
-            session.close()
         return _emit(payload, exit_code=0 if payload.get("ok") else 1)
     try:
         payload = _run_tool(args)
