@@ -81,7 +81,7 @@ CLI_PROVIDER_SESSION_ENV_PREFIXES = {
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
-DEFAULT_MULTIPASS_STEP_WORKERS = 1
+DEFAULT_MULTIPASS_STEP_WORKERS = 4
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
@@ -719,7 +719,7 @@ def load_reviewflow_multipass_defaults(
       [multipass]
       enabled = true
       max_steps = 20
-      step_workers = 1
+      step_workers = 4
       plan_reasoning_effort = "high"
       step_reasoning_effort = "medium"
       synth_reasoning_effort = "high"

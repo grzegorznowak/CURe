@@ -332,6 +332,7 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 # warn   = record findings and continue
 # off    = skip grounding validation
 grounding_mode = "strict"
+step_workers = 4
 
 # Optional multipass-only reasoning-effort overrides.
 # If unset:

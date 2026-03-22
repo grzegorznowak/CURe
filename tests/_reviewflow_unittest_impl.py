@@ -813,6 +813,16 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+    def test_load_reviewflow_multipass_defaults_defaults_step_workers_to_four(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_default_step_workers.toml"
+        try:
+            cfg.write_text("[multipass]\nmax_steps = 5\n", encoding="utf-8")
+            mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertEqual(mp["step_workers"], 4)
+            self.assertEqual(meta["multipass"]["step_workers"], 4)
+        finally:
+            cfg.unlink(missing_ok=True)
+
     def test_load_reviewflow_multipass_defaults_defaults_step_effort_to_medium(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_default_step_effort.toml"
         try:
@@ -14842,7 +14852,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         root: Path,
         profile_resolved: str,
         multipass_enabled: bool,
-        step_workers: int = 1,
+        step_workers: int = 4,
         llm_side_effect: Any,
         expect_error: str | None = None,
         helper_preflight_side_effect: Any | None = None,
