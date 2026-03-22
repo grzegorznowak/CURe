@@ -546,6 +546,103 @@ def build_llm_meta(
     }
 
 
+_MULTIPASS_REASONING_STAGE_KEYS = {
+    "plan": "plan_reasoning_effort",
+    "step": "step_reasoning_effort",
+    "synth": "synth_reasoning_effort",
+}
+
+
+def _normalize_optional_reasoning_effort(*, raw: object, field_name: str) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        allowed = ", ".join(CODEX_REASONING_EFFORT_CHOICES)
+        raise ReviewflowError(
+            f"Invalid {field_name} in reviewflow config. Expected one of: {allowed}."
+        )
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value not in CODEX_REASONING_EFFORT_CHOICES:
+        allowed = ", ".join(CODEX_REASONING_EFFORT_CHOICES)
+        raise ReviewflowError(
+            f"Invalid {field_name} in reviewflow config. Expected one of: {allowed}."
+        )
+    return value
+
+
+def resolve_multipass_stage_llm_config(
+    *,
+    stage: str,
+    resolved: dict[str, Any],
+    resolution_meta: dict[str, Any],
+    multipass_cfg: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    stage_name = str(stage or "").strip().lower()
+    if stage_name not in _MULTIPASS_REASONING_STAGE_KEYS:
+        raise ReviewflowError(f"Unsupported multipass llm stage: {stage!r}")
+
+    provider = str(resolved.get("provider") or "").strip().lower()
+    resolved_meta = (
+        dict(resolution_meta.get("resolved"))
+        if isinstance(resolution_meta.get("resolved"), dict)
+        else {}
+    )
+    stage_override_key = _MULTIPASS_REASONING_STAGE_KEYS[stage_name]
+    override_value = _normalize_optional_reasoning_effort(
+        raw=multipass_cfg.get(stage_override_key),
+        field_name=f"[multipass].{stage_override_key}",
+    )
+
+    generic_value = str(resolved.get("reasoning_effort") or "").strip() or None
+    generic_source = str(resolved_meta.get("reasoning_effort_source") or "").strip() or "unset"
+    plan_value = str(resolved.get("plan_reasoning_effort") or "").strip() or None
+    plan_source = str(resolved_meta.get("plan_reasoning_effort_source") or "").strip() or "unset"
+
+    applied_field = "reasoning_effort"
+    base_value = generic_value
+    base_source = f"reasoning_effort:{generic_source}"
+    if stage_name == "plan" and provider == "codex":
+        applied_field = "plan_reasoning_effort"
+        if plan_value is not None:
+            base_value = plan_value
+            base_source = f"plan_reasoning_effort:{plan_source}"
+
+    effective_value = override_value if override_value is not None else base_value
+    effective_source = "multipass_config" if override_value is not None else "inherited"
+
+    stage_resolved = dict(resolved)
+    stage_resolution_meta = dict(resolution_meta)
+    stage_resolved_meta = dict(resolved_meta)
+    stage_meta = {
+        "stage": stage_name,
+        "model": str(stage_resolved.get("model") or "").strip() or None,
+        "applied_reasoning_effort_field": applied_field,
+        "base_reasoning_effort": base_value,
+        "base_reasoning_effort_source": base_source,
+        "override_reasoning_effort": override_value,
+        "override_reasoning_effort_source": ("cure.toml" if override_value is not None else "unset"),
+        "effective_reasoning_effort": effective_value,
+        "effective_reasoning_effort_source": effective_source,
+    }
+    if applied_field == "plan_reasoning_effort":
+        stage_resolved["plan_reasoning_effort"] = effective_value
+        stage_resolved_meta["plan_reasoning_effort"] = effective_value
+        stage_resolved_meta["plan_reasoning_effort_source"] = (
+            "multipass_config" if override_value is not None else base_source
+        )
+    else:
+        stage_resolved["reasoning_effort"] = effective_value
+        stage_resolved_meta["reasoning_effort"] = effective_value
+        stage_resolved_meta["reasoning_effort_source"] = (
+            "multipass_config" if override_value is not None else base_source
+        )
+    stage_resolution_meta["resolved"] = stage_resolved_meta
+    stage_resolution_meta["multipass_stage_reasoning"] = dict(stage_meta)
+    return stage_resolved, stage_resolution_meta, stage_meta
+
+
 def _reviewflow_defaults_meta(resolution_meta: dict[str, Any]) -> dict[str, Any]:
     reviewflow_defaults = resolution_meta.get("reviewflow_defaults")
     if isinstance(reviewflow_defaults, dict):
@@ -623,6 +720,9 @@ def load_reviewflow_multipass_defaults(
       enabled = true
       max_steps = 20
       step_workers = 1
+      plan_reasoning_effort = "high"
+      step_reasoning_effort = "medium"
+      synth_reasoning_effort = "high"
     """
 
     path = config_path or _default_reviewflow_config_path()
@@ -641,6 +741,19 @@ def load_reviewflow_multipass_defaults(
     step_workers = mp.get("step_workers")
     if isinstance(step_workers, bool) or not isinstance(step_workers, int):
         step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
+
+    plan_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("plan_reasoning_effort"),
+        field_name="[multipass].plan_reasoning_effort",
+    )
+    step_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("step_reasoning_effort"),
+        field_name="[multipass].step_reasoning_effort",
+    )
+    synth_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("synth_reasoning_effort"),
+        field_name="[multipass].synth_reasoning_effort",
+    )
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -671,6 +784,9 @@ def load_reviewflow_multipass_defaults(
         "max_steps": int(max_steps),
         "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
+        "plan_reasoning_effort": plan_reasoning_effort,
+        "step_reasoning_effort": step_reasoning_effort,
+        "synth_reasoning_effort": synth_reasoning_effort,
     }
     meta: dict[str, Any] = {
         "config_path": str(path),
@@ -2803,6 +2919,7 @@ __all__ = [
     "resolve_codex_flags",
     "resolve_llm_config",
     "resolve_llm_config_from_args",
+    "resolve_multipass_stage_llm_config",
     "resolve_reviewflow_config_path",
     "resolve_review_intelligence_capabilities",
     "resolve_runtime",

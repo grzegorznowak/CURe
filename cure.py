@@ -662,12 +662,33 @@ def _refresh_review_artifact_footer(
     upsert_review_artifact_footer(markdown_path=markdown_path, footer_line=footer_line)
 
 
+def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
+    llm_meta = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
+    payload = dict(llm_meta)
+    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    multipass_llm = multipass.get("llm") if isinstance(multipass.get("llm"), dict) else {}
+    review_artifact_llm = (
+        multipass_llm.get("review_artifact_llm")
+        if isinstance(multipass_llm.get("review_artifact_llm"), dict)
+        else {}
+    )
+    if not review_artifact_llm:
+        return payload or None
+    if str(review_artifact_llm.get("model") or "").strip():
+        payload["model"] = review_artifact_llm.get("model")
+    if "effective_reasoning_effort" in review_artifact_llm:
+        payload["reasoning_effort"] = review_artifact_llm.get("effective_reasoning_effort")
+    if str(multipass_llm.get("review_artifact_stage") or "").strip():
+        payload["review_artifact_stage"] = multipass_llm.get("review_artifact_stage")
+    return payload or None
+
+
 def _refresh_session_review_footer(*, meta: dict[str, Any], markdown_path: Path) -> None:
     _refresh_review_artifact_footer(
         markdown_path=markdown_path,
         session_id=str(meta.get("session_id") or "").strip() or None,
         review_head_sha=_resolve_session_review_head_sha(meta=meta),
-        llm_meta=meta.get("llm") if isinstance(meta.get("llm"), dict) else None,
+        llm_meta=_resolve_session_review_artifact_llm_meta(meta=meta),
         created_at=str(meta.get("created_at") or "").strip() or None,
         completed_at=str(meta.get("completed_at") or "").strip() or None,
     )
@@ -5148,6 +5169,159 @@ def _build_multipass_step_entries(
     return entries
 
 
+def _prepare_multipass_stage_llm_configs(
+    *,
+    meta: dict[str, Any],
+    multipass_cfg: dict[str, Any],
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+    preserve_existing_stage_meta: bool = False,
+) -> dict[str, dict[str, Any]]:
+    mp = meta.setdefault("multipass", {})
+    mp_llm = mp.setdefault("llm", {})
+    declared_overrides: dict[str, dict[str, Any]] = {}
+    stage_configs: dict[str, dict[str, Any]] = {}
+    existing_stage_meta = (
+        {str(k): dict(v) for k, v in mp_llm.get("stages", {}).items() if isinstance(v, dict)}
+        if isinstance(mp_llm.get("stages"), dict)
+        else {}
+    )
+    stage_meta_payload: dict[str, dict[str, Any]] = (
+        dict(existing_stage_meta) if preserve_existing_stage_meta else {}
+    )
+    for stage_name, key in (
+        ("plan", "plan_reasoning_effort"),
+        ("step", "step_reasoning_effort"),
+        ("synth", "synth_reasoning_effort"),
+    ):
+        override_value = str(multipass_cfg.get(key) or "").strip() or None
+        declared_overrides[key] = {
+            "value": override_value,
+            "source": ("cure.toml" if override_value is not None else "unset"),
+        }
+        stage_resolved, stage_resolution_meta, stage_meta = resolve_multipass_stage_llm_config(
+            stage=stage_name,
+            resolved=llm_resolved,
+            resolution_meta=llm_resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+        stage_configs[stage_name] = {
+            "resolved": stage_resolved,
+            "resolution_meta": stage_resolution_meta,
+            "meta": stage_meta,
+        }
+        if not preserve_existing_stage_meta:
+            stage_meta_payload[stage_name] = dict(stage_meta)
+    mp_llm["declared_overrides"] = declared_overrides
+    if stage_meta_payload:
+        mp_llm["stages"] = stage_meta_payload
+    if "review_artifact_stage" not in mp_llm:
+        mp_llm["review_artifact_stage"] = None
+    return stage_configs
+
+
+def _record_multipass_stage_llm(*, meta: dict[str, Any], stage_name: str, stage_llm_meta: dict[str, Any]) -> None:
+    mp_llm = meta.setdefault("multipass", {}).setdefault("llm", {})
+    stage_map = mp_llm.setdefault("stages", {})
+    if isinstance(stage_map, dict):
+        stage_map[stage_name] = dict(stage_llm_meta)
+
+
+def _record_multipass_review_artifact_llm(
+    *, meta: dict[str, Any], stage_name: str, stage_llm_meta: dict[str, Any]
+) -> None:
+    mp_llm = meta.setdefault("multipass", {}).setdefault("llm", {})
+    mp_llm["review_artifact_stage"] = stage_name
+    mp_llm["review_artifact_llm"] = dict(stage_llm_meta)
+
+
+def _record_existing_multipass_review_artifact_llm(*, meta: dict[str, Any], stage_name: str) -> None:
+    mp_llm = meta.setdefault("multipass", {}).setdefault("llm", {})
+    stages = mp_llm.get("stages") if isinstance(mp_llm.get("stages"), dict) else {}
+    stage_llm_meta = stages.get(stage_name) if isinstance(stages.get(stage_name), dict) else None
+    if stage_llm_meta is None:
+        return
+    _record_multipass_review_artifact_llm(
+        meta=meta,
+        stage_name=stage_name,
+        stage_llm_meta=stage_llm_meta,
+    )
+
+
+def _runtime_policy_for_multipass_stage(
+    *,
+    runtime_policy: dict[str, Any],
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+) -> dict[str, Any]:
+    provider = str(llm_resolved.get("provider") or "").strip().lower()
+    if provider != "codex":
+        return runtime_policy
+    stage_policy = dict(runtime_policy)
+    codex_flags, _ = build_codex_flags_from_llm_config(
+        resolved=llm_resolved,
+        resolution_meta=llm_resolution_meta,
+        include_sandbox=False,
+    )
+    sandbox_mode = str(stage_policy.get("sandbox_mode") or "").strip()
+    if sandbox_mode:
+        codex_flags.extend(["--sandbox", sandbox_mode])
+    approval_policy = str(stage_policy.get("approval_policy") or "").strip()
+    if approval_policy:
+        codex_flags.extend(["-a", approval_policy])
+    stage_policy["codex_flags"] = codex_flags
+    return stage_policy
+
+
+def _ensure_multipass_run_entry(
+    meta: dict[str, Any],
+    *,
+    kind: str,
+    output_path: Path,
+    template_id: str,
+    prompt: str,
+    stage_llm_meta: dict[str, Any],
+    step_index: int | None = None,
+    step_id: str | None = None,
+    step_title: str | None = None,
+) -> dict[str, Any]:
+    mp_runs = meta.setdefault("multipass", {}).setdefault("runs", [])
+    run_entry = next(
+        (
+            item
+            for item in mp_runs
+            if isinstance(item, dict)
+            and str(item.get("kind") or "").strip() == kind
+            and (
+                kind != "step"
+                or int(item.get("step_index") or 0) == int(step_index or 0)
+            )
+        ),
+        None,
+    )
+    if run_entry is None:
+        run_entry = {"kind": kind}
+        mp_runs.append(run_entry)
+    run_entry.update(
+        {
+            "output_path": str(output_path),
+            "template_id": template_id,
+            "prompt_chars": len(prompt),
+            "prompt_sha256": sha256_text(prompt),
+            "llm": dict(stage_llm_meta),
+        }
+    )
+    if kind == "step":
+        run_entry.update(
+            {
+                "step_index": int(step_index or 0),
+                "step_id": step_id,
+                "step_title": step_title,
+            }
+        )
+    return run_entry
+
+
 def _run_multipass_step_llm(
     *,
     entry: MultipassStepEntry,
@@ -7723,6 +7897,30 @@ def _pr_flow_impl(
                         "grounding_mode", DEFAULT_MULTIPASS_GROUNDING_MODE
                     )
                 )
+                multipass_stage_llms = _prepare_multipass_stage_llm_configs(
+                    meta=progress.meta,
+                    multipass_cfg=multipass_defaults,
+                    llm_resolved=llm_resolved,
+                    llm_resolution_meta=llm_resolution_meta,
+                )
+                plan_llm = multipass_stage_llms["plan"]
+                step_llm = multipass_stage_llms["step"]
+                synth_llm = multipass_stage_llms["synth"]
+                plan_runtime_policy = _runtime_policy_for_multipass_stage(
+                    runtime_policy=runtime_policy,
+                    llm_resolved=plan_llm["resolved"],
+                    llm_resolution_meta=plan_llm["resolution_meta"],
+                )
+                step_runtime_policy = _runtime_policy_for_multipass_stage(
+                    runtime_policy=runtime_policy,
+                    llm_resolved=step_llm["resolved"],
+                    llm_resolution_meta=step_llm["resolution_meta"],
+                )
+                synth_runtime_policy = _runtime_policy_for_multipass_stage(
+                    runtime_policy=runtime_policy,
+                    llm_resolved=synth_llm["resolved"],
+                    llm_resolution_meta=synth_llm["resolution_meta"],
+                )
 
                 plan_md_path = session_dir / "review.plan.md"
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
@@ -7758,36 +7956,38 @@ def _pr_flow_impl(
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
-                    progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
-                        {
-                            "kind": "plan",
-                            "template_id": builtin_prompt_id(templates["plan"]),
-                            "output_path": str(plan_md_path),
-                            "prompt_chars": len(plan_prompt),
-                            "prompt_sha256": sha256_text(plan_prompt),
-                        }
+                    plan_run_entry = _ensure_multipass_run_entry(
+                        progress.meta,
+                        kind="plan",
+                        output_path=plan_md_path,
+                        template_id=builtin_prompt_id(templates["plan"]),
+                        prompt=plan_prompt,
+                        stage_llm_meta=plan_llm["meta"],
                     )
                     progress.flush()
                     plan_result = run_llm_exec(
                         repo_dir=repo_dir,
-                        resolved=llm_resolved,
-                        resolution_meta=llm_resolution_meta,
+                        resolved=plan_llm["resolved"],
+                        resolution_meta=plan_llm["resolution_meta"],
                         output_path=plan_md_path,
                         prompt=plan_prompt,
                         env=env,
                         stream=stream,
                         progress=progress,
                         add_dirs=add_dirs,
-                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                        runtime_policy=runtime_policy,
+                        codex_config_overrides=list(plan_runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=plan_runtime_policy,
                     )
                     record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
-                    plan_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
-                    if plan_runs and isinstance(plan_runs[-1], dict) and plan_result.resume is not None:
-                        plan_runs[-1]["llm_session_id"] = plan_result.resume.session_id
-                        plan_runs[-1]["llm_provider"] = plan_result.resume.provider
-                    if plan_runs and isinstance(plan_runs[-1], dict):
-                        plan_runs[-1]["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
+                    _record_multipass_stage_llm(
+                        meta=progress.meta,
+                        stage_name="plan",
+                        stage_llm_meta=plan_llm["meta"],
+                    )
+                    if plan_result.resume is not None:
+                        plan_run_entry["llm_session_id"] = plan_result.resume.session_id
+                        plan_run_entry["llm_provider"] = plan_result.resume.provider
+                    plan_run_entry["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
                     progress.flush()
                     plan_tool_report = _enforce_codex_chunkhound_tool_proof(
                         meta=progress.meta,
@@ -7839,6 +8039,11 @@ def _pr_flow_impl(
                             encoding="utf-8",
                         )
                         progress.meta.setdefault("multipass", {})["status"] = "abort"
+                        _record_multipass_review_artifact_llm(
+                            meta=progress.meta,
+                            stage_name="plan",
+                            stage_llm_meta=plan_llm["meta"],
+                        )
                         progress.flush()
                         if persist_review_verdicts_from_markdown(
                             meta=progress.meta, markdown_path=review_md_path
@@ -7879,22 +8084,24 @@ def _pr_flow_impl(
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
                     )
-                    progress.meta.setdefault("multipass", {}).setdefault("runs", []).extend(
-                        [
-                            {
-                                "kind": "step",
-                                "step_index": entry.index,
-                                "step_id": entry.step_id,
-                                "step_title": entry.step_title,
-                                "output_path": str(entry.output_path),
-                                "template_id": builtin_prompt_id(templates["step"]),
-                                "prompt_chars": len(entry.prompt),
-                                "prompt_sha256": sha256_text(entry.prompt),
-                            }
-                            for entry in step_entries
-                        ]
-                    )
+                    for entry in step_entries:
+                        _ensure_multipass_run_entry(
+                            progress.meta,
+                            kind="step",
+                            step_index=entry.index,
+                            step_id=entry.step_id,
+                            step_title=entry.step_title,
+                            output_path=entry.output_path,
+                            template_id=builtin_prompt_id(templates["step"]),
+                            prompt=entry.prompt,
+                            stage_llm_meta=step_llm["meta"],
+                        )
                     progress.flush()
+                    _record_multipass_stage_llm(
+                        meta=progress.meta,
+                        stage_name="step",
+                        stage_llm_meta=step_llm["meta"],
+                    )
                     with phase("codex_steps", progress=progress, quiet=quiet):
                         success_resume_command = _execute_multipass_step_stage(
                             progress=progress,
@@ -7908,12 +8115,12 @@ def _pr_flow_impl(
                                     "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
                                 )
                             ),
-                            llm_resolved=llm_resolved,
-                            llm_resolution_meta=llm_resolution_meta,
+                            llm_resolved=step_llm["resolved"],
+                            llm_resolution_meta=step_llm["resolution_meta"],
                             env=env,
                             stream=stream,
                             add_dirs=add_dirs,
-                            runtime_policy=runtime_policy,
+                            runtime_policy=step_runtime_policy,
                             templates=templates,
                             codex_meta=codex_meta,
                             quiet=quiet,
@@ -7951,36 +8158,40 @@ def _pr_flow_impl(
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                             },
                         )
-                        progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
-                            {
-                                "kind": "synth",
-                                "template_id": builtin_prompt_id(templates["synth"]),
-                                "output_path": str(review_md_path),
-                                "prompt_chars": len(synth_prompt),
-                                "prompt_sha256": sha256_text(synth_prompt),
-                            }
+                        synth_run_entry = _ensure_multipass_run_entry(
+                            progress.meta,
+                            kind="synth",
+                            output_path=review_md_path,
+                            template_id=builtin_prompt_id(templates["synth"]),
+                            prompt=synth_prompt,
+                            stage_llm_meta=synth_llm["meta"],
                         )
                         progress.flush()
                         synth_result = run_llm_exec(
                             repo_dir=repo_dir,
-                            resolved=llm_resolved,
-                            resolution_meta=llm_resolution_meta,
+                            resolved=synth_llm["resolved"],
+                            resolution_meta=synth_llm["resolution_meta"],
                             output_path=review_md_path,
                             prompt=synth_prompt,
                             env=env,
                             stream=stream,
                             progress=progress,
                             add_dirs=add_dirs,
-                            codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                            runtime_policy=runtime_policy,
+                            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
+                            runtime_policy=synth_runtime_policy,
                         )
                         record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
-                        synth_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
-                        if synth_runs and isinstance(synth_runs[-1], dict) and synth_result.resume is not None:
-                            synth_runs[-1]["llm_session_id"] = synth_result.resume.session_id
-                            synth_runs[-1]["llm_provider"] = synth_result.resume.provider
-                        if synth_runs and isinstance(synth_runs[-1], dict):
-                            synth_runs[-1]["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
+                        _record_multipass_stage_llm(
+                            meta=progress.meta,
+                            stage_name="synth",
+                            stage_llm_meta=synth_llm["meta"],
+                        )
+                        if synth_result.resume is not None:
+                            synth_run_entry["llm_session_id"] = synth_result.resume.session_id
+                            synth_run_entry["llm_provider"] = synth_result.resume.provider
+                        synth_run_entry["usage"] = _normalize_llm_usage(
+                            synth_result.adapter_meta.get("usage")
+                        )
                         progress.flush()
                         success_resume_command = record_llm_resume(
                             progress.meta.setdefault("llm", {}), synth_result.resume
@@ -8020,6 +8231,11 @@ def _pr_flow_impl(
                             and (synth_validation.get("valid") is False)
                         ):
                             raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
+                        _record_multipass_review_artifact_llm(
+                            meta=progress.meta,
+                            stage_name="synth",
+                            stage_llm_meta=synth_llm["meta"],
+                        )
 
                     progress.meta.setdefault("multipass", {})["status"] = "done"
                     progress.flush()
@@ -8525,6 +8741,31 @@ def _resume_flow_impl(
         )
         progress.meta.setdefault("multipass", {})["step_workers_source"] = "cure.toml"
         progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
+        multipass_stage_llms = _prepare_multipass_stage_llm_configs(
+            meta=progress.meta,
+            multipass_cfg=multipass_cfg,
+            llm_resolved=llm_resolved,
+            llm_resolution_meta=llm_resolution_meta,
+            preserve_existing_stage_meta=True,
+        )
+        plan_llm = multipass_stage_llms["plan"]
+        step_llm = multipass_stage_llms["step"]
+        synth_llm = multipass_stage_llms["synth"]
+        plan_runtime_policy = _runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved=plan_llm["resolved"],
+            llm_resolution_meta=plan_llm["resolution_meta"],
+        )
+        step_runtime_policy = _runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved=step_llm["resolved"],
+            llm_resolution_meta=step_llm["resolution_meta"],
+        )
+        synth_runtime_policy = _runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved=synth_llm["resolved"],
+            llm_resolution_meta=synth_llm["resolution_meta"],
+        )
         progress.flush()
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
@@ -8566,6 +8807,7 @@ def _resume_flow_impl(
         progress.flush()
 
         did_work = False
+        plan_reran = False
         plan_tool_report: dict[str, Any] | None = None
 
         if from_phase in {"plan", "auto"} and (from_phase == "plan" or not plan_json_path.is_file()):
@@ -8579,6 +8821,7 @@ def _resume_flow_impl(
             progress.flush()
             with phase("codex_plan", progress=progress, quiet=quiet):
                 did_work = True
+                plan_reran = True
                 plan_template = load_builtin_prompt_text(templates["plan"])
                 plan_prompt = render_prompt(
                     plan_template,
@@ -8599,20 +8842,37 @@ def _resume_flow_impl(
                         "MAX_STEPS": str(max_steps),
                     },
                 )
+                plan_run_entry = _ensure_multipass_run_entry(
+                    progress.meta,
+                    kind="plan",
+                    output_path=plan_md_path,
+                    template_id=builtin_prompt_id(templates["plan"]),
+                    prompt=plan_prompt,
+                    stage_llm_meta=plan_llm["meta"],
+                )
                 plan_result = run_llm_exec(
                     repo_dir=repo_dir,
-                    resolved=llm_resolved,
-                    resolution_meta=llm_resolution_meta,
+                    resolved=plan_llm["resolved"],
+                    resolution_meta=plan_llm["resolution_meta"],
                     output_path=plan_md_path,
                     prompt=plan_prompt,
                     env=env,
                     stream=stream,
                     progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                    runtime_policy=runtime_policy,
+                    codex_config_overrides=list(plan_runtime_policy.get("codex_config_overrides") or []),
+                    runtime_policy=plan_runtime_policy,
                 )
                 record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
+                _record_multipass_stage_llm(
+                    meta=progress.meta,
+                    stage_name="plan",
+                    stage_llm_meta=plan_llm["meta"],
+                )
+                plan_run_entry["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
+                if plan_result.resume is not None:
+                    plan_run_entry["llm_session_id"] = plan_result.resume.session_id
+                    plan_run_entry["llm_provider"] = plan_result.resume.provider
                 success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), plan_result.resume)
                 if codex_meta is not None:
                     codex_resume = (
@@ -8664,6 +8924,14 @@ def _resume_flow_impl(
                 build_abort_review_markdown(reason=reason, include_steps_taken=True),
                 encoding="utf-8",
             )
+            if plan_reran:
+                _record_multipass_review_artifact_llm(
+                    meta=progress.meta,
+                    stage_name="plan",
+                    stage_llm_meta=plan_llm["meta"],
+                )
+            else:
+                _record_existing_multipass_review_artifact_llm(meta=progress.meta, stage_name="plan")
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()
             progress.done()
@@ -8732,24 +9000,18 @@ def _resume_flow_impl(
             )
 
         progress.meta.setdefault("multipass", {}).setdefault("runs", [])
-        existing_step_runs = {
-            int(item.get("step_index") or 0)
-            for item in progress.meta.setdefault("multipass", {}).setdefault("runs", [])
-            if isinstance(item, dict) and str(item.get("kind") or "").strip() == "step"
-        }
         for entry in step_entries:
-            if entry.should_run and entry.index not in existing_step_runs:
-                progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
-                    {
-                        "kind": "step",
-                        "step_index": entry.index,
-                        "step_id": entry.step_id,
-                        "step_title": entry.step_title,
-                        "output_path": str(entry.output_path),
-                        "template_id": builtin_prompt_id(templates["step"]),
-                        "prompt_chars": len(entry.prompt),
-                        "prompt_sha256": sha256_text(entry.prompt),
-                    }
+            if entry.should_run:
+                _ensure_multipass_run_entry(
+                    progress.meta,
+                    kind="step",
+                    step_index=entry.index,
+                    step_id=entry.step_id,
+                    step_title=entry.step_title,
+                    output_path=entry.output_path,
+                    template_id=builtin_prompt_id(templates["step"]),
+                    prompt=entry.prompt,
+                    stage_llm_meta=step_llm["meta"],
                 )
         progress.flush()
 
@@ -8757,6 +9019,11 @@ def _resume_flow_impl(
         step_reran = any(entry.should_run for entry in step_entries)
         if step_reran:
             did_work = True
+            _record_multipass_stage_llm(
+                meta=progress.meta,
+                stage_name="step",
+                stage_llm_meta=step_llm["meta"],
+            )
             with phase("codex_steps", progress=progress, quiet=quiet):
                 success_resume_command = _execute_multipass_step_stage(
                     progress=progress,
@@ -8770,12 +9037,12 @@ def _resume_flow_impl(
                             "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
                         )
                     ),
-                    llm_resolved=llm_resolved,
-                    llm_resolution_meta=llm_resolution_meta,
+                    llm_resolved=step_llm["resolved"],
+                    llm_resolution_meta=step_llm["resolution_meta"],
                     env=env,
                     stream=stream,
                     add_dirs=add_dirs,
-                    runtime_policy=runtime_policy,
+                    runtime_policy=step_runtime_policy,
                     templates=templates,
                     codex_meta=codex_meta,
                     quiet=quiet,
@@ -8849,20 +9116,37 @@ def _resume_flow_impl(
                         "STEP_OUTPUT_PATHS": step_paths_text,
                     },
                 )
+                synth_run_entry = _ensure_multipass_run_entry(
+                    progress.meta,
+                    kind="synth",
+                    output_path=review_md_path,
+                    template_id=builtin_prompt_id(templates["synth"]),
+                    prompt=synth_prompt,
+                    stage_llm_meta=synth_llm["meta"],
+                )
                 synth_result = run_llm_exec(
                     repo_dir=repo_dir,
-                    resolved=llm_resolved,
-                    resolution_meta=llm_resolution_meta,
+                    resolved=synth_llm["resolved"],
+                    resolution_meta=synth_llm["resolution_meta"],
                     output_path=review_md_path,
                     prompt=synth_prompt,
                     env=env,
                     stream=stream,
                     progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                    runtime_policy=runtime_policy,
+                    codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
+                    runtime_policy=synth_runtime_policy,
                 )
                 record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
+                _record_multipass_stage_llm(
+                    meta=progress.meta,
+                    stage_name="synth",
+                    stage_llm_meta=synth_llm["meta"],
+                )
+                synth_run_entry["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
+                if synth_result.resume is not None:
+                    synth_run_entry["llm_session_id"] = synth_result.resume.session_id
+                    synth_run_entry["llm_provider"] = synth_result.resume.provider
                 success_resume_command = record_llm_resume(
                     progress.meta.setdefault("llm", {}), synth_result.resume
                 )
@@ -8901,6 +9185,11 @@ def _resume_flow_impl(
                     and (synth_validation.get("valid") is False)
                 ):
                     raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
+                _record_multipass_review_artifact_llm(
+                    meta=progress.meta,
+                    stage_name="synth",
+                    stage_llm_meta=synth_llm["meta"],
+                )
 
         if did_work:
             progress.meta["status"] = "running"
@@ -12326,6 +12615,7 @@ from cure_runtime import (
     resolve_codex_flags,
     resolve_llm_config,
     resolve_llm_config_from_args,
+    resolve_multipass_stage_llm_config,
     resolve_review_intelligence_capabilities,
     resolve_reviewflow_config_path,
     resolve_runtime,

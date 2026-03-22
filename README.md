@@ -332,6 +332,14 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 # warn   = record findings and continue
 # off    = skip grounding validation
 grounding_mode = "strict"
+
+# Optional multipass-only reasoning-effort overrides.
+# If unset:
+# - plan keeps using the existing resolved plan effort
+# - step and synth keep using the generic resolved reasoning effort
+plan_reasoning_effort = "high"
+step_reasoning_effort = "medium"
+synth_reasoning_effort = "high"
 ```
 
 If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.

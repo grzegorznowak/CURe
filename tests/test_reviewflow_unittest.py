@@ -813,6 +813,31 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+    def test_load_reviewflow_multipass_defaults_parses_stage_reasoning_efforts(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_stage_efforts.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[multipass]",
+                        'plan_reasoning_effort = "high"',
+                        'step_reasoning_effort = "low"',
+                        'synth_reasoning_effort = "xhigh"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertEqual(mp["plan_reasoning_effort"], "high")
+            self.assertEqual(mp["step_reasoning_effort"], "low")
+            self.assertEqual(mp["synth_reasoning_effort"], "xhigh")
+            self.assertEqual(meta["multipass"]["plan_reasoning_effort"], "high")
+            self.assertEqual(meta["multipass"]["step_reasoning_effort"], "low")
+            self.assertEqual(meta["multipass"]["synth_reasoning_effort"], "xhigh")
+        finally:
+            cfg.unlink(missing_ok=True)
+
     def test_load_reviewflow_multipass_defaults_rejects_invalid_grounding_mode(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_invalid_grounding.toml"
         try:
@@ -822,8 +847,118 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+    def test_load_reviewflow_multipass_defaults_rejects_invalid_stage_reasoning_effort(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_invalid_stage_effort.toml"
+        try:
+            cfg.write_text('[multipass]\nstep_reasoning_effort = "broken"\n', encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertIn("[multipass].step_reasoning_effort", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
 
 class LlmPresetConfigTests(unittest.TestCase):
+    def test_resolve_multipass_stage_llm_config_preserves_codex_plan_and_generic_step_synth_inheritance(self) -> None:
+        resolved = {
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "reasoning_effort": "medium",
+            "plan_reasoning_effort": "high",
+        }
+        resolution_meta = {
+            "resolved": {
+                "model_source": "cli",
+                "reasoning_effort_source": "cli",
+                "plan_reasoning_effort_source": "preset",
+            }
+        }
+        multipass_cfg = {}
+
+        plan_resolved, plan_resolution_meta, plan_meta = rf.resolve_multipass_stage_llm_config(
+            stage="plan",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+        step_resolved, _, step_meta = rf.resolve_multipass_stage_llm_config(
+            stage="step",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+        synth_resolved, _, synth_meta = rf.resolve_multipass_stage_llm_config(
+            stage="synth",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+
+        self.assertEqual(plan_resolved["reasoning_effort"], "medium")
+        self.assertEqual(plan_resolved["plan_reasoning_effort"], "high")
+        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "plan_reasoning_effort")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "high")
+        self.assertEqual(plan_meta["base_reasoning_effort_source"], "plan_reasoning_effort:preset")
+        self.assertEqual(
+            plan_resolution_meta["resolved"]["plan_reasoning_effort_source"],
+            "plan_reasoning_effort:preset",
+        )
+        self.assertEqual(step_resolved["reasoning_effort"], "medium")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(step_meta["base_reasoning_effort_source"], "reasoning_effort:cli")
+        self.assertEqual(synth_resolved["reasoning_effort"], "medium")
+        self.assertEqual(synth_meta["effective_reasoning_effort"], "medium")
+
+    def test_resolve_multipass_stage_llm_config_applies_stage_overrides_and_non_codex_plan_carrier(self) -> None:
+        resolved = {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "reasoning_effort": "medium",
+            "plan_reasoning_effort": "high",
+        }
+        resolution_meta = {
+            "resolved": {
+                "reasoning_effort_source": "preset",
+                "plan_reasoning_effort_source": "reviewflow_defaults",
+            }
+        }
+        multipass_cfg = {
+            "plan_reasoning_effort": "minimal",
+            "step_reasoning_effort": "low",
+            "synth_reasoning_effort": "xhigh",
+        }
+
+        plan_resolved, plan_resolution_meta, plan_meta = rf.resolve_multipass_stage_llm_config(
+            stage="plan",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+        step_resolved, step_resolution_meta, step_meta = rf.resolve_multipass_stage_llm_config(
+            stage="step",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+        synth_resolved, synth_resolution_meta, synth_meta = rf.resolve_multipass_stage_llm_config(
+            stage="synth",
+            resolved=resolved,
+            resolution_meta=resolution_meta,
+            multipass_cfg=multipass_cfg,
+        )
+
+        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "reasoning_effort")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "minimal")
+        self.assertEqual(plan_meta["effective_reasoning_effort_source"], "multipass_config")
+        self.assertEqual(plan_resolved["reasoning_effort"], "minimal")
+        self.assertEqual(plan_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "low")
+        self.assertEqual(step_resolved["reasoning_effort"], "low")
+        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(synth_meta["effective_reasoning_effort"], "xhigh")
+        self.assertEqual(synth_resolved["reasoning_effort"], "xhigh")
+        self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+
     def test_load_reviewflow_llm_config_parses_builtin_named_overrides(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_llm.toml"
         try:
@@ -14596,6 +14731,10 @@ class CodexToolProofFlowTests(unittest.TestCase):
         llm_side_effect: Any,
         expect_error: str | None = None,
         helper_preflight_side_effect: Any | None = None,
+        multipass_defaults_override: dict[str, object] | None = None,
+        llm_resolved_override: dict[str, object] | None = None,
+        llm_resolution_meta_override: dict[str, object] | None = None,
+        runtime_policy_override: dict[str, object] | None = None,
     ) -> tuple[Path, list[str]]:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
@@ -14629,6 +14768,31 @@ class CodexToolProofFlowTests(unittest.TestCase):
         )
         calls: list[str] = []
         llm_param_count = len(inspect.signature(llm_side_effect).parameters)
+        multipass_defaults = (
+            dict(multipass_defaults_override)
+            if isinstance(multipass_defaults_override, dict)
+            else {
+                "enabled": multipass_enabled,
+                "max_steps": 20,
+                "step_workers": step_workers,
+                "grounding_mode": "off",
+            }
+        )
+        llm_resolved = (
+            dict(llm_resolved_override)
+            if isinstance(llm_resolved_override, dict)
+            else {"provider": "codex", "preset": "test-codex"}
+        )
+        llm_resolution_meta = (
+            dict(llm_resolution_meta_override)
+            if isinstance(llm_resolution_meta_override, dict)
+            else {}
+        )
+        runtime_policy = (
+            dict(runtime_policy_override)
+            if isinstance(runtime_policy_override, dict)
+            else self._codex_runtime_policy()
+        )
 
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -14706,20 +14870,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     rf,
                     "load_reviewflow_multipass_defaults",
                     return_value=(
-                        {
-                            "enabled": multipass_enabled,
-                            "max_steps": 20,
-                            "step_workers": step_workers,
-                            "grounding_mode": "off",
-                        },
-                        {
-                            "multipass": {
-                                "enabled": multipass_enabled,
-                                "max_steps": 20,
-                                "step_workers": step_workers,
-                                "grounding_mode": "off",
-                            }
-                        },
+                        multipass_defaults,
+                        {"multipass": dict(multipass_defaults)},
                     ),
                 )
             )
@@ -14731,17 +14883,14 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "resolve_llm_config_from_args",
-                    return_value=(
-                        {"provider": "codex", "preset": "test-codex"},
-                        {},
-                    ),
+                    return_value=(llm_resolved, llm_resolution_meta),
                 )
             )
             stack.enter_context(
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value=self._codex_runtime_policy(),
+                    return_value=runtime_policy,
                 )
             )
             if helper_preflight_side_effect is None:
@@ -15191,6 +15340,145 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 [run["review_stage"] for run in report["runs"]],
                 ["multipass_plan", "multipass_step", "multipass_synth"],
             )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_multipass_stage_effort_overrides_update_stage_metadata_and_footer(self) -> None:
+        root = ROOT / ".tmp_test_multipass_stage_effort_overrides"
+        stage_invocations: dict[str, dict[str, object]] = {}
+
+        def llm_side_effect(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> rf.LlmRunResult:
+            resolved = kwargs["resolved"] if isinstance(kwargs.get("resolved"), dict) else {}
+            resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+            runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
+            stage_invocations[output_path.name] = {
+                "reasoning_effort": resolved.get("reasoning_effort"),
+                "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+                "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+                "plan_reasoning_effort_source": (
+                    (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
+                ),
+                "codex_flags": list(runtime_policy.get("codex_flags") or []),
+            }
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [{"id": "01", "title": "API review", "focus": "tool proof"}],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: tool proof",
+                            "",
+                            "### Steps taken",
+                            "- checked repo",
+                            "",
+                            "### Findings",
+                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "",
+                            "### Suggested actions",
+                            "- Add checks",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name == "review.md":
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+            multipass_defaults_override={
+                "enabled": True,
+                "max_steps": 20,
+                "step_workers": 1,
+                "grounding_mode": "off",
+                "plan_reasoning_effort": "minimal",
+                "step_reasoning_effort": "low",
+                "synth_reasoning_effort": "xhigh",
+            },
+            llm_resolved_override={
+                "provider": "codex",
+                "preset": "test-codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "medium",
+                "plan_reasoning_effort": "high",
+                "capabilities": {"supports_resume": True},
+            },
+            llm_resolution_meta_override={
+                "resolved": {
+                    "model_source": "cli",
+                    "reasoning_effort_source": "cli",
+                    "plan_reasoning_effort_source": "preset",
+                }
+            },
+            runtime_policy_override={
+                "env": {},
+                "metadata": {},
+                "staged_paths": {},
+                "add_dirs": [],
+                "codex_config_overrides": [],
+                "codex_flags": [],
+                "dangerously_bypass_approvals_and_sandbox": False,
+                "sandbox_mode": "workspace-write",
+                "approval_policy": "never",
+            },
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            review_md = (session_dir / "review.md").read_text(encoding="utf-8")
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
+            self.assertEqual(stage_invocations["review.plan.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort"], "minimal")
+            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort_source"], "multipass_config")
+            self.assertIn('plan_mode_reasoning_effort="minimal"', stage_invocations["review.plan.md"]["codex_flags"])
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertIn('model_reasoning_effort="low"', stage_invocations["review.step-01.md"]["codex_flags"])
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertIn('model_reasoning_effort="xhigh"', stage_invocations["review.md"]["codex_flags"])
+            self.assertEqual(meta["llm"]["reasoning_effort"], "medium")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "minimal")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(meta["multipass"]["llm"]["review_artifact_stage"], "synth")
+            self.assertEqual(
+                meta["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
+                "xhigh",
+            )
+            self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "minimal")
+            self.assertIn("model gpt-5.4/xhigh", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -15984,8 +16272,21 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "resolve_llm_config_from_args",
                         return_value=(
-                            {"provider": "codex", "preset": "test-codex", "capabilities": {"supports_resume": True}},
-                            {},
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
                         ),
                     )
                 )
@@ -16001,8 +16302,22 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "load_reviewflow_multipass_defaults",
                         return_value=(
-                            {"enabled": True, "max_steps": 20, "grounding_mode": "strict"},
-                            {"multipass": {"enabled": True, "max_steps": 20, "grounding_mode": "strict"}},
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
                         ),
                     )
                 )
@@ -16160,10 +16475,21 @@ class CodexToolProofFlowTests(unittest.TestCase):
             (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
             calls: list[str] = []
+            stage_invocations: dict[str, dict[str, object]] = {}
 
             def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
                 output_path = Path(str(kwargs["output_path"]))
                 calls.append(output_path.name)
+                resolved = kwargs["resolved"] if isinstance(kwargs.get("resolved"), dict) else {}
+                resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+                stage_invocations[output_path.name] = {
+                    "reasoning_effort": resolved.get("reasoning_effort"),
+                    "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+                    "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+                    "plan_reasoning_effort_source": (
+                        (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
+                    ),
+                }
                 if output_path.name == "review.step-01.md":
                     output_path.write_text(
                         "\n".join(
@@ -16243,8 +16569,21 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "resolve_llm_config_from_args",
                         return_value=(
-                            {"provider": "codex", "preset": "test-codex", "capabilities": {"supports_resume": True}},
-                            {},
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
                         ),
                     )
                 )
@@ -16260,8 +16599,22 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         rf,
                         "load_reviewflow_multipass_defaults",
                         return_value=(
-                            {"enabled": True, "max_steps": 20, "grounding_mode": "strict"},
-                            {"multipass": {"enabled": True, "max_steps": 20, "grounding_mode": "strict"}},
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
                         ),
                     )
                 )
@@ -16278,8 +16631,340 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["multipass_step", "multipass_synth"])
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(refreshed["llm"]["reasoning_effort"], "medium")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(
+                refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
+                "xhigh",
+            )
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
+            self.assertIn("model gpt-5.4/xhigh", review_md_text)
             self.assertIn("session session-1", review_md_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_preserves_reused_stage_effort_metadata_under_config_drift(self) -> None:
+        root = ROOT / ".tmp_test_resume_stage_effort_metadata_drift"
+        cfg = root / "reviewflow.toml"
+        valid_step_markdown = "\n".join(
+            [
+                "### Step Result: 01 — API review",
+                "**Focus**: tool proof",
+                "",
+                "### Steps taken",
+                "- checked repo",
+                "",
+                "### Findings",
+                "- Input lacks validation. Evidence: `src/app.py:2`",
+                "",
+                "### Suggested actions",
+                "- Add checks",
+                "",
+            ]
+        )
+        valid_synth_markdown = "\n".join(
+            [
+                "### Steps taken",
+                "- Read step output",
+                "",
+                "**Summary**: ok",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Business value is clear. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Technical read happened. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "tool proof"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(valid_step_markdown, encoding="utf-8")
+            review_md = session_dir / "review.md"
+            old_review_md = session_dir / "review.previous.md"
+            old_review_md.write_text(valid_synth_markdown, encoding="utf-8")
+            step_validation = rf.validate_multipass_step_grounding(
+                artifact_path=step_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            synth_validation = rf.validate_multipass_synth_grounding(
+                artifact_path=old_review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "artifacts": {"step_outputs": [str(step_output)]},
+                    "llm": {
+                        "stages": {
+                            "plan": {
+                                "stage": "plan",
+                                "model": "gpt-5.4",
+                                "effective_reasoning_effort": "high",
+                                "effective_reasoning_effort_source": "inherited",
+                            },
+                            "step": {
+                                "stage": "step",
+                                "model": "gpt-5.4",
+                                "effective_reasoning_effort": "medium",
+                                "effective_reasoning_effort_source": "inherited",
+                            },
+                            "synth": {
+                                "stage": "synth",
+                                "model": "gpt-5.4",
+                                "effective_reasoning_effort": "medium",
+                                "effective_reasoning_effort_source": "inherited",
+                            },
+                        },
+                        "review_artifact_stage": "synth",
+                        "review_artifact_llm": {
+                            "stage": "synth",
+                            "model": "gpt-5.4",
+                            "effective_reasoning_effort": "medium",
+                            "effective_reasoning_effort_source": "inherited",
+                        },
+                    },
+                    "validation": {
+                        "mode": "strict",
+                        "invalid_artifacts": ["synth"],
+                        "has_invalid_artifacts": True,
+                        "artifacts": {
+                            "step-01": step_validation,
+                            "synth": synth_validation,
+                        },
+                        "report_path": str(work_dir / "grounding_report.json"),
+                    },
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+            stage_invocations: dict[str, dict[str, object]] = {}
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                resolved = kwargs["resolved"] if isinstance(kwargs.get("resolved"), dict) else {}
+                resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+                stage_invocations[output_path.name] = {
+                    "reasoning_effort": resolved.get("reasoning_effort"),
+                    "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+                    "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+                    "plan_reasoning_effort_source": (
+                        (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
+                    ),
+                }
+                if output_path.name != "review.md":
+                    raise AssertionError(f"unexpected rerun path: {output_path}")
+                output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            review_md_text = review_md.read_text(encoding="utf-8")
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "high")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(refreshed["multipass"]["llm"]["review_artifact_stage"], "synth")
+            self.assertEqual(
+                refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
+                "xhigh",
+            )
+            self.assertIn("model gpt-5.4/xhigh", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
