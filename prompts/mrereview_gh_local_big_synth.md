@@ -40,7 +40,11 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
-- Every non-empty bullet under `Strengths`, `In Scope Issues`, `Out of Scope Issues`, and `Reusability` must end with a `Sources:` suffix containing one or more real `review.step-XX.md:line` citations.
+- Every non-empty bullet under `Strengths`, `In Scope Issues`, `Out of Scope Issues`, and `Reusability` must end with a `Sources:` suffix containing at least one real primary-evidence citation.
+- Accepted primary evidence in v1:
+  - repo or test files under the sandbox checkout, e.g. `src/module.py:12` or `tests/test_module.py:44`
+  - stable CURe session artifacts under `work/`, e.g. `work/pr-context.md:7`
+- `review.step-XX.md:line` may be included as extra traceability, but it does not count as the required primary evidence by itself.
 
 # Output Format
 Output ONLY the final review (no plan, no step outputs appended):
@@ -54,13 +58,13 @@ Output ONLY the final review (no plan, no step outputs appended):
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
 
 ### Strengths
-- ... Sources: `review.step-01.md:12`
+- ... Sources: `src/module.py:12`
 
 ### In Scope Issues
-- ... Sources: `review.step-02.md:8`
+- ... Sources: `src/module.py:24`
 
 ### Out of Scope Issues
-- ... Sources: `review.step-03.md:6`
+- ... Sources: `work/pr-context.md:7`
 
 ## Technical Assessment
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
@@ -75,6 +79,6 @@ Output ONLY the final review (no plan, no step outputs appended):
 - ...
 
 ### Reusability
-- ... Sources: `review.step-01.md:18`
+- ... Sources: `tests/test_module.py:44`
 ####
 ```

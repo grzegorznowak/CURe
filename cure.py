@@ -4530,6 +4530,22 @@ def _resolve_grounding_path(*, root_dir: Path, relative_path: str) -> Path | Non
     return resolved
 
 
+def _resolve_work_grounding_path(
+    *,
+    session_dir: Path,
+    work_dir: Path,
+    relative_path: str,
+) -> Path | None:
+    resolved = _resolve_grounding_path(root_dir=session_dir, relative_path=relative_path)
+    if resolved is None:
+        return None
+    try:
+        resolved.relative_to(work_dir.resolve())
+    except Exception:
+        return None
+    return resolved
+
+
 def _line_exists_in_file(path: Path, line_number: int) -> bool:
     if line_number < 1 or (not path.is_file()):
         return False
@@ -4669,6 +4685,8 @@ def validate_multipass_synth_grounding(
     *,
     artifact_path: Path,
     step_outputs: list[Path],
+    repo_dir: Path,
+    work_dir: Path,
 ) -> dict[str, Any]:
     errors: list[str] = []
     citations: list[dict[str, Any]] = []
@@ -4683,6 +4701,8 @@ def validate_multipass_synth_grounding(
     }
     step_output_map: dict[str, Path] = {}
     source_shas: dict[str, str] = {}
+    primary_source_shas: dict[str, str] = {}
+    session_dir = artifact_path.parent.resolve()
     for step_output in step_outputs:
         step_output_map[step_output.name] = step_output
         source_shas[step_output.name] = _artifact_sha256(step_output)
@@ -4703,37 +4723,60 @@ def validate_multipass_synth_grounding(
                 continue
             bullet_citations = _citation_records(body)
             if not bullet_citations:
-                errors.append(f"Section '### {title}' bullet #{bullet_index} is missing a step-artifact citation.")
+                errors.append(f"Section '### {title}' bullet #{bullet_index} is missing a primary-evidence citation.")
                 continue
-            valid_citation_found = False
+            valid_primary_citation_found = False
             for citation in bullet_citations:
-                target = step_output_map.get(str(citation["path"]))
+                citation_path = str(citation["path"])
+                target = step_output_map.get(citation_path)
+                counts_as_primary = False
+                source_kind = "step_artifact" if target is not None else None
+                if target is None:
+                    if citation_path.startswith("work/"):
+                        target = _resolve_work_grounding_path(
+                            session_dir=session_dir,
+                            work_dir=work_dir,
+                            relative_path=citation_path,
+                        )
+                        if target is not None:
+                            counts_as_primary = True
+                            source_kind = "session_artifact"
+                    if target is None:
+                        target = _resolve_grounding_path(root_dir=repo_dir, relative_path=citation_path)
+                        if target is not None:
+                            counts_as_primary = True
+                            source_kind = "repo"
                 entry = {
                     "section": title,
                     "bullet_index": bullet_index,
-                    "path": citation["path"],
+                    "path": citation_path,
                     "line": citation["line"],
                     "resolved_path": str(target) if target is not None else None,
+                    "source_kind": source_kind,
+                    "counts_as_primary": counts_as_primary,
                 }
                 if target is None or (not target.is_file()):
                     errors.append(
-                        f"Section '### {title}' bullet #{bullet_index} cites unknown step artifact "
-                        f"{citation['path']}:{citation['line']}."
+                        f"Section '### {title}' bullet #{bullet_index} cites unsupported synth source "
+                        f"{citation_path}:{citation['line']}."
                     )
                     entry["valid"] = False
                 elif not _line_exists_in_file(target, int(citation["line"])):
                     errors.append(
-                        f"Section '### {title}' bullet #{bullet_index} cites missing step artifact line "
-                        f"{citation['path']}:{citation['line']}."
+                        f"Section '### {title}' bullet #{bullet_index} cites missing source line "
+                        f"{citation_path}:{citation['line']}."
                     )
                     entry["valid"] = False
                 else:
-                    valid_citation_found = True
                     entry["valid"] = True
+                    if counts_as_primary:
+                        valid_primary_citation_found = True
+                        primary_source_shas[str(target.resolve())] = _artifact_sha256(target)
                 citations.append(entry)
-            if not valid_citation_found:
+            if not valid_primary_citation_found:
                 errors.append(
-                    f"Section '### {title}' bullet #{bullet_index} must cite at least one valid step-artifact line."
+                    f"Section '### {title}' bullet #{bullet_index} must cite at least one valid primary-evidence line; "
+                    "step-artifact citations alone are insufficient."
                 )
 
     for title, required_count in required_counts.items():
@@ -4746,7 +4789,10 @@ def validate_multipass_synth_grounding(
         artifact_path=artifact_path,
         citations=citations,
         errors=errors,
-        extra={"source_artifact_shas": source_shas},
+        extra={
+            "source_artifact_shas": source_shas,
+            "primary_source_shas": primary_source_shas,
+        },
     )
 
 
@@ -4821,12 +4867,26 @@ def _grounding_entry_matches_file(entry: dict[str, Any], artifact_path: Path) ->
     return bool(expected_sha) and expected_sha == _artifact_sha256(artifact_path)
 
 
-def _synth_entry_matches_sources(entry: dict[str, Any], step_outputs: list[Path]) -> bool:
+def _synth_entry_matches_sources(
+    entry: dict[str, Any],
+    step_outputs: list[Path],
+) -> bool:
     source_shas = entry.get("source_artifact_shas")
     if not isinstance(source_shas, dict):
         return False
     current = {path.name: _artifact_sha256(path) for path in step_outputs}
-    return source_shas == current
+    if source_shas != current:
+        return False
+    primary_source_shas = entry.get("primary_source_shas")
+    if not isinstance(primary_source_shas, dict):
+        return False
+    current_primary: dict[str, str] = {}
+    for path_text in primary_source_shas:
+        path = Path(str(path_text))
+        if not path.is_file():
+            return False
+        current_primary[str(path)] = _artifact_sha256(path)
+    return primary_source_shas == current_primary
 
 
 def _validate_or_reuse_step_artifact(
@@ -4859,6 +4919,7 @@ def _validate_or_reuse_synth_artifact(
     grounding_mode: str,
     artifact_path: Path,
     step_outputs: list[Path],
+    repo_dir: Path,
 ) -> tuple[bool, dict[str, Any] | None]:
     if grounding_mode == "off":
         return True, None
@@ -4873,6 +4934,8 @@ def _validate_or_reuse_synth_artifact(
     result = validate_multipass_synth_grounding(
         artifact_path=artifact_path,
         step_outputs=step_outputs,
+        repo_dir=repo_dir,
+        work_dir=work_dir,
     )
     _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
     return bool(result.get("valid")), result
@@ -7455,6 +7518,7 @@ def _pr_flow_impl(
                             grounding_mode=grounding_mode,
                             artifact_path=review_md_path,
                             step_outputs=[Path(item) for item in step_outputs],
+                            repo_dir=repo_dir,
                         )
                         progress.flush()
                         if (
@@ -8240,6 +8304,7 @@ def _resume_flow_impl(
                 grounding_mode=grounding_mode,
                 artifact_path=review_md_path,
                 step_outputs=[Path(item) for item in step_outputs],
+                repo_dir=repo_dir,
             )
             progress.flush()
             should_synth = not synth_reusable
@@ -8318,6 +8383,7 @@ def _resume_flow_impl(
                     grounding_mode=grounding_mode,
                     artifact_path=review_md_path,
                     step_outputs=[Path(item) for item in step_outputs],
+                    repo_dir=repo_dir,
                 )
                 progress.flush()
                 if (
