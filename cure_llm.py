@@ -178,6 +178,122 @@ def _path_size(path: Path | None) -> int | None:
         return None
 
 
+def _coerce_usage_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def _normalize_usage_payload(raw: object) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    input_tokens = _coerce_usage_int(raw.get("input_tokens"))
+    if input_tokens is None:
+        input_tokens = _coerce_usage_int(raw.get("prompt_tokens"))
+    if input_tokens is None:
+        input_tokens = _coerce_usage_int(raw.get("inputTokenCount"))
+
+    output_tokens = _coerce_usage_int(raw.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = _coerce_usage_int(raw.get("completion_tokens"))
+    if output_tokens is None:
+        output_tokens = _coerce_usage_int(raw.get("outputTokenCount"))
+    if output_tokens is None:
+        output_tokens = _coerce_usage_int(raw.get("candidatesTokenCount"))
+
+    total_tokens = _coerce_usage_int(raw.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = _coerce_usage_int(raw.get("totalTokenCount"))
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    normalized = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    if all(value is None for value in normalized.values()):
+        return None
+    return {key: value for key, value in normalized.items() if isinstance(value, int)}
+
+
+def _merge_usage_totals(
+    left: dict[str, int] | None, right: dict[str, int] | None
+) -> dict[str, int] | None:
+    if left is None:
+        return dict(right) if right is not None else None
+    if right is None:
+        return dict(left)
+    merged: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        lhs = left.get(key)
+        rhs = right.get(key)
+        if lhs is None and rhs is None:
+            continue
+        if lhs is None:
+            merged[key] = int(rhs)
+        elif rhs is None:
+            merged[key] = int(lhs)
+        else:
+            merged[key] = int(lhs) + int(rhs)
+    if "total_tokens" not in merged and "input_tokens" in merged and "output_tokens" in merged:
+        merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
+    return merged or None
+
+
+def _extract_usage_from_payload(payload: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[object] = [payload.get("usage"), payload.get("usageMetadata")]
+    result = payload.get("result")
+    if isinstance(result, dict):
+        candidates.extend([result.get("usage"), result.get("usageMetadata")])
+    candidates.append(payload)
+    for candidate in candidates:
+        normalized = _normalize_usage_payload(candidate)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _extract_codex_usage_from_event_slice(
+    *, events_path: Path | None, start_offset: int | None, end_offset: int | None
+) -> dict[str, int] | None:
+    if events_path is None or not events_path.is_file():
+        return None
+    start = max(0, int(start_offset or 0))
+    end = _path_size(events_path) if end_offset is None else max(start, int(end_offset))
+    try:
+        with events_path.open("r", encoding="utf-8") as fh:
+            fh.seek(start)
+            raw = fh.read(max(0, end - start))
+    except OSError:
+        return None
+
+    usage_totals: dict[str, int] | None = None
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("type") or "").strip() != "turn.completed":
+            continue
+        usage = _normalize_usage_payload(payload.get("usage"))
+        usage_totals = _merge_usage_totals(usage_totals, usage)
+    return usage_totals
+
+
 def _ensure_codex_live_progress(*, progress: Any, events_log_path: Path) -> None:
     meta = _progress_meta_dict(progress)
     if meta is None:
@@ -645,6 +761,7 @@ def run_claude_exec(
         raise ReviewflowError("Claude did not return any printable review output.")
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
     normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+    usage = _extract_usage_from_payload(payload)
     session_id = str(payload.get("session_id") or "").strip()
     resume = None
     if session_id:
@@ -660,7 +777,14 @@ def run_claude_exec(
                 runtime_policy=runtime_policy,
             ),
         )
-    return LlmRunResult(resume=resume, adapter_meta={"transport": "cli-claude", "command": safe_cmd_for_meta(cmd)})
+    return LlmRunResult(
+        resume=resume,
+        adapter_meta={
+            "transport": "cli-claude",
+            "command": safe_cmd_for_meta(cmd),
+            "usage": usage,
+        },
+    )
 
 
 def build_gemini_exec_cmd(
@@ -705,7 +829,14 @@ def run_gemini_exec(
         raise ReviewflowError("Gemini did not return any printable review output.")
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
     normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    return LlmRunResult(resume=None, adapter_meta={"transport": "cli-gemini", "command": safe_cmd_for_meta(cmd)})
+    return LlmRunResult(
+        resume=None,
+        adapter_meta={
+            "transport": "cli-gemini",
+            "command": safe_cmd_for_meta(cmd),
+            "usage": _extract_usage_from_payload(payload),
+        },
+    )
 
 
 def run_http_response_exec(
@@ -749,6 +880,7 @@ def run_http_response_exec(
     text = _extract_http_response_output_text(payload)
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
     normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+    usage = _extract_usage_from_payload(payload)
     return LlmRunResult(
         resume=None,
         adapter_meta={
@@ -756,6 +888,7 @@ def run_http_response_exec(
             "status_code": status_code,
             "url": request_meta["url"],
             "response_id": str(payload.get("id") or "").strip() or None,
+            "usage": usage,
         },
     )
 
@@ -814,6 +947,11 @@ def run_llm_exec(
                 "codex_events_path": str(result.events_log_path) if result.events_log_path is not None else None,
                 "codex_events_start_offset": result.events_start_offset,
                 "codex_events_end_offset": result.events_end_offset,
+                "usage": _extract_codex_usage_from_event_slice(
+                    events_path=result.events_log_path,
+                    start_offset=result.events_start_offset,
+                    end_offset=result.events_end_offset,
+                ),
             },
         )
     if provider == "claude":

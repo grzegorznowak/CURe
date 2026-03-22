@@ -10087,6 +10087,95 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
+    def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
+        footer = cure_output.format_review_artifact_footer(
+            review_head_sha="abcdef1234567890abcdef1234567890abcdef12",
+            model="gpt-5.2",
+            reasoning_effort="high",
+            input_tokens=18_400,
+            output_tokens=4_300,
+            total_tokens=22_700,
+            session_id="20260322-abc123",
+            created_at="2026-03-22T00:00:00+00:00",
+            completed_at="2026-03-22T00:06:12+00:00",
+        )
+
+        self.assertEqual(
+            footer,
+            "_CURe review · sha abcdef1 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+        )
+
+    def test_upsert_review_artifact_footer_is_idempotent_and_replaces_existing_footer(self) -> None:
+        session_dir = ROOT / ".tmp_test_review_footer_upsert"
+        md = session_dir / "review.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+
+            cure_output.upsert_review_artifact_footer(
+                markdown_path=md,
+                footer_line="_CURe review · sha abc1234 · model gpt-5.2/high · tok 1k/2k/3k · session s1 · 5m0s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+            )
+            cure_output.upsert_review_artifact_footer(
+                markdown_path=md,
+                footer_line="_CURe review · sha def5678 · model gpt-5.2/high · tok 4k/5k/9k · session s1 · 7m0s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+            )
+
+            rendered = md.read_text(encoding="utf-8")
+            self.assertEqual(rendered.count("CURE_REVIEW_FOOTER_START"), 1)
+            self.assertIn("sha def5678", rendered)
+            self.assertNotIn("sha abc1234", rendered)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_record_llm_usage_aggregates_usage_across_runs(self) -> None:
+        llm_meta: dict[str, object] = {}
+
+        first = rf.record_llm_usage(
+            llm_meta,
+            {"usage": {"input_tokens": 1000, "output_tokens": 250, "total_tokens": 1250}},
+        )
+        second = rf.record_llm_usage(
+            llm_meta,
+            {"usage": {"input_tokens": 500, "output_tokens": 125}},
+        )
+
+        self.assertEqual(first, {"input_tokens": 1000, "output_tokens": 250, "total_tokens": 1250})
+        self.assertEqual(second, {"input_tokens": 1500, "output_tokens": 375, "total_tokens": 1875})
+        self.assertEqual(llm_meta["usage"], {"input_tokens": 1500, "output_tokens": 375, "total_tokens": 1875})
+
+    def test_extract_codex_usage_from_event_slice_sums_turn_usage(self) -> None:
+        root = ROOT / ".tmp_test_codex_usage_slice"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            events_path = root / "codex.events.jsonl"
+            payloads = [
+                {"type": "turn.started"},
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
+                },
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 800, "output_tokens": 200, "total_tokens": 1000},
+                },
+            ]
+            events_path.write_text("\n".join(json.dumps(payload) for payload in payloads) + "\n", encoding="utf-8")
+
+            usage = cure_llm._extract_codex_usage_from_event_slice(
+                events_path=events_path,
+                start_offset=0,
+                end_offset=events_path.stat().st_size,
+            )
+
+            self.assertEqual(
+                usage,
+                {"input_tokens": 2000, "output_tokens": 500, "total_tokens": 2500},
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class CodexResumeTests(unittest.TestCase):
     def test_build_codex_resume_command_includes_env_flags_and_session_id(self) -> None:
@@ -14131,11 +14220,14 @@ class CodexToolProofFlowTests(unittest.TestCase):
             session_dir = next((root / "sandboxes").iterdir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
             self.assertEqual(meta["status"], "done")
             self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
+            self.assertIn("session ", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -14163,10 +14255,56 @@ class CodexToolProofFlowTests(unittest.TestCase):
             session_dir = next((root / "sandboxes").iterdir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.md"])
             self.assertEqual(meta["status"], "done")
             self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["singlepass_review"])
+            self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_plan_abort_writes_footerized_abort_review(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_abort_review"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                "\n".join(
+                    [
+                        "### Plan JSON",
+                        "```json",
+                        json.dumps(
+                            {
+                                "abort": True,
+                                "abort_reason": "missing required Jira context",
+                                "jira_keys": [],
+                                "steps": [],
+                            }
+                        ),
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            review_md = (session_dir / "review.md").read_text(encoding="utf-8")
+            self.assertEqual(calls, ["review.plan.md"])
+            self.assertIn("missing required Jira context", review_md)
+            self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -14555,11 +14693,15 @@ class CodexToolProofFlowTests(unittest.TestCase):
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            followup_path = Path(str(refreshed["followups"][0]["output_path"]))
+            followup_md = followup_path.read_text(encoding="utf-8")
             self.assertEqual(rc, 0)
             self.assertEqual(len(refreshed["followups"]), 1)
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
+            self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", followup_md)
+            self.assertIn("sha deadbee", followup_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -14968,12 +15110,15 @@ class CodexToolProofFlowTests(unittest.TestCase):
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            review_md_text = review_md.read_text(encoding="utf-8")
             self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.step-01.md", "review.md"])
             self.assertEqual(refreshed["status"], "done")
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["multipass_step", "multipass_synth"])
+            self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
+            self.assertIn("session session-1", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)

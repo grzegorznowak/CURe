@@ -15,6 +15,12 @@ from cure_errors import ReviewflowError
 from run import run_cmd
 from ui import Dashboard, TailBuffer, UiState, Verbosity, StreamSink
 
+CURE_PROJECT_URL = "https://github.com/grzegorznowak/CURe"
+_REVIEW_ARTIFACT_FOOTER_BLOCK_RE = re.compile(
+    r"\n*---\n<!-- CURE_REVIEW_FOOTER_START -->\n.*?\n<!-- CURE_REVIEW_FOOTER_END -->\n*",
+    re.DOTALL,
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -519,6 +525,95 @@ def normalize_markdown_artifact(*, markdown_path: Path, session_dir: Path) -> No
     normalized = normalize_markdown_local_refs(normalized, session_dir=session_dir)
     if normalized != original:
         markdown_path.write_text(normalized, encoding="utf-8")
+
+
+def _parse_iso_datetime(raw: str | None) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_compact_token_count(value: int | None) -> str:
+    if not isinstance(value, int) or value < 0:
+        return "-"
+    if value < 1000:
+        return str(value)
+    if value < 1_000_000:
+        return f"{int(round(value / 1000.0))}k"
+    return f"{int(round(value / 1_000_000.0))}m"
+
+
+def _format_elapsed_short(*, created_at: str | None, completed_at: str | None) -> str:
+    started = _parse_iso_datetime(created_at)
+    finished = _parse_iso_datetime(completed_at)
+    if started is None or finished is None:
+        return "-"
+    elapsed_seconds = int((finished - started).total_seconds())
+    if elapsed_seconds < 0:
+        return "-"
+    hours, rem = divmod(elapsed_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m{seconds}s"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
+
+
+def format_review_artifact_footer(
+    *,
+    review_head_sha: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    session_id: str | None,
+    created_at: str | None,
+    completed_at: str | None,
+    project_url: str = CURE_PROJECT_URL,
+) -> str:
+    sha_text = str(review_head_sha or "").strip()
+    short_sha = sha_text[:7] if sha_text else "-"
+    model_text = str(model or "").strip() or "-"
+    effort_text = str(reasoning_effort or "").strip() or "-"
+    session_text = str(session_id or "").strip() or "-"
+    elapsed_text = _format_elapsed_short(created_at=created_at, completed_at=completed_at)
+    return (
+        "_CURe review"
+        f" · sha {short_sha}"
+        f" · model {model_text}/{effort_text}"
+        f" · tok {_format_compact_token_count(input_tokens)}/"
+        f"{_format_compact_token_count(output_tokens)}/"
+        f"{_format_compact_token_count(total_tokens)}"
+        f" · session {session_text}"
+        f" · {elapsed_text}"
+        f" · [Project: CURe]({project_url})_"
+    )
+
+
+def upsert_review_artifact_footer(*, markdown_path: Path, footer_line: str) -> None:
+    if not markdown_path.is_file():
+        return
+    original = markdown_path.read_text(encoding="utf-8")
+    body = _REVIEW_ARTIFACT_FOOTER_BLOCK_RE.sub("\n", original).rstrip("\n")
+    if not body:
+        return
+    updated = (
+        f"{body}\n\n---\n"
+        "<!-- CURE_REVIEW_FOOTER_START -->\n"
+        f"{footer_line}\n"
+        "<!-- CURE_REVIEW_FOOTER_END -->\n"
+    )
+    if updated != original:
+        markdown_path.write_text(updated, encoding="utf-8")
 
 
 def _now_hms_utc() -> str:

@@ -41,11 +41,13 @@ from cure_output import (
     log,
     maybe_print_codex_resume_command,
     maybe_print_markdown_after_tui,
+    format_review_artifact_footer,
     normalize_markdown_artifact,
     normalize_markdown_local_refs,
     safe_cmd_for_meta,
     set_active_output,
     sha256_text,
+    upsert_review_artifact_footer,
 )
 from meta import json_fingerprint, write_json, write_redacted_json
 from paths import (
@@ -575,6 +577,115 @@ def build_llm_meta(
         "env_keys": sorted(_string_dict(resolved.get("env")).keys()),
         "capabilities": dict(resolved.get("capabilities") or {}),
     }
+
+
+def _normalize_llm_usage(raw: object) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    normalized: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = raw.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            normalized[key] = value
+    if "total_tokens" not in normalized and "input_tokens" in normalized and "output_tokens" in normalized:
+        normalized["total_tokens"] = normalized["input_tokens"] + normalized["output_tokens"]
+    return normalized or None
+
+
+def _merge_llm_usage(
+    left: dict[str, int] | None, right: dict[str, int] | None
+) -> dict[str, int] | None:
+    if left is None:
+        return dict(right) if right is not None else None
+    if right is None:
+        return dict(left)
+    merged: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        lhs = left.get(key)
+        rhs = right.get(key)
+        if lhs is None and rhs is None:
+            continue
+        if lhs is None:
+            merged[key] = int(rhs)
+        elif rhs is None:
+            merged[key] = int(lhs)
+        else:
+            merged[key] = int(lhs) + int(rhs)
+    if "total_tokens" not in merged and "input_tokens" in merged and "output_tokens" in merged:
+        merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
+    return merged or None
+
+
+def record_llm_usage(llm_meta: dict[str, Any], adapter_meta: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(llm_meta, dict) or not isinstance(adapter_meta, dict):
+        return None
+    incoming = _normalize_llm_usage(adapter_meta.get("usage"))
+    if incoming is None:
+        return _normalize_llm_usage(llm_meta.get("usage"))
+    current = _normalize_llm_usage(llm_meta.get("usage"))
+    merged = _merge_llm_usage(current, incoming)
+    if merged is not None:
+        llm_meta["usage"] = merged
+    return merged
+
+
+def _refresh_review_artifact_footer(
+    *,
+    markdown_path: Path,
+    session_id: str | None,
+    review_head_sha: str | None,
+    llm_meta: dict[str, Any] | None,
+    created_at: str | None,
+    completed_at: str | None,
+) -> None:
+    if not markdown_path.is_file():
+        return
+    payload = llm_meta if isinstance(llm_meta, dict) else {}
+    usage = _normalize_llm_usage(payload.get("usage")) or {}
+    footer_line = format_review_artifact_footer(
+        review_head_sha=review_head_sha,
+        model=str(payload.get("model") or "").strip() or None,
+        reasoning_effort=str(payload.get("reasoning_effort") or "").strip() or None,
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        session_id=session_id,
+        created_at=created_at,
+        completed_at=completed_at,
+    )
+    upsert_review_artifact_footer(markdown_path=markdown_path, footer_line=footer_line)
+
+
+def _refresh_session_review_footer(*, meta: dict[str, Any], markdown_path: Path) -> None:
+    _refresh_review_artifact_footer(
+        markdown_path=markdown_path,
+        session_id=str(meta.get("session_id") or "").strip() or None,
+        review_head_sha=_resolve_session_review_head_sha(meta=meta),
+        llm_meta=meta.get("llm") if isinstance(meta.get("llm"), dict) else None,
+        created_at=str(meta.get("created_at") or "").strip() or None,
+        completed_at=str(meta.get("completed_at") or "").strip() or None,
+    )
+
+
+def _refresh_followup_review_footer(
+    *, meta: dict[str, Any], followup_entry: dict[str, Any], markdown_path: Path
+) -> None:
+    llm_meta = followup_entry.get("llm") if isinstance(followup_entry.get("llm"), dict) else {}
+    review_head_sha = (
+        str(followup_entry.get("head_sha_after") or "").strip()
+        or str(followup_entry.get("head_sha") or "").strip()
+        or _resolve_session_review_head_sha(meta=meta)
+    )
+    _refresh_review_artifact_footer(
+        markdown_path=markdown_path,
+        session_id=str(meta.get("session_id") or "").strip() or None,
+        review_head_sha=review_head_sha,
+        llm_meta=llm_meta,
+        created_at=str(followup_entry.get("started_at") or "").strip() or None,
+        completed_at=str(followup_entry.get("completed_at") or "").strip() or None,
+    )
 
 
 def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict[str, str]:
@@ -7061,11 +7172,14 @@ def _pr_flow_impl(
                         codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                         runtime_policy=runtime_policy,
                     )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
                     plan_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                     if plan_runs and isinstance(plan_runs[-1], dict) and plan_result.resume is not None:
                         plan_runs[-1]["llm_session_id"] = plan_result.resume.session_id
                         plan_runs[-1]["llm_provider"] = plan_result.resume.provider
-                        progress.flush()
+                    if plan_runs and isinstance(plan_runs[-1], dict):
+                        plan_runs[-1]["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
+                    progress.flush()
                     _enforce_codex_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
@@ -7116,6 +7230,7 @@ def _pr_flow_impl(
                         ) is not None:
                             progress.flush()
                         progress.done()
+                        _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
                         success_markdown_path = review_md_path
                         print(str(session_dir))
                         return 0
@@ -7206,10 +7321,13 @@ def _pr_flow_impl(
                                     codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                                     runtime_policy=runtime_policy,
                                 )
+                                record_llm_usage(progress.meta.setdefault("llm", {}), step_result.adapter_meta)
                                 step_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                                 if step_runs and isinstance(step_runs[-1], dict) and step_result.resume is not None:
                                     step_runs[-1]["llm_session_id"] = step_result.resume.session_id
                                     step_runs[-1]["llm_provider"] = step_result.resume.provider
+                                if step_runs and isinstance(step_runs[-1], dict):
+                                    step_runs[-1]["usage"] = _normalize_llm_usage(step_result.adapter_meta.get("usage"))
                                 progress.flush()
                                 _enforce_codex_chunkhound_tool_proof(
                                     meta=progress.meta,
@@ -7300,10 +7418,13 @@ def _pr_flow_impl(
                             codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                             runtime_policy=runtime_policy,
                         )
+                        record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
                         synth_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
                         if synth_runs and isinstance(synth_runs[-1], dict) and synth_result.resume is not None:
                             synth_runs[-1]["llm_session_id"] = synth_result.resume.session_id
                             synth_runs[-1]["llm_provider"] = synth_result.resume.provider
+                        if synth_runs and isinstance(synth_runs[-1], dict):
+                            synth_runs[-1]["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
                         progress.flush()
                         success_resume_command = record_llm_resume(
                             progress.meta.setdefault("llm", {}), synth_result.resume
@@ -7419,6 +7540,7 @@ def _pr_flow_impl(
                         codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                         runtime_policy=runtime_policy,
                     )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), review_result.adapter_meta)
                     success_resume_command = record_llm_resume(
                         progress.meta.setdefault("llm", {}), review_result.resume
                     )
@@ -7448,6 +7570,7 @@ def _pr_flow_impl(
         ):
             progress.flush()
         progress.done()
+        _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
         progress.error(
@@ -7919,6 +8042,7 @@ def _resume_flow_impl(
                     codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                     runtime_policy=runtime_policy,
                 )
+                record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
                 success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), plan_result.resume)
                 if codex_meta is not None:
                     codex_resume = (
@@ -7967,6 +8091,7 @@ def _resume_flow_impl(
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()
             progress.done()
+            _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
             print(str(session_dir))
             return 0
@@ -8063,6 +8188,7 @@ def _resume_flow_impl(
                     codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                     runtime_policy=runtime_policy,
                 )
+                record_llm_usage(progress.meta.setdefault("llm", {}), step_result.adapter_meta)
                 success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), step_result.resume)
                 if codex_meta is not None:
                     codex_resume = (
@@ -8162,6 +8288,7 @@ def _resume_flow_impl(
                     codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                     runtime_policy=runtime_policy,
                 )
+                record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
                 success_resume_command = record_llm_resume(
                     progress.meta.setdefault("llm", {}), synth_result.resume
                 )
@@ -8206,6 +8333,7 @@ def _resume_flow_impl(
         if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
             progress.flush()
         progress.done()
+        _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path
         print(str(session_dir))
         return 0
@@ -8569,6 +8697,7 @@ def _followup_flow_impl(
                 codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                 runtime_policy=runtime_policy,
             )
+        record_llm_usage(meta.setdefault("llm", {}), followup_result.adapter_meta)
         success_resume_command = record_llm_resume(meta.setdefault("llm", {}), followup_result.resume)
         if codex_meta is not None:
             codex_resume = (
@@ -8623,9 +8752,17 @@ def _followup_flow_impl(
                 record_codex_resume(followup_codex_meta, codex_resume)
         followup_llm_meta = followup_entry.get("llm")
         if isinstance(followup_llm_meta, dict):
+            usage = record_llm_usage(followup_llm_meta, followup_result.adapter_meta)
+            if usage is not None:
+                followup_llm_meta["usage"] = usage
             record_llm_resume(followup_llm_meta, followup_result.resume)
         meta.setdefault("followups", []).append(followup_entry)
         write_redacted_json(meta_path, meta)
+        _refresh_followup_review_footer(
+            meta=meta,
+            followup_entry=followup_entry,
+            markdown_path=followup_md_path,
+        )
 
         success_markdown_path = followup_md_path
         print(str(followup_md_path))
