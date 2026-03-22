@@ -249,7 +249,7 @@ curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cur
 Pin a specific standalone release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.3
+curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.4
 ```
 
 The installer downloads the matching release asset into `~/.local/bin/cure`. After that, the bootstrap/readiness flow is unchanged:
