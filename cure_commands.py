@@ -46,6 +46,54 @@ def _watch_line_for_payload(payload: dict[str, object]) -> str:
     llm_summary = str((llm or {}).get("summary") or "").strip()
     if llm_summary:
         parts.append(llm_summary)
+    multipass = payload.get("multipass") if isinstance(payload.get("multipass"), dict) else {}
+    multipass_enabled = bool(multipass.get("enabled") is True)
+    multipass_mode = str(multipass.get("mode") or "").strip().lower()
+    if multipass and (multipass_enabled or multipass_mode == "multipass"):
+        mp_bits: list[str] = []
+        step_workers = multipass.get("step_workers")
+        effective_step_workers = multipass.get("effective_step_workers")
+        if isinstance(step_workers, int) and step_workers > 0:
+            if isinstance(effective_step_workers, int) and effective_step_workers > 0:
+                mp_bits.append(f"multipass_workers={effective_step_workers}/{step_workers}")
+            else:
+                mp_bits.append(f"multipass_workers={step_workers}")
+        step_states = multipass.get("step_states") if isinstance(multipass.get("step_states"), list) else []
+        if step_states:
+            queued = 0
+            running = 0
+            completed = 0
+            failed = 0
+            reused = 0
+            for item in step_states:
+                if not isinstance(item, dict):
+                    continue
+                status = str(item.get("status") or "").strip().lower()
+                if status == "queued":
+                    queued += 1
+                elif status in {"running", "awaiting_validation"}:
+                    running += 1
+                elif status == "completed":
+                    completed += 1
+                elif status == "reused":
+                    reused += 1
+                elif status in {"failed", "canceled"}:
+                    failed += 1
+            state_bits: list[str] = []
+            if running:
+                state_bits.append(f"{running} running")
+            if queued:
+                state_bits.append(f"{queued} queued")
+            if completed:
+                state_bits.append(f"{completed} completed")
+            if reused:
+                state_bits.append(f"{reused} reused")
+            if failed:
+                state_bits.append(f"{failed} failed")
+            if state_bits:
+                mp_bits.append("steps=" + ",".join(state_bits))
+        if mp_bits:
+            parts.append(" ".join(mp_bits))
     live = payload.get("live_progress") if isinstance(payload.get("live_progress"), dict) else {}
     current = live.get("current") if isinstance(live.get("current"), dict) else {}
     current_text = str((current or {}).get("text") or (live or {}).get("last_agent_message") or "").strip()

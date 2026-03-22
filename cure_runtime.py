@@ -81,6 +81,8 @@ CLI_PROVIDER_SESSION_ENV_PREFIXES = {
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
+DEFAULT_MULTIPASS_STEP_WORKERS = 1
+MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
@@ -614,6 +616,15 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
 def load_reviewflow_multipass_defaults(
     *, config_path: Path | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load reviewflow-level multipass defaults from the active reviewflow config.
+
+    Schema:
+      [multipass]
+      enabled = true
+      max_steps = 20
+      step_workers = 1
+    """
+
     path = config_path or _default_reviewflow_config_path()
     raw = load_toml(path)
     mp = raw.get("multipass", {}) if isinstance(raw, dict) else {}
@@ -626,6 +637,10 @@ def load_reviewflow_multipass_defaults(
     max_steps = mp.get("max_steps")
     if not isinstance(max_steps, int):
         max_steps = DEFAULT_MULTIPASS_MAX_STEPS
+
+    step_workers = mp.get("step_workers")
+    if isinstance(step_workers, bool) or not isinstance(step_workers, int):
+        step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -646,10 +661,15 @@ def load_reviewflow_multipass_defaults(
         max_steps = 1
     if max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
         max_steps = MULTIPASS_MAX_STEPS_HARD_CAP
+    if step_workers < 1:
+        step_workers = 1
+    if step_workers > MULTIPASS_STEP_WORKERS_HARD_CAP:
+        step_workers = MULTIPASS_STEP_WORKERS_HARD_CAP
 
     cfg: dict[str, Any] = {
         "enabled": bool(enabled),
         "max_steps": int(max_steps),
+        "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
     }
     meta: dict[str, Any] = {
@@ -2733,12 +2753,14 @@ __all__ = [
     "DEFAULT_LEGACY_CODEX_PRESET",
     "DEFAULT_MULTIPASS_ENABLED",
     "DEFAULT_MULTIPASS_MAX_STEPS",
+    "DEFAULT_MULTIPASS_STEP_WORKERS",
     "DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE",
     "DoctorCheck",
     "HTTP_LLM_PROVIDERS",
     "LLM_RESUME_PROVIDERS",
     "LLM_TRANSPORT_CHOICES",
     "MULTIPASS_MAX_STEPS_HARD_CAP",
+    "MULTIPASS_STEP_WORKERS_HARD_CAP",
     "REVIEW_INTELLIGENCE_CONFIG_EXAMPLE",
     "ReviewIntelligenceConfig",
     "ReviewIntelligenceSource",

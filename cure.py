@@ -18,11 +18,13 @@ import shutil
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tomllib
 import tty
 import urllib.error
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from importlib import resources
@@ -202,6 +204,8 @@ CURATED_ENV_INHERIT_KEYS = (
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
+DEFAULT_MULTIPASS_STEP_WORKERS = 1
+MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9][A-Za-z0-9._/-]*):([1-9][0-9]*)`?")
@@ -734,6 +738,7 @@ def load_reviewflow_multipass_defaults(
       [multipass]
       enabled = true
       max_steps = 20
+      step_workers = 1
     """
 
     path = config_path or default_reviewflow_config_path()
@@ -748,6 +753,10 @@ def load_reviewflow_multipass_defaults(
     max_steps = mp.get("max_steps")
     if not isinstance(max_steps, int):
         max_steps = DEFAULT_MULTIPASS_MAX_STEPS
+
+    step_workers = mp.get("step_workers")
+    if isinstance(step_workers, bool) or not isinstance(step_workers, int):
+        step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -769,10 +778,15 @@ def load_reviewflow_multipass_defaults(
         max_steps = 1
     if max_steps > MULTIPASS_MAX_STEPS_HARD_CAP:
         max_steps = MULTIPASS_MAX_STEPS_HARD_CAP
+    if step_workers < 1:
+        step_workers = 1
+    if step_workers > MULTIPASS_STEP_WORKERS_HARD_CAP:
+        step_workers = MULTIPASS_STEP_WORKERS_HARD_CAP
 
     cfg: dict[str, Any] = {
         "enabled": bool(enabled),
         "max_steps": int(max_steps),
+        "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
     }
     meta: dict[str, Any] = {
@@ -2707,57 +2721,78 @@ class SessionProgress:
         self.meta_path = meta_path
         self.quiet = quiet
         self.meta: dict[str, Any] = {}
+        self._lock = threading.RLock()
 
-    def init(self, initial: dict[str, Any]) -> None:
-        self.meta = dict(initial)
-        self.meta.setdefault("status", "running")
-        self.meta.setdefault("phase", "init")
-        self.meta.setdefault("phases", {})
-        self.flush()
-
-    def flush(self) -> None:
+    def _flush_locked(self) -> None:
         write_redacted_json(self.meta_path, self.meta)
 
+    def init(self, initial: dict[str, Any]) -> None:
+        with self._lock:
+            self.meta = dict(initial)
+            self.meta.setdefault("status", "running")
+            self.meta.setdefault("phase", "init")
+            self.meta.setdefault("phases", {})
+            self._flush_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    @contextlib.contextmanager
+    def mutate(self) -> "contextlib.AbstractContextManager[dict[str, Any]]":
+        with self._lock:
+            try:
+                yield self.meta
+            finally:
+                self._flush_locked()
+
     def set_phase(self, phase: str) -> None:
-        self.meta["phase"] = phase
-        self.flush()
+        with self._lock:
+            self.meta["phase"] = phase
+            self._flush_locked()
 
     def record_cmd(self, cmd: list[str]) -> None:
-        self.meta["last_cmd"] = safe_cmd_for_meta(cmd)
-        self.flush()
+        with self._lock:
+            self.meta["last_cmd"] = safe_cmd_for_meta(cmd)
+            self._flush_locked()
 
     def phase_started(self, phase: str) -> None:
-        phases = self.meta.setdefault("phases", {})
-        entry = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
-        entry["started_at"] = _utc_now_iso()
-        entry["status"] = "running"
-        phases[phase] = entry
-        self.meta["phase"] = phase
-        self.flush()
+        with self._lock:
+            phases = self.meta.setdefault("phases", {})
+            entry = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
+            entry["started_at"] = _utc_now_iso()
+            entry["status"] = "running"
+            phases[phase] = entry
+            self.meta["phase"] = phase
+            self._flush_locked()
 
     def phase_finished(self, phase: str, *, duration_seconds: float, ok: bool) -> None:
-        phases = self.meta.setdefault("phases", {})
-        entry = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
-        entry["finished_at"] = _utc_now_iso()
-        entry["duration_seconds"] = float(duration_seconds)
-        entry["status"] = "done" if ok else "error"
-        phases[phase] = entry
-        self.flush()
+        with self._lock:
+            phases = self.meta.setdefault("phases", {})
+            entry = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
+            entry["finished_at"] = _utc_now_iso()
+            entry["duration_seconds"] = float(duration_seconds)
+            entry["status"] = "done" if ok else "error"
+            phases[phase] = entry
+            self._flush_locked()
 
     def set_base_cache(self, base_cache_meta: dict[str, Any] | None) -> None:
-        self.meta["base_cache"] = base_cache_meta
-        self.flush()
+        with self._lock:
+            self.meta["base_cache"] = base_cache_meta
+            self._flush_locked()
 
     def done(self) -> None:
-        self.meta["status"] = "done"
-        self.meta["completed_at"] = _utc_now_iso()
-        self.flush()
+        with self._lock:
+            self.meta["status"] = "done"
+            self.meta["completed_at"] = _utc_now_iso()
+            self._flush_locked()
 
     def error(self, info: dict[str, Any]) -> None:
-        self.meta["status"] = "error"
-        self.meta["failed_at"] = _utc_now_iso()
-        self.meta["error"] = info
-        self.flush()
+        with self._lock:
+            self.meta["status"] = "error"
+            self.meta["failed_at"] = _utc_now_iso()
+            self.meta["error"] = info
+            self._flush_locked()
 
 
 @contextlib.contextmanager
@@ -2822,6 +2857,24 @@ class LlmResumeInfo:
 class LlmRunResult:
     resume: LlmResumeInfo | None = None
     adapter_meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MultipassStepEntry:
+    index: int
+    step_id: str
+    step_title: str
+    step_focus: str
+    output_path: Path
+    prompt: str
+    should_run: bool
+
+
+@dataclass(frozen=True)
+class MultipassStepRunResult:
+    entry: MultipassStepEntry
+    llm_result: LlmRunResult
+    duration_seconds: float
 
 
 @dataclass(frozen=True)
@@ -4941,6 +4994,450 @@ def _validate_or_reuse_synth_artifact(
     return bool(result.get("valid")), result
 
 
+def _update_multipass_step_progress(meta: dict[str, Any]) -> None:
+    mp = meta.setdefault("multipass", {})
+    states = mp.get("step_states")
+    if not isinstance(states, list) or not states:
+        return
+    queued = 0
+    running = 0
+    completed = 0
+    failed = 0
+    active_titles: list[str] = []
+    for item in states:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        title = str(item.get("step_title") or "").strip()
+        if status == "queued":
+            queued += 1
+        elif status in {"running", "awaiting_validation"}:
+            running += 1
+            if title:
+                active_titles.append(title)
+        elif status in {"completed", "reused"}:
+            completed += 1
+        elif status in {"failed", "canceled"}:
+            failed += 1
+        else:
+            queued += 1
+    total = len(states)
+    display_index = total if completed >= total else min(total, completed + 1)
+    worker_text = (
+        f"workers {int(mp.get('effective_step_workers') or 0)}/{int(mp.get('step_workers') or 0)}"
+        if int(mp.get("step_workers") or 0) > 0
+        else None
+    )
+    parts: list[str] = []
+    if worker_text:
+        parts.append(worker_text)
+    if running:
+        parts.append(f"{running} running")
+    if queued:
+        parts.append(f"{queued} queued")
+    if completed:
+        parts.append(f"{completed} ready")
+    if failed:
+        parts.append(f"{failed} failed")
+    if active_titles:
+        parts.append("active: " + ", ".join(active_titles[:2]))
+    current = mp.setdefault("current", {})
+    current["stage"] = "steps"
+    current["step_index"] = int(display_index)
+    current["step_count"] = int(total)
+    current["step_title"] = " | ".join(parts) if parts else "step scheduling"
+
+
+def _set_multipass_step_state(
+    meta: dict[str, Any],
+    *,
+    entry: MultipassStepEntry,
+    status: str,
+    reusable: bool | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    duration_seconds: float | None = None,
+    error: str | None = None,
+) -> None:
+    mp = meta.setdefault("multipass", {})
+    states = mp.setdefault("step_states", [])
+    while len(states) < entry.index:
+        states.append({})
+    state = states[entry.index - 1]
+    if not isinstance(state, dict):
+        state = {}
+        states[entry.index - 1] = state
+    state.update(
+        {
+            "step_index": int(entry.index),
+            "step_id": entry.step_id,
+            "step_title": entry.step_title,
+            "step_focus": entry.step_focus,
+            "output_path": str(entry.output_path),
+            "status": status,
+        }
+    )
+    if reusable is not None:
+        state["reusable"] = bool(reusable)
+    if started_at is not None:
+        state["started_at"] = started_at
+    if finished_at is not None:
+        state["finished_at"] = finished_at
+    if duration_seconds is not None:
+        state["duration_seconds"] = float(duration_seconds)
+    if error is not None:
+        state["error"] = error
+    elif status not in {"failed", "canceled"}:
+        state.pop("error", None)
+    _update_multipass_step_progress(meta)
+
+
+def _build_multipass_step_entries(
+    *,
+    steps: list[dict[str, Any]],
+    session_dir: Path,
+    plan_json_path: Path,
+    templates: dict[str, str],
+    base_ref_for_review: str,
+    pr_url: str,
+    pr_number: int,
+    pr: PullRequestRef,
+    agent_desc: str,
+    review_intelligence_cfg: ReviewIntelligenceConfig,
+    review_intelligence_capabilities: dict[str, Any] | None,
+) -> list[MultipassStepEntry]:
+    step_template = load_builtin_prompt_text(templates["step"])
+    entries: list[MultipassStepEntry] = []
+    for idx, step in enumerate(steps, start=1):
+        step_id = str(step.get("id") or f"{idx:02d}").strip()
+        step_title = str(step.get("title") or "").strip()
+        step_focus = str(step.get("focus") or "").strip()
+        prompt = render_prompt(
+            step_template,
+            base_ref_for_review=base_ref_for_review,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            gh_host=str(pr.host),
+            gh_owner=str(pr.owner),
+            gh_repo_name=str(pr.repo),
+            gh_repo=str(pr.gh_repo),
+            agent_desc=agent_desc,
+            head_ref="HEAD",
+            extra_vars={
+                **review_intelligence_prompt_vars(
+                    review_intelligence_cfg,
+                    capability_summary=review_intelligence_capabilities,
+                ),
+                "PLAN_JSON_PATH": str(plan_json_path),
+                "STEP_ID": step_id,
+                "STEP_TITLE": step_title,
+                "STEP_FOCUS": step_focus,
+            },
+        )
+        entries.append(
+            MultipassStepEntry(
+                index=idx,
+                step_id=step_id,
+                step_title=step_title,
+                step_focus=step_focus,
+                output_path=session_dir / f"review.step-{idx:02d}.md",
+                prompt=prompt,
+                should_run=True,
+            )
+        )
+    return entries
+
+
+def _run_multipass_step_llm(
+    *,
+    entry: MultipassStepEntry,
+    progress: SessionProgress,
+    repo_dir: Path,
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+    env: dict[str, str],
+    stream: bool,
+    add_dirs: list[Path] | None,
+    runtime_policy: dict[str, Any],
+    quiet: bool,
+) -> MultipassStepRunResult:
+    started_at = _utc_now_iso()
+    with progress.mutate():
+        _set_multipass_step_state(
+            progress.meta,
+            entry=entry,
+            status="running",
+            reusable=False,
+            started_at=started_at,
+        )
+    started_perf = time.perf_counter()
+    try:
+        log(f"Multipass step {entry.index:02d}: {entry.step_title}", quiet=quiet)
+        llm_result = run_llm_exec(
+            repo_dir=repo_dir,
+            resolved=llm_resolved,
+            resolution_meta=llm_resolution_meta,
+            output_path=entry.output_path,
+            prompt=entry.prompt,
+            env=env,
+            stream=stream,
+            progress=progress,
+            add_dirs=add_dirs,
+            codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+            runtime_policy=runtime_policy,
+        )
+        duration_seconds = time.perf_counter() - started_perf
+        with progress.mutate():
+            _set_multipass_step_state(
+                progress.meta,
+                entry=entry,
+                status="awaiting_validation",
+                reusable=False,
+                started_at=started_at,
+                finished_at=_utc_now_iso(),
+                duration_seconds=duration_seconds,
+            )
+        return MultipassStepRunResult(
+            entry=entry,
+            llm_result=llm_result,
+            duration_seconds=duration_seconds,
+        )
+    except Exception as exc:
+        with progress.mutate():
+            _set_multipass_step_state(
+                progress.meta,
+                entry=entry,
+                status="failed",
+                reusable=False,
+                started_at=started_at,
+                finished_at=_utc_now_iso(),
+                duration_seconds=(time.perf_counter() - started_perf),
+                error=str(exc),
+            )
+            progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+        raise
+
+
+def _finalize_multipass_step_result(
+    *,
+    progress: SessionProgress,
+    work_dir: Path,
+    repo_dir: Path,
+    grounding_mode: str,
+    entry: MultipassStepEntry,
+    step_result: LlmRunResult,
+    duration_seconds: float,
+    provider: str,
+    templates: dict[str, str],
+    codex_meta: dict[str, Any] | None,
+) -> str | None:
+    success_resume_command: str | None = None
+    with progress.mutate():
+        mp_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
+        run_entry = next(
+            (
+                item
+                for item in mp_runs
+                if isinstance(item, dict)
+                and str(item.get("kind") or "").strip() == "step"
+                and int(item.get("step_index") or 0) == int(entry.index)
+            ),
+            None,
+        )
+        if run_entry is None:
+            raise ReviewflowError(f"Missing multipass run entry for step {entry.index:02d}.")
+        record_llm_usage(progress.meta.setdefault("llm", {}), step_result.adapter_meta)
+        if step_result.resume is not None:
+            run_entry["llm_session_id"] = step_result.resume.session_id
+            run_entry["llm_provider"] = step_result.resume.provider
+        run_entry["usage"] = _normalize_llm_usage(step_result.adapter_meta.get("usage"))
+        success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), step_result.resume)
+        if codex_meta is not None:
+            codex_resume = (
+                CodexResumeInfo(
+                    session_id=step_result.resume.session_id,
+                    cwd=step_result.resume.cwd,
+                    command=step_result.resume.command,
+                )
+                if step_result.resume is not None and step_result.resume.provider == "codex"
+                else None
+            )
+            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+        _enforce_codex_chunkhound_tool_proof(
+            meta=progress.meta,
+            work_dir=work_dir,
+            provider=provider,
+            review_stage="multipass_step",
+            prompt_template_name=templates["step"],
+            adapter_meta=step_result.adapter_meta,
+        )
+        _, step_validation = _validate_or_reuse_step_artifact(
+            meta=progress.meta,
+            work_dir=work_dir,
+            grounding_mode=grounding_mode,
+            artifact_path=entry.output_path,
+            repo_dir=repo_dir,
+            step_index=entry.index,
+        )
+        if (
+            grounding_mode == "strict"
+            and step_validation is not None
+            and (step_validation.get("valid") is False)
+        ):
+            raise ReviewflowError(
+                f"Multipass step grounding validation failed for {entry.output_path.name}."
+            )
+        _set_multipass_step_state(
+            progress.meta,
+            entry=entry,
+            status="completed",
+            reusable=True,
+            finished_at=_utc_now_iso(),
+            duration_seconds=duration_seconds,
+        )
+    return success_resume_command
+
+
+def _execute_multipass_step_stage(
+    *,
+    progress: SessionProgress,
+    work_dir: Path,
+    repo_dir: Path,
+    session_id: str,
+    grounding_mode: str,
+    step_entries: list[MultipassStepEntry],
+    step_worker_count: int,
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+    env: dict[str, str],
+    stream: bool,
+    add_dirs: list[Path] | None,
+    runtime_policy: dict[str, Any],
+    templates: dict[str, str],
+    codex_meta: dict[str, Any] | None,
+    quiet: bool,
+) -> str | None:
+    step_outputs = [str(entry.output_path) for entry in step_entries]
+    runnable_entries = [entry for entry in step_entries if entry.should_run]
+    effective_workers = min(max(1, step_worker_count), len(runnable_entries)) if runnable_entries else 0
+    success_resume_command: str | None = None
+
+    with progress.mutate():
+        mp = progress.meta.setdefault("multipass", {})
+        mp.setdefault("artifacts", {})["step_mds"] = list(step_outputs)
+        mp["step_outputs"] = list(step_outputs)
+        mp["effective_step_workers"] = int(effective_workers)
+        states: list[dict[str, Any]] = []
+        for entry in step_entries:
+            states.append(
+                {
+                    "step_index": int(entry.index),
+                    "step_id": entry.step_id,
+                    "step_title": entry.step_title,
+                    "step_focus": entry.step_focus,
+                    "output_path": str(entry.output_path),
+                    "status": ("queued" if entry.should_run else "reused"),
+                    "reusable": bool(not entry.should_run),
+                }
+            )
+        mp["step_states"] = states
+        _update_multipass_step_progress(progress.meta)
+
+    if not runnable_entries:
+        return success_resume_command
+
+    worker_stream = stream if effective_workers <= 1 else False
+    future_to_entry: dict[Future[MultipassStepRunResult], MultipassStepEntry] = {}
+    raw_results: dict[int, MultipassStepRunResult] = {}
+    first_error: Exception | None = None
+
+    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="cure-multipass-step") as executor:
+        for entry in runnable_entries:
+            future = executor.submit(
+                _run_multipass_step_llm,
+                entry=entry,
+                progress=progress,
+                repo_dir=repo_dir,
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+                env=env,
+                stream=worker_stream,
+                add_dirs=add_dirs,
+                runtime_policy=runtime_policy,
+                quiet=quiet,
+            )
+            future_to_entry[future] = entry
+
+        for future in as_completed(future_to_entry):
+            entry = future_to_entry[future]
+            try:
+                raw_result = future.result()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                    for other_future, other_entry in future_to_entry.items():
+                        if other_future.done():
+                            continue
+                        if other_future.cancel():
+                            with progress.mutate():
+                                _set_multipass_step_state(
+                                    progress.meta,
+                                    entry=other_entry,
+                                    status="canceled",
+                                    reusable=False,
+                                    finished_at=_utc_now_iso(),
+                                    error="canceled after another step failed",
+                                )
+                                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+                continue
+            raw_results[entry.index] = raw_result
+
+    for entry in step_entries:
+        raw_result = raw_results.get(entry.index)
+        if raw_result is None:
+            continue
+        try:
+            success_resume_command = _finalize_multipass_step_result(
+                progress=progress,
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                grounding_mode=grounding_mode,
+                entry=entry,
+                step_result=raw_result.llm_result,
+                duration_seconds=raw_result.duration_seconds,
+                provider=str(llm_resolved.get("provider") or ""),
+                templates=templates,
+                codex_meta=codex_meta,
+            ) or success_resume_command
+        except Exception as exc:
+            with progress.mutate():
+                _set_multipass_step_state(
+                    progress.meta,
+                    entry=entry,
+                    status="failed",
+                    reusable=False,
+                    finished_at=_utc_now_iso(),
+                    duration_seconds=raw_result.duration_seconds,
+                    error=str(exc),
+                )
+                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+            if first_error is None:
+                first_error = exc
+
+    with progress.mutate():
+        if first_error is None:
+            progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
+        progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
+            "step_outputs"
+        ] = list(step_outputs)
+
+    if first_error is not None:
+        if isinstance(first_error, ReviewflowSubprocessError):
+            _eprint(f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}")
+        raise first_error
+    return success_resume_command
+
+
 def require_gh_auth(host: str) -> None:
     try:
         run_cmd(["gh", "auth", "status", "--hostname", host], check=True)
@@ -6725,6 +7222,7 @@ def _pr_flow_impl(
     review_intelligence_capabilities: dict[str, Any] | None = None
     multipass_defaults: dict[str, Any] = {}
     multipass_max_steps: int | None = None
+    multipass_step_workers: int | None = None
     if not bool(args.no_review):
         review_intelligence_cfg, review_intelligence_meta = load_review_intelligence_config(
             config_path=effective_config_path,
@@ -6752,13 +7250,22 @@ def _pr_flow_impl(
         else:
             multipass_max_steps = int(multipass_defaults.get("max_steps", DEFAULT_MULTIPASS_MAX_STEPS))
             multipass_max_steps_source = "cure.toml"
+        multipass_step_workers = int(
+            multipass_defaults.get("step_workers", DEFAULT_MULTIPASS_STEP_WORKERS)
+        )
+        multipass_step_workers_source = "cure.toml"
     else:
         multipass_max_steps = DEFAULT_MULTIPASS_MAX_STEPS
         multipass_max_steps_source = "skipped:no_review"
+        multipass_step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
+        multipass_step_workers_source = "skipped:no_review"
     progress.meta["multipass"] = {
         "enabled": False if bool(args.no_review) else None,
         "max_steps": multipass_max_steps,
         "max_steps_source": multipass_max_steps_source,
+        "step_workers": multipass_step_workers,
+        "step_workers_source": multipass_step_workers_source,
+        "effective_step_workers": 0,
         "grounding_mode": ("off" if bool(args.no_review) else DEFAULT_MULTIPASS_GROUNDING_MODE),
         "grounding_mode_source": ("forced_off:no_review" if bool(args.no_review) else "default"),
         "mode": ("skipped:no_review" if bool(args.no_review) else None),
@@ -7359,119 +7866,60 @@ def _pr_flow_impl(
                     }
                     progress.flush()
 
-                    step_outputs: list[str] = []
-                    for idx, step in enumerate(steps, start=1):
-                        step_id = str(step.get("id") or f"{idx:02d}").strip()
-                        step_title = str(step.get("title") or "").strip()
-                        step_focus = str(step.get("focus") or "").strip()
-                        out_path = session_dir / f"review.step-{idx:02d}.md"
-                        step_outputs.append(str(out_path))
-                        progress.meta.setdefault("multipass", {}).setdefault("artifacts", {}).setdefault(
-                            "step_mds", []
-                        ).append(str(out_path))
-                        progress.meta.setdefault("multipass", {})["current"] = {
-                            "stage": "step",
-                            "step_index": int(idx),
-                            "step_count": int(len(steps)),
-                            "step_title": step_title,
-                        }
-                        progress.flush()
+                    step_entries = _build_multipass_step_entries(
+                        steps=steps,
+                        session_dir=session_dir,
+                        plan_json_path=plan_json_path,
+                        templates=templates,
+                        base_ref_for_review=base_ref_for_review,
+                        pr_url=str(args.pr_url),
+                        pr_number=int(pr.number),
+                        pr=pr,
+                        agent_desc=agent_desc,
+                        review_intelligence_cfg=review_intelligence_cfg,
+                        review_intelligence_capabilities=review_intelligence_capabilities,
+                    )
+                    progress.meta.setdefault("multipass", {}).setdefault("runs", []).extend(
+                        [
+                            {
+                                "kind": "step",
+                                "step_index": entry.index,
+                                "step_id": entry.step_id,
+                                "step_title": entry.step_title,
+                                "output_path": str(entry.output_path),
+                                "template_id": builtin_prompt_id(templates["step"]),
+                                "prompt_chars": len(entry.prompt),
+                                "prompt_sha256": sha256_text(entry.prompt),
+                            }
+                            for entry in step_entries
+                        ]
+                    )
+                    progress.flush()
+                    with phase("codex_steps", progress=progress, quiet=quiet):
+                        success_resume_command = _execute_multipass_step_stage(
+                            progress=progress,
+                            work_dir=work_dir,
+                            repo_dir=repo_dir,
+                            session_id=session_id,
+                            grounding_mode=grounding_mode,
+                            step_entries=step_entries,
+                            step_worker_count=int(
+                                progress.meta.setdefault("multipass", {}).get(
+                                    "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                                )
+                            ),
+                            llm_resolved=llm_resolved,
+                            llm_resolution_meta=llm_resolution_meta,
+                            env=env,
+                            stream=stream,
+                            add_dirs=add_dirs,
+                            runtime_policy=runtime_policy,
+                            templates=templates,
+                            codex_meta=codex_meta,
+                            quiet=quiet,
+                        ) or success_resume_command
 
-                        with phase(f"codex_step_{idx:02d}", progress=progress, quiet=quiet):
-                            log(f"Multipass step {idx:02d}: {step_title}", quiet=quiet)
-                            step_template = load_builtin_prompt_text(templates["step"])
-                            step_prompt = render_prompt(
-                                step_template,
-                                base_ref_for_review=base_ref_for_review,
-                                pr_url=str(args.pr_url),
-                                pr_number=int(pr.number),
-                                gh_host=str(pr.host),
-                                gh_owner=str(pr.owner),
-                                gh_repo_name=str(pr.repo),
-                                gh_repo=str(pr.gh_repo),
-                                agent_desc=agent_desc,
-                                head_ref="HEAD",
-                                extra_vars={
-                                    **review_intelligence_prompt_vars(
-                                        review_intelligence_cfg,
-                                        capability_summary=review_intelligence_capabilities,
-                                    ),
-                                    "PLAN_JSON_PATH": str(plan_json_path),
-                                    "STEP_ID": step_id,
-                                    "STEP_TITLE": step_title,
-                                    "STEP_FOCUS": step_focus,
-                                },
-                            )
-                            progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
-                                {
-                                    "kind": "step",
-                                    "step_index": idx,
-                                    "step_id": step_id,
-                                    "step_title": step_title,
-                                    "output_path": str(out_path),
-                                    "template_id": builtin_prompt_id(templates["step"]),
-                                    "prompt_chars": len(step_prompt),
-                                    "prompt_sha256": sha256_text(step_prompt),
-                                }
-                            )
-                            progress.flush()
-                            try:
-                                step_result = run_llm_exec(
-                                    repo_dir=repo_dir,
-                                    resolved=llm_resolved,
-                                    resolution_meta=llm_resolution_meta,
-                                    output_path=out_path,
-                                    prompt=step_prompt,
-                                    env=env,
-                                    stream=stream,
-                                    progress=progress,
-                                    add_dirs=add_dirs,
-                                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                                    runtime_policy=runtime_policy,
-                                )
-                                record_llm_usage(progress.meta.setdefault("llm", {}), step_result.adapter_meta)
-                                step_runs = progress.meta.setdefault("multipass", {}).setdefault("runs", [])
-                                if step_runs and isinstance(step_runs[-1], dict) and step_result.resume is not None:
-                                    step_runs[-1]["llm_session_id"] = step_result.resume.session_id
-                                    step_runs[-1]["llm_provider"] = step_result.resume.provider
-                                if step_runs and isinstance(step_runs[-1], dict):
-                                    step_runs[-1]["usage"] = _normalize_llm_usage(step_result.adapter_meta.get("usage"))
-                                progress.flush()
-                                _enforce_codex_chunkhound_tool_proof(
-                                    meta=progress.meta,
-                                    work_dir=work_dir,
-                                    provider=str(llm_resolved.get("provider") or ""),
-                                    review_stage="multipass_step",
-                                    prompt_template_name=templates["step"],
-                                    adapter_meta=step_result.adapter_meta,
-                                )
-                                progress.flush()
-                                _, step_validation = _validate_or_reuse_step_artifact(
-                                    meta=progress.meta,
-                                    work_dir=work_dir,
-                                    grounding_mode=grounding_mode,
-                                    artifact_path=out_path,
-                                    repo_dir=repo_dir,
-                                    step_index=idx,
-                                )
-                                progress.flush()
-                                if (
-                                    grounding_mode == "strict"
-                                    and step_validation is not None
-                                    and (step_validation.get("valid") is False)
-                                ):
-                                    raise ReviewflowError(
-                                        f"Multipass step grounding validation failed for {out_path.name}."
-                                    )
-                            except ReviewflowSubprocessError:
-                                _eprint(
-                                    f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}"
-                                )
-                                raise
-
-                    progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
-                        "step_outputs"
-                    ] = step_outputs
+                    step_outputs = [str(entry.output_path) for entry in step_entries]
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
                         "step_index": int(len(step_outputs)),
@@ -8072,6 +8520,11 @@ def _resume_flow_impl(
         )
         progress.meta.setdefault("multipass", {})["grounding_mode"] = grounding_mode
         progress.meta.setdefault("multipass", {})["grounding_mode_source"] = "cure.toml"
+        progress.meta.setdefault("multipass", {})["step_workers"] = int(
+            multipass_cfg.get("step_workers", DEFAULT_MULTIPASS_STEP_WORKERS)
+        )
+        progress.meta.setdefault("multipass", {})["step_workers_source"] = "cure.toml"
+        progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
         progress.flush()
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
@@ -8234,122 +8687,119 @@ def _resume_flow_impl(
         }
         progress.flush()
 
-        step_outputs: list[str] = []
-        step_reran = False
-        for idx, step in enumerate(steps, start=1):
-            out_path = session_dir / f"review.step-{idx:02d}.md"
-            step_outputs.append(str(out_path))
-
-            if from_phase == "synth":
-                continue
-            if from_phase in {"plan"}:
-                should_run = True
-            else:
-                should_run = (not out_path.is_file()) or (out_path.stat().st_size == 0)
-                if (not should_run) and grounding_mode != "off":
-                    reusable, _ = _validate_or_reuse_step_artifact(
-                        meta=progress.meta,
-                        work_dir=work_dir,
-                        grounding_mode=grounding_mode,
-                        artifact_path=out_path,
-                        repo_dir=repo_dir,
-                        step_index=idx,
-                    )
-                    progress.flush()
-                    should_run = not reusable
-            if not should_run:
-                continue
-
-            step_id = str(step.get("id") or f"{idx:02d}").strip()
-            step_title = str(step.get("title") or "").strip()
-            step_focus = str(step.get("focus") or "").strip()
-            progress.meta.setdefault("multipass", {})["current"] = {
-                "stage": "step",
-                "step_index": int(idx),
-                "step_count": int(len(steps)),
-                "step_title": step_title,
-            }
-            progress.flush()
-
-            with phase(f"codex_step_{idx:02d}", progress=progress, quiet=quiet):
-                did_work = True
-                step_reran = True
-                log(f"Multipass step {idx:02d}: {step_title}", quiet=quiet)
-                step_template = load_builtin_prompt_text(templates["step"])
-                step_prompt = render_prompt(
-                    step_template,
-                    base_ref_for_review=base_ref_for_review,
-                    pr_url=pr_url,
-                    pr_number=int(meta.get("number") or pr.number),
-                    gh_host=str(pr.host),
-                    gh_owner=str(pr.owner),
-                    gh_repo_name=str(pr.repo),
-                    gh_repo=str(pr.gh_repo),
-                    agent_desc=agent_desc,
-                    head_ref="HEAD",
-                    extra_vars={
-                        **review_intelligence_prompt_vars(
-                            review_intelligence_cfg,
-                            capability_summary=review_intelligence_capabilities,
-                        ),
-                        "PLAN_JSON_PATH": str(plan_json_path),
-                        "STEP_ID": step_id,
-                        "STEP_TITLE": step_title,
-                        "STEP_FOCUS": step_focus,
-                    },
+        base_step_entries = _build_multipass_step_entries(
+            steps=steps,
+            session_dir=session_dir,
+            plan_json_path=plan_json_path,
+            templates=templates,
+            base_ref_for_review=base_ref_for_review,
+            pr_url=pr_url,
+            pr_number=int(meta.get("number") or pr.number),
+            pr=pr,
+            agent_desc=agent_desc,
+            review_intelligence_cfg=review_intelligence_cfg,
+            review_intelligence_capabilities=review_intelligence_capabilities,
+        )
+        step_entries: list[MultipassStepEntry] = []
+        for entry in base_step_entries:
+            should_run = False
+            if from_phase != "synth":
+                if from_phase in {"plan"}:
+                    should_run = True
+                else:
+                    should_run = (not entry.output_path.is_file()) or (entry.output_path.stat().st_size == 0)
+                    if (not should_run) and grounding_mode != "off":
+                        reusable, _ = _validate_or_reuse_step_artifact(
+                            meta=progress.meta,
+                            work_dir=work_dir,
+                            grounding_mode=grounding_mode,
+                            artifact_path=entry.output_path,
+                            repo_dir=repo_dir,
+                            step_index=entry.index,
+                        )
+                        progress.flush()
+                        should_run = not reusable
+            step_entries.append(
+                MultipassStepEntry(
+                    index=entry.index,
+                    step_id=entry.step_id,
+                    step_title=entry.step_title,
+                    step_focus=entry.step_focus,
+                    output_path=entry.output_path,
+                    prompt=entry.prompt,
+                    should_run=should_run,
                 )
-                step_result = run_llm_exec(
+            )
+
+        progress.meta.setdefault("multipass", {}).setdefault("runs", [])
+        existing_step_runs = {
+            int(item.get("step_index") or 0)
+            for item in progress.meta.setdefault("multipass", {}).setdefault("runs", [])
+            if isinstance(item, dict) and str(item.get("kind") or "").strip() == "step"
+        }
+        for entry in step_entries:
+            if entry.should_run and entry.index not in existing_step_runs:
+                progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
+                    {
+                        "kind": "step",
+                        "step_index": entry.index,
+                        "step_id": entry.step_id,
+                        "step_title": entry.step_title,
+                        "output_path": str(entry.output_path),
+                        "template_id": builtin_prompt_id(templates["step"]),
+                        "prompt_chars": len(entry.prompt),
+                        "prompt_sha256": sha256_text(entry.prompt),
+                    }
+                )
+        progress.flush()
+
+        step_outputs = [str(entry.output_path) for entry in step_entries]
+        step_reran = any(entry.should_run for entry in step_entries)
+        if step_reran:
+            did_work = True
+            with phase("codex_steps", progress=progress, quiet=quiet):
+                success_resume_command = _execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=work_dir,
                     repo_dir=repo_dir,
-                    resolved=llm_resolved,
-                    resolution_meta=llm_resolution_meta,
-                    output_path=out_path,
-                    prompt=step_prompt,
+                    session_id=session_id,
+                    grounding_mode=grounding_mode,
+                    step_entries=step_entries,
+                    step_worker_count=int(
+                        progress.meta.setdefault("multipass", {}).get(
+                            "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                        )
+                    ),
+                    llm_resolved=llm_resolved,
+                    llm_resolution_meta=llm_resolution_meta,
                     env=env,
                     stream=stream,
-                    progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                     runtime_policy=runtime_policy,
-                )
-                record_llm_usage(progress.meta.setdefault("llm", {}), step_result.adapter_meta)
-                success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), step_result.resume)
-                if codex_meta is not None:
-                    codex_resume = (
-                        CodexResumeInfo(
-                            session_id=step_result.resume.session_id,
-                            cwd=step_result.resume.cwd,
-                            command=step_result.resume.command,
-                        )
-                        if step_result.resume is not None and step_result.resume.provider == "codex"
-                        else None
-                    )
-                    record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                _enforce_codex_chunkhound_tool_proof(
-                    meta=progress.meta,
-                    work_dir=work_dir,
-                    provider=str(llm_resolved.get("provider") or ""),
-                    review_stage="multipass_step",
-                    prompt_template_name=templates["step"],
-                    adapter_meta=step_result.adapter_meta,
-                )
-                progress.flush()
-                _, step_validation = _validate_or_reuse_step_artifact(
-                    meta=progress.meta,
-                    work_dir=work_dir,
-                    grounding_mode=grounding_mode,
-                    artifact_path=out_path,
-                    repo_dir=repo_dir,
-                    step_index=idx,
-                )
-                progress.flush()
-                if (
-                    grounding_mode == "strict"
-                    and step_validation is not None
-                    and (step_validation.get("valid") is False)
-                ):
-                    raise ReviewflowError(
-                        f"Multipass step grounding validation failed for {out_path.name}."
-                    )
+                    templates=templates,
+                    codex_meta=codex_meta,
+                    quiet=quiet,
+                ) or success_resume_command
+        else:
+            with progress.mutate():
+                progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
+                    "step_outputs"
+                ] = list(step_outputs)
+                progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
+                progress.meta.setdefault("multipass", {})["step_states"] = [
+                    {
+                        "step_index": int(entry.index),
+                        "step_id": entry.step_id,
+                        "step_title": entry.step_title,
+                        "step_focus": entry.step_focus,
+                        "output_path": str(entry.output_path),
+                        "status": "reused",
+                        "reusable": True,
+                    }
+                    for entry in step_entries
+                ]
+                progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
+                _update_multipass_step_progress(progress.meta)
 
         should_synth = (
             from_phase in {"synth", "plan", "steps"}
@@ -11827,11 +12277,13 @@ from cure_runtime import (
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
     DEFAULT_MULTIPASS_MAX_STEPS,
+    DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
     HTTP_LLM_PROVIDERS,
     LLM_RESUME_PROVIDERS,
     LLM_TRANSPORT_CHOICES,
     MULTIPASS_MAX_STEPS_HARD_CAP,
+    MULTIPASS_STEP_WORKERS_HARD_CAP,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
     DoctorCheck,
     ReviewIntelligenceConfig,

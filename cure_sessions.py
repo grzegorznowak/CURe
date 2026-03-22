@@ -1214,6 +1214,35 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
             chunkhound_payload = {}
         chunkhound_payload["access"] = dict(access)
 
+    multipass_payload = None
+    multipass_meta = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    if multipass_meta:
+        multipass_payload = {
+            "enabled": bool(multipass_meta.get("enabled") is True),
+            "mode": str(multipass_meta.get("mode") or "").strip() or None,
+            "status": str(multipass_meta.get("status") or "").strip() or None,
+            "max_steps": int(multipass_meta.get("max_steps") or 0) if multipass_meta.get("max_steps") is not None else None,
+            "step_workers": int(multipass_meta.get("step_workers") or 0)
+            if multipass_meta.get("step_workers") is not None
+            else None,
+            "effective_step_workers": int(multipass_meta.get("effective_step_workers") or 0)
+            if multipass_meta.get("effective_step_workers") is not None
+            else None,
+        }
+        current = multipass_meta.get("current") if isinstance(multipass_meta.get("current"), dict) else None
+        if current is not None:
+            multipass_payload["current"] = dict(current)
+        step_states = multipass_meta.get("step_states")
+        if isinstance(step_states, list):
+            multipass_payload["step_states"] = [dict(item) for item in step_states if isinstance(item, dict)]
+        artifacts = multipass_meta.get("artifacts")
+        if isinstance(artifacts, dict):
+            step_outputs = artifacts.get("step_outputs")
+            if isinstance(step_outputs, list):
+                multipass_payload["step_outputs"] = [str(item) for item in step_outputs]
+        if isinstance(multipass_meta.get("validation"), dict):
+            multipass_payload["validation"] = dict(multipass_meta.get("validation"))
+
     host = _normalize_pr_identity_value(meta.get("host")) or "github.com"
     owner = _normalize_pr_identity_value(meta.get("owner"))
     repo = _normalize_pr_identity_value(meta.get("repo"))
@@ -1253,6 +1282,8 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
         payload["agent_runtime"] = agent_runtime_payload
     if chunkhound_payload is not None:
         payload["chunkhound"] = chunkhound_payload
+    if multipass_payload is not None:
+        payload["multipass"] = multipass_payload
     if isinstance(meta.get("error"), dict):
         payload["error"] = meta.get("error")
         payload["terminal_error"] = meta.get("error")

@@ -1,5 +1,6 @@
 import contextlib
 import argparse
+import inspect
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import unittest
 from io import StringIO
@@ -799,6 +801,15 @@ class CodexConfigTests(unittest.TestCase):
             cfg.write_text("[multipass]\nmax_steps = 5\n", encoding="utf-8")
             mp, _ = rf.load_reviewflow_multipass_defaults(config_path=cfg)
             self.assertEqual(mp["grounding_mode"], "strict")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_multipass_defaults_normalizes_step_workers(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_multipass_step_workers.toml"
+        try:
+            cfg.write_text("[multipass]\nstep_workers = 99\n", encoding="utf-8")
+            mp, _ = rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertEqual(mp["step_workers"], rf.MULTIPASS_STEP_WORKERS_HARD_CAP)
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -5520,6 +5531,7 @@ class WorkflowContractTests(unittest.TestCase):
         agent_runtime: dict[str, object] | None = None,
         error: dict[str, object] | None = None,
         followup_name: str | None = None,
+        multipass: dict[str, object] | None = None,
     ) -> Path:
         session_dir = root / session_id
         repo_dir = session_dir / "repo"
@@ -5584,6 +5596,8 @@ class WorkflowContractTests(unittest.TestCase):
             meta["error"] = error
         if followups:
             meta["followups"] = followups
+        if multipass is not None:
+            meta["multipass"] = multipass
 
         (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
         return session_dir
@@ -6181,6 +6195,169 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("session=watch-done", rendered)
             self.assertIn("status=done", rendered)
             self.assertNotIn("\x1b[", rendered)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_status_flow_json_includes_multipass_worker_metadata(self) -> None:
+        root = ROOT / ".tmp_test_status_multipass_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="status_multipass")
+            self._write_session(
+                root=root,
+                session_id="multipass-status",
+                status="running",
+                created_at="2026-03-10T09:00:00+00:00",
+                number=31,
+                phase="codex_steps",
+                multipass={
+                    "enabled": True,
+                    "mode": "multipass",
+                    "status": "steps_ready",
+                    "max_steps": 20,
+                    "step_workers": 3,
+                    "effective_step_workers": 2,
+                    "current": {
+                        "stage": "steps",
+                        "step_index": 2,
+                        "step_count": 4,
+                        "step_title": "workers 2/3 | 1 running | 1 queued | 2 ready",
+                    },
+                    "step_states": [
+                        {"step_index": 1, "step_title": "API", "status": "completed"},
+                        {"step_index": 2, "step_title": "Tests", "status": "running"},
+                        {"step_index": 3, "step_title": "Docs", "status": "queued"},
+                        {"step_index": 4, "step_title": "Cleanup", "status": "reused"},
+                    ],
+                    "artifacts": {
+                        "step_outputs": [
+                            "/tmp/review.step-01.md",
+                            "/tmp/review.step-02.md",
+                        ]
+                    },
+                },
+            )
+
+            stdout = StringIO()
+            rc = rf.status_flow(
+                argparse.Namespace(target="multipass-status", json_output=True),
+                paths=paths,
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(rc, 0)
+            self.assertIn("multipass", payload)
+            self.assertEqual(payload["multipass"]["step_workers"], 3)
+            self.assertEqual(payload["multipass"]["effective_step_workers"], 2)
+            self.assertEqual(payload["multipass"]["current"]["stage"], "steps")
+            self.assertEqual(
+                [item["status"] for item in payload["multipass"]["step_states"]],
+                ["completed", "running", "queued", "reused"],
+            )
+            self.assertEqual(
+                payload["multipass"]["step_outputs"],
+                ["/tmp/review.step-01.md", "/tmp/review.step-02.md"],
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_watch_flow_non_tty_includes_multipass_worker_summary(self) -> None:
+        root = ROOT / ".tmp_test_watch_multipass_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="watch_multipass")
+            self._write_session(
+                root=root,
+                session_id="watch-multipass",
+                status="running",
+                created_at="2026-03-10T09:00:00+00:00",
+                number=32,
+                phase="codex_steps",
+                multipass={
+                    "enabled": True,
+                    "mode": "multipass",
+                    "status": "steps_ready",
+                    "step_workers": 3,
+                    "effective_step_workers": 2,
+                    "step_states": [
+                        {"step_index": 1, "step_title": "API", "status": "completed"},
+                        {"step_index": 2, "step_title": "Tests", "status": "running"},
+                        {"step_index": 3, "step_title": "Docs", "status": "queued"},
+                    ],
+                },
+            )
+
+            with mock.patch.object(cure_commands.time, "sleep", side_effect=KeyboardInterrupt):
+                stdout = StringIO()
+                with self.assertRaises(KeyboardInterrupt):
+                    rf.watch_flow(
+                        argparse.Namespace(
+                            target="watch-multipass",
+                            interval=0.0,
+                            verbosity="quiet",
+                            no_color=True,
+                        ),
+                        paths=paths,
+                        stdout=stdout,
+                        stderr=StringIO(),
+                    )
+
+            rendered = stdout.getvalue()
+            self.assertIn("session=watch-multipass", rendered)
+            self.assertIn("multipass_workers=2/3", rendered)
+            self.assertIn("steps=1 running,1 queued,1 completed", rendered)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_watch_flow_non_tty_omits_multipass_worker_summary_for_singlepass_session(self) -> None:
+        root = ROOT / ".tmp_test_watch_singlepass_root"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            paths, cfg = self._make_paths(root, suffix="watch_singlepass")
+            self._write_session(
+                root=root,
+                session_id="watch-singlepass",
+                status="done",
+                created_at="2026-03-10T09:00:00+00:00",
+                completed_at="2026-03-10T09:03:00+00:00",
+                number=33,
+                phase="codex_review",
+                multipass={
+                    "enabled": False,
+                    "mode": "singlepass",
+                    "step_workers": 3,
+                    "effective_step_workers": 0,
+                    "step_states": [
+                        {"step_index": 1, "step_title": "placeholder", "status": "queued"},
+                    ],
+                },
+            )
+
+            stdout = StringIO()
+            rc = rf.watch_flow(
+                argparse.Namespace(
+                    target="watch-singlepass",
+                    interval=0.0,
+                    verbosity="quiet",
+                    no_color=True,
+                ),
+                paths=paths,
+                stdout=stdout,
+                stderr=StringIO(),
+            )
+
+            rendered = stdout.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("session=watch-singlepass", rendered)
+            self.assertNotIn("multipass_workers=", rendered)
+            self.assertNotIn("steps=", rendered)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -12730,6 +12907,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             ]
         )
         calls: list[str] = []
+        llm_param_count = len(inspect.signature(llm_side_effect).parameters)
 
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -12931,6 +13109,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             ]
         )
         calls: list[str] = []
+        llm_param_count = len(inspect.signature(llm_side_effect).parameters)
 
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -14413,6 +14592,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         root: Path,
         profile_resolved: str,
         multipass_enabled: bool,
+        step_workers: int = 1,
         llm_side_effect: Any,
         expect_error: str | None = None,
         helper_preflight_side_effect: Any | None = None,
@@ -14448,6 +14628,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             ]
         )
         calls: list[str] = []
+        llm_param_count = len(inspect.signature(llm_side_effect).parameters)
 
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -14456,7 +14637,10 @@ class CodexToolProofFlowTests(unittest.TestCase):
         def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
             output_path = Path(str(kwargs["output_path"]))
             calls.append(output_path.name)
-            return llm_side_effect(output_path, Path(str(kwargs["repo_dir"])).parent / "work")
+            work_dir = Path(str(kwargs["repo_dir"])).parent / "work"
+            if llm_param_count >= 3:
+                return llm_side_effect(output_path, work_dir, kwargs)
+            return llm_side_effect(output_path, work_dir)
 
         with contextlib.ExitStack() as stack:
             fake_run_cmd = self._fake_run_cmd(seed=seed)
@@ -14522,8 +14706,20 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     rf,
                     "load_reviewflow_multipass_defaults",
                     return_value=(
-                        {"enabled": multipass_enabled, "max_steps": 20, "grounding_mode": "off"},
-                        {"multipass": {"enabled": multipass_enabled, "max_steps": 20, "grounding_mode": "off"}},
+                        {
+                            "enabled": multipass_enabled,
+                            "max_steps": 20,
+                            "step_workers": step_workers,
+                            "grounding_mode": "off",
+                        },
+                        {
+                            "multipass": {
+                                "enabled": multipass_enabled,
+                                "max_steps": 20,
+                                "step_workers": step_workers,
+                                "grounding_mode": "off",
+                            }
+                        },
                     ),
                 )
             )
@@ -14994,6 +15190,192 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(
                 [run["review_stage"] for run in report["runs"]],
                 ["multipass_plan", "multipass_step", "multipass_synth"],
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_parallel_multipass_steps_preserve_ordered_synth_inputs(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_parallel_multipass"
+        step_one_started = threading.Event()
+        step_two_finished = threading.Event()
+        synth_prompts: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [
+                                        {"id": "01", "title": "API review", "focus": "api"},
+                                        {"id": "02", "title": "Tests review", "focus": "tests"},
+                                    ],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                )
+            elif output_path.name == "review.step-01.md":
+                step_one_started.set()
+                self.assertTrue(step_two_finished.wait(timeout=2))
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: api",
+                            "",
+                            "### Findings",
+                            "- API concern",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name == "review.step-02.md":
+                self.assertTrue(step_one_started.wait(timeout=2))
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 02 — Tests review",
+                            "**Focus**: tests",
+                            "",
+                            "### Findings",
+                            "- Test concern",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                step_two_finished.set()
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name == "review.md":
+                synth_prompts.append(str(kwargs["prompt"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            step_workers=2,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                calls,
+                ["review.plan.md", "review.step-01.md", "review.step-02.md", "review.md"],
+            )
+            self.assertEqual(meta["multipass"]["step_workers"], 2)
+            self.assertEqual(meta["multipass"]["effective_step_workers"], 2)
+            self.assertEqual(
+                meta["multipass"]["artifacts"]["step_outputs"],
+                [
+                    str(session_dir / "review.step-01.md"),
+                    str(session_dir / "review.step-02.md"),
+                ],
+            )
+            self.assertEqual(
+                [item["status"] for item in meta["multipass"]["step_states"]],
+                ["completed", "completed"],
+            )
+            self.assertEqual(len(synth_prompts), 1)
+            self.assertLess(
+                synth_prompts[0].index("review.step-01.md"),
+                synth_prompts[0].index("review.step-02.md"),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_parallel_multipass_step_failure_blocks_synth(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_parallel_step_failure"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Plan JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "abort": False,
+                                    "abort_reason": None,
+                                    "jira_keys": ["ABC-1"],
+                                    "steps": [
+                                        {"id": "01", "title": "API review", "focus": "api"},
+                                        {"id": "02", "title": "Tests review", "focus": "tests"},
+                                    ],
+                                }
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+            if output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Step Result: 01 — API review",
+                            "**Focus**: api",
+                            "",
+                            "### Findings",
+                            "- API concern",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+            if output_path.name == "review.step-02.md":
+                raise rf.ReviewflowError("simulated parallel step failure")
+            if output_path.name == "review.md":
+                raise AssertionError("synth should not run after a step failure")
+            raise AssertionError(f"unexpected output path: {output_path}")
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            step_workers=2,
+            llm_side_effect=llm_side_effect,
+            expect_error="simulated parallel step failure",
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertNotIn("review.md", calls)
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+            self.assertEqual(
+                [item["status"] for item in meta["multipass"]["step_states"]],
+                ["completed", "failed"],
             )
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -15898,6 +16280,283 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["multipass_step", "multipass_synth"])
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
             self.assertIn("session session-1", review_md_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_parallel_multipass_reuses_valid_steps_and_reruns_missing_subset(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_resume_parallel_subset"
+        cfg = root / "reviewflow.toml"
+        valid_synth_markdown = "\n".join(
+            [
+                "### Steps taken",
+                "- Read step outputs",
+                "",
+                "**Summary**: ok",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Business value is clear. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Technical read happened. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [
+                            {"id": "01", "title": "API review", "focus": "api"},
+                            {"id": "02", "title": "Tests review", "focus": "tests"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            step_one_output = session_dir / "review.step-01.md"
+            step_one_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: api",
+                        "",
+                        "### Steps taken",
+                        "- checked repo",
+                        "",
+                        "### Findings",
+                        "- API concern. Evidence: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            valid_step_one = rf.validate_multipass_step_grounding(
+                artifact_path=step_one_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            rf._update_grounding_state(
+                meta={"multipass": {"enabled": True, "grounding_mode": "strict"}},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                result=valid_step_one,
+            )
+            review_md = session_dir / "review.md"
+            meta = {
+                "session_id": "session-1",
+                "status": "error",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "failed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "llm": {"provider": "codex", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {
+                        "mode": "strict",
+                        "invalid_artifacts": [],
+                        "has_invalid_artifacts": False,
+                        "artifacts": {"step-01": valid_step_one},
+                        "report_path": str(work_dir / "grounding_report.json"),
+                    },
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                if output_path.name == "review.step-02.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Step Result: 02 — Tests review",
+                                "**Focus**: tests",
+                                "",
+                                "### Steps taken",
+                                "- checked tests",
+                                "",
+                                "### Findings",
+                                "- Test concern. Evidence: `src/app.py:3`",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+                elif output_path.name == "review.md":
+                    output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                    adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+                else:
+                    raise AssertionError(f"unexpected output path: {output_path}")
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "codex", "preset": "test-codex", "capabilities": {"supports_resume": True}},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "step_workers": 2,
+                                "grounding_mode": "strict",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "step_workers": 2,
+                                    "grounding_mode": "strict",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.step-02.md", "review.md"])
+            self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(refreshed["multipass"]["step_workers"], 2)
+            self.assertEqual(refreshed["multipass"]["effective_step_workers"], 1)
+            self.assertEqual(
+                [item["status"] for item in refreshed["multipass"]["step_states"]],
+                ["reused", "completed"],
+            )
+            self.assertEqual(
+                refreshed["multipass"]["artifacts"]["step_outputs"],
+                [
+                    str(session_dir / "review.step-01.md"),
+                    str(session_dir / "review.step-02.md"),
+                ],
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
