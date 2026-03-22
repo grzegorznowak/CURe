@@ -6460,7 +6460,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             helper_text = (
                 helper_path.read_text(encoding="utf-8")
                 .replace('"search": 15.0', '"search": 0.4')
-                .replace('"code_research": 45.0', '"code_research": 0.2')
+                .replace('"code_research": 1200.0', '"code_research": 0.2')
             )
             helper_path.write_text(helper_text, encoding="utf-8")
             env = os.environ.copy()
@@ -13492,10 +13492,10 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                             "tool_name": "code_research",
                             "query": "cross-file question",
                             "helper_path": helper_path,
-                            "error": "timed out after 45.0s waiting for stage tools/call",
+                            "error": "timed out after 1200.0s waiting for stage tools/call",
                             "execution_stage": "tools/call",
                             "execution_stage_status": "timeout",
-                            "execution_timeout_seconds": 45.0,
+                            "execution_timeout_seconds": 1200.0,
                         },
                     },
                 ),
@@ -13507,7 +13507,10 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertEqual(report["observed_successful_calls"], ["search"])
             self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "code_research")
             self.assertEqual(report["observed_failed_call_details"][0]["stage_status"], "timeout")
-            self.assertIn("code_research failed during tools/call (timeout) after 45.0s", str(report["failure_reason"]))
+            self.assertIn(
+                "code_research failed during tools/call (timeout) after 1200.0s",
+                str(report["failure_reason"]),
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

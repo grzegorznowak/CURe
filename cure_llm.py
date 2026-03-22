@@ -943,7 +943,7 @@ _PREFLIGHT_STAGE_TIMEOUTS = {{
 }}
 _TOOL_CALL_TIMEOUTS = {{
     "search": 15.0,
-    "code_research": 45.0,
+    "code_research": 1200.0,
 }}
 _TRANSPORT_MODES = ("json_line", "mcp_framed")
 DAEMON_METADATA_PROBE = "\\n".join(
