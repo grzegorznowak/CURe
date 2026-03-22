@@ -902,6 +902,166 @@ def validate_and_record_codex_chunkhound_tool_proof(
     return run_report
 
 
+def _normalize_plan_abort_reason_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _resolve_chunkhound_tool_validation_report_path(
+    *, meta: dict[str, Any] | None, work_dir: Path
+) -> Path:
+    chunkhound_meta = meta.get("chunkhound") if isinstance(meta, dict) else None
+    tool_validation = chunkhound_meta.get("tool_validation") if isinstance(chunkhound_meta, dict) else None
+    raw_path = str(tool_validation.get("path") or "").strip() if isinstance(tool_validation, dict) else ""
+    if raw_path:
+        return Path(raw_path).resolve()
+    return (work_dir / "chunkhound_tool_validation.json").resolve()
+
+
+def _load_latest_chunkhound_tool_validation_run(
+    *, report_path: Path, review_stage: str, require_valid: bool = False
+) -> tuple[dict[str, Any] | None, int | None]:
+    if not report_path.is_file():
+        return None, None
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        return None, None
+    for idx in range(len(runs) - 1, -1, -1):
+        item = runs[idx]
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("review_stage") or "").strip() != review_stage:
+            continue
+        if require_valid and (item.get("valid") is not True):
+            continue
+        return item, idx
+    return None, None
+
+
+def detect_multipass_plan_abort_contradiction(
+    *,
+    meta: dict[str, Any] | None,
+    work_dir: Path,
+    plan: dict[str, Any] | None,
+    plan_tool_report: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    plan_payload = plan if isinstance(plan, dict) else {}
+    if not bool(plan_payload.get("abort")):
+        return None
+
+    abort_reason = str(plan_payload.get("abort_reason") or "").strip()
+    normalized_reason = _normalize_plan_abort_reason_text(abort_reason)
+    if not normalized_reason:
+        return None
+
+    report_path = _resolve_chunkhound_tool_validation_report_path(meta=meta, work_dir=work_dir)
+    persisted_run, persisted_run_index = _load_latest_chunkhound_tool_validation_run(
+        report_path=report_path,
+        review_stage="multipass_plan",
+        require_valid=True,
+    )
+    live_report = plan_tool_report if isinstance(plan_tool_report, dict) else None
+    if (
+        isinstance(live_report, dict)
+        and str(live_report.get("review_stage") or "").strip() == "multipass_plan"
+        and bool(live_report.get("valid"))
+    ):
+        proof_run = live_report
+        proof_source = "live_plan_report"
+    else:
+        proof_run = persisted_run
+        proof_source = "persisted_plan_report" if persisted_run is not None else None
+    if not isinstance(proof_run, dict) or not bool(proof_run.get("valid")):
+        return None
+
+    validated_tools = [
+        str(tool).strip()
+        for tool in (proof_run.get("observed_successful_calls") or [])
+        if str(tool).strip()
+    ]
+    validated_tool_set = set(validated_tools)
+    if not validated_tool_set:
+        return None
+
+    failure_terms = (
+        r"\bfailed\b",
+        r"\bfailure\b",
+        r"\bunavailable\b",
+        r"\bmissing\b",
+        r"\bnever completed\b",
+        r"\bdid not complete\b",
+        r"\bdidn't complete\b",
+        r"\bnot complete\b",
+        r"\bnot completed\b",
+        r"\bunable to\b",
+        r"\bcould not\b",
+        r"\bcouldn't\b",
+        r"\bnot available\b",
+        r"\btimed out\b",
+        r"\btimeout\b",
+        r"\bno completed\b",
+    )
+    gate_terms = (
+        r"\bgate\b",
+        r"\bmandatory review-intelligence\b",
+        r"\brequired review-intelligence\b",
+        r"\brequired intelligence\b",
+        r"\bmandatory helper gate\b",
+        r"\bno plan steps\b",
+        r"\bno steps could be emitted\b",
+    )
+    helper_terms = (r"\bhelper\b", r"\bchunkhound\b")
+    search_terms = (r"\bsearch\b",)
+    code_research_terms = (r"\bcode[_\s-]*research\b", r"\bresearch\b")
+
+    matched_signals: list[str] = []
+
+    def _contains_any(patterns: tuple[str, ...], *, signal: str) -> bool:
+        matched = any(re.search(pattern, normalized_reason) for pattern in patterns)
+        if matched and signal not in matched_signals:
+            matched_signals.append(signal)
+        return matched
+
+    has_failure = _contains_any(failure_terms, signal="failure_term")
+    has_gate = _contains_any(gate_terms, signal="gate_term")
+    has_helper = _contains_any(helper_terms, signal="helper_term")
+    has_search = _contains_any(search_terms, signal="search_term")
+    has_code_research = _contains_any(code_research_terms, signal="code_research_term")
+
+    matched_categories: list[str] = []
+    if has_helper and (has_failure or has_gate):
+        matched_categories.append("helper_failure")
+    if "search" in validated_tool_set and has_search and (has_failure or has_gate or has_helper):
+        matched_categories.append("missing_search")
+    if "code_research" in validated_tool_set and has_code_research and (has_failure or has_gate or has_helper):
+        matched_categories.append("missing_code_research")
+    if (has_helper or has_search or has_code_research) and has_gate and (has_failure or has_helper):
+        matched_categories.append("helper_gate_failure")
+    if not matched_categories:
+        return None
+
+    evidence_sources = [
+        str(source).strip()
+        for source in (proof_run.get("observed_evidence_sources") or [])
+        if str(source).strip()
+    ]
+    return {
+        "detected_at": _utc_now_iso(),
+        "review_stage": "multipass_plan",
+        "status": "planner_runtime_inconsistency",
+        "abort_reason": abort_reason,
+        "matched_categories": matched_categories,
+        "matched_signals": matched_signals,
+        "validated_tools": validated_tools,
+        "evidence_sources": evidence_sources,
+        "tool_validation_report_path": str(report_path),
+        "tool_validation_run_index": persisted_run_index,
+        "tool_validation_source": proof_source,
+    }
+
 
 def review_intelligence_prompt_vars(
     cfg: ReviewIntelligenceConfig,
@@ -2100,6 +2260,7 @@ __all__ = [
     'compute_pr_stats',
     'copy_duckdb_files',
     'DEFAULT_BASE_CACHE_TTL_HOURS',
+    'detect_multipass_plan_abort_contradiction',
     'discover_exact_repo_local_chunkhound_seed_candidate',
     'discover_repo_local_chunkhound_config',
     'ensure_base_cache',

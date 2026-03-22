@@ -13608,6 +13608,136 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_detect_multipass_plan_abort_contradiction_matches_valid_plan_proof(self) -> None:
+        root = ROOT / ".tmp_test_multipass_plan_abort_contradiction_match"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                ),
+            )
+            contradiction = rf.detect_multipass_plan_abort_contradiction(
+                meta=meta,
+                work_dir=work_dir,
+                plan={
+                    "abort": True,
+                    "abort_reason": "Mandatory helper gate failed because research never completed.",
+                    "steps": [],
+                },
+                plan_tool_report=report,
+            )
+
+            self.assertIsNotNone(contradiction)
+            assert contradiction is not None
+            self.assertEqual(contradiction["review_stage"], "multipass_plan")
+            self.assertEqual(contradiction["tool_validation_source"], "live_plan_report")
+            self.assertEqual(contradiction["validated_tools"], ["search", "code_research"])
+            self.assertEqual(
+                contradiction["matched_categories"],
+                ["helper_failure", "missing_code_research", "helper_gate_failure"],
+            )
+            self.assertNotIn("missing_search", contradiction["matched_categories"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_detect_multipass_plan_abort_contradiction_ignores_unrelated_abort_reason(self) -> None:
+        root = ROOT / ".tmp_test_multipass_plan_abort_contradiction_unrelated"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                ),
+            )
+            contradiction = rf.detect_multipass_plan_abort_contradiction(
+                meta=meta,
+                work_dir=work_dir,
+                plan={
+                    "abort": True,
+                    "abort_reason": "missing required Jira context",
+                    "steps": [],
+                },
+                plan_tool_report=report,
+            )
+
+            self.assertIsNone(contradiction)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_detect_multipass_plan_abort_contradiction_uses_persisted_plan_stage_proof(self) -> None:
+        root = ROOT / ".tmp_test_multipass_plan_abort_contradiction_persisted"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                ),
+            )
+            rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_step",
+                prompt_template_name="mrereview_gh_local_big_step.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search"],
+                ),
+            )
+
+            contradiction = rf.detect_multipass_plan_abort_contradiction(
+                meta=meta,
+                work_dir=work_dir,
+                plan={
+                    "abort": True,
+                    "abort_reason": "ChunkHound helper failed and no plan steps could be emitted because research never completed.",
+                    "steps": [],
+                },
+                plan_tool_report=None,
+            )
+
+            self.assertIsNotNone(contradiction)
+            assert contradiction is not None
+            self.assertEqual(contradiction["tool_validation_source"], "persisted_plan_report")
+            self.assertEqual(contradiction["tool_validation_run_index"], 0)
+            self.assertIn("helper_gate_failure", contradiction["matched_categories"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_ignores_discovery_only_runs(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_tool_proof_discovery_only"
         try:
@@ -14692,6 +14822,60 @@ class CodexToolProofFlowTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_pr_flow_contradictory_plan_abort_raises_inconsistency_error(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_abort_contradiction"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                "\n".join(
+                    [
+                        "### Plan JSON",
+                        "```json",
+                        json.dumps(
+                            {
+                                "abort": True,
+                                "abort_reason": "Mandatory helper gate failed because research never completed.",
+                                "jira_keys": [],
+                                "steps": [],
+                            }
+                        ),
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=llm_side_effect,
+            expect_error="Multipass planner/runtime inconsistency",
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.plan.md"])
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "planner_runtime_inconsistency")
+            self.assertIn("plan_contradiction", meta["multipass"])
+            self.assertIn(
+                "Multipass planner/runtime inconsistency",
+                str((meta.get("error") or {}).get("message") or ""),
+            )
+            self.assertTrue(report["runs"][0]["valid"])
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+            self.assertFalse((session_dir / "review.md").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_pr_flow_plan_abort_writes_footerized_abort_review(self) -> None:
         root = ROOT / ".tmp_test_codex_tool_proof_abort_review"
 
@@ -15290,6 +15474,173 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["latest_review_stage"], "followup")
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], [])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_existing_contradictory_abort_plan_raises_inconsistency_error(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_resume_abort_contradiction"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": True,
+                        "abort_reason": "Mandatory helper gate failed because research never completed.",
+                        "jira_keys": [],
+                        "steps": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "llm": {"provider": "codex", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(session_dir / "review.md"),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                },
+            }
+            rf.validate_and_record_codex_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "codex", "preset": "test-codex", "capabilities": {"supports_resume": True}},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {"enabled": True, "max_steps": 20, "grounding_mode": "strict"},
+                            {"multipass": {"enabled": True, "max_steps": 20, "grounding_mode": "strict"}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("resume should not rerun review generation"),
+                    )
+                )
+                with self.assertRaisesRegex(rf.ReviewflowError, "Multipass planner/runtime inconsistency"):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed["status"], "error")
+            self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
+            self.assertEqual(refreshed["multipass"]["status"], "planner_runtime_inconsistency")
+            self.assertIn("plan_contradiction", refreshed["multipass"])
+            self.assertFalse((session_dir / "review.md").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)

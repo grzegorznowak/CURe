@@ -6473,6 +6473,44 @@ def _enforce_codex_chunkhound_tool_proof(
     )
 
 
+def _raise_on_multipass_plan_abort_contradiction(
+    *,
+    progress: SessionProgress,
+    work_dir: Path,
+    plan: dict[str, Any],
+    plan_tool_report: dict[str, Any] | None,
+) -> None:
+    contradiction = detect_multipass_plan_abort_contradiction(
+        meta=progress.meta,
+        work_dir=work_dir,
+        plan=plan,
+        plan_tool_report=plan_tool_report,
+    )
+    if contradiction is None:
+        return
+    multipass_meta = progress.meta.setdefault("multipass", {})
+    multipass_meta["status"] = "planner_runtime_inconsistency"
+    multipass_meta["plan_contradiction"] = contradiction
+    multipass_meta["current"] = {
+        "stage": "plan_contradiction",
+        "step_index": 0,
+        "step_count": 0,
+        "step_title": str(contradiction.get("abort_reason") or "planner/runtime inconsistency"),
+    }
+    progress.flush()
+    categories = ", ".join(
+        str(item).strip()
+        for item in (contradiction.get("matched_categories") or [])
+        if str(item).strip()
+    )
+    category_suffix = f" [{categories}]" if categories else ""
+    raise ReviewflowError(
+        "Multipass planner/runtime inconsistency: planner abort reason contradicted validated "
+        f"multipass_plan ChunkHound proof{category_suffix}: "
+        f"{contradiction.get('abort_reason') or 'unknown'}"
+    )
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -7191,6 +7229,7 @@ def _pr_flow_impl(
                 }
                 progress.flush()
 
+                plan_tool_report: dict[str, Any] | None = None
                 with phase("codex_plan", progress=progress, quiet=quiet):
                     plan_template = load_builtin_prompt_text(templates["plan"])
                     plan_prompt = render_prompt(
@@ -7243,7 +7282,7 @@ def _pr_flow_impl(
                     if plan_runs and isinstance(plan_runs[-1], dict):
                         plan_runs[-1]["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
                     progress.flush()
-                    _enforce_codex_chunkhound_tool_proof(
+                    plan_tool_report = _enforce_codex_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
                         provider=str(llm_resolved.get("provider") or ""),
@@ -7279,6 +7318,12 @@ def _pr_flow_impl(
                         "step_count": len(plan.get("steps") or []),
                     }
                     progress.flush()
+                    _raise_on_multipass_plan_abort_contradiction(
+                        progress=progress,
+                        work_dir=work_dir,
+                        plan=plan,
+                        plan_tool_report=plan_tool_report,
+                    )
 
                     if bool(plan.get("abort")):
                         reason = str(plan.get("abort_reason") or "unknown")
@@ -7875,7 +7920,14 @@ def _resume_flow_impl(
         require_builtin_review_intelligence(
             review_intelligence_cfg, config_path=effective_config_path
         )
-        progress.meta["chunkhound"] = chunkhound_meta["chunkhound"]
+        existing_chunkhound_meta = (
+            progress.meta.get("chunkhound") if isinstance(progress.meta.get("chunkhound"), dict) else {}
+        )
+        progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
+        if isinstance(existing_chunkhound_meta.get("tool_validation"), dict):
+            progress.meta["chunkhound"]["tool_validation"] = dict(
+                existing_chunkhound_meta["tool_validation"]
+            )
         progress.meta["review_intelligence"] = review_intelligence_meta["review_intelligence"]
         progress.flush()
 
@@ -8061,6 +8113,7 @@ def _resume_flow_impl(
         progress.flush()
 
         did_work = False
+        plan_tool_report: dict[str, Any] | None = None
 
         if from_phase in {"plan", "auto"} and (from_phase == "plan" or not plan_json_path.is_file()):
             progress.meta.setdefault("multipass", {})["enabled"] = True
@@ -8119,7 +8172,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                _enforce_codex_chunkhound_tool_proof(
+                plan_tool_report = _enforce_codex_chunkhound_tool_proof(
                     meta=progress.meta,
                     work_dir=work_dir,
                     provider=str(llm_resolved.get("provider") or ""),
@@ -8138,6 +8191,12 @@ def _resume_flow_impl(
             raise ReviewflowError(f"Missing multipass plan JSON: {plan_json_path}")
 
         plan = json.loads(plan_json_path.read_text(encoding="utf-8"))
+        _raise_on_multipass_plan_abort_contradiction(
+            progress=progress,
+            work_dir=work_dir,
+            plan=plan,
+            plan_tool_report=plan_tool_report,
+        )
         if bool(plan.get("abort")):
             reason = str(plan.get("abort_reason") or "unknown")
             progress.meta.setdefault("multipass", {})["enabled"] = True
@@ -11827,6 +11886,7 @@ from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
     compute_pr_stats,
+    detect_multipass_plan_abort_contradiction,
     followup_prompt_template_name_for_profile,
     multipass_prompt_template_names,
     parse_multipass_plan_json,
