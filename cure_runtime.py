@@ -84,6 +84,7 @@ MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
+DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
@@ -720,9 +721,9 @@ def load_reviewflow_multipass_defaults(
       enabled = true
       max_steps = 20
       step_workers = 4
-      plan_reasoning_effort = "high"
+      plan_reasoning_effort = "xhigh"
       step_reasoning_effort = "medium"
-      synth_reasoning_effort = "high"
+      synth_reasoning_effort = "xhigh"
     """
 
     path = config_path or _default_reviewflow_config_path()
@@ -750,6 +751,8 @@ def load_reviewflow_multipass_defaults(
         raw=mp.get("step_reasoning_effort"),
         field_name="[multipass].step_reasoning_effort",
     )
+    if step_reasoning_effort is None:
+        step_reasoning_effort = DEFAULT_MULTIPASS_STEP_REASONING_EFFORT
     synth_reasoning_effort = _normalize_optional_reasoning_effort(
         raw=mp.get("synth_reasoning_effort"),
         field_name="[multipass].synth_reasoning_effort",
@@ -872,6 +875,7 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
+            "reasoning_effort": "xhigh",
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1152,25 +1156,17 @@ def _synthetic_legacy_codex_preset(
     *, base_codex_config_path: Path, reviewflow_config_path: Path | None
 ) -> dict[str, Any]:
     legacy_defaults, _ = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
-    return {
-        "transport": "cli",
-        "provider": "codex",
-        "command": "codex",
-        "model": legacy_defaults.get("model"),
-        "reasoning_effort": legacy_defaults.get("model_reasoning_effort"),
-        "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
-        "text_verbosity": None,
-        "max_output_tokens": None,
-        "env": {},
-        "request": {},
-        "headers": {},
-        "endpoint": None,
-        "base_url": None,
-        "api_key": None,
-        "store": None,
-        "include": [],
-        "metadata": {},
-    }
+    preset = dict(builtin_llm_presets()[DEFAULT_IMPLICIT_CODEX_PRESET])
+    preset.update(
+        {
+            "model": legacy_defaults.get("model"),
+            "reasoning_effort": (
+                legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
+            ),
+            "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
+        }
+    )
+    return preset
 
 
 def resolve_llm_config(

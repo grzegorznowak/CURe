@@ -207,6 +207,7 @@ MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
+DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9][A-Za-z0-9._/-]*):([1-9][0-9]*)`?")
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
@@ -760,6 +761,7 @@ def load_reviewflow_multipass_defaults(
       enabled = true
       max_steps = 20
       step_workers = 4
+      step_reasoning_effort = "medium"
     """
 
     path = config_path or default_reviewflow_config_path()
@@ -778,6 +780,21 @@ def load_reviewflow_multipass_defaults(
     step_workers = mp.get("step_workers")
     if isinstance(step_workers, bool) or not isinstance(step_workers, int):
         step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
+
+    plan_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("plan_reasoning_effort"),
+        field_name="[multipass].plan_reasoning_effort",
+    )
+    step_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("step_reasoning_effort"),
+        field_name="[multipass].step_reasoning_effort",
+    )
+    if step_reasoning_effort is None:
+        step_reasoning_effort = DEFAULT_MULTIPASS_STEP_REASONING_EFFORT
+    synth_reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=mp.get("synth_reasoning_effort"),
+        field_name="[multipass].synth_reasoning_effort",
+    )
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -809,6 +826,9 @@ def load_reviewflow_multipass_defaults(
         "max_steps": int(max_steps),
         "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
+        "plan_reasoning_effort": plan_reasoning_effort,
+        "step_reasoning_effort": step_reasoning_effort,
+        "synth_reasoning_effort": synth_reasoning_effort,
     }
     meta: dict[str, Any] = {
         "config_path": str(path),
@@ -906,6 +926,7 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
+            "reasoning_effort": "xhigh",
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1190,25 +1211,17 @@ def _synthetic_legacy_codex_preset(
     *, base_codex_config_path: Path, reviewflow_config_path: Path | None
 ) -> dict[str, Any]:
     legacy_defaults, _ = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
-    return {
-        "transport": "cli",
-        "provider": "codex",
-        "command": "codex",
-        "model": legacy_defaults.get("model"),
-        "reasoning_effort": legacy_defaults.get("model_reasoning_effort"),
-        "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
-        "text_verbosity": None,
-        "max_output_tokens": None,
-        "env": {},
-        "request": {},
-        "headers": {},
-        "endpoint": None,
-        "base_url": None,
-        "api_key": None,
-        "store": None,
-        "include": [],
-        "metadata": {},
-    }
+    preset = dict(builtin_llm_presets()[DEFAULT_IMPLICIT_CODEX_PRESET])
+    preset.update(
+        {
+            "model": legacy_defaults.get("model"),
+            "reasoning_effort": (
+                legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
+            ),
+            "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
+        }
+    )
+    return preset
 
 
 def _normalize_llm_preset_name(value: object) -> str | None:
@@ -1251,9 +1264,32 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
     resolved = out.get("resolved") if isinstance(out.get("resolved"), dict) else None
     if resolved is not None:
         normalized_resolved_meta = dict(resolved)
+        resolved_preset_id = (
+            _normalize_llm_preset_name(out.get("resolved_preset_id"))
+            or _normalize_llm_preset_name(out.get("selected_name"))
+            or DEFAULT_IMPLICIT_CODEX_PRESET
+        )
+        builtin_preset = builtin_llm_presets().get(resolved_preset_id, {})
+        reviewflow_source_keys = {
+            "model_source": ("model",),
+            "reasoning_effort_source": ("model_reasoning_effort", "reasoning_effort"),
+            "plan_reasoning_effort_source": ("plan_mode_reasoning_effort", "plan_reasoning_effort"),
+        }
+        preset_value_keys = {
+            "model_source": "model",
+            "reasoning_effort_source": "reasoning_effort",
+            "plan_reasoning_effort_source": "plan_reasoning_effort",
+        }
         for key, raw_value in list(normalized_resolved_meta.items()):
-            if str(raw_value or "").strip() == DEFAULT_LEGACY_CODEX_PRESET:
+            if str(raw_value or "").strip() != DEFAULT_LEGACY_CODEX_PRESET:
+                continue
+            reviewflow_keys = reviewflow_source_keys.get(key, ())
+            if any(reviewflow_defaults.get(name) not in (None, "", [], {}) for name in reviewflow_keys):
                 normalized_resolved_meta[key] = "reviewflow_defaults"
+                continue
+            preset_key = preset_value_keys.get(key)
+            if preset_key and builtin_preset.get(preset_key) not in (None, "", [], {}):
+                normalized_resolved_meta[key] = "preset"
         out["resolved"] = normalized_resolved_meta
     return out
 
@@ -4390,6 +4426,30 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
             out["selected_name"] = normalized_selected
         normalized_config = _normalize_llm_config_meta(out.get("config"))
         if normalized_config is not None:
+            resolved_cfg = (
+                normalized_config.get("resolved")
+                if isinstance(normalized_config.get("resolved"), dict)
+                else {}
+            )
+            reviewflow_defaults = (
+                normalized_config.get("reviewflow_defaults")
+                if isinstance(normalized_config.get("reviewflow_defaults"), dict)
+                else {}
+            )
+            resolved_preset_id = (
+                _normalize_llm_preset_name(normalized_config.get("resolved_preset_id"))
+                or _normalize_llm_preset_name(out.get("preset"))
+                or DEFAULT_IMPLICIT_CODEX_PRESET
+            )
+            builtin_preset = builtin_llm_presets().get(resolved_preset_id, {})
+            if (
+                resolved_cfg.get("reasoning_effort_source") == "reviewflow_defaults"
+                and reviewflow_defaults.get("model_reasoning_effort") in (None, "", [], {})
+                and reviewflow_defaults.get("reasoning_effort") in (None, "", [], {})
+                and builtin_preset.get("reasoning_effort") not in (None, "", [], {})
+            ):
+                resolved_cfg["reasoning_effort_source"] = "preset"
+                normalized_config["resolved"] = resolved_cfg
             out["config"] = normalized_config
         out["capabilities"] = (
             dict(out.get("capabilities"))

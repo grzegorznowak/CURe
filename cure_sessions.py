@@ -61,9 +61,34 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
     resolved = out.get("resolved") if isinstance(out.get("resolved"), dict) else None
     if resolved is not None:
         normalized_resolved_meta = dict(resolved)
+        resolved_preset_id = (
+            _normalize_llm_preset_name(out.get("resolved_preset_id"))
+            or _normalize_llm_preset_name(out.get("selected_name"))
+            or DEFAULT_IMPLICIT_CODEX_PRESET
+        )
+        builtin_preset = (
+            {"reasoning_effort": "xhigh"} if resolved_preset_id == DEFAULT_IMPLICIT_CODEX_PRESET else {}
+        )
+        reviewflow_source_keys = {
+            "model_source": ("model",),
+            "reasoning_effort_source": ("model_reasoning_effort", "reasoning_effort"),
+            "plan_reasoning_effort_source": ("plan_mode_reasoning_effort", "plan_reasoning_effort"),
+        }
+        preset_value_keys = {
+            "model_source": "model",
+            "reasoning_effort_source": "reasoning_effort",
+            "plan_reasoning_effort_source": "plan_reasoning_effort",
+        }
         for key, raw_value in list(normalized_resolved_meta.items()):
-            if str(raw_value or "").strip() == DEFAULT_LEGACY_CODEX_PRESET:
+            if str(raw_value or "").strip() != DEFAULT_LEGACY_CODEX_PRESET:
+                continue
+            reviewflow_keys = reviewflow_source_keys.get(key, ())
+            if any(reviewflow_defaults.get(name) not in (None, "", [], {}) for name in reviewflow_keys):
                 normalized_resolved_meta[key] = "reviewflow_defaults"
+                continue
+            preset_key = preset_value_keys.get(key)
+            if preset_key and builtin_preset.get(preset_key) not in (None, "", [], {}):
+                normalized_resolved_meta[key] = "preset"
         out["resolved"] = normalized_resolved_meta
     return out
 

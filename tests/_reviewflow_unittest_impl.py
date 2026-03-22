@@ -13167,8 +13167,6 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             ]
         )
         calls: list[str] = []
-        llm_param_count = len(inspect.signature(llm_side_effect).parameters)
-
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
@@ -13369,8 +13367,6 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             ]
         )
         calls: list[str] = []
-        llm_param_count = len(inspect.signature(llm_side_effect).parameters)
-
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
@@ -13423,6 +13419,9 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             elif output_path.name == "review.md":
+                work_context = output_path.parent / "work" / "pr-context.md"
+                work_context.parent.mkdir(parents=True, exist_ok=True)
+                work_context.write_text("context\n", encoding="utf-8")
                 output_path.write_text(synth_markdown, encoding="utf-8")
             else:
                 raise AssertionError(f"unexpected output path: {output_path}")

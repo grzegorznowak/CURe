@@ -336,11 +336,12 @@ step_workers = 4
 
 # Optional multipass-only reasoning-effort overrides.
 # If unset:
-# - plan keeps using the existing resolved plan effort
-# - step and synth keep using the generic resolved reasoning effort
-plan_reasoning_effort = "high"
+# - plan and synth keep using the generic resolved reasoning effort
+#   (the built-in `codex-cli` preset defaults that generic effort to `xhigh`)
+# - step defaults to `medium` for built-in big multipass reviews
+plan_reasoning_effort = "xhigh"
 step_reasoning_effort = "medium"
-synth_reasoning_effort = "high"
+synth_reasoning_effort = "xhigh"
 ```
 
 If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
