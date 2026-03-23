@@ -27,7 +27,8 @@ import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from importlib import resources
+from functools import lru_cache
+from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlparse
@@ -639,6 +640,8 @@ def record_llm_usage(llm_meta: dict[str, Any], adapter_meta: dict[str, Any] | No
 def _refresh_review_artifact_footer(
     *,
     markdown_path: Path,
+    cure_version: str | None,
+    stage_shape_label: str | None,
     session_id: str | None,
     review_head_sha: str | None,
     llm_meta: dict[str, Any] | None,
@@ -650,6 +653,8 @@ def _refresh_review_artifact_footer(
     payload = llm_meta if isinstance(llm_meta, dict) else {}
     usage = _normalize_llm_usage(payload.get("usage")) or {}
     footer_line = format_review_artifact_footer(
+        cure_version=cure_version,
+        stage_shape_label=stage_shape_label,
         review_head_sha=review_head_sha,
         model=str(payload.get("model") or "").strip() or None,
         reasoning_effort=str(payload.get("reasoning_effort") or "").strip() or None,
@@ -661,6 +666,61 @@ def _refresh_review_artifact_footer(
         completed_at=completed_at,
     )
     upsert_review_artifact_footer(markdown_path=markdown_path, footer_line=footer_line)
+
+
+@lru_cache(maxsize=1)
+def _resolve_cure_version() -> str | None:
+    try:
+        version = str(importlib_metadata.version("cureview") or "").strip()
+    except importlib_metadata.PackageNotFoundError:
+        version = ""
+    if version:
+        return version
+    pyproject = load_toml(Path(__file__).resolve().with_name("pyproject.toml"))
+    project = pyproject.get("project") if isinstance(pyproject.get("project"), dict) else {}
+    version = str(project.get("version") or "").strip()
+    return version or None
+
+
+def _load_multipass_plan_step_count(*, meta: dict[str, Any]) -> int | None:
+    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    raw_plan_json_path = str(multipass.get("plan_json_path") or "").strip()
+    if not raw_plan_json_path:
+        return None
+    plan_json_path = Path(raw_plan_json_path)
+    try:
+        payload = json.loads(plan_json_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    steps = payload.get("steps") if isinstance(payload, dict) else None
+    if not isinstance(steps, list):
+        return None
+    return len(steps)
+
+
+def _resolve_multipass_stage_count(*, meta: dict[str, Any]) -> int | None:
+    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    artifacts = multipass.get("artifacts") if isinstance(multipass.get("artifacts"), dict) else {}
+    step_outputs = artifacts.get("step_outputs")
+    if isinstance(step_outputs, list):
+        return len(step_outputs)
+    plan_step_count = _load_multipass_plan_step_count(meta=meta)
+    if plan_step_count is not None:
+        return plan_step_count
+    current = multipass.get("current") if isinstance(multipass.get("current"), dict) else {}
+    step_count = current.get("step_count")
+    if isinstance(step_count, int) and step_count >= 0:
+        return step_count
+    return None
+
+
+def _resolve_session_review_stage_shape(*, meta: dict[str, Any]) -> str:
+    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    if not bool(multipass.get("enabled")):
+        return "single-stage"
+    stage_count = _resolve_multipass_stage_count(meta=meta)
+    count_text = str(stage_count) if isinstance(stage_count, int) and stage_count >= 0 else "-"
+    return f"multi-stage - stages: {count_text}"
 
 
 def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
@@ -687,6 +747,8 @@ def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[s
 def _refresh_session_review_footer(*, meta: dict[str, Any], markdown_path: Path) -> None:
     _refresh_review_artifact_footer(
         markdown_path=markdown_path,
+        cure_version=_resolve_cure_version(),
+        stage_shape_label=_resolve_session_review_stage_shape(meta=meta),
         session_id=str(meta.get("session_id") or "").strip() or None,
         review_head_sha=_resolve_session_review_head_sha(meta=meta),
         llm_meta=_resolve_session_review_artifact_llm_meta(meta=meta),
@@ -706,6 +768,8 @@ def _refresh_followup_review_footer(
     )
     _refresh_review_artifact_footer(
         markdown_path=markdown_path,
+        cure_version=_resolve_cure_version(),
+        stage_shape_label="single-stage",
         session_id=str(meta.get("session_id") or "").strip() or None,
         review_head_sha=review_head_sha,
         llm_meta=llm_meta,
@@ -9178,6 +9242,7 @@ def _resume_flow_impl(
                 )
                 if head_after_update == str(incremental_resume_review_point.head_sha or "").strip():
                     # Fast no-op for completed sessions that already target the latest PR head.
+                    _refresh_session_review_footer(meta=meta, markdown_path=review_md_path)
                     print(str(session_dir))
                     maybe_print_markdown_after_tui(ui_enabled=ui_enabled, stderr=sys.stderr, markdown_path=review_md_path)
                     existing_codex = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
@@ -9433,6 +9498,8 @@ def _resume_flow_impl(
             and str(meta.get("status")) == "done"
             and (not _multipass_has_invalid_artifacts(meta))
         ):
+            progress.done()
+            _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
             print(str(session_dir))
             return 0

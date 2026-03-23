@@ -108,7 +108,10 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
             shutil.rmtree(session_dir, ignore_errors=True)
 
     def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         footer = cure_output.format_review_artifact_footer(
+            cure_version=version,
+            stage_shape_label="multi-stage - stages: 4",
             review_head_sha="sha1234-example-review-head",
             model="gpt-5.2",
             reasoning_effort="high",
@@ -122,7 +125,28 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             footer,
-            "_CURe review · sha sha1234 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+            f"_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. {version} · multi-stage - stages: 4 · sha sha1234 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s_",
+        )
+
+    def test_format_review_artifact_footer_renders_single_stage_contract(self) -> None:
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        footer = cure_output.format_review_artifact_footer(
+            cure_version=version,
+            stage_shape_label="single-stage",
+            review_head_sha="sha1234-example-review-head",
+            model="gpt-5.2",
+            reasoning_effort="high",
+            input_tokens=18_400,
+            output_tokens=4_300,
+            total_tokens=22_700,
+            session_id="20260322-abc123",
+            created_at="2026-03-22T00:00:00+00:00",
+            completed_at="2026-03-22T00:06:12+00:00",
+        )
+
+        self.assertEqual(
+            footer,
+            f"_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. {version} · single-stage · sha sha1234 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s_",
         )
 
     def test_upsert_review_artifact_footer_is_idempotent_and_replaces_existing_footer(self) -> None:
@@ -134,11 +158,11 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
 
             cure_output.upsert_review_artifact_footer(
                 markdown_path=md,
-                footer_line="_CURe review · sha abc1234 · model gpt-5.2/high · tok 1k/2k/3k · session s1 · 5m0s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+                footer_line="_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4 · single-stage · sha abc1234 · model gpt-5.2/high · tok 1k/2k/3k · session s1 · 5m0s_",
             )
             cure_output.upsert_review_artifact_footer(
                 markdown_path=md,
-                footer_line="_CURe review · sha def5678 · model gpt-5.2/high · tok 4k/5k/9k · session s1 · 7m0s · [Project: CURe](https://github.com/grzegorznowak/CURe)_",
+                footer_line="_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4 · multi-stage - stages: 4 · sha def5678 · model gpt-5.2/high · tok 4k/5k/9k · session s1 · 7m0s_",
             )
 
             rendered = md.read_text(encoding="utf-8")
@@ -4672,7 +4696,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
             self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
-            self.assertIn("session ", review_md)
+            self.assertIn("review generated with [CURe]", review_md)
+            self.assertIn("multi-stage - stages: 1", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -4706,6 +4731,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["singlepass_review"])
             self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
+            self.assertIn("review generated with [CURe]", review_md)
+            self.assertIn("single-stage", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -4804,6 +4831,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(calls, ["review.plan.md"])
             self.assertIn("missing required Jira context", review_md)
             self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
+            self.assertIn("review generated with [CURe]", review_md)
+            self.assertIn("multi-stage - stages: 0", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5020,6 +5049,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "xhigh",
             )
             self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "minimal")
+            self.assertIn("review generated with [CURe]", review_md)
+            self.assertIn("multi-stage - stages: 1", review_md)
             self.assertIn("model gpt-5.4/xhigh", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -5525,6 +5556,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["followup"])
             self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", followup_md)
+            self.assertIn("review generated with [CURe]", followup_md)
+            self.assertIn("single-stage", followup_md)
             self.assertIn("sha deadbee", followup_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -6185,8 +6218,275 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "xhigh",
             )
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
+            self.assertIn("review generated with [CURe]", review_md_text)
+            self.assertIn("multi-stage - stages: 1", review_md_text)
             self.assertIn("model gpt-5.4/xhigh", review_md_text)
             self.assertIn("session session-1", review_md_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_completed_multipass_latest_head_noop_refreshes_footer(self) -> None:
+        root = ROOT / ".tmp_test_resume_incremental_noop_footer"
+        cfg = root / "reviewflow.toml"
+        head_sha = "1111111111111111111111111111111111111111"
+        review_body = _sectioned_review_markdown(business="APPROVE", technical="APPROVE")
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "api"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(review_body, encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "head_sha": head_sha,
+                "review_head_sha": head_sha,
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_update_resume_session_repo_for_incremental_review",
+                        return_value=(head_sha, head_sha),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("latest-head no-op resume should not rerun review generation"),
+                    )
+                )
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            review_md_text = review_md.read_text(encoding="utf-8")
+            self.assertEqual(rc, 0)
+            self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
+            self.assertIn("review generated with [CURe]", review_md_text)
+            self.assertIn("multi-stage - stages: 1", review_md_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_completed_noop_refreshes_footer(self) -> None:
+        root = ROOT / ".tmp_test_resume_completed_noop_footer"
+        cfg = root / "reviewflow.toml"
+        review_body = _sectioned_review_markdown(business="APPROVE", technical="APPROVE")
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text(review_body, encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "review_head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("completed no-op resume should not rerun review generation"),
+                    )
+                )
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            review_md_text = review_md.read_text(encoding="utf-8")
+            self.assertEqual(rc, 0)
+            self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
+            self.assertIn("review generated with [CURe]", review_md_text)
+            self.assertIn("single-stage", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)

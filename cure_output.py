@@ -569,6 +569,8 @@ def _format_elapsed_short(*, created_at: str | None, completed_at: str | None) -
 
 def format_review_artifact_footer(
     *,
+    cure_version: str | None,
+    stage_shape_label: str | None,
     review_head_sha: str | None,
     model: str | None,
     reasoning_effort: str | None,
@@ -580,6 +582,8 @@ def format_review_artifact_footer(
     completed_at: str | None,
     project_url: str = CURE_PROJECT_URL,
 ) -> str:
+    version_text = str(cure_version or "").strip() or "-"
+    stage_text = str(stage_shape_label or "").strip() or "-"
     sha_text = str(review_head_sha or "").strip()
     short_sha = sha_text[:7] if sha_text else "-"
     model_text = str(model or "").strip() or "-"
@@ -587,7 +591,8 @@ def format_review_artifact_footer(
     session_text = str(session_id or "").strip() or "-"
     elapsed_text = _format_elapsed_short(created_at=created_at, completed_at=completed_at)
     return (
-        "_CURe review"
+        f"_review generated with [CURe]({project_url}) v. {version_text}"
+        f" · {stage_text}"
         f" · sha {short_sha}"
         f" · model {model_text}/{effort_text}"
         f" · tok {_format_compact_token_count(input_tokens)}/"
@@ -595,7 +600,7 @@ def format_review_artifact_footer(
         f"{_format_compact_token_count(total_tokens)}"
         f" · session {session_text}"
         f" · {elapsed_text}"
-        f" · [Project: CURe]({project_url})_"
+        "_"
     )
 
 
