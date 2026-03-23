@@ -723,6 +723,27 @@ def _resolve_session_review_stage_shape(*, meta: dict[str, Any]) -> str:
     return f"multi-stage - stages: {count_text}"
 
 
+def _resolve_session_review_elapsed_started_at(*, meta: dict[str, Any]) -> str | None:
+    resumed_at = str(meta.get("resumed_at") or "").strip()
+    if resumed_at:
+        return resumed_at
+    return str(meta.get("created_at") or "").strip() or None
+
+
+def _mark_resume_noop_completed(
+    *, meta_path: Path, meta: dict[str, Any], resumed_at: str | None = None
+) -> dict[str, Any]:
+    completed_at = _utc_now_iso()
+    updated = dict(meta)
+    updated["status"] = "done"
+    updated["resumed_at"] = str(resumed_at or completed_at).strip() or completed_at
+    updated["completed_at"] = completed_at
+    updated.pop("failed_at", None)
+    updated.pop("error", None)
+    write_redacted_json(meta_path, updated)
+    return updated
+
+
 def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
     llm_meta = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
     payload = dict(llm_meta)
@@ -752,7 +773,7 @@ def _refresh_session_review_footer(*, meta: dict[str, Any], markdown_path: Path)
         session_id=str(meta.get("session_id") or "").strip() or None,
         review_head_sha=_resolve_session_review_head_sha(meta=meta),
         llm_meta=_resolve_session_review_artifact_llm_meta(meta=meta),
-        created_at=str(meta.get("created_at") or "").strip() or None,
+        created_at=_resolve_session_review_elapsed_started_at(meta=meta),
         completed_at=str(meta.get("completed_at") or "").strip() or None,
     )
 
@@ -9233,6 +9254,7 @@ def _resume_flow_impl(
             base_ref = str(meta.get("base_ref") or "").strip()
             base_ref_for_review = str(meta.get("base_ref_for_review") or "").strip()
             if base_ref and base_ref_for_review:
+                resume_started_at = _utc_now_iso()
                 _, head_after_update = _update_resume_session_repo_for_incremental_review(
                     repo_dir=repo_dir,
                     pr=pr,
@@ -9242,10 +9264,15 @@ def _resume_flow_impl(
                 )
                 if head_after_update == str(incremental_resume_review_point.head_sha or "").strip():
                     # Fast no-op for completed sessions that already target the latest PR head.
-                    _refresh_session_review_footer(meta=meta, markdown_path=review_md_path)
+                    updated_meta = _mark_resume_noop_completed(
+                        meta_path=meta_path,
+                        meta=meta,
+                        resumed_at=resume_started_at,
+                    )
+                    _refresh_session_review_footer(meta=updated_meta, markdown_path=review_md_path)
                     print(str(session_dir))
                     maybe_print_markdown_after_tui(ui_enabled=ui_enabled, stderr=sys.stderr, markdown_path=review_md_path)
-                    existing_codex = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
+                    existing_codex = updated_meta.get("codex") if isinstance(updated_meta.get("codex"), dict) else {}
                     existing_resume = existing_codex.get("resume") if isinstance(existing_codex.get("resume"), dict) else {}
                     existing_resume_cmd = str((existing_resume or {}).get("command") or "").strip() or None
                     maybe_print_codex_resume_command(stderr=sys.stderr, command=existing_resume_cmd)

@@ -149,6 +149,36 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
             f"_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. {version} · single-stage · sha sha1234 · model gpt-5.2/high · tok 18k/4k/23k · session 20260322-abc123 · 6m12s_",
         )
 
+    def test_refresh_session_review_footer_prefers_resumed_at_for_elapsed_window(self) -> None:
+        session_dir = ROOT / ".tmp_test_review_footer_resume_elapsed"
+        md = session_dir / "review.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+
+            rf._refresh_session_review_footer(
+                meta={
+                    "session_id": "session-1",
+                    "created_at": "2026-03-10T00:00:00+00:00",
+                    "resumed_at": "2026-03-12T22:00:00+00:00",
+                    "completed_at": "2026-03-12T22:00:07+00:00",
+                    "review_head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "llm": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
+                    },
+                },
+                markdown_path=md,
+            )
+
+            rendered = md.read_text(encoding="utf-8")
+            self.assertIn("review generated with [CURe]", rendered)
+            self.assertIn(" · 7s_", rendered)
+            self.assertNotIn("70h", rendered)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
     def test_upsert_review_artifact_footer_is_idempotent_and_replaces_existing_footer(self) -> None:
         session_dir = ROOT / ".tmp_test_review_footer_upsert"
         md = session_dir / "review.md"
@@ -6317,6 +6347,13 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 stack.enter_context(
                     mock.patch.object(
                         rf,
+                        "_utc_now_iso",
+                        side_effect=["2026-03-10T01:00:00+00:00", "2026-03-10T01:00:05+00:00"],
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
                         "_update_resume_session_repo_for_incremental_review",
                         return_value=(head_sha, head_sha),
                     )
@@ -6337,6 +6374,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
             self.assertIn("review generated with [CURe]", review_md_text)
             self.assertIn("multi-stage - stages: 1", review_md_text)
+            self.assertIn(" · 5s_", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
