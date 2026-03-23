@@ -6511,6 +6511,953 @@ class CodexToolProofFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+    def test_resume_flow_completed_multipass_uses_incremental_synth_only_when_resume_planner_says_so(self) -> None:
+        root = ROOT / ".tmp_test_resume_incremental_synth_only"
+        cfg = root / "reviewflow.toml"
+        old_head = "1111111111111111111111111111111111111111"
+        new_head = "2222222222222222222222222222222222222222"
+        valid_step_markdown = "\n".join(
+            [
+                "### Step Result: 01 — API review",
+                "**Focus**: api",
+                "",
+                "### Steps taken",
+                "- checked repo",
+                "",
+                "### Findings",
+                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "",
+                "### Suggested actions",
+                "- None.",
+                "",
+            ]
+        )
+        valid_synth_markdown = "\n".join(
+            [
+                "### Steps taken",
+                "- Reviewed latest diff",
+                "",
+                "**Summary**: incremental resume is happy",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Cosmetic changes remain aligned. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Previous concerns appear resolved. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Existing review context remained useful. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "api"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(valid_step_markdown, encoding="utf-8")
+            review_md = session_dir / "review.md"
+            review_md.write_text(valid_synth_markdown, encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "head_sha": old_head,
+                "review_head_sha": old_head,
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                if output_path.name == "review.resume-plan.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Steps taken",
+                                "- Read prior review",
+                                "",
+                                "### Resume Strategy",
+                                "- Cosmetic-only delta",
+                                "",
+                                "### Resume Strategy JSON",
+                                "```json",
+                                json.dumps(
+                                    {
+                                        "decision": "synth_only",
+                                        "reason": "The delta is cosmetic and the previous review context is sufficient.",
+                                        "reopen_step_ids": [],
+                                        "new_steps": [],
+                                    },
+                                    indent=2,
+                                ),
+                                "```",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    adapter_meta = self._write_helper_command_events(
+                        work_dir=work_dir,
+                        commands=["search", "research"],
+                    )
+                elif output_path.name == "review.md":
+                    output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                    adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+                else:
+                    raise AssertionError(f"unexpected output path: {output_path}")
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_update_resume_session_repo_for_incremental_review",
+                        return_value=(old_head, new_head),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
+            self.assertEqual(refreshed["review_head_sha"], new_head)
+            self.assertEqual(refreshed["head_sha"], new_head)
+            self.assertEqual(refreshed["multipass"]["resume"]["decision"], "synth_only")
+            self.assertEqual(refreshed["multipass"]["resume"]["previous_review_head_sha"], old_head)
+            self.assertEqual(refreshed["multipass"]["resume"]["current_review_head_sha"], new_head)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_completed_multipass_can_reopen_existing_steps_and_add_new_step(self) -> None:
+        root = ROOT / ".tmp_test_resume_incremental_targeted"
+        cfg = root / "reviewflow.toml"
+        old_head = "1111111111111111111111111111111111111111"
+        new_head = "3333333333333333333333333333333333333333"
+        original_step_markdown = "\n".join(
+            [
+                "### Step Result: 01 — API review",
+                "**Focus**: api",
+                "",
+                "### Steps taken",
+                "- checked repo",
+                "",
+                "### Findings",
+                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "",
+                "### Suggested actions",
+                "- None.",
+                "",
+            ]
+        )
+        valid_synth_markdown = "\n".join(
+            [
+                "### Steps taken",
+                "- Combined resumed steps",
+                "",
+                "**Summary**: targeted resume covered the new delta",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Delta remains within scope. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Reopened and new analysis converged. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Targeted resume stayed efficient. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "api"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(original_step_markdown, encoding="utf-8")
+            review_md = session_dir / "review.md"
+            review_md.write_text(valid_synth_markdown, encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "head_sha": old_head,
+                "review_head_sha": old_head,
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+            stage_invocations: dict[str, dict[str, object]] = {}
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                resolved = kwargs["resolved"] if isinstance(kwargs.get("resolved"), dict) else {}
+                resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+                stage_invocations[output_path.name] = {
+                    "reasoning_effort": resolved.get("reasoning_effort"),
+                    "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+                }
+                if output_path.name == "review.resume-plan.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Steps taken",
+                                "- Read prior review",
+                                "",
+                                "### Resume Strategy",
+                                "- Reopen API and add delta pass",
+                                "",
+                                "### Resume Strategy JSON",
+                                "```json",
+                                json.dumps(
+                                    {
+                                        "decision": "targeted",
+                                        "reason": "The new delta changes API behavior and introduces a new surface worth a fresh targeted pass.",
+                                        "reopen_step_ids": ["01"],
+                                        "new_steps": [
+                                            {
+                                                "id": "02",
+                                                "title": "Delta review",
+                                                "focus": "new behavior since the last reviewed head",
+                                            }
+                                        ],
+                                    },
+                                    indent=2,
+                                ),
+                                "```",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    adapter_meta = self._write_helper_command_events(
+                        work_dir=work_dir,
+                        commands=["search", "research"],
+                    )
+                elif output_path.name == "review.step-01.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Step Result: 01 — API review",
+                                "**Focus**: api",
+                                "",
+                                "### Steps taken",
+                                "- Re-read changed files",
+                                "",
+                                "### Findings",
+                                "- The updated API path is now coherent. Evidence: `src/app.py:2`",
+                                "",
+                                "### Suggested actions",
+                                "- None.",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+                elif output_path.name == "review.step-02.md":
+                    output_path.write_text(
+                        "\n".join(
+                            [
+                                "### Step Result: 02 — Delta review",
+                                "**Focus**: new behavior since the last reviewed head",
+                                "",
+                                "### Steps taken",
+                                "- Examined incremental diff",
+                                "",
+                                "### Findings",
+                                "- The new delta remains cosmetic in effect. Evidence: `src/app.py:2`",
+                                "",
+                                "### Suggested actions",
+                                "- None.",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+                elif output_path.name == "review.md":
+                    output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                    adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+                else:
+                    raise AssertionError(f"unexpected output path: {output_path}")
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "step_workers": 1,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "step_workers": 1,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_update_resume_session_repo_for_incremental_review",
+                        return_value=(old_head, new_head),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            updated_plan = json.loads(plan_json.read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.resume-plan.md", "review.step-01.md", "review.step-02.md", "review.md"])
+            self.assertEqual(updated_plan["steps"][1]["id"], "02")
+            self.assertEqual(refreshed["review_head_sha"], new_head)
+            self.assertEqual(refreshed["multipass"]["resume"]["decision"], "targeted")
+            self.assertEqual(
+                refreshed["multipass"]["artifacts"]["step_outputs"],
+                [str(session_dir / "review.step-01.md"), str(session_dir / "review.step-02.md")],
+            )
+            self.assertEqual([item["status"] for item in refreshed["multipass"]["step_states"]], ["completed", "completed"])
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
+            self.assertEqual(stage_invocations["review.step-02.md"]["reasoning_effort"], "low")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_completed_multipass_rejects_unknown_reopened_step_ids(self) -> None:
+        root = ROOT / ".tmp_test_resume_incremental_unknown_reopen_step"
+        cfg = root / "reviewflow.toml"
+        old_head = "1111111111111111111111111111111111111111"
+        new_head = "4444444444444444444444444444444444444444"
+        valid_synth_markdown = "\n".join(
+            [
+                "### Steps taken",
+                "- Combined resumed steps",
+                "",
+                "**Summary**: targeted resume covered the new delta",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Delta remains within scope. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                "- Reopened and new analysis converged. Sources: `src/app.py:2`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                "- Targeted resume stayed efficient. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [{"id": "01", "title": "API review", "focus": "api"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "review.step-01.md").write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: api",
+                        "",
+                        "### Steps taken",
+                        "- checked repo",
+                        "",
+                        "### Findings",
+                        "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                        "",
+                        "### Suggested actions",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(valid_synth_markdown, encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T01:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "head_sha": old_head,
+                "review_head_sha": old_head,
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                if output_path.name != "review.resume-plan.md":
+                    raise AssertionError(f"unexpected output path: {output_path}")
+                output_path.write_text(
+                    "\n".join(
+                        [
+                            "### Steps taken",
+                            "- Read prior review",
+                            "",
+                            "### Resume Strategy",
+                            "- Planner asked to reopen a nonexistent step",
+                            "",
+                            "### Resume Strategy JSON",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "decision": "targeted",
+                                    "reason": "The new delta supposedly reopens prior work, but the requested step id is not present in the persisted plan.",
+                                    "reopen_step_ids": ["99"],
+                                    "new_steps": [],
+                                },
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                )
+                return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="auto",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "step_workers": 1,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "step_workers": 1,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_update_resume_session_repo_for_incremental_review",
+                        return_value=(old_head, new_head),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                with self.assertRaisesRegex(rf.ReviewflowError, "unknown reopen_step_ids"):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.resume-plan.md"])
+            self.assertEqual(refreshed["status"], "error")
+            self.assertEqual(refreshed["multipass"]["resume"]["decision"], "targeted")
+            self.assertEqual(refreshed["multipass"]["resume"]["reopen_step_ids"], ["99"])
+            self.assertFalse((session_dir / "review.step-02.md").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
     def test_resume_flow_parallel_multipass_reuses_valid_steps_and_reruns_missing_subset(self) -> None:
         root = ROOT / ".tmp_test_codex_tool_proof_resume_parallel_subset"
         cfg = root / "reviewflow.toml"

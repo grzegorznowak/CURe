@@ -154,8 +154,29 @@ class PromptTemplateTests(unittest.TestCase):
         big_synth = (ROOT / "prompts" / "mrereview_gh_local_big_synth.md").read_text(
             encoding="utf-8"
         )
+        big_resume_plan = (ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md").read_text(
+            encoding="utf-8"
+        )
+        big_resume_step = (ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md").read_text(
+            encoding="utf-8"
+        )
+        big_resume_synth = (ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md").read_text(
+            encoding="utf-8"
+        )
         default = (ROOT / "prompts" / "default.md").read_text(encoding="utf-8")
-        for text in (normal, big, followup, big_followup, big_plan, big_step, big_synth, default):
+        for text in (
+            normal,
+            big,
+            followup,
+            big_followup,
+            big_plan,
+            big_step,
+            big_synth,
+            big_resume_plan,
+            big_resume_step,
+            big_resume_synth,
+            default,
+        ):
             self.assertNotIn(".reviewflow/context", text)
             self.assertIn("$REVIEW_INTELLIGENCE_GUIDANCE", text)
             self.assertNotIn("gh pr view", text)
@@ -186,8 +207,29 @@ class PromptTemplateTests(unittest.TestCase):
         big_synth = (ROOT / "prompts" / "mrereview_gh_local_big_synth.md").read_text(
             encoding="utf-8"
         )
+        big_resume_plan = (ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md").read_text(
+            encoding="utf-8"
+        )
+        big_resume_step = (ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md").read_text(
+            encoding="utf-8"
+        )
+        big_resume_synth = (ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md").read_text(
+            encoding="utf-8"
+        )
         default = (ROOT / "prompts" / "default.md").read_text(encoding="utf-8")
-        for text in (normal, big, followup, big_followup, big_plan, big_step, big_synth, default):
+        for text in (
+            normal,
+            big,
+            followup,
+            big_followup,
+            big_plan,
+            big_step,
+            big_synth,
+            big_resume_plan,
+            big_resume_step,
+            big_resume_synth,
+            default,
+        ):
             self.assertNotIn("`./ch", text)
             self.assertNotIn("./ch ", text)
             self.assertNotIn("fall back to `rg`", text)
@@ -208,6 +250,9 @@ class PromptTemplateTests(unittest.TestCase):
             "mrereview_gh_local_followup.md": ("required", "guidance"),
             "mrereview_gh_local_big_step.md": ("required", "guidance"),
             "mrereview_gh_local_big_synth.md": ("conditional", "conditional"),
+            "mrereview_gh_local_big_resume_plan.md": ("required", "required"),
+            "mrereview_gh_local_big_resume_step.md": ("required", "guidance"),
+            "mrereview_gh_local_big_resume_synth.md": ("conditional", "conditional"),
         }
 
         contracts = cure_flows.chunkhound_prompt_contracts()

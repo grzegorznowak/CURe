@@ -714,6 +714,55 @@ def _refresh_followup_review_footer(
     )
 
 
+def _resolve_latest_session_review_point(*, session_dir: Path, meta: dict[str, Any]) -> SessionReviewPoint | None:
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    review_md_raw = str((meta_paths or {}).get("review_md") or "").strip()
+    review_md_default = session_dir / "review.md"
+    review_md_path = _resolve_session_relative_path(
+        session_dir=session_dir,
+        raw=review_md_raw,
+        default=review_md_default,
+    )
+    candidates: list[SessionReviewPoint] = []
+    if review_md_path.is_file():
+        candidates.append(
+            SessionReviewPoint(
+                kind="review",
+                artifact_path=review_md_path,
+                head_sha=_resolve_session_review_head_sha(meta=meta),
+                completed_at=str(meta.get("completed_at") or meta.get("created_at") or "").strip() or None,
+            )
+        )
+
+    followups = meta.get("followups") if isinstance(meta.get("followups"), list) else []
+    for followup in followups:
+        if not isinstance(followup, dict):
+            continue
+        output_path = str(followup.get("output_path") or "").strip()
+        if not output_path:
+            continue
+        artifact_path = _resolve_session_relative_path(
+            session_dir=session_dir,
+            raw=output_path,
+            default=session_dir / output_path,
+        )
+        if not artifact_path.is_file():
+            continue
+        candidates.append(
+            SessionReviewPoint(
+                kind="followup",
+                artifact_path=artifact_path,
+                head_sha=str(followup.get("head_sha_after") or followup.get("head_sha") or "").strip() or None,
+                completed_at=str(followup.get("completed_at") or followup.get("started_at") or "").strip() or None,
+            )
+        )
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item.sort_dt(), reverse=True)
+    return candidates[0]
+
+
 def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict[str, str]:
     env = dict(base_env)
     env.update(_string_dict(resolved.get("env")))
@@ -2935,6 +2984,17 @@ class MultipassStepRunResult:
 
 
 @dataclass(frozen=True)
+class SessionReviewPoint:
+    kind: str
+    artifact_path: Path
+    head_sha: str | None
+    completed_at: str | None
+
+    def sort_dt(self) -> datetime:
+        return _parse_iso_dt(self.completed_at) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
 class CodexResumeInfo:
     session_id: str
     cwd: Path
@@ -4543,6 +4603,14 @@ def multipass_prompt_template_names() -> dict[str, str]:
     }
 
 
+def incremental_resume_prompt_template_names() -> dict[str, str]:
+    return {
+        "resume_plan": "mrereview_gh_local_big_resume_plan.md",
+        "resume_step": "mrereview_gh_local_big_resume_step.md",
+        "resume_synth": "mrereview_gh_local_big_resume_synth.md",
+    }
+
+
 def _extract_first_fenced_block(text: str, *, lang: str) -> str | None:
     """Extract the first fenced code block for a given language (e.g. ```json ... ```)."""
     fence = f"```{lang}"
@@ -4600,6 +4668,51 @@ def parse_multipass_plan_json(text: str) -> dict[str, Any]:
             raise ReviewflowError(f"Multipass plan step #{idx} missing title.")
         if not isinstance(step.get("focus"), str) or not str(step.get("focus")).strip():
             raise ReviewflowError(f"Multipass plan step #{idx} missing focus.")
+    return data
+
+
+def parse_incremental_resume_plan_json(text: str) -> dict[str, Any]:
+    raw = _extract_first_fenced_block(text, lang="json")
+    if not raw:
+        raise ReviewflowError("Incremental resume plan JSON missing (expected a ```json fenced block).")
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        raise ReviewflowError(f"Incremental resume plan JSON invalid: {e}") from e
+    if not isinstance(data, dict):
+        raise ReviewflowError("Incremental resume plan JSON must be an object.")
+    decision = str(data.get("decision") or "").strip().lower()
+    if decision not in {"synth_only", "targeted"}:
+        raise ReviewflowError("Incremental resume plan JSON decision must be 'synth_only' or 'targeted'.")
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ReviewflowError("Incremental resume plan JSON reason must be a non-empty string.")
+    reopen_step_ids = data.get("reopen_step_ids")
+    if reopen_step_ids is None:
+        reopen_step_ids = []
+        data["reopen_step_ids"] = reopen_step_ids
+    if not isinstance(reopen_step_ids, list) or not all(isinstance(item, str) and item.strip() for item in reopen_step_ids):
+        raise ReviewflowError("Incremental resume plan JSON reopen_step_ids must be an array of non-empty strings.")
+    new_steps = data.get("new_steps")
+    if new_steps is None:
+        new_steps = []
+        data["new_steps"] = new_steps
+    if not isinstance(new_steps, list):
+        raise ReviewflowError("Incremental resume plan JSON new_steps must be an array.")
+    for idx, step in enumerate(new_steps, start=1):
+        if not isinstance(step, dict):
+            raise ReviewflowError(f"Incremental resume plan new_steps[{idx}] must be an object.")
+        if not isinstance(step.get("title"), str) or not str(step.get("title")).strip():
+            raise ReviewflowError(f"Incremental resume plan new_steps[{idx}] missing title.")
+        if not isinstance(step.get("focus"), str) or not str(step.get("focus")).strip():
+            raise ReviewflowError(f"Incremental resume plan new_steps[{idx}] missing focus.")
+        step_id = step.get("id")
+        if step_id is not None and (not isinstance(step_id, str) or not str(step_id).strip()):
+            raise ReviewflowError(f"Incremental resume plan new_steps[{idx}] has invalid id.")
+    if decision == "targeted" and (not reopen_step_ids) and (not new_steps):
+        raise ReviewflowError("Incremental resume plan targeted decision requires reopen_step_ids or new_steps.")
+    if decision == "synth_only" and (reopen_step_ids or new_steps):
+        raise ReviewflowError("Incremental resume plan synth_only decision must not request reopened or new steps.")
     return data
 
 
@@ -5190,7 +5303,7 @@ def _build_multipass_step_entries(
     step_template = load_builtin_prompt_text(templates["step"])
     entries: list[MultipassStepEntry] = []
     for idx, step in enumerate(steps, start=1):
-        step_id = str(step.get("id") or f"{idx:02d}").strip()
+        step_id = _multipass_step_id(step=step, idx=idx)
         step_title = str(step.get("title") or "").strip()
         step_focus = str(step.get("focus") or "").strip()
         prompt = render_prompt(
@@ -5222,6 +5335,93 @@ def _build_multipass_step_entries(
                 step_title=step_title,
                 step_focus=step_focus,
                 output_path=session_dir / f"review.step-{idx:02d}.md",
+                prompt=prompt,
+                should_run=True,
+            )
+        )
+    return entries
+
+
+def _multipass_step_id(*, step: dict[str, Any], idx: int) -> str:
+    step_id = str(step.get("id") or "").strip()
+    return step_id or f"{idx:02d}"
+
+
+def _format_incremental_resume_step_catalog(
+    *,
+    steps: list[dict[str, Any]],
+    session_dir: Path,
+) -> str:
+    if not steps:
+        return "- None."
+    lines: list[str] = []
+    for idx, step in enumerate(steps, start=1):
+        step_id = _multipass_step_id(step=step, idx=idx)
+        title = str(step.get("title") or "").strip() or f"Step {idx:02d}"
+        focus = str(step.get("focus") or "").strip() or "unspecified"
+        output_path = session_dir / f"review.step-{idx:02d}.md"
+        lines.append(f"- `{step_id}` • {title} • {focus} • `{output_path}`")
+    return "\n".join(lines)
+
+
+def _build_incremental_resume_step_entries(
+    *,
+    steps: list[dict[str, Any]],
+    session_dir: Path,
+    resume_plan_json_path: Path,
+    templates: dict[str, str],
+    base_ref_for_review: str,
+    pr_url: str,
+    pr_number: int,
+    pr: PullRequestRef,
+    agent_desc: str,
+    review_intelligence_cfg: ReviewIntelligenceConfig,
+    review_intelligence_capabilities: dict[str, Any] | None,
+    previous_review_md_path: Path,
+    previous_review_head_sha: str,
+    current_review_head_sha: str,
+) -> list[MultipassStepEntry]:
+    step_template = load_builtin_prompt_text(templates["resume_step"])
+    entries: list[MultipassStepEntry] = []
+    for idx, step in enumerate(steps, start=1):
+        step_id = _multipass_step_id(step=step, idx=idx)
+        step_title = str(step.get("title") or "").strip()
+        step_focus = str(step.get("focus") or "").strip()
+        output_path = session_dir / f"review.step-{idx:02d}.md"
+        prior_step_output = str(output_path) if output_path.exists() else "(none)"
+        prompt = render_prompt(
+            step_template,
+            base_ref_for_review=base_ref_for_review,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            gh_host=str(pr.host),
+            gh_owner=str(pr.owner),
+            gh_repo_name=str(pr.repo),
+            gh_repo=str(pr.gh_repo),
+            agent_desc=agent_desc,
+            head_ref="HEAD",
+            extra_vars={
+                **review_intelligence_prompt_vars(
+                    review_intelligence_cfg,
+                    capability_summary=review_intelligence_capabilities,
+                ),
+                "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
+                "PREVIOUS_REVIEW_MD": str(previous_review_md_path),
+                "PREVIOUS_REVIEW_HEAD_SHA": previous_review_head_sha,
+                "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
+                "STEP_ID": step_id,
+                "STEP_TITLE": step_title,
+                "STEP_FOCUS": step_focus,
+                "PRIOR_STEP_OUTPUT_PATH": prior_step_output,
+            },
+        )
+        entries.append(
+            MultipassStepEntry(
+                index=idx,
+                step_id=step_id,
+                step_title=step_title,
+                step_focus=step_focus,
+                output_path=output_path,
                 prompt=prompt,
                 should_run=True,
             )
@@ -5464,6 +5664,8 @@ def _finalize_multipass_step_result(
     provider: str,
     templates: dict[str, str],
     codex_meta: dict[str, Any] | None,
+    review_stage: str = "multipass_step",
+    prompt_template_name: str | None = None,
 ) -> str | None:
     success_resume_command: str | None = None
     with progress.mutate():
@@ -5501,8 +5703,8 @@ def _finalize_multipass_step_result(
             meta=progress.meta,
             work_dir=work_dir,
             provider=provider,
-            review_stage="multipass_step",
-            prompt_template_name=templates["step"],
+            review_stage=review_stage,
+            prompt_template_name=prompt_template_name or templates["step"],
             adapter_meta=step_result.adapter_meta,
         )
         _, step_validation = _validate_or_reuse_step_artifact(
@@ -5550,6 +5752,8 @@ def _execute_multipass_step_stage(
     templates: dict[str, str],
     codex_meta: dict[str, Any] | None,
     quiet: bool,
+    review_stage: str = "multipass_step",
+    prompt_template_name: str | None = None,
 ) -> str | None:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
@@ -5642,6 +5846,8 @@ def _execute_multipass_step_stage(
                 provider=str(llm_resolved.get("provider") or ""),
                 templates=templates,
                 codex_meta=codex_meta,
+                review_stage=review_stage,
+                prompt_template_name=prompt_template_name,
             ) or success_resume_command
         except Exception as exc:
             with progress.mutate():
@@ -5855,6 +6061,35 @@ def checkout_pr_in_repo(*, repo_dir: Path, pr: PullRequestRef) -> None:
                 return
             _raise_gh_auth_error(host=pr.host, error=e)
         raise
+
+
+def _update_resume_session_repo_for_incremental_review(
+    *,
+    repo_dir: Path,
+    pr: PullRequestRef,
+    base_ref: str,
+    base_ref_for_review: str,
+    stream: bool,
+) -> tuple[str, str]:
+    head_before = run_cmd(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
+    run_cmd(["git", "-C", str(repo_dir), "fetch", "--prune", "origin"], stream=stream, stream_label="git")
+    checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
+    run_cmd(["git", "-C", str(repo_dir), "fetch", "origin", base_ref], stream=stream, stream_label="git")
+    run_cmd(
+        [
+            "git",
+            "-C",
+            str(repo_dir),
+            "branch",
+            "-f",
+            base_ref_for_review,
+            f"origin/{base_ref}",
+        ],
+        stream=stream,
+        stream_label="git",
+    )
+    head_after = run_cmd(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
+    return head_before, head_after
 
 
 @dataclass(frozen=True)
@@ -8440,6 +8675,409 @@ def _pr_flow_impl(
     return 0
 
 
+def _run_incremental_completed_multipass_resume(
+    *,
+    progress: SessionProgress,
+    session_id: str,
+    session_dir: Path,
+    repo_dir: Path,
+    work_dir: Path,
+    review_md_path: Path,
+    meta: dict[str, Any],
+    pr: PullRequestRef,
+    base_ref_for_review: str,
+    agent_desc: str,
+    review_intelligence_cfg: ReviewIntelligenceConfig,
+    review_intelligence_capabilities: dict[str, Any] | None,
+    plan_llm: dict[str, Any],
+    step_llm: dict[str, Any],
+    synth_llm: dict[str, Any],
+    plan_runtime_policy: dict[str, Any],
+    step_runtime_policy: dict[str, Any],
+    synth_runtime_policy: dict[str, Any],
+    env: dict[str, str],
+    stream: bool,
+    add_dirs: list[Path],
+    grounding_mode: str,
+    codex_meta: dict[str, Any] | None,
+    quiet: bool,
+    previous_review_point: SessionReviewPoint,
+    current_review_head_sha: str,
+) -> str | None:
+    templates = incremental_resume_prompt_template_names()
+    mp = progress.meta.setdefault("multipass", {})
+    resume_meta = mp.setdefault("resume", {})
+    previous_review_snapshot_path = work_dir / "review.resume.previous.md"
+    shutil.copy2(previous_review_point.artifact_path, previous_review_snapshot_path)
+
+    plan_json_text = str(mp.get("plan_json_path") or "").strip()
+    existing_plan_path = Path(plan_json_text).resolve() if plan_json_text else (work_dir / "review_plan.json").resolve()
+    if repo_dir in existing_plan_path.parents:
+        raise ReviewflowError(f"Refusing to use multipass plan JSON under the repo tree: {existing_plan_path}")
+    if existing_plan_path.is_file():
+        loaded_plan = json.loads(existing_plan_path.read_text(encoding="utf-8"))
+        existing_plan = loaded_plan if isinstance(loaded_plan, dict) else {}
+    else:
+        existing_plan = {"abort": False, "abort_reason": None, "jira_keys": [], "steps": []}
+    existing_steps_raw = existing_plan.get("steps")
+    existing_steps = [dict(item) for item in existing_steps_raw if isinstance(item, dict)] if isinstance(existing_steps_raw, list) else []
+    existing_step_catalog = _format_incremental_resume_step_catalog(steps=existing_steps, session_dir=session_dir)
+
+    resume_plan_md_path = session_dir / "review.resume-plan.md"
+    resume_plan_json_path = work_dir / "review_resume_plan.json"
+    resume_meta.update(
+        {
+            "previous_review_kind": previous_review_point.kind,
+            "previous_review_artifact": str(previous_review_point.artifact_path),
+            "previous_review_snapshot": str(previous_review_snapshot_path),
+            "previous_review_head_sha": str(previous_review_point.head_sha or "").strip() or None,
+            "current_review_head_sha": current_review_head_sha,
+            "resume_plan_json_path": str(resume_plan_json_path),
+        }
+    )
+    progress.flush()
+
+    progress.meta.setdefault("multipass", {})["current"] = {
+        "stage": "resume_plan",
+        "step_index": 0,
+        "step_count": int(len(existing_steps)),
+        "step_title": "resume planning",
+    }
+    progress.flush()
+
+    with phase("codex_resume_plan", progress=progress, quiet=quiet):
+        plan_prompt = render_prompt(
+            load_builtin_prompt_text(templates["resume_plan"]),
+            base_ref_for_review=base_ref_for_review,
+            pr_url=str(meta.get("pr_url") or ""),
+            pr_number=int(meta.get("number") or pr.number),
+            gh_host=str(pr.host),
+            gh_owner=str(pr.owner),
+            gh_repo_name=str(pr.repo),
+            gh_repo=str(pr.gh_repo),
+            agent_desc=agent_desc,
+            head_ref="HEAD",
+            extra_vars={
+                **review_intelligence_prompt_vars(
+                    review_intelligence_cfg,
+                    capability_summary=review_intelligence_capabilities,
+                ),
+                "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
+                "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
+                "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
+                "EXISTING_PLAN_JSON_PATH": str(existing_plan_path),
+                "EXISTING_STEP_CATALOG": existing_step_catalog,
+            },
+        )
+        resume_plan_run_entry = _ensure_multipass_run_entry(
+            progress.meta,
+            kind="resume_plan",
+            output_path=resume_plan_md_path,
+            template_id=builtin_prompt_id(templates["resume_plan"]),
+            prompt=plan_prompt,
+            stage_llm_meta=plan_llm["meta"],
+        )
+        plan_result = run_llm_exec(
+            repo_dir=repo_dir,
+            resolved=plan_llm["resolved"],
+            resolution_meta=plan_llm["resolution_meta"],
+            output_path=resume_plan_md_path,
+            prompt=plan_prompt,
+            env=env,
+            stream=stream,
+            progress=progress,
+            add_dirs=add_dirs,
+            codex_config_overrides=list(plan_runtime_policy.get("codex_config_overrides") or []),
+            runtime_policy=plan_runtime_policy,
+        )
+        record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
+        _record_multipass_stage_llm(meta=progress.meta, stage_name="plan", stage_llm_meta=plan_llm["meta"])
+        resume_plan_run_entry["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
+        if plan_result.resume is not None:
+            resume_plan_run_entry["llm_session_id"] = plan_result.resume.session_id
+            resume_plan_run_entry["llm_provider"] = plan_result.resume.provider
+        success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), plan_result.resume)
+        if codex_meta is not None:
+            codex_resume = (
+                CodexResumeInfo(
+                    session_id=plan_result.resume.session_id,
+                    cwd=plan_result.resume.cwd,
+                    command=plan_result.resume.command,
+                )
+                if plan_result.resume is not None and plan_result.resume.provider == "codex"
+                else None
+            )
+            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+        _enforce_codex_chunkhound_tool_proof(
+            meta=progress.meta,
+            work_dir=work_dir,
+            provider=str(plan_llm["resolved"].get("provider") or ""),
+            review_stage="multipass_resume_plan",
+            prompt_template_name=templates["resume_plan"],
+            adapter_meta=plan_result.adapter_meta,
+        )
+        progress.flush()
+
+    resume_strategy = parse_incremental_resume_plan_json(
+        resume_plan_md_path.read_text(encoding="utf-8") if resume_plan_md_path.is_file() else ""
+    )
+    resume_plan_json_path.write_text(json.dumps(resume_strategy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    resume_meta["decision"] = resume_strategy["decision"]
+    resume_meta["reason"] = resume_strategy["reason"]
+    resume_meta["reopen_step_ids"] = list(resume_strategy.get("reopen_step_ids") or [])
+
+    existing_step_ids = {_multipass_step_id(step=step, idx=idx) for idx, step in enumerate(existing_steps, start=1)}
+    requested_reopen_step_ids = {str(item).strip() for item in resume_strategy.get("reopen_step_ids") or []}
+    unknown_reopen_step_ids = sorted(step_id for step_id in requested_reopen_step_ids if step_id not in existing_step_ids)
+    if unknown_reopen_step_ids:
+        raise ReviewflowError(
+            "Incremental resume plan referenced unknown reopen_step_ids: "
+            + ", ".join(unknown_reopen_step_ids)
+        )
+    used_ids = set(existing_step_ids)
+    appended_steps: list[dict[str, Any]] = []
+    next_auto_idx = len(existing_steps) + 1
+    for raw_step in resume_strategy.get("new_steps") or []:
+        step = dict(raw_step)
+        step_id = str(step.get("id") or f"{next_auto_idx:02d}").strip()
+        if step_id in used_ids:
+            raise ReviewflowError(f"Incremental resume step id conflicts with existing plan step: {step_id}")
+        appended_steps.append(
+            {
+                "id": step_id,
+                "title": str(step.get("title") or "").strip(),
+                "focus": str(step.get("focus") or "").strip(),
+            }
+        )
+        used_ids.add(step_id)
+        next_auto_idx += 1
+    resume_meta["new_steps"] = list(appended_steps)
+
+    combined_steps = list(existing_steps)
+    if appended_steps:
+        combined_steps.extend(appended_steps)
+        existing_plan["steps"] = combined_steps
+        existing_plan_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_plan_path.write_text(json.dumps(existing_plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        progress.meta.setdefault("multipass", {})["plan_json_path"] = str(existing_plan_path)
+
+    reopen_step_ids = requested_reopen_step_ids
+    base_step_count = len(existing_steps)
+    step_entries: list[MultipassStepEntry] = []
+    for entry in _build_incremental_resume_step_entries(
+        steps=combined_steps,
+        session_dir=session_dir,
+        resume_plan_json_path=resume_plan_json_path,
+        templates=templates,
+        base_ref_for_review=base_ref_for_review,
+        pr_url=str(meta.get("pr_url") or ""),
+        pr_number=int(meta.get("number") or pr.number),
+        pr=pr,
+        agent_desc=agent_desc,
+        review_intelligence_cfg=review_intelligence_cfg,
+        review_intelligence_capabilities=review_intelligence_capabilities,
+        previous_review_md_path=previous_review_snapshot_path,
+        previous_review_head_sha=str(previous_review_point.head_sha or "").strip(),
+        current_review_head_sha=current_review_head_sha,
+    ):
+        should_run = False
+        if entry.step_id in reopen_step_ids or entry.index > base_step_count:
+            should_run = True
+        else:
+            should_run = (not entry.output_path.is_file()) or (entry.output_path.stat().st_size == 0)
+            if (not should_run) and grounding_mode != "off":
+                reusable, _ = _validate_or_reuse_step_artifact(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    grounding_mode=grounding_mode,
+                    artifact_path=entry.output_path,
+                    repo_dir=repo_dir,
+                    step_index=entry.index,
+                )
+                progress.flush()
+                should_run = not reusable
+        step_entries.append(
+            MultipassStepEntry(
+                index=entry.index,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                step_focus=entry.step_focus,
+                output_path=entry.output_path,
+                prompt=entry.prompt,
+                should_run=should_run,
+            )
+        )
+
+    progress.meta.setdefault("multipass", {})["current"] = {
+        "stage": "steps",
+        "step_index": 0,
+        "step_count": int(len(step_entries)),
+        "step_title": "incremental resume",
+    }
+    progress.meta.setdefault("multipass", {}).setdefault("runs", [])
+    for entry in step_entries:
+        if entry.should_run:
+            _ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                output_path=entry.output_path,
+                template_id=builtin_prompt_id(templates["resume_step"]),
+                prompt=entry.prompt,
+                stage_llm_meta=step_llm["meta"],
+                step_index=entry.index,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+            )
+    progress.flush()
+
+    step_outputs = [str(entry.output_path) for entry in step_entries]
+    step_reran = any(entry.should_run for entry in step_entries)
+    if step_reran:
+        _record_multipass_stage_llm(meta=progress.meta, stage_name="step", stage_llm_meta=step_llm["meta"])
+        success_resume_command = _execute_multipass_step_stage(
+            progress=progress,
+            work_dir=work_dir,
+            repo_dir=repo_dir,
+            session_id=session_id,
+            grounding_mode=grounding_mode,
+            step_entries=step_entries,
+            step_worker_count=int(progress.meta.setdefault("multipass", {}).get("step_workers", DEFAULT_MULTIPASS_STEP_WORKERS)),
+            llm_resolved=step_llm["resolved"],
+            llm_resolution_meta=step_llm["resolution_meta"],
+            env=env,
+            stream=stream,
+            add_dirs=add_dirs,
+            runtime_policy=step_runtime_policy,
+            templates={"step": templates["resume_step"]},
+            codex_meta=codex_meta,
+            quiet=quiet,
+            review_stage="multipass_resume_step",
+            prompt_template_name=templates["resume_step"],
+        ) or success_resume_command
+    else:
+        with progress.mutate():
+            progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})["step_outputs"] = list(step_outputs)
+            progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
+            progress.meta.setdefault("multipass", {})["step_states"] = [
+                {
+                    "step_index": int(entry.index),
+                    "step_id": entry.step_id,
+                    "step_title": entry.step_title,
+                    "step_focus": entry.step_focus,
+                    "output_path": str(entry.output_path),
+                    "status": "reused",
+                    "reusable": True,
+                }
+                for entry in step_entries
+            ]
+            progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
+            _update_multipass_step_progress(progress.meta)
+
+    progress.meta.setdefault("multipass", {})["current"] = {
+        "stage": "resume_synth",
+        "step_index": int(len(step_entries)),
+        "step_count": int(len(step_entries)),
+        "step_title": "resume synth",
+    }
+    progress.flush()
+    with phase("codex_resume_synth", progress=progress, quiet=quiet):
+        step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs) if step_outputs else "- None."
+        synth_prompt = render_prompt(
+            load_builtin_prompt_text(templates["resume_synth"]),
+            base_ref_for_review=base_ref_for_review,
+            pr_url=str(meta.get("pr_url") or ""),
+            pr_number=int(meta.get("number") or pr.number),
+            gh_host=str(pr.host),
+            gh_owner=str(pr.owner),
+            gh_repo_name=str(pr.repo),
+            gh_repo=str(pr.gh_repo),
+            agent_desc=agent_desc,
+            head_ref="HEAD",
+            extra_vars={
+                **review_intelligence_prompt_vars(
+                    review_intelligence_cfg,
+                    capability_summary=review_intelligence_capabilities,
+                ),
+                "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
+                "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
+                "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
+                "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
+                "STEP_OUTPUT_PATHS": step_paths_text,
+            },
+        )
+        synth_run_entry = _ensure_multipass_run_entry(
+            progress.meta,
+            kind="resume_synth",
+            output_path=review_md_path,
+            template_id=builtin_prompt_id(templates["resume_synth"]),
+            prompt=synth_prompt,
+            stage_llm_meta=synth_llm["meta"],
+        )
+        synth_result = run_llm_exec(
+            repo_dir=repo_dir,
+            resolved=synth_llm["resolved"],
+            resolution_meta=synth_llm["resolution_meta"],
+            output_path=review_md_path,
+            prompt=synth_prompt,
+            env=env,
+            stream=stream,
+            progress=progress,
+            add_dirs=add_dirs,
+            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
+            runtime_policy=synth_runtime_policy,
+        )
+        record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
+        _record_multipass_stage_llm(meta=progress.meta, stage_name="synth", stage_llm_meta=synth_llm["meta"])
+        synth_run_entry["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
+        if synth_result.resume is not None:
+            synth_run_entry["llm_session_id"] = synth_result.resume.session_id
+            synth_run_entry["llm_provider"] = synth_result.resume.provider
+        success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), synth_result.resume)
+        if codex_meta is not None:
+            codex_resume = (
+                CodexResumeInfo(
+                    session_id=synth_result.resume.session_id,
+                    cwd=synth_result.resume.cwd,
+                    command=synth_result.resume.command,
+                )
+                if synth_result.resume is not None and synth_result.resume.provider == "codex"
+                else None
+            )
+            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+        _enforce_codex_chunkhound_tool_proof(
+            meta=progress.meta,
+            work_dir=work_dir,
+            provider=str(synth_llm["resolved"].get("provider") or ""),
+            review_stage="multipass_resume_synth",
+            prompt_template_name=templates["resume_synth"],
+            adapter_meta=synth_result.adapter_meta,
+        )
+        progress.flush()
+        _, synth_validation = _validate_or_reuse_synth_artifact(
+            meta=progress.meta,
+            work_dir=work_dir,
+            grounding_mode=grounding_mode,
+            artifact_path=review_md_path,
+            step_outputs=[Path(item) for item in step_outputs],
+            repo_dir=repo_dir,
+        )
+        progress.flush()
+        if grounding_mode == "strict" and synth_validation is not None and (synth_validation.get("valid") is False):
+            raise ReviewflowError("Incremental multipass synth grounding validation failed for review.md.")
+        _record_multipass_review_artifact_llm(
+            meta=progress.meta,
+            stage_name="synth",
+            stage_llm_meta=synth_llm["meta"],
+        )
+
+    progress.meta["review_head_sha"] = current_review_head_sha
+    progress.meta["head_sha"] = current_review_head_sha
+    progress.meta.setdefault("multipass", {})["status"] = "done"
+    progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})["step_outputs"] = list(step_outputs)
+    progress.flush()
+    return success_resume_command
+
+
 def _resume_flow_impl(
     args: argparse.Namespace,
     *,
@@ -8519,25 +9157,46 @@ def _resume_flow_impl(
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
     if not pr_url:
         raise ReviewflowError("Session meta missing pr_url.")
-
-    already_done = (
-        from_phase == "auto"
-        and review_md_path.is_file()
+    pr = parse_pr_url(pr_url)
+    completed_session = (
+        review_md_path.is_file()
         and (
             str(meta.get("status") or "").strip() == "done"
             or bool(str(meta.get("completed_at") or "").strip())
         )
-        and (not _multipass_has_invalid_artifacts(meta))
     )
-    if already_done:
-        # Fast no-op for completed sessions (do not rewrite meta.json).
-        print(str(session_dir))
-        maybe_print_markdown_after_tui(ui_enabled=ui_enabled, stderr=sys.stderr, markdown_path=review_md_path)
-        existing_codex = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
-        existing_resume = existing_codex.get("resume") if isinstance(existing_codex.get("resume"), dict) else {}
-        existing_resume_cmd = str((existing_resume or {}).get("command") or "").strip() or None
-        maybe_print_codex_resume_command(stderr=sys.stderr, command=existing_resume_cmd)
-        return 0
+    incremental_resume_review_point: SessionReviewPoint | None = None
+    incremental_resume_head_sha: str | None = None
+    if from_phase == "auto" and completed_session:
+        incremental_resume_review_point = _resolve_latest_session_review_point(session_dir=session_dir, meta=meta)
+        mp_meta = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+        if (
+            bool((mp_meta or {}).get("enabled") is True)
+            and incremental_resume_review_point is not None
+            and str(incremental_resume_review_point.head_sha or "").strip()
+            and (not bool(((meta.get("notes") or {}).get("no_index")) or False))
+            and (not _multipass_has_invalid_artifacts(meta))
+        ):
+            base_ref = str(meta.get("base_ref") or "").strip()
+            base_ref_for_review = str(meta.get("base_ref_for_review") or "").strip()
+            if base_ref and base_ref_for_review:
+                _, head_after_update = _update_resume_session_repo_for_incremental_review(
+                    repo_dir=repo_dir,
+                    pr=pr,
+                    base_ref=base_ref,
+                    base_ref_for_review=base_ref_for_review,
+                    stream=stream,
+                )
+                if head_after_update == str(incremental_resume_review_point.head_sha or "").strip():
+                    # Fast no-op for completed sessions that already target the latest PR head.
+                    print(str(session_dir))
+                    maybe_print_markdown_after_tui(ui_enabled=ui_enabled, stderr=sys.stderr, markdown_path=review_md_path)
+                    existing_codex = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
+                    existing_resume = existing_codex.get("resume") if isinstance(existing_codex.get("resume"), dict) else {}
+                    existing_resume_cmd = str((existing_resume or {}).get("command") or "").strip() or None
+                    maybe_print_codex_resume_command(stderr=sys.stderr, command=existing_resume_cmd)
+                    return 0
+                incremental_resume_head_sha = head_after_update
 
     work_dir = Path(str(meta_paths.get("work_dir") or (session_dir / "work"))).resolve()
     work_tmp_dir = Path(str(meta_paths.get("work_tmp_dir") or (work_dir / "tmp"))).resolve()
@@ -8563,7 +9222,6 @@ def _resume_flow_impl(
             "Re-run the review without --no-index."
         )
 
-    pr = parse_pr_url(pr_url)
     ensure_review_config(paths, config_path=effective_config_path)
     restore_session_chunkhound_db_from_baseline(
         meta=meta,
@@ -8779,6 +9437,8 @@ def _resume_flow_impl(
 
         # If already complete, no-op.
         if (
+            not incremental_resume_head_sha
+            and
             from_phase == "auto"
             and review_md_path.is_file()
             and str(meta.get("status")) == "done"
@@ -8827,6 +9487,47 @@ def _resume_flow_impl(
             llm_resolution_meta=synth_llm["resolution_meta"],
         )
         progress.flush()
+        if incremental_resume_head_sha and incremental_resume_review_point is not None:
+            success_resume_command = _run_incremental_completed_multipass_resume(
+                progress=progress,
+                session_id=session_id,
+                session_dir=session_dir,
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+                review_md_path=review_md_path,
+                meta=meta,
+                pr=pr,
+                base_ref_for_review=base_ref_for_review,
+                agent_desc=agent_desc,
+                review_intelligence_cfg=review_intelligence_cfg,
+                review_intelligence_capabilities=review_intelligence_capabilities,
+                plan_llm=plan_llm,
+                step_llm=step_llm,
+                synth_llm=synth_llm,
+                plan_runtime_policy=plan_runtime_policy,
+                step_runtime_policy=step_runtime_policy,
+                synth_runtime_policy=synth_runtime_policy,
+                env=env,
+                stream=stream,
+                add_dirs=add_dirs,
+                grounding_mode=str(
+                    progress.meta.setdefault("multipass", {}).get(
+                        "grounding_mode", DEFAULT_MULTIPASS_GROUNDING_MODE
+                    )
+                ),
+                codex_meta=codex_meta,
+                quiet=quiet,
+                previous_review_point=incremental_resume_review_point,
+                current_review_head_sha=incremental_resume_head_sha,
+            )
+            if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
+                progress.flush()
+            progress.done()
+            _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
+            success_markdown_path = review_md_path
+            print(str(session_dir))
+            return 0
+
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
             max_steps = int(cli_max_steps)
