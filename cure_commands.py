@@ -155,24 +155,13 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 ],
             },
             {
-                "name": "followup",
-                "summary": "Run a follow-up review inside an existing session sandbox.",
-                "targets": ["session_id"],
-                "safety": "Reuses the existing sandbox and appends a new follow-up artifact.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
-                "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("followup <session_id>"),
-                "variants": [],
-            },
-            {
                 "name": "resume",
-                "summary": "Resume a multipass session, or use its existing PR URL compatibility behavior.",
+                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
                 "targets": ["session_id", "PR_URL"],
-                "safety": "PR URL mode keeps its special resume-or-followup behavior for compatibility.",
+                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Human-readable progress only.",
-                "exit_codes": {"0": "resume or compatible follow-up completed", "2": "usage or runtime error"},
+                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
                 "variants": [
                     {

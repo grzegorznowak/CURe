@@ -4067,7 +4067,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
-        self.assertEqual(names, ["pr", "followup", "resume", "zip", "clean", "status", "watch"])
+        self.assertEqual(names, ["pr", "resume", "zip", "clean", "status", "watch"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)

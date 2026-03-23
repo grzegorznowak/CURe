@@ -290,7 +290,7 @@ def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str]
     ensure(payload["schema_version"] == 2, "commands schema_version mismatch")
     ensure(payload["kind"] == "cure.commands", "commands kind mismatch")
     names = [entry["name"] for entry in payload["commands"]]
-    ensure(names == ["pr", "followup", "resume", "zip", "clean", "status", "watch"], "commands order mismatch")
+    ensure(names == ["pr", "resume", "zip", "clean", "status", "watch"], "commands order mismatch")
     ensure("interactive" not in names, "interactive should be absent from curated catalog")
     for entry in payload["commands"]:
         for key in (

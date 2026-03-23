@@ -4021,24 +4021,13 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 ],
             },
             {
-                "name": "followup",
-                "summary": "Run a follow-up review inside an existing session sandbox.",
-                "targets": ["session_id"],
-                "safety": "Reuses the existing sandbox and appends a new follow-up artifact.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Human-readable progress only; follow-up artifact path is not a stable stdout contract.",
-                "exit_codes": {"0": "follow-up completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("followup <session_id>"),
-                "variants": [],
-            },
-            {
                 "name": "resume",
-                "summary": "Resume a multipass session, or use its existing PR URL compatibility behavior.",
+                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
                 "targets": ["session_id", "PR_URL"],
-                "safety": "PR URL mode keeps its special resume-or-followup behavior for compatibility.",
+                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Human-readable progress only.",
-                "exit_codes": {"0": "resume or compatible follow-up completed", "2": "usage or runtime error"},
+                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
                 "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
                 "variants": [
                     {
@@ -13596,7 +13585,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     rp = sub.add_parser(
         "resume",
-        help="Resume a multipass review session (PR URL: runs follow-up if already completed)",
+        help="Resume a multipass review session",
         parents=[runtime_parent],
     )
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
@@ -13619,7 +13608,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    fup = sub.add_parser("followup", help="Run a follow-up review for an existing session sandbox", parents=[runtime_parent])
+    fup = sub.add_parser("followup", help=argparse.SUPPRESS, parents=[runtime_parent])
     fup.add_argument("session_id", help="Session id (folder name)")
     fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
     add_llm_override_args(fup)
@@ -13711,6 +13700,13 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=None,
         help="Evaluate readiness for starting a review of this PR URL",
     )
+
+    hidden_subcommands = {"followup"}
+    sub._choices_actions = [
+        action for action in sub._choices_actions if getattr(action, "dest", None) not in hidden_subcommands
+    ]
+    visible_subcommands = [name for name in sub.choices.keys() if name not in hidden_subcommands]
+    sub.metavar = "{" + ",".join(visible_subcommands) + "}"
 
     return parser
 

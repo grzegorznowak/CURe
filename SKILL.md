@@ -1,6 +1,6 @@
 ---
 name: cure
-description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure init`, `cure pr`, `cure status`, `cure watch`, follow-up, resume, and zip synthesis.
+description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure init`, `cure pr`, `cure status`, `cure watch`, `resume`, and `zip`.
 metadata:
   short-description: Review GitHub PRs in isolated sandboxes with CURe
 ---
@@ -208,7 +208,7 @@ It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkho
 cure doctor --pr-url <PR_URL> --json
 ```
 
-Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, `cure followup`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [JIRA.md](JIRA.md): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
+Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [JIRA.md](JIRA.md): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
 That indexed ChunkHound-backed path is the default and recommended review workflow:
 
@@ -247,10 +247,9 @@ Success means:
 - `cure status ... --json` returns machine-readable run state
 - `cure watch ...` lets another human or agent follow the run
 
-Common follow-up actions:
+Common next actions:
 
 ```bash
-cure followup <session_id>
 cure resume <session_id|PR_URL>
 cure zip <PR_URL>
 cure clean closed --json
@@ -344,7 +343,7 @@ Required behavior:
 - If `VOYAGE_API_KEY` is present, let `cure init` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
 - After install or repair, run `cure install`.
-- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, `followup`, and `zip`.
+- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.

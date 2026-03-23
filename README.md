@@ -201,11 +201,10 @@ Watch a run:
 cure watch <session_id|PR_URL>
 ```
 
-Resume or follow up:
+Resume a session:
 
 ```bash
 cure resume <session_id|PR_URL>
-cure followup <session_id>
 ```
 
 Synthesize a final review:

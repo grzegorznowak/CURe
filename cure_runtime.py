@@ -2746,7 +2746,7 @@ def _doctor_runtime_checks(
                 DoctorCheck(
                     name="gh",
                     status="ok",
-                    detail=f"{gh_check.detail} (not required for public github.com PR lifecycle flows such as `pr`, `resume`, `followup`, and `zip`; anonymous fallback confirmed)",
+                    detail=f"{gh_check.detail} (not required for public github.com PR lifecycle flows such as `pr`, `resume`, and `zip`; anonymous fallback confirmed)",
                 )
             )
         else:

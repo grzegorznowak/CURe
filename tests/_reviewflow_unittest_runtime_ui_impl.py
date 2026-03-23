@@ -1632,6 +1632,8 @@ class TuiDashboardTests(unittest.TestCase):
 
     def test_parser_accepts_if_reviewed_and_followup_flags(self) -> None:
         p = rf.build_parser()
+        help_text = p.format_help()
+        self.assertNotIn("followup", help_text)
         args = p.parse_args(
             [
                 "pr",
