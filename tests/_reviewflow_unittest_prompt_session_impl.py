@@ -618,6 +618,82 @@ class MultipassGroundingValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_multipass_step_grounding_accepts_dot_prefixed_repo_citation(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_dot_path"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            workflow_dir = repo_dir / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+            (workflow_dir / "ci.yml").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — CI review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked workflow",
+                        "",
+                        "### Findings",
+                        "- CI gate exists. Evidence: `.github/workflows/ci.yml:2`",
+                        "",
+                        "### Suggested actions",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_step_grounding_accepts_dot_slash_prefixed_repo_citation(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_dot_slash_path"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            workflow_dir = repo_dir / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+            (workflow_dir / "ci.yml").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — CI review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked workflow",
+                        "",
+                        "### Findings",
+                        "- CI gate exists. Evidence: `./.github/workflows/ci.yml:2`",
+                        "",
+                        "### Suggested actions",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_multipass_step_grounding_rejects_missing_repo_citation(self) -> None:
         root = ROOT / ".tmp_test_step_grounding_invalid"
         try:

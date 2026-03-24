@@ -210,7 +210,7 @@ MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
-GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9][A-Za-z0-9._/-]*):([1-9][0-9]*)`?")
+GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
 
@@ -4835,6 +4835,10 @@ def _citation_records(text: str) -> list[dict[str, Any]]:
 
 def _resolve_grounding_path(*, root_dir: Path, relative_path: str) -> Path | None:
     rel = str(relative_path or "").strip()
+    if not rel:
+        return None
+    while rel.startswith("./"):
+        rel = rel[2:]
     if not rel:
         return None
     candidate = Path(rel)
