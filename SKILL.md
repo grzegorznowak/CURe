@@ -339,10 +339,12 @@ Required behavior:
 - If CURe config already exists, inspect the active `cure.toml` and the JSON resolved from `[chunkhound].base_config_path` before creating new config files.
 - Look for repo-root `chunkhound.json` and `.chunkhound.json` as ask-first setup hints and ask the operator before reusing them.
 - Use a temp XDG root or explicit `--config` / `--sandbox-root` / `--cache-root` overrides when the session should not touch the default `~/.config/cure` layout.
-- Run `cure init` before `cure install`.
+- Use `cure init` as the primary bootstrap and repair entry point.
+- On a TTY, expect `cure init` to act as an interactive setup wizard that can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config.
 - If `VOYAGE_API_KEY` is present, let `cure init` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
-- After install or repair, run `cure install`.
+- If `chunkhound` is still missing on `PATH`, the wizard may offer to run `cure install`; otherwise run `cure install` after bootstrap or repair.
+- Commands that require ChunkHound bootstrap (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late `[chunkhound]` config errors. On non-TTY runs, they should fail fast and point back to `cure init` plus `cure doctor`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.

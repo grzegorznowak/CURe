@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -11,10 +12,14 @@ from typing import TYPE_CHECKING, TextIO
 
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
+from cure_flows import discover_repo_local_chunkhound_config
 from cure_runtime import (
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
     _doctor_runtime_checks,
     _doctor_runtime_payload,
+    load_chunkhound_runtime_config,
+    load_reviewflow_chunkhound_config,
+    toml_string,
 )
 from cure_sessions import build_status_payload, resolve_observation_target
 from paths import ReviewflowPaths
@@ -412,7 +417,415 @@ def _render_init_config(*, runtime: ReviewflowRuntime, chunkhound_base_config_pa
     return "\n".join(lines)
 
 
-def init_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
+def _default_chunkhound_base_config_payload() -> dict[str, object]:
+    payload: dict[str, object] = {}
+    embedding = _auto_embedding_block()
+    if embedding is not None:
+        payload["embedding"] = embedding
+    return payload
+
+
+def _write_chunkhound_base_config_file(path: Path) -> str:
+    payload = _default_chunkhound_base_config_payload()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    embedding = payload.get("embedding")
+    if isinstance(embedding, dict):
+        provider = str(embedding.get("provider") or "").strip()
+        if provider:
+            return f" ({provider} embedding defaults)"
+    return ""
+
+
+def _stream_is_tty(stream: TextIO | None) -> bool:
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
+def _validate_chunkhound_base_config_choice(path: Path) -> Path:
+    rf = _reviewflow()
+    resolved = path.expanduser().resolve(strict=False)
+    rf._read_chunkhound_json_config(resolved)  # type: ignore[attr-defined]
+    return resolved
+
+
+def _resolved_runtime_config_for_repo_local_discovery(*, runtime: ReviewflowRuntime) -> dict[str, object] | None:
+    if not runtime.config_enabled:
+        return None
+    try:
+        _, _, resolved = load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+        return resolved
+    except ReviewflowError:
+        return None
+
+
+def _collect_chunkhound_base_config_choices(
+    *,
+    runtime: ReviewflowRuntime,
+    invocation_cwd: Path,
+) -> tuple[list[dict[str, str]], int, dict[str, object]]:
+    choices: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    current_path: Path | None = None
+    current_valid = False
+    discovery = discover_repo_local_chunkhound_config(
+        invocation_cwd=invocation_cwd,
+        pr=None,
+        resolved_runtime_config=_resolved_runtime_config_for_repo_local_discovery(runtime=runtime),
+    )
+    try:
+        cfg, _ = load_reviewflow_chunkhound_config(config_path=runtime.config_path, require=True)
+        assert cfg is not None
+        current_path = cfg.base_config_path.resolve(strict=False)
+        current_valid = True
+    except ReviewflowError:
+        current_path = _load_existing_chunkhound_base_config_path(runtime.config_path)
+        if current_path is not None:
+            current_path = current_path.resolve(strict=False)
+
+    def add_choice(*, kind: str, path: Path, label: str) -> None:
+        resolved = path.resolve(strict=False)
+        if resolved in seen:
+            return
+        try:
+            _validate_chunkhound_base_config_choice(resolved)
+        except ReviewflowError:
+            return
+        choices.append({"kind": kind, "path": str(resolved), "label": label})
+        seen.add(resolved)
+
+    if current_valid and current_path is not None:
+        add_choice(kind="current", path=current_path, label=f"Keep current configured base config ({current_path})")
+
+    if str(discovery.get("candidate_state") or "") == "candidate":
+        config_path_raw = str(discovery.get("config_path") or "").strip()
+        config_file_name = str(discovery.get("config_file_name") or "").strip()
+        if config_path_raw:
+            candidate = Path(config_path_raw).resolve(strict=False)
+            label_name = config_file_name or candidate.name
+            add_choice(
+                kind="repo_local",
+                path=candidate,
+                label=f"Use repo-local {label_name} ({candidate})",
+            )
+
+    generated_path = _default_chunkhound_base_config_path(runtime.config_path)
+    choices.append(
+        {
+            "kind": "generated_default",
+            "path": str(generated_path),
+            "label": f"Generate or refresh the CURe default base config ({generated_path})",
+        }
+    )
+
+    default_index = len(choices) - 1
+    if current_valid and current_path is not None:
+        for idx, item in enumerate(choices):
+            if Path(item["path"]) == current_path:
+                default_index = idx
+                break
+    else:
+        for preferred_name in ("chunkhound.json", ".chunkhound.json"):
+            for idx, item in enumerate(choices):
+                if Path(item["path"]).name == preferred_name:
+                    default_index = idx
+                    return choices, default_index, discovery
+    return choices, default_index, discovery
+
+
+def _upsert_chunkhound_base_config_path(*, config_path: Path, runtime: ReviewflowRuntime, base_config_path: Path) -> bool:
+    rendered = _render_init_config(runtime=runtime, chunkhound_base_config_path=base_config_path)
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(rendered, encoding="utf-8")
+        return True
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read CURe config at {config_path}: {exc}") from exc
+
+    if not text.strip():
+        config_path.write_text(rendered, encoding="utf-8")
+        return True
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        config_path.write_text(rendered, encoding="utf-8")
+        return True
+
+    new_line = f"base_config_path = {toml_string(str(base_config_path))}"
+    lines = text.splitlines()
+    replaced = False
+    in_chunkhound = False
+    insert_at: int | None = None
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_chunkhound and not replaced:
+                insert_at = idx
+                break
+            in_chunkhound = stripped == "[chunkhound]"
+            continue
+        if in_chunkhound and stripped.startswith("base_config_path"):
+            lines[idx] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        if insert_at is None and in_chunkhound:
+            insert_at = len(lines)
+        if insert_at is not None:
+            lines.insert(insert_at, new_line)
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(["[chunkhound]", new_line])
+
+    updated = "\n".join(lines)
+    if text.endswith("\n") or not updated.endswith("\n"):
+        updated += "\n"
+    if updated == text:
+        return False
+    config_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _wizard_summary_lines(*, selected_path: Path, will_install: bool, install_source: str | None) -> list[str]:
+    lines = [
+        "",
+        "Setup summary:",
+        f"- ChunkHound base config: {selected_path}",
+    ]
+    if will_install:
+        lines.append(f"- Run cure install now: yes (source={install_source})")
+    else:
+        lines.append("- Run cure install now: no")
+    return lines
+
+
+def _read_wizard_line(*, prompt: str, stdin: TextIO, stderr: TextIO) -> str | None:
+    try:
+        stderr.write(prompt)
+        stderr.flush()
+        return stdin.readline()
+    except Exception:
+        return None
+
+
+def run_chunkhound_setup_wizard(
+    *,
+    runtime: ReviewflowRuntime,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> bool:
+    in_stream = stdin or sys.stdin
+    out_stream = stdout or sys.stdout
+    err_stream = stderr or sys.stderr
+    if not (_stream_is_tty(in_stream) and _stream_is_tty(err_stream)):
+        raise ReviewflowError("setup wizard requires a TTY on stdin/stderr.")
+
+    choices, default_index, discovery = _collect_chunkhound_base_config_choices(
+        runtime=runtime,
+        invocation_cwd=Path.cwd(),
+    )
+    while True:
+        err_stream.write("\nCURe setup wizard\n")
+        err_stream.write("Choose the ChunkHound base config source to persist in cure.toml.\n")
+        for idx, item in enumerate(choices, start=1):
+            marker = " (default)" if idx - 1 == default_index else ""
+            err_stream.write(f"{idx}. {item['label']}{marker}\n")
+        if str(discovery.get("candidate_state") or "") not in {"candidate", "absent"}:
+            reason = str(discovery.get("reason") or "unknown")
+            config_hint = str(discovery.get("config_path") or "").strip()
+            if config_hint:
+                err_stream.write(f"Hint: repo-local ChunkHound candidate was not auto-selectable ({reason}: {config_hint}).\n")
+            else:
+                err_stream.write(f"Hint: repo-local ChunkHound candidate was not auto-selectable ({reason}).\n")
+        raw = _read_wizard_line(
+            prompt=f"Select source [default {default_index + 1}; or enter an absolute path]: ",
+            stdin=in_stream,
+            stderr=err_stream,
+        )
+        if raw is None:
+            raise ReviewflowError("setup wizard input failed.")
+        text = str(raw).strip()
+        if not text:
+            selected = choices[default_index]
+        elif text.isdigit() and 1 <= int(text) <= len(choices):
+            selected = choices[int(text) - 1]
+        else:
+            candidate = Path(text).expanduser()
+            if not candidate.is_absolute():
+                err_stream.write("Rejected: custom path must be absolute.\n\n")
+                err_stream.flush()
+                continue
+            try:
+                resolved = _validate_chunkhound_base_config_choice(candidate)
+            except ReviewflowError as exc:
+                err_stream.write(f"Rejected: {exc}\n\n")
+                err_stream.flush()
+                continue
+            selected = {
+                "kind": "custom_absolute",
+                "path": str(resolved),
+                "label": f"Use custom absolute base config ({resolved})",
+            }
+
+        selected_path = Path(selected["path"]).resolve(strict=False)
+        chunkhound_missing = shutil.which("chunkhound") is None
+        run_install = False
+        install_source: str | None = None
+        if chunkhound_missing:
+            install_raw = _read_wizard_line(
+                prompt="ChunkHound is not available on PATH. Run cure install now? [y/N]: ",
+                stdin=in_stream,
+                stderr=err_stream,
+            )
+            install_choice = str(install_raw or "").strip().lower()
+            run_install = install_choice in {"y", "yes"}
+            if run_install:
+                source_raw = _read_wizard_line(
+                    prompt="Install source [release/git-main] (default: release): ",
+                    stdin=in_stream,
+                    stderr=err_stream,
+                )
+                source_text = str(source_raw or "").strip().lower()
+                install_source = "git-main" if source_text == "git-main" else "release"
+
+        for line in _wizard_summary_lines(
+            selected_path=selected_path,
+            will_install=run_install,
+            install_source=install_source,
+        ):
+            err_stream.write(line + "\n")
+        confirm_raw = _read_wizard_line(
+            prompt="Apply this setup? [y/N]: ",
+            stdin=in_stream,
+            stderr=err_stream,
+        )
+        if str(confirm_raw or "").strip().lower() not in {"y", "yes"}:
+            raise ReviewflowError("Setup canceled.")
+
+        config_changed = _upsert_chunkhound_base_config_path(
+            config_path=runtime.config_path,
+            runtime=runtime,
+            base_config_path=selected_path,
+        )
+        if config_changed:
+            print(f"Updated CURe config: {runtime.config_path}", file=out_stream)
+        else:
+            print(f"Left existing CURe config unchanged: {runtime.config_path}", file=out_stream)
+
+        if selected["kind"] == "generated_default":
+            suffix = _write_chunkhound_base_config_file(selected_path)
+            print(f"Wrote ChunkHound base config: {selected_path}{suffix}", file=out_stream)
+        if chunkhound_missing and not run_install:
+            raise ReviewflowError(
+                "ChunkHound CLI is still not available on PATH. "
+                f"Run `{PRIMARY_CLI_COMMAND} install` before retrying the original command."
+            )
+        if run_install:
+            assert install_source is not None
+            _reviewflow().install_flow(argparse.Namespace(chunkhound_source=install_source))
+            if shutil.which("chunkhound") is None:
+                raise ReviewflowError(
+                    "ChunkHound installation completed but `chunkhound` is still not available on PATH. "
+                    f"Retry `{PRIMARY_CLI_COMMAND} install --chunkhound-source {install_source}` after fixing PATH."
+                )
+        return True
+
+
+def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRuntime, args: argparse.Namespace) -> list[str]:
+    lines = [f"CURe bootstrap is not ready for `{PRIMARY_CLI_COMMAND} {command_name}`."]
+    if not runtime.config_enabled:
+        lines.append("`--no-config` disables the CURe bootstrap config, so the setup wizard cannot persist a base config.")
+    else:
+        try:
+            load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+        except ReviewflowError as exc:
+            lines.append(str(exc))
+    if shutil.which("chunkhound") is None:
+        lines.append("ChunkHound CLI is not available on PATH.")
+
+    discovery = discover_repo_local_chunkhound_config(invocation_cwd=Path.cwd(), pr=None, resolved_runtime_config=None)
+    state = str(discovery.get("candidate_state") or "").strip()
+    if state == "candidate":
+        lines.append(f"Repo-local candidate: {discovery.get('config_path')}")
+    elif str(discovery.get("config_path") or "").strip():
+        lines.append(
+            "Repo-local hint not ready to assume: "
+            f"{discovery.get('config_path')} ({discovery.get('reason') or 'unknown'})"
+        )
+
+    lines.append(f"Run `{PRIMARY_CLI_COMMAND} init` in a TTY to configure CURe bootstrap.")
+    pr_url = str(getattr(args, "pr_url", "") or "").strip()
+    if pr_url:
+        lines.append(f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --pr-url {pr_url} --json`.")
+    else:
+        lines.append(f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --json`.")
+    return lines
+
+
+def ensure_chunkhound_bootstrap_ready(
+    args: argparse.Namespace,
+    *,
+    runtime: ReviewflowRuntime,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> bool:
+    command_name = str(getattr(args, "cmd", "") or "").strip()
+    gated = {
+        "pr",
+        "resume",
+        "followup",
+        "interactive",
+    }
+    if command_name == "cache" and str(getattr(args, "cache_cmd", "") or "").strip() == "prime":
+        gated.add("cache")
+    if command_name not in gated:
+        return False
+
+    ready = runtime.config_enabled
+    if ready:
+        try:
+            load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+        except ReviewflowError:
+            ready = False
+    if ready and shutil.which("chunkhound") is not None:
+        return False
+
+    in_stream = stdin or sys.stdin
+    err_stream = stderr or sys.stderr
+    if _stream_is_tty(in_stream) and _stream_is_tty(err_stream) and runtime.config_enabled:
+        return run_chunkhound_setup_wizard(runtime=runtime, stdin=in_stream, stdout=stdout, stderr=err_stream)
+
+    raise ReviewflowError("\n".join(_bootstrap_gate_problem_lines(command_name=command_name, runtime=runtime, args=args)))
+
+
+def init_flow(
+    args: argparse.Namespace,
+    *,
+    runtime: ReviewflowRuntime,
+    stdin: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    if _stream_is_tty(stdin or sys.stdin) and _stream_is_tty(stderr or sys.stderr):
+        run_chunkhound_setup_wizard(runtime=runtime, stdin=stdin, stderr=stderr)
+        return 0
+
     config_path = runtime.config_path
     force = bool(getattr(args, "force", False))
     existing_base_path = None if force else _load_existing_chunkhound_base_config_path(config_path)
@@ -440,15 +853,7 @@ def init_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
             "Left ChunkHound base config unchanged because the existing cure.toml does not declare `[chunkhound].base_config_path`."
         )
     elif force or not _path_has_text(chunkhound_base_config_path):
-        payload: dict[str, object] = {}
-        embedding = _auto_embedding_block()
-        if embedding is not None:
-            payload["embedding"] = embedding
-        chunkhound_base_config_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        suffix = f" ({embedding['provider']} embedding defaults)" if embedding is not None else ""
+        suffix = _write_chunkhound_base_config_file(chunkhound_base_config_path)
         print(f"Wrote ChunkHound base config: {chunkhound_base_config_path}{suffix}")
     else:
         print(f"Left existing ChunkHound base config unchanged: {chunkhound_base_config_path}")

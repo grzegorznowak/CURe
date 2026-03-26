@@ -117,6 +117,8 @@ If CURe is already partially configured, inspect the active local setup before c
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 ```
 
+On a TTY, `cure init` now acts as a setup wizard. It can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. If `chunkhound` is still missing on `PATH`, the wizard can also offer to run `cure install` before returning to the original command.
+
 ### Example 3: what a finished review produces
 
 A normal review run leaves behind resumable session state plus a review artifact with stable headings:
@@ -146,6 +148,8 @@ Ensure `git`, `curl`, and `ca-certificates` are present before bootstrap. Instal
 Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-first setup. Its `repo_local_chunkhound` payload plus the `repo-local-chunkhound` check and `executor-network` advisory check surface the same setup hints in machine-readable and text forms.
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
+
+Commands that actually require ChunkHound bootstrap now fail or repair earlier instead of surfacing late `Missing required [chunkhound] section.` errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure init` plus `cure doctor`.
 
 On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
 
@@ -184,6 +188,8 @@ Initialize non-secret bootstrap files:
 ```bash
 cure init
 ```
+
+When stdin/stderr are a real terminal, `cure init` is interactive and acts as the guided bootstrap/repair entry point.
 
 Start a fresh review:
 

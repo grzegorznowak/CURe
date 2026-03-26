@@ -4193,7 +4193,9 @@ class WorkflowContractTests(unittest.TestCase):
             cure_runtime, "resolve_runtime", return_value=runtime
         ) as resolve_runtime_mock, mock.patch.object(
             cure_commands, "pr_flow", return_value=17
-        ) as pr_flow_mock:
+        ) as pr_flow_mock, mock.patch.object(
+            cure_commands, "ensure_chunkhound_bootstrap_ready", return_value=False
+        ):
             rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
 
         self.assertEqual(rc, 17)
@@ -4295,7 +4297,9 @@ class WorkflowContractTests(unittest.TestCase):
                 cure_runtime, "resolve_runtime", return_value=runtime
             ) as resolve_runtime_mock, mock.patch.object(
                 cure_commands, flow_name, return_value=29
-            ) as flow_mock:
+            ) as flow_mock, mock.patch.object(
+                cure_commands, "ensure_chunkhound_bootstrap_ready", return_value=False
+            ):
                 rc = rf.main([command_name])
 
             self.assertEqual(rc, 29)

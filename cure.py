@@ -6614,6 +6614,7 @@ def cache_prime(
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
+    progress: Any | None = None,
     host: str,
     owner: str,
     repo: str,
@@ -6694,6 +6695,7 @@ def cache_prime(
         with phase(
             f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
         ):
+            _ = progress
             out = active_output()
             if out is not None:
                 index_result = out.run_logged_cmd(
@@ -14010,6 +14012,9 @@ def main(
     try:
         if args.cmd == "init":
             return command_surface.init_flow(args, runtime=runtime)
+        if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
+            runtime = runtime_surface.resolve_runtime(args)
+            paths = runtime.paths
         if args.cmd == "install":
             return install_flow(args)
         if args.cmd == "doctor":

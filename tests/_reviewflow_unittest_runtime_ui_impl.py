@@ -2,6 +2,11 @@
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
+class _FakeTty(StringIO):
+    def isatty(self) -> bool:  # pragma: no cover
+        return True
+
+
 class CodexCommandTests(unittest.TestCase):
     def test_build_codex_exec_cmd_includes_bypass_flag(self) -> None:
         repo = ROOT
@@ -2082,7 +2087,9 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         runtime = self._runtime()
         with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
             cure_commands, "pr_flow", return_value=17
-        ) as pr_flow:
+        ) as pr_flow, mock.patch.object(
+            cure_commands, "ensure_chunkhound_bootstrap_ready", return_value=False
+        ):
             rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
 
         self.assertEqual(rc, 17)
@@ -2123,6 +2130,190 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertEqual(init_flow.call_count, 1)
         self.assertTrue(init_flow.call_args.args[0].force)
         self.assertIs(init_flow.call_args.kwargs["runtime"], runtime)
+
+    def test_main_gates_pr_before_dispatch_without_tty(self) -> None:
+        runtime = self._runtime()
+        runtime = rf.ReviewflowRuntime(
+            config_path=ROOT / ".tmp_story26_missing.toml",
+            config_source=runtime.config_source,
+            config_enabled=True,
+            paths=runtime.paths,
+            sandbox_root_source=runtime.sandbox_root_source,
+            cache_root_source=runtime.cache_root_source,
+            codex_base_config_path=runtime.codex_base_config_path,
+            codex_base_config_source=runtime.codex_base_config_source,
+        )
+        stderr = StringIO()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "pr_flow", return_value=17
+        ) as pr_flow, mock.patch("sys.stderr", stderr), mock.patch.object(
+            shutil, "which", return_value="/usr/bin/chunkhound"
+        ):
+            rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+        self.assertEqual(rc, 2)
+        resolve_runtime.assert_called_once()
+        pr_flow.assert_not_called()
+        self.assertIn("CURe bootstrap is not ready", stderr.getvalue())
+        self.assertIn("Run `cure init` in a TTY", stderr.getvalue())
+
+    def test_main_runs_tty_bootstrap_wizard_before_dispatching_pr(self) -> None:
+        root = ROOT / ".tmp_story26_main_pr_gate"
+        repo_root = root / "repo"
+        config_path = root / "config" / "cure.toml"
+        repo_cfg = repo_root / "chunkhound.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root.mkdir(parents=True, exist_ok=True)
+            repo_cfg.write_text("{}", encoding="utf-8")
+            with mock.patch.object(cure_runtime, "resolve_runtime", side_effect=[runtime, runtime]) as resolve_runtime, mock.patch.object(
+                cure_commands, "pr_flow", return_value=17
+            ) as pr_flow, mock.patch("sys.stdin", stdin), mock.patch("sys.stderr", stderr), mock.patch(
+                "sys.stdout", stdout
+            ), mock.patch.object(
+                cure_commands,
+                "discover_repo_local_chunkhound_config",
+                return_value={
+                    "candidate_state": "candidate",
+                    "config_path": str(repo_cfg),
+                    "config_file_name": "chunkhound.json",
+                },
+            ), mock.patch.object(
+                shutil, "which", return_value="/usr/bin/chunkhound"
+            ):
+                rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+            self.assertEqual(rc, 17)
+            self.assertEqual(resolve_runtime.call_count, 2)
+            pr_flow.assert_called_once()
+            self.assertIn(str(repo_cfg), config_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_main_runs_tty_bootstrap_wizard_before_dispatching_resume(self) -> None:
+        root = ROOT / ".tmp_story26_main_resume_gate"
+        config_path = root / "config" / "cure.toml"
+        custom_cfg = root / "custom-base.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty(f"{custom_cfg}\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            custom_cfg.write_text("{}", encoding="utf-8")
+            with mock.patch.object(cure_runtime, "resolve_runtime", side_effect=[runtime, runtime]) as resolve_runtime, mock.patch.object(
+                cure_commands, "resume_flow", return_value=19
+            ) as resume_flow, mock.patch("sys.stdin", stdin), mock.patch("sys.stderr", stderr), mock.patch(
+                "sys.stdout", stdout
+            ), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil, "which", return_value="/usr/bin/chunkhound"
+            ):
+                rc = rf.main(["resume", "session-123"])
+
+            self.assertEqual(rc, 19)
+            self.assertEqual(resolve_runtime.call_count, 2)
+            resume_flow.assert_called_once()
+            self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_main_gates_cache_prime_before_dispatch_without_tty(self) -> None:
+        runtime = self._runtime()
+        runtime = rf.ReviewflowRuntime(
+            config_path=ROOT / ".tmp_story26_cache_missing.toml",
+            config_source=runtime.config_source,
+            config_enabled=True,
+            paths=runtime.paths,
+            sandbox_root_source=runtime.sandbox_root_source,
+            cache_root_source=runtime.cache_root_source,
+            codex_base_config_path=runtime.codex_base_config_path,
+            codex_base_config_source=runtime.codex_base_config_source,
+        )
+        stderr = StringIO()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "cache_prime", return_value=0
+        ) as cache_prime, mock.patch("sys.stderr", stderr), mock.patch.object(
+            shutil, "which", return_value="/usr/bin/chunkhound"
+        ):
+            rc = rf.main(["cache", "prime", "acme/repo", "--base", "main"])
+
+        self.assertEqual(rc, 2)
+        resolve_runtime.assert_called_once()
+        cache_prime.assert_not_called()
+        self.assertIn("CURe bootstrap is not ready", stderr.getvalue())
+
+    def test_main_runs_tty_bootstrap_wizard_before_dispatching_cache_prime(self) -> None:
+        root = ROOT / ".tmp_story26_main_cache_gate"
+        config_path = root / "config" / "cure.toml"
+        custom_cfg = root / "custom-base.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty(f"{custom_cfg}\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            custom_cfg.write_text("{}", encoding="utf-8")
+            with mock.patch.object(cure_runtime, "resolve_runtime", side_effect=[runtime, runtime]) as resolve_runtime, mock.patch.object(
+                cure_commands, "cache_prime", return_value=0
+            ) as cache_prime, mock.patch("sys.stdin", stdin), mock.patch("sys.stderr", stderr), mock.patch(
+                "sys.stdout", stdout
+            ), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil, "which", return_value="/usr/bin/chunkhound"
+            ):
+                rc = rf.main(["cache", "prime", "acme/repo", "--base", "main"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(resolve_runtime.call_count, 2)
+            cache_prime.assert_called_once()
+            self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_console_main_dispatches_for_reviewflow_argv_without_warning_in_owner_tests(self) -> None:
         stderr = StringIO()
@@ -2614,6 +2805,133 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn("Wrote CURe config", output)
             self.assertIn("Wrote ChunkHound base config", output)
             self.assertIn("Next: cure install", output)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_init_flow_tty_wizard_selects_repo_local_config(self) -> None:
+        root = ROOT / ".tmp_test_cure_init_wizard_repo_local"
+        repo_root = root / "repo"
+        config_path = root / "config" / "cure.toml"
+        repo_cfg = repo_root / "chunkhound.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root.mkdir(parents=True, exist_ok=True)
+            repo_cfg.write_text("{}", encoding="utf-8")
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "candidate", "config_path": str(repo_cfg)}
+            ), mock.patch.object(
+                shutil, "which", return_value="/usr/bin/chunkhound"
+            ):
+                rc = rf.init_flow(argparse.Namespace(force=False), runtime=runtime, stdin=stdin, stderr=stderr)
+
+            self.assertEqual(rc, 0)
+            self.assertIn(str(repo_cfg), config_path.read_text(encoding="utf-8"))
+            self.assertIn("Updated CURe config", stdout.getvalue())
+            self.assertNotIn("Next: cure install", stdout.getvalue())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_init_flow_tty_wizard_accepts_custom_path_and_install_source(self) -> None:
+        root = ROOT / ".tmp_test_cure_init_wizard_custom"
+        config_path = root / "config" / "cure.toml"
+        custom_cfg = root / "custom-base.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty(f"{custom_cfg}\ny\ngit-main\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            custom_cfg.write_text("{}", encoding="utf-8")
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil, "which", side_effect=[None, "/usr/bin/chunkhound"]
+            ), mock.patch.object(
+                rf, "install_flow", return_value=0
+            ) as install_flow:
+                rc = rf.init_flow(argparse.Namespace(force=False), runtime=runtime, stdin=stdin, stderr=stderr)
+
+            self.assertEqual(rc, 0)
+            install_flow.assert_called_once()
+            self.assertEqual(install_flow.call_args.args[0].chunkhound_source, "git-main")
+            self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_init_flow_tty_wizard_does_not_offer_incompatible_repo_local_config(self) -> None:
+        root = ROOT / ".tmp_test_cure_init_wizard_incompatible_repo_local"
+        repo_root = root / "repo"
+        config_path = root / "config" / "cure.toml"
+        repo_cfg = repo_root / "chunkhound.json"
+        generated_path = root / "config" / "chunkhound-base.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root.mkdir(parents=True, exist_ok=True)
+            repo_cfg.write_text("{}", encoding="utf-8")
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands,
+                "discover_repo_local_chunkhound_config",
+                return_value={
+                    "candidate_state": "incompatible",
+                    "config_path": str(repo_cfg),
+                    "config_file_name": "chunkhound.json",
+                    "reason": "config_mismatch",
+                },
+            ), mock.patch.object(
+                shutil, "which", return_value="/usr/bin/chunkhound"
+            ):
+                rc = rf.init_flow(argparse.Namespace(force=False), runtime=runtime, stdin=stdin, stderr=stderr)
+
+            self.assertEqual(rc, 0)
+            self.assertIn(str(generated_path), config_path.read_text(encoding="utf-8"))
+            self.assertNotIn(str(repo_cfg), config_path.read_text(encoding="utf-8"))
+            self.assertIn(str(repo_cfg), stderr.getvalue())
+            self.assertIn("not auto-selectable", stderr.getvalue())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

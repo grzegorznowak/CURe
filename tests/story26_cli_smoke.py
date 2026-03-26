@@ -566,6 +566,25 @@ def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     ensure(auth_fail.returncode != 0, "clean closed auth failure should be non-zero")
 
 
+def test_bootstrap_gate_non_tty(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
+    proc = run_cmd(
+        cli_cmd(
+            binary,
+            sandbox_root,
+            "pr",
+            "https://github.com/acme/repo/pull/26",
+            "--if-reviewed",
+            "new",
+        ),
+        env=env,
+        check=False,
+    )
+    ensure(proc.returncode != 0, "bootstrap gate should fail non-zero when config is disabled")
+    ensure("CURe bootstrap is not ready" in proc.stderr, "bootstrap gate message missing")
+    ensure("Run `cure init` in a TTY" in proc.stderr, "bootstrap gate next step missing")
+    ensure("doctor --pr-url https://github.com/acme/repo/pull/26 --json" in proc.stderr, "bootstrap gate doctor guidance missing")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli-bin", required=True)
@@ -592,6 +611,7 @@ def main() -> int:
         test_status(binary, env, tmp_root / "status")
         test_watch(binary, script_bin, env, tmp_root / "watch")
         test_clean(binary, env, tmp_root / "clean")
+        test_bootstrap_gate_non_tty(binary, env, tmp_root / "bootstrap")
 
     return 0
 

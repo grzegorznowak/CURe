@@ -659,7 +659,19 @@ class EnsureBaseCacheTests(unittest.TestCase):
                         {"indexing": {"exclude": []}},
                     ),
                 ),
+                mock.patch.object(
+                    cure_flows,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(
+                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                        ),
+                        {"chunkhound": {"base_config_path": "/tmp/base.json"}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
                 mock.patch.object(rf, "fingerprint_chunkhound_reviewflow_config", return_value="stable"),
+                mock.patch.object(cure_flows, "fingerprint_chunkhound_reviewflow_config", return_value="stable"),
                 mock.patch.object(
                     rf,
                     "prompt_operator_chunkhound_base_cache_hot_start",
@@ -9591,7 +9603,10 @@ class ExtractionOwnershipTests(unittest.TestCase):
         with mock.patch("cure_runtime.resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch(
             "cure_commands.pr_flow",
             return_value=23,
-        ) as pr_flow:
+        ) as pr_flow, mock.patch(
+            "cure_commands.ensure_chunkhound_bootstrap_ready",
+            return_value=False,
+        ):
             rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
 
         self.assertEqual(rc, 23)
