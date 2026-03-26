@@ -5170,6 +5170,76 @@ def _validation_entry_for_stage(meta: dict[str, Any], stage_key: str) -> dict[st
     return entry if isinstance(entry, dict) else None
 
 
+def _emit_multipass_grounding_failure_playbook(
+    *,
+    meta: dict[str, Any],
+    session_id: str,
+    session_dir: Path,
+    work_dir: Path,
+    artifact_path: Path,
+    validation: dict[str, Any] | None,
+    resume_from: str | None,
+    max_errors: int = 4,
+) -> None:
+    mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    validation_meta = mp.get("validation") if isinstance(mp.get("validation"), dict) else {}
+    report_path_raw = str(validation_meta.get("report_path") or "").strip()
+    report_path = Path(report_path_raw) if report_path_raw else _grounding_report_path(work_dir=work_dir)
+    logs_dir = _resolve_session_logs_dir(session_dir=session_dir, meta=meta, work_dir=work_dir)
+    log_paths = _resolve_session_log_paths(session_dir=session_dir, meta=meta, logs_dir=logs_dir)
+    errors_raw = validation.get("errors") if isinstance(validation, dict) else []
+    errors = [str(item).strip() for item in errors_raw if str(item).strip()] if isinstance(errors_raw, list) else []
+    mode = _normalize_grounding_mode(validation_meta.get("mode") or mp.get("grounding_mode"))
+
+    lines = [
+        f"Strict multipass grounding blocked completion for `{artifact_path.name}`.",
+        "",
+        "Inspection:",
+        f"- artifact: {artifact_path}",
+        f"- grounding report: {report_path}",
+        f"- session directory: {session_dir}",
+        f"- logs directory: {logs_dir}",
+    ]
+    for key in ("cure", "reviewflow", "chunkhound", "codex"):
+        path = log_paths.get(key)
+        if path:
+            lines.append(f"- {key} log: {path}")
+
+    if errors:
+        lines.extend(["", "Validation errors:"])
+        for error in errors[:max_errors]:
+            lines.append(f"- {error}")
+        remaining = len(errors) - max_errors
+        if remaining > 0:
+            lines.append(f"- ... and {remaining} more in {report_path}")
+
+    lines.extend(
+        [
+            "",
+            "Suggested next steps:",
+            f"- {PRIMARY_CLI_COMMAND} status {session_id} --json",
+            f"- {PRIMARY_CLI_COMMAND} watch {session_id}",
+            f"- {PRIMARY_CLI_COMMAND} resume {session_id}",
+        ]
+    )
+    if resume_from:
+        lines.append(f"- {PRIMARY_CLI_COMMAND} resume {session_id} --from {resume_from}")
+    lines.extend(
+        [
+            "",
+            "Grounding modes:",
+            "- strict: blocks completion for invalid artifacts",
+            "- warn: records validation findings and continues",
+            "- off: skips grounding validation",
+            (
+                f'- For fail-open behavior on future runs, set [multipass].grounding_mode = "warn" '
+                f'(current session mode: "{mode}").'
+            ),
+        ]
+    )
+    _eprint("\n".join(lines))
+
+
 def _multipass_has_invalid_artifacts(meta: dict[str, Any]) -> bool:
     mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
     validation = mp.get("validation") if isinstance(mp.get("validation"), dict) else {}
@@ -5798,6 +5868,15 @@ def _finalize_multipass_step_result(
             and step_validation is not None
             and (step_validation.get("valid") is False)
         ):
+            _emit_multipass_grounding_failure_playbook(
+                meta=progress.meta,
+                session_id=str(progress.meta.get("session_id") or entry.output_path.parent.name),
+                session_dir=entry.output_path.parent,
+                work_dir=work_dir,
+                artifact_path=entry.output_path,
+                validation=step_validation,
+                resume_from="steps",
+            )
             raise ReviewflowError(
                 f"Multipass step grounding validation failed for {entry.output_path.name}."
             )
@@ -8603,6 +8682,15 @@ def _pr_flow_impl(
                             and synth_validation is not None
                             and (synth_validation.get("valid") is False)
                         ):
+                            _emit_multipass_grounding_failure_playbook(
+                                meta=progress.meta,
+                                session_id=session_id,
+                                session_dir=review_md_path.parent,
+                                work_dir=work_dir,
+                                artifact_path=review_md_path,
+                                validation=synth_validation,
+                                resume_from="synth",
+                            )
                             raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
                         _record_multipass_review_artifact_llm(
                             meta=progress.meta,
@@ -9141,6 +9229,15 @@ def _run_incremental_completed_multipass_resume(
         )
         progress.flush()
         if grounding_mode == "strict" and synth_validation is not None and (synth_validation.get("valid") is False):
+            _emit_multipass_grounding_failure_playbook(
+                meta=progress.meta,
+                session_id=session_id,
+                session_dir=review_md_path.parent,
+                work_dir=work_dir,
+                artifact_path=review_md_path,
+                validation=synth_validation,
+                resume_from="synth",
+            )
             raise ReviewflowError("Incremental multipass synth grounding validation failed for review.md.")
         _record_multipass_review_artifact_llm(
             meta=progress.meta,
@@ -10032,6 +10129,15 @@ def _resume_flow_impl(
                     and synth_validation is not None
                     and (synth_validation.get("valid") is False)
                 ):
+                    _emit_multipass_grounding_failure_playbook(
+                        meta=progress.meta,
+                        session_id=session_id,
+                        session_dir=review_md_path.parent,
+                        work_dir=work_dir,
+                        artifact_path=review_md_path,
+                        validation=synth_validation,
+                        resume_from="synth",
+                    )
                     raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
                 _record_multipass_review_artifact_llm(
                     meta=progress.meta,
