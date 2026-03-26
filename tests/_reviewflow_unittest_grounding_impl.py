@@ -914,6 +914,557 @@ class EnsureBaseCacheTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
+    def test_cache_prime_publishes_live_progress_when_session_progress_is_available(self) -> None:
+        root = ROOT / ".tmp_test_cache_prime_live_progress"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            seed_root = root / "seed"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            seed_root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+
+            class _Progress:
+                def __init__(self) -> None:
+                    self.meta: dict[str, object] = {"status": "running", "phase": "ensure_base_cache"}
+
+                def flush(self) -> None:
+                    return None
+
+            class _Result:
+                def __init__(self, *, stdout: str = "", stderr: str = "", duration_seconds: float = 0.0) -> None:
+                    self.stdout = stdout
+                    self.stderr = stderr
+                    self.duration_seconds = duration_seconds
+
+            progress = _Progress()
+            active_output = mock.Mock()
+
+            def fake_run_logged_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                callback = kwargs.get("stream_text_callback")
+                assert callable(callback)
+                current = progress.meta["live_progress"]["current"]["text"]
+                self.assertIn("Refreshing base cache", str(current))
+                callback("Initial stats: 120 files, 4091 chunks, 4091 embeddings\n")
+                current = progress.meta["live_progress"]["current"]["text"]
+                self.assertIn("120 files/4091 chunks/4091 emb", str(current))
+                return _Result(
+                    stdout="\n".join(
+                        [
+                            "Processed: 4 files",
+                            "Skipped: 1 files",
+                            "Errors: 0 files",
+                            "Total chunks: 84",
+                            "Embeddings: 84",
+                            "Time: 17.23s",
+                        ]
+                    )
+                    + "\n",
+                    duration_seconds=17.23,
+                )
+
+            active_output.run_logged_cmd.side_effect = fake_run_logged_cmd
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:3] == ["git", "-C", str(seed_root)]:
+                    if cmd[3:5] == ["rev-parse", "--is-inside-work-tree"]:
+                        return mock.Mock(stdout="true\n", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "--prune"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "origin"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["checkout", "-B"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:4] == ["rev-parse"]:
+                        return mock.Mock(
+                            stdout="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+                            stderr="",
+                            duration_seconds=0.0,
+                        )
+                if cmd == ["chunkhound", "--version"]:
+                    return mock.Mock(stdout="chunkhound 1.2.3\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(
+                    cure_flows,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        {"chunkhound": {"base_config_path": str(base_cfg)}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
+                mock.patch.object(cure_flows, "ensure_review_config"),
+                mock.patch.object(
+                    cure_flows,
+                    "materialize_chunkhound_env_config",
+                    side_effect=fake_materialize_chunkhound_env_config,
+                ),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(cure_flows, "seed_dir", return_value=seed_root),
+                mock.patch.object(cure_flows, "active_output", return_value=active_output),
+            ):
+                meta = cure_flows.cache_prime(
+                    paths=paths,
+                    progress=progress,
+                    host="github.com",
+                    owner="acme",
+                    repo="repo",
+                    base_ref="main",
+                    force=False,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertNotIn("live_progress", progress.meta)
+            self.assertEqual(progress.meta["chunkhound"]["last_index"]["scope"], "base_cache")
+            self.assertEqual(meta["index_summary"]["processed_files"], 4)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_publishes_topup_live_progress_and_clears_it_after_indexing(self) -> None:
+        root = ROOT / ".tmp_test_pr_flow_chunkhound_live_progress"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            sandbox_root = root / "sandbox"
+            cache_root = root / "cache"
+            seed = root / "seed-repo"
+            config_path = root / "reviewflow.toml"
+            base_cfg = root / "chunkhound-base.json"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            seed.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base-db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                    return _Result()
+                if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                    return _Result("https://github.com/acme/repo.git\n")
+                if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                    return _Result("true\n")
+                if cmd[:4] == ["git", "-C", str(Path(str(cmd[2]))), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd[:3] == ["gh", "pr", "checkout"]:
+                    return _Result()
+                if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+            def fake_write_pr_context_file(
+                *,
+                work_dir: Path,
+                pr: rf.PullRequestRef,
+                pr_meta: dict[str, object],
+            ) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            def fake_run_logged_cmd(output: object, cmd: list[str], **kwargs: object) -> _Result:
+                callback = kwargs.get("stream_text_callback")
+                assert callable(callback)
+                meta_path = Path(str(getattr(output, "meta_path")))
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(meta["phase"], "index_topup")
+                self.assertIn(
+                    "Building session index top-up",
+                    str(meta["live_progress"]["current"]["text"]),
+                )
+                callback("Initial stats: 12 files, 48 chunks, 48 embeddings\n")
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertIn(
+                    "12 files/48 chunks/48 emb",
+                    str(meta["live_progress"]["current"]["text"]),
+                )
+                return _Result()
+
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {
+                                    "ref": "release/1.2",
+                                    "repo": {"default_branch": "main"},
+                                },
+                                "head": {"sha": "1111111111111111111111111111111111111111"},
+                                "title": "Baseline selection PR",
+                            },
+                            {
+                                "ahead_by": 12,
+                                "behind_by": 4,
+                                "files": [
+                                    {"filename": "a.py", "additions": 10, "deletions": 3},
+                                    {"filename": "b.py", "additions": 5, "deletions": 2},
+                                ],
+                            },
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file)
+                )
+                ensure_base_cache = stack.enter_context(
+                    mock.patch.object(rf, "ensure_base_cache", return_value={"db_path": str(base_db)})
+                )
+                stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+                stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+                stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+                stack.enter_context(mock.patch.object(rf, "copy_duckdb_files", side_effect=fake_copy_duckdb_files))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=fake_run_logged_cmd,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        side_effect=AssertionError("review setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        side_effect=AssertionError("multipass defaults should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_prompt_profile",
+                        side_effect=AssertionError("prompt selection should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "require_builtin_review_intelligence",
+                        side_effect=AssertionError("review validation should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        side_effect=AssertionError("llm resolution should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=AssertionError("runtime setup should be skipped"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_llm_exec",
+                        side_effect=AssertionError("review execution should be skipped"),
+                    )
+                )
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("progress", ensure_base_cache.call_args.kwargs)
+            session_dir = Path(stdout.getvalue().strip())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertNotIn("live_progress", meta)
+            self.assertEqual(meta["chunkhound"]["last_index"]["scope"], "topup")
+            self.assertEqual(meta["phases"]["index_topup"]["status"], "done")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_followup_flow_publishes_followup_index_live_progress_and_clears_without_provider_updates(self) -> None:
+        root = ROOT / ".tmp_test_followup_chunkhound_live_progress"
+        cfg = root / "reviewflow.toml"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "completed_at": "2026-03-10T00:05:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "prompt": {"profile_resolved": "normal"},
+                "llm": {"provider": "openai", "capabilities": {"supports_resume": True}},
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:4] == ["git", "-C", str(repo_dir), "rev-parse"]:
+                    return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+                if cmd and cmd[0] == "chunkhound":
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_run_logged_cmd(output: object, cmd: list[str], **kwargs: object) -> _Result:
+                callback = kwargs.get("stream_text_callback")
+                assert callable(callback)
+                meta_path = Path(str(getattr(output, "meta_path")))
+                current_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(current_meta["phase"], "followup_index")
+                self.assertIn(
+                    "Building follow-up index",
+                    str(current_meta["live_progress"]["current"]["text"]),
+                )
+                callback("Initial stats: 9 files, 36 chunks, 36 embeddings\n")
+                current_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertIn(
+                    "9 files/36 chunks/36 emb",
+                    str(current_meta["live_progress"]["current"]["text"]),
+                )
+                return _Result()
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
+                    encoding="utf-8",
+                )
+                return rf.LlmRunResult(resume=None, adapter_meta={"transport": "http-openai"})
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {"provider": "openai", "preset": "test-openai"},
+                            {},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value={
+                            "env": {},
+                            "metadata": {"profile": "balanced", "provider": "openai"},
+                            "add_dirs": [],
+                            "codex_flags": [],
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight"))
+                stack.enter_context(mock.patch.object(rf, "load_builtin_prompt_text", return_value="Prompt"))
+                stack.enter_context(mock.patch.object(rf, "review_intelligence_prompt_vars", return_value={}))
+                stack.enter_context(mock.patch.object(rf, "render_prompt", return_value="Prompt"))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=fake_run_logged_cmd,
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertNotIn("live_progress", refreshed)
+            self.assertEqual(refreshed["chunkhound"]["last_index"]["scope"], "followup")
+            self.assertEqual(refreshed["phases"]["followup_index"]["status"], "done")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+
 class BaselineSelectionTests(unittest.TestCase):
     def test_resolve_pr_review_baseline_selection_prefers_default_branch_within_threshold(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)

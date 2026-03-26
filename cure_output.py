@@ -6,10 +6,12 @@ import re
 import shlex
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, TextIO, cast
 
+from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import RUNTIME_SLUG
 from cure_errors import ReviewflowError
 from run import run_cmd
@@ -33,6 +35,292 @@ def _compact_codex_text(text: str, *, max_chars: int = 240) -> str:
     if max_chars <= 1:
         return value[:max_chars]
     return value[: max_chars - 1] + "…"
+
+
+def _progress_meta_dict(progress: Any) -> dict[str, Any] | None:
+    meta = getattr(progress, "meta", None)
+    return meta if isinstance(meta, dict) else None
+
+
+def _flush_progress(progress: Any) -> None:
+    flush = getattr(progress, "flush", None)
+    if callable(flush):
+        try:
+            flush()
+        except Exception:
+            pass
+
+
+_LIVE_PROGRESS_TIMELINE_MAX = 12
+
+
+class ChunkhoundLiveProgressReporter:
+    _PHASE_LABELS: dict[str, tuple[str, str]] = {
+        "base_cache": ("Preparing base cache refresh", "Refreshing base cache"),
+        "topup": ("Preparing session index top-up", "Building session index top-up"),
+        "followup": ("Preparing follow-up index", "Building follow-up index"),
+    }
+
+    def __init__(self, *, progress: Any, scope: str) -> None:
+        self._progress = progress
+        self._scope = str(scope or "").strip() or "topup"
+        self._source = "chunkhound_cache_build"
+        self._started_mono: float | None = None
+        self._running = False
+        self._active = False
+        self._summary: dict[str, Any] | None = None
+        self._summary_key = ""
+        self._lines: list[str] = []
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        meta = _progress_meta_dict(self._progress)
+        if meta is None:
+            return
+        now = _utc_now_iso()
+        with self._lock:
+            self._started_mono = time.monotonic()
+            self._running = False
+            self._active = True
+            self._set_live_progress_locked(
+                text=self._build_message_locked(),
+                timestamp=now,
+                event_type="chunkhound_cache_prepare",
+                add_timeline=True,
+            )
+            self._ensure_thread_locked()
+
+    def mark_running(self) -> None:
+        meta = _progress_meta_dict(self._progress)
+        if meta is None:
+            return
+        now = _utc_now_iso()
+        with self._lock:
+            if not self._active:
+                return
+            self._running = True
+            self._set_live_progress_locked(
+                text=self._build_message_locked(),
+                timestamp=now,
+                event_type="chunkhound_cache_active",
+                add_timeline=True,
+            )
+
+    def consume_text(self, text: str) -> None:
+        if not text:
+            return
+        meta = _progress_meta_dict(self._progress)
+        if meta is None:
+            return
+        cleaned_lines: list[str] = []
+        for raw_line in str(text).splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("[chunkhound] "):
+                line = line[len("[chunkhound] ") :]
+            cleaned_lines.append(line)
+        if not cleaned_lines:
+            return
+        now = _utc_now_iso()
+        with self._lock:
+            if not self._active:
+                return
+            self._running = True
+            self._lines.extend(cleaned_lines)
+            if len(self._lines) > 200:
+                self._lines = self._lines[-200:]
+            parsed = parse_chunkhound_index_summary(self._lines, scope=self._scope)
+            summary_key = json.dumps(parsed, sort_keys=True) if isinstance(parsed, dict) else ""
+            if isinstance(parsed, dict):
+                self._summary = parsed
+            if summary_key != self._summary_key:
+                self._summary_key = summary_key
+            self._set_live_progress_locked(
+                text=self._build_message_locked(),
+                timestamp=now,
+                event_type="chunkhound_cache_active",
+                add_timeline=False,
+            )
+
+    def finish(self, *, status: str) -> dict[str, Any] | None:
+        thread: threading.Thread | None = None
+        with self._lock:
+            self._active = False
+            self._stop_event.set()
+            thread = self._thread
+            summary = dict(self._summary) if isinstance(self._summary, dict) else None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        meta = _progress_meta_dict(self._progress)
+        if meta is None:
+            return summary
+        with self._lock:
+            live = meta.get("live_progress")
+            if not isinstance(live, dict) or live.get("source") != self._source:
+                return summary
+            if isinstance(summary, dict):
+                chunkhound_value = meta.get("chunkhound")
+                chunkhound: dict[str, Any] = (
+                    dict(cast(dict[str, Any], chunkhound_value))
+                    if isinstance(chunkhound_value, dict)
+                    else {}
+                )
+                chunkhound["last_index"] = dict(summary)
+                meta["chunkhound"] = chunkhound
+            if str(status or "").strip().lower() == "error":
+                timestamp = _utc_now_iso()
+                live["status"] = "error"
+                live["updated_at"] = timestamp
+                live["current"] = {
+                    "type": "chunkhound_cache_error",
+                    "text": self._build_failure_message_locked(),
+                    "ts": timestamp,
+                }
+                meta["live_progress"] = live
+            else:
+                meta.pop("live_progress", None)
+            _flush_progress(self._progress)
+        return summary
+
+    def _ensure_thread_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_event.wait(1.0):
+            meta = _progress_meta_dict(self._progress)
+            if meta is None:
+                return
+            with self._lock:
+                if not self._active:
+                    return
+                self._set_live_progress_locked(
+                    text=self._build_message_locked(),
+                    timestamp=_utc_now_iso(),
+                    event_type="chunkhound_cache_active" if self._running else "chunkhound_cache_prepare",
+                    add_timeline=False,
+                )
+
+    def _label_pair_locked(self) -> tuple[str, str]:
+        return self._PHASE_LABELS.get(
+            self._scope,
+            ("Preparing ChunkHound cache build", "Building ChunkHound cache"),
+        )
+
+    def _elapsed_seconds_locked(self) -> int:
+        if self._started_mono is None:
+            return 0
+        return max(0, int(time.monotonic() - self._started_mono))
+
+    def _summary_groups_locked(self) -> list[str]:
+        summary = self._summary if isinstance(self._summary, dict) else {}
+        groups: list[str] = []
+
+        run_bits: list[str] = []
+        if isinstance(summary.get("processed_files"), int):
+            run_bits.append(f"{summary['processed_files']} proc")
+        if isinstance(summary.get("skipped_files"), int):
+            run_bits.append(f"{summary['skipped_files']} skip")
+        if isinstance(summary.get("error_files"), int):
+            run_bits.append(f"{summary['error_files']} err")
+        if run_bits:
+            groups.append("/".join(run_bits))
+
+        output_bits: list[str] = []
+        if isinstance(summary.get("total_chunks"), int):
+            output_bits.append(f"{summary['total_chunks']} chunks")
+        if isinstance(summary.get("embeddings"), int):
+            output_bits.append(f"{summary['embeddings']} emb")
+        if output_bits:
+            groups.append("/".join(output_bits))
+
+        if not groups:
+            before_bits: list[str] = []
+            if isinstance(summary.get("initial_files"), int):
+                before_bits.append(f"{summary['initial_files']} files")
+            if isinstance(summary.get("initial_chunks"), int):
+                before_bits.append(f"{summary['initial_chunks']} chunks")
+            if isinstance(summary.get("initial_embeddings"), int):
+                before_bits.append(f"{summary['initial_embeddings']} emb")
+            if before_bits:
+                groups.append("/".join(before_bits))
+
+        return groups
+
+    def _build_message_locked(self) -> str:
+        prepare_label, active_label = self._label_pair_locked()
+        label = active_label if self._running else prepare_label
+        parts = [label, f"{self._elapsed_seconds_locked()}s"]
+        parts.extend(self._summary_groups_locked())
+        return " · ".join(part for part in parts if part)
+
+    def _build_failure_message_locked(self) -> str:
+        _, active_label = self._label_pair_locked()
+        return f"{active_label} failed after {self._elapsed_seconds_locked()}s"
+
+    def _set_live_progress_locked(
+        self,
+        *,
+        text: str,
+        timestamp: str,
+        event_type: str,
+        add_timeline: bool,
+    ) -> None:
+        meta = _progress_meta_dict(self._progress)
+        if meta is None:
+            return
+        live_value = meta.get("live_progress")
+        live: dict[str, Any] = (
+            dict(cast(dict[str, Any], live_value)) if isinstance(live_value, dict) else {}
+        )
+        live["source"] = self._source
+        live["provider"] = "chunkhound"
+        live["scope"] = self._scope
+        live["status"] = "running"
+        live["updated_at"] = timestamp
+        current = {"type": event_type, "text": text, "ts": timestamp}
+        live["current"] = current
+        if add_timeline:
+            timeline_value = live.get("timeline")
+            timeline = (
+                list(cast(list[dict[str, Any]], timeline_value))
+                if isinstance(timeline_value, list)
+                else []
+            )
+            last = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+            if last.get("type") != event_type or last.get("text") != text:
+                timeline.append(current)
+            if len(timeline) > _LIVE_PROGRESS_TIMELINE_MAX:
+                timeline = timeline[-_LIVE_PROGRESS_TIMELINE_MAX:]
+            live["timeline"] = timeline
+        meta["live_progress"] = live
+        _flush_progress(self._progress)
+
+
+class _TextCallbackSink:
+    def __init__(self, sink: TextIO, callback: Callable[[str], None]) -> None:
+        self._sink = sink
+        self._callback = callback
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        written = self._sink.write(s)
+        try:
+            self._callback(s)
+        except Exception:
+            pass
+        return written
+
+    def flush(self) -> None:
+        self._sink.flush()
 
 
 class CodexJsonEventSink:
@@ -283,15 +571,17 @@ class ReviewflowOutput:
         stream_requested: bool,
         codex_json_events_path: Path | None = None,
         codex_event_callback: Callable[[dict[str, Any]], None] | None = None,
+        stream_text_callback: Callable[[str], None] | None = None,
     ):
         capture_codex_json = kind == "codex" and codex_json_events_path is not None
         stream = True if (self.ui_enabled or capture_codex_json) else bool(stream_requested)
         label = None if capture_codex_json else (self.stream_label(kind) if stream else None)
         if stream:
-            sink: TextIO = self.stream_sink(kind)
+            sink: Any = self.stream_sink(kind)
             raw_fh: TextIO | None = None
             try:
                 if capture_codex_json:
+                    assert codex_json_events_path is not None
                     codex_json_events_path.parent.mkdir(parents=True, exist_ok=True)
                     raw_fh = codex_json_events_path.open("a", encoding="utf-8", buffering=1)
                     also_to = (
@@ -307,6 +597,8 @@ class ReviewflowOutput:
                         on_activity=self.state.ping,
                         on_event=codex_event_callback,
                     )
+                if stream_text_callback is not None:
+                    sink = _TextCallbackSink(sink, stream_text_callback)
                 return run_cmd(
                     cmd,
                     cwd=cwd,
@@ -333,6 +625,14 @@ class ReviewflowOutput:
             self.stream_sink(kind).write(res.stderr)
         except Exception:
             pass
+        if stream_text_callback is not None:
+            for chunk in (res.stdout, res.stderr):
+                if not chunk:
+                    continue
+                try:
+                    stream_text_callback(chunk)
+                except Exception:
+                    pass
         return res
 
 

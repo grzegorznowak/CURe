@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
-from cure_output import _eprint, active_output, log
+from cure_output import ChunkhoundLiveProgressReporter, _eprint, active_output, log
 from cure_runtime import (
     ReviewIntelligenceConfig,
     ReviewflowChunkHoundConfig,
@@ -1474,6 +1474,7 @@ def cache_prime(
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
+    progress: Any | None = None,
     host: str,
     owner: str,
     repo: str,
@@ -1554,25 +1555,36 @@ def cache_prime(
         with phase(
             f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
         ):
+            index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="base_cache")
+            index_reporter.start()
             out = active_output()
-            if out is not None:
-                index_result = out.run_logged_cmd(
-                    index_cmd,
-                    kind="chunkhound",
-                    cwd=base_root,
-                    env=env,
-                    check=True,
-                    stream_requested=stream,
-                )
-            else:
-                index_result = _run_cmd(
-                    index_cmd,
-                    cwd=base_root,
-                    env=env,
-                    check=True,
-                    stream=stream,
-                    stream_label="chunkhound",
-                )
+            index_ok = False
+            try:
+                index_reporter.mark_running()
+                if out is not None:
+                    index_result = out.run_logged_cmd(
+                        index_cmd,
+                        kind="chunkhound",
+                        cwd=base_root,
+                        env=env,
+                        check=True,
+                        stream_requested=stream,
+                        stream_text_callback=index_reporter.consume_text,
+                    )
+                else:
+                    index_result = _run_cmd(
+                        index_cmd,
+                        cwd=base_root,
+                        env=env,
+                        check=True,
+                        stream=stream,
+                        stream_label="chunkhound",
+                    )
+                    index_reporter.consume_text(index_result.stdout)
+                    index_reporter.consume_text(index_result.stderr)
+                index_ok = True
+            finally:
+                index_reporter.finish(status="done" if index_ok else "error")
         db_size_bytes = path_size_bytes(db_path)
 
         meta = {
@@ -2311,6 +2323,7 @@ def ensure_base_cache(
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
+    progress: Any | None = None,
     pr: PullRequestRef,
     base_ref: str,
     ttl_hours: int,
@@ -2328,6 +2341,7 @@ def ensure_base_cache(
         return _compat_cache_prime(
             paths=paths,
             config_path=effective_config_path,
+            progress=progress,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -2346,6 +2360,7 @@ def ensure_base_cache(
         return _compat_cache_prime(
             paths=paths,
             config_path=effective_config_path,
+            progress=progress,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -2375,6 +2390,7 @@ def ensure_base_cache(
         return _compat_cache_prime(
             paths=paths,
             config_path=effective_config_path,
+            progress=progress,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,
@@ -2389,6 +2405,7 @@ def ensure_base_cache(
         return _compat_cache_prime(
             paths=paths,
             config_path=effective_config_path,
+            progress=progress,
             host=pr.host,
             owner=pr.owner,
             repo=pr.repo,

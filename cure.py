@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from cure_output import (
+    ChunkhoundLiveProgressReporter,
     ReviewflowOutput,
     _eprint,
     _shell_join,
@@ -6769,6 +6770,7 @@ def ensure_base_cache(
     *,
     paths: ReviewflowPaths,
     config_path: Path | None = None,
+    progress: SessionProgress | None = None,
     pr: PullRequestRef,
     base_ref: str,
     ttl_hours: int,
@@ -6791,6 +6793,7 @@ def ensure_base_cache(
     return shared_ensure_base_cache(
         paths=paths,
         config_path=effective_config_path,
+        progress=progress,
         pr=pr,
         base_ref=base_ref,
         ttl_hours=ttl_hours,
@@ -7956,6 +7959,7 @@ def _pr_flow_impl(
                 base_cache_meta = ensure_base_cache(
                     paths=paths,
                     config_path=effective_config_path,
+                    progress=progress,
                     pr=pr,
                     base_ref=selected_baseline_ref,
                     ttl_hours=int(args.base_ttl_hours),
@@ -8214,6 +8218,8 @@ def _pr_flow_impl(
                 raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
 
             with phase("index_topup", progress=progress, quiet=quiet):
+                index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="topup")
+                index_reporter.start()
                 seed_kind = (
                     str((seed_source_meta or {}).get("source_kind") or "shared_base_cache")
                     if isinstance(seed_source_meta, dict)
@@ -8242,23 +8248,32 @@ def _pr_flow_impl(
                 ]
                 progress.record_cmd(index_cmd)
                 out = active_output()
-                if out is not None:
-                    out.run_logged_cmd(
-                        index_cmd,
-                        kind="chunkhound",
-                        cwd=chunkhound_work_dir,
-                        env=env,
-                        check=True,
-                        stream_requested=stream,
-                    )
-                else:
-                    run_cmd(
-                        index_cmd,
-                        cwd=chunkhound_work_dir,
-                        env=env,
-                        stream=stream,
-                        stream_label="chunkhound",
-                    )
+                index_ok = False
+                try:
+                    index_reporter.mark_running()
+                    if out is not None:
+                        out.run_logged_cmd(
+                            index_cmd,
+                            kind="chunkhound",
+                            cwd=chunkhound_work_dir,
+                            env=env,
+                            check=True,
+                            stream_requested=stream,
+                            stream_text_callback=index_reporter.consume_text,
+                        )
+                    else:
+                        result = run_cmd(
+                            index_cmd,
+                            cwd=chunkhound_work_dir,
+                            env=env,
+                            stream=stream,
+                            stream_label="chunkhound",
+                        )
+                        index_reporter.consume_text(result.stdout)
+                        index_reporter.consume_text(result.stderr)
+                    index_ok = True
+                finally:
+                    index_reporter.finish(status="done" if index_ok else "error")
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -10452,7 +10467,9 @@ def _followup_flow_impl(
                     ["git", "-C", str(repo_dir), "rev-parse", "HEAD"]
                 ).stdout.strip()
 
-        with phase("followup_index", progress=None, quiet=quiet):
+        with phase("followup_index", progress=progress, quiet=quiet):
+            index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="followup")
+            index_reporter.start()
             index_cmd = [
                 "chunkhound",
                 "index",
@@ -10461,24 +10478,33 @@ def _followup_flow_impl(
                 str(chunkhound_cfg_path),
             ]
             out_obj = active_output()
-            if out_obj is not None:
-                out_obj.run_logged_cmd(
-                    index_cmd,
-                    kind="chunkhound",
-                    cwd=chunkhound_work_dir,
-                    env=env,
-                    check=True,
-                    stream_requested=stream,
-                )
-            else:
-                run_cmd(
-                    index_cmd,
-                    cwd=chunkhound_work_dir,
-                    env=env,
-                    check=True,
-                    stream=stream,
-                    stream_label="chunkhound",
-                )
+            index_ok = False
+            try:
+                index_reporter.mark_running()
+                if out_obj is not None:
+                    out_obj.run_logged_cmd(
+                        index_cmd,
+                        kind="chunkhound",
+                        cwd=chunkhound_work_dir,
+                        env=env,
+                        check=True,
+                        stream_requested=stream,
+                        stream_text_callback=index_reporter.consume_text,
+                    )
+                else:
+                    result = run_cmd(
+                        index_cmd,
+                        cwd=chunkhound_work_dir,
+                        env=env,
+                        check=True,
+                        stream=stream,
+                        stream_label="chunkhound",
+                    )
+                    index_reporter.consume_text(result.stdout)
+                    index_reporter.consume_text(result.stderr)
+                index_ok = True
+            finally:
+                index_reporter.finish(status="done" if index_ok else "error")
 
         # Pick follow-up prompt template based on the original profile (best-effort).
         prompt_meta = meta.get("prompt") if isinstance(meta.get("prompt"), dict) else {}

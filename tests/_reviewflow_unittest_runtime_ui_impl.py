@@ -1207,6 +1207,26 @@ class CodexJsonProgressTests(unittest.TestCase):
         line = cure_commands._watch_line_for_payload(payload)
         self.assertIn("current=Checking changed files and narrowing scope", line)
 
+    def test_watch_line_for_payload_appends_chunkhound_cache_build_live_progress_summary(self) -> None:
+        payload = {
+            "session_id": "session-idx",
+            "status": "running",
+            "phase": "index_topup",
+            "pr": {"owner": "acme", "repo": "repo", "number": 12},
+            "live_progress": {
+                "source": "chunkhound_cache_build",
+                "current": {
+                    "type": "chunkhound_cache_active",
+                    "text": "Building session index top-up · 12s · 120 files/4091 chunks/4091 emb",
+                },
+            },
+        }
+        line = cure_commands._watch_line_for_payload(payload)
+        self.assertIn(
+            "current=Building session index top-up · 12s · 120 files/4091 chunks/4091 emb",
+            line,
+        )
+
     def test_watch_line_for_payload_appends_chunkhound_preflight_summary(self) -> None:
         payload = {
             "session_id": "session-456",
@@ -3820,6 +3840,58 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Phase: Generate review", joined)
         self.assertIn("Now: Checking changed files", joined)
         self.assertIn("[12:00:00] Codex session started.", joined)
+        self.assertNotIn("─ Activity", joined)
+
+    def test_dashboard_running_shows_chunkhound_cache_build_live_progress(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "followup_index",
+            "phases": {"followup_index": {"status": "running"}},
+            "live_progress": {
+                "source": "chunkhound_cache_build",
+                "scope": "followup",
+                "current": {
+                    "type": "chunkhound_cache_active",
+                    "text": "Building follow-up index · 9s · 36 files/144 chunks/144 emb",
+                    "ts": "2026-03-26T12:00:02+00:00",
+                },
+                "timeline": [
+                    {
+                        "type": "chunkhound_cache_prepare",
+                        "text": "Preparing follow-up index · 0s",
+                        "ts": "2026-03-26T12:00:00+00:00",
+                    },
+                    {
+                        "type": "chunkhound_cache_active",
+                        "text": "Building follow-up index · 9s · 36 files/144 chunks/144 emb",
+                        "ts": "2026-03-26T12:00:09+00:00",
+                    },
+                ],
+            },
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=["Processed: 4 files"],
+            codex_tail=[],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        joined = "\n".join(lines)
+        self.assertIn("─ Live Progress", joined)
+        self.assertIn("Phase: Refresh index", joined)
+        self.assertIn("Now: Building follow-up index · 9s · 36 files/144 chunks/144 emb", joined)
+        self.assertIn("[12:00:00] Preparing follow-up index · 0s", joined)
         self.assertNotIn("─ Activity", joined)
 
     def test_dashboard_shows_chunkhound_preflight_stage_summary(self) -> None:
