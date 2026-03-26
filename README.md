@@ -147,6 +147,8 @@ Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-fi
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
+On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
+
 That indexed ChunkHound-backed path is the default and recommended public review workflow.
 
 ```bash

@@ -6532,6 +6532,83 @@ def ensure_review_config(paths: ReviewflowPaths, *, config_path: Path | None = N
     )
 
 
+def prompt_operator_chunkhound_base_cache_hot_start(
+    *,
+    pr: PullRequestRef,
+    resolved_runtime_config: dict[str, Any],
+    stdin: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> dict[str, Any] | None:
+    in_stream = stdin or sys.stdin
+    err_stream = stderr or sys.stderr
+    try:
+        is_tty = bool(in_stream.isatty()) and bool(err_stream.isatty())
+    except Exception:
+        is_tty = False
+    if not is_tty:
+        return None
+
+    intro = (
+        f"\nNo usable CURe base cache exists for {pr.owner}/{pr.repo}. "
+        "Building one from scratch may take longer.\n"
+        "If you already have a matching ChunkHound workspace/config for this repo, "
+        "CURe can validate it and hot-start the managed base cache.\n"
+        "Enter `new` to skip this and create a new baseline.\n\n"
+    )
+    while True:
+        try:
+            err_stream.write(intro)
+            err_stream.write("Workspace path:\n")
+            err_stream.flush()
+            workspace_raw = in_stream.readline()
+        except Exception:
+            return None
+        workspace_text = str(workspace_raw or "").strip()
+        if workspace_text.lower() == "new":
+            return None
+        if not workspace_text:
+            try:
+                err_stream.write("Rejected (workspace_required): Enter a workspace path or `new`.\n\n")
+                err_stream.flush()
+            except Exception:
+                return None
+            continue
+
+        try:
+            err_stream.write("ChunkHound config path:\n")
+            err_stream.flush()
+            config_raw = in_stream.readline()
+        except Exception:
+            return None
+        config_text = str(config_raw or "").strip()
+        if config_text.lower() == "new":
+            return None
+        if not config_text:
+            try:
+                err_stream.write("Rejected (config_required): Enter a config path or `new`.\n\n")
+                err_stream.flush()
+            except Exception:
+                return None
+            continue
+
+        candidate = validate_operator_chunkhound_seed_source(
+            workspace_path=Path(workspace_text),
+            config_path=Path(config_text),
+            pr=pr,
+            resolved_runtime_config=resolved_runtime_config,
+        )
+        if str(candidate.get("candidate_state") or "") == "accepted":
+            return candidate
+
+        reason = str(candidate.get("reason") or "unknown")
+        message = str(candidate.get("message") or "ChunkHound seed source validation failed.")
+        try:
+            err_stream.write(f"Rejected ({reason}): {message}\n\n")
+            err_stream.flush()
+        except Exception:
+            return None
+
+
 def cache_prime(
     *,
     paths: ReviewflowPaths,
@@ -6541,6 +6618,7 @@ def cache_prime(
     repo: str,
     base_ref: str,
     force: bool,
+    hot_start_seed: dict[str, Any] | None = None,
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
@@ -6583,6 +6661,10 @@ def cache_prime(
             database_provider="duckdb",
             database_path=db_path,
         )
+        if isinstance(hot_start_seed, dict):
+            source_db_raw = str(hot_start_seed.get("db_path") or "").strip()
+            if source_db_raw:
+                copy_duckdb_files(Path(source_db_raw).resolve(strict=False), db_path)
 
         cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
         env_cfg_fp = json_fingerprint(ch_cfg_path)
@@ -6649,6 +6731,15 @@ def cache_prime(
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        if isinstance(hot_start_seed, dict):
+            meta["hot_start"] = {
+                "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
+                "workspace_path": str(hot_start_seed.get("workspace_path") or ""),
+                "config_path": str(hot_start_seed.get("config_path") or ""),
+                "db_path": str(hot_start_seed.get("db_path") or ""),
+                "target_match_state": str(hot_start_seed.get("target_match_state") or "unknown"),
+                "runtime_match_state": str(hot_start_seed.get("runtime_match_state") or "unknown"),
+            }
         write_redacted_json(meta_path, meta)
         return meta
 
@@ -6686,69 +6777,28 @@ def ensure_base_cache(
     no_stream: bool = False,
 ) -> dict[str, Any]:
     effective_config_path = config_path or default_reviewflow_config_path()
-    base_root = base_dir(paths, pr.host, pr.owner, pr.repo, base_ref)
-    meta_path = base_root / "meta.json"
-    if refresh or not meta_path.is_file():
-        log(f"Base cache refresh: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
-        return cache_prime(
-            paths=paths,
-            config_path=effective_config_path,
-            host=pr.host,
-            owner=pr.owner,
-            repo=pr.repo,
-            base_ref=base_ref,
-            force=False,
-            quiet=quiet,
-            no_stream=no_stream,
-        )
 
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    try:
-        _, chunkhound_meta, _ = load_chunkhound_runtime_config(
+    def _resolve_operator_hot_start() -> dict[str, Any] | None:
+        _, _, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
             config_path=effective_config_path,
             require=True,
         )
-        cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
-    except Exception as e:
-        cfg_fp = None
-        log(
-            f"Base cache config fingerprint failed: {effective_config_path} ({e})",
-            quiet=quiet,
+        return prompt_operator_chunkhound_base_cache_hot_start(
+            pr=pr,
+            resolved_runtime_config=resolved_chunkhound_cfg,
         )
 
-    if cfg_fp and meta.get("config_fingerprint") != cfg_fp:
-        log(f"Base cache config changed: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
-        return cache_prime(
-            paths=paths,
-            config_path=effective_config_path,
-            host=pr.host,
-            owner=pr.owner,
-            repo=pr.repo,
-            base_ref=base_ref,
-            force=False,
-            quiet=quiet,
-            no_stream=no_stream,
-        )
-
-    if ttl_expired(str(meta.get("indexed_at") or ""), ttl_hours):
-        log(f"Base cache expired: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
-        return cache_prime(
-            paths=paths,
-            config_path=effective_config_path,
-            host=pr.host,
-            owner=pr.owner,
-            repo=pr.repo,
-            base_ref=base_ref,
-            force=False,
-            quiet=quiet,
-            no_stream=no_stream,
-        )
-
-    log(
-        f"Base cache hit: {pr.owner}/{pr.repo}@{base_ref} (indexed_at={meta.get('indexed_at')})",
+    return shared_ensure_base_cache(
+        paths=paths,
+        config_path=effective_config_path,
+        pr=pr,
+        base_ref=base_ref,
+        ttl_hours=ttl_hours,
+        refresh=refresh,
+        operator_hot_start_resolver=_resolve_operator_hot_start,
         quiet=quiet,
+        no_stream=no_stream,
     )
-    return meta
 
 
 def path_size_bytes(path: Path) -> int:
@@ -13583,6 +13633,7 @@ from cure_flows import (
     chunkhound_prompt_contract_for_template,
     compute_pr_stats,
     detect_multipass_plan_abort_contradiction,
+    ensure_base_cache as shared_ensure_base_cache,
     followup_prompt_template_name_for_profile,
     multipass_prompt_template_names,
     parse_multipass_plan_json,
@@ -13593,6 +13644,7 @@ from cure_flows import (
     resolve_prompt_profile,
     restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
+    validate_operator_chunkhound_seed_source,
     validate_and_record_codex_chunkhound_tool_proof,
     validate_codex_chunkhound_tool_proof,
 )

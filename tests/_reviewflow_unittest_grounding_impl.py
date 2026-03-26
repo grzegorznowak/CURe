@@ -481,6 +481,10 @@ class CodexResumeOutputTests(unittest.TestCase):
 
 
 class EnsureBaseCacheTests(unittest.TestCase):
+    class _FakeTty(StringIO):
+        def isatty(self) -> bool:
+            return True
+
     def test_ensure_base_cache_reprime_when_review_config_fingerprint_changes(self) -> None:
         tmp_cache = ROOT / ".tmp_test_cache_fp_mismatch"
         tmp_sandbox = ROOT / ".tmp_test_sandbox_fp_mismatch"
@@ -547,6 +551,367 @@ class EnsureBaseCacheTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_sandbox, ignore_errors=True)
             shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_ensure_base_cache_cold_miss_uses_operator_seed_resolver(self) -> None:
+        tmp_cache = ROOT / ".tmp_test_cache_hot_start_resolver"
+        tmp_sandbox = ROOT / ".tmp_test_sandbox_hot_start_resolver"
+        try:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            tmp_cache.mkdir(parents=True, exist_ok=True)
+            tmp_sandbox.mkdir(parents=True, exist_ok=True)
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=tmp_sandbox,
+                cache_root=tmp_cache,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+
+            hot_start_seed = {
+                "source_kind": "operator_workspace_config",
+                "workspace_path": "/tmp/workspace",
+                "config_path": "/tmp/workspace/chunkhound.json",
+                "db_path": "/tmp/workspace/.chunkhound",
+                "target_match_state": "match",
+                "runtime_match_state": "compatible",
+            }
+            called: dict[str, object] = {}
+
+            def fake_cache_prime(**kwargs):  # type: ignore[no-untyped-def]
+                called["kwargs"] = kwargs
+                return {"primed": True}
+
+            with (
+                mock.patch.object(rf, "cache_prime", side_effect=fake_cache_prime),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(
+                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                        ),
+                        {"chunkhound": {"base_config_path": "/tmp/base.json"}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
+                mock.patch.object(
+                    rf,
+                    "prompt_operator_chunkhound_base_cache_hot_start",
+                    return_value=hot_start_seed,
+                ) as prompt_hot_start,
+            ):
+                out = rf.ensure_base_cache(
+                    paths=paths,
+                    pr=pr,
+                    base_ref="main",
+                    ttl_hours=24,
+                    refresh=False,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertEqual(out, {"primed": True})
+            prompt_hot_start.assert_called_once()
+            self.assertEqual(called["kwargs"]["hot_start_seed"], hot_start_seed)
+        finally:
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_ensure_base_cache_hit_skips_operator_hot_start_prompt(self) -> None:
+        tmp_cache = ROOT / ".tmp_test_cache_hot_start_hit"
+        tmp_sandbox = ROOT / ".tmp_test_sandbox_hot_start_hit"
+        try:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            tmp_cache.mkdir(parents=True, exist_ok=True)
+            tmp_sandbox.mkdir(parents=True, exist_ok=True)
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=tmp_sandbox,
+                cache_root=tmp_cache,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            base_root = rf.base_dir(paths, pr.host, pr.owner, pr.repo, "main")
+            base_root.mkdir(parents=True, exist_ok=True)
+            (base_root / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "indexed_at": "2026-03-26T00:00:00+00:00",
+                        "config_fingerprint": "stable",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(
+                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                        ),
+                        {"chunkhound": {"base_config_path": "/tmp/base.json"}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
+                mock.patch.object(rf, "fingerprint_chunkhound_reviewflow_config", return_value="stable"),
+                mock.patch.object(
+                    rf,
+                    "prompt_operator_chunkhound_base_cache_hot_start",
+                    side_effect=AssertionError("should not prompt on cache hit"),
+                ),
+            ):
+                out = rf.ensure_base_cache(
+                    paths=paths,
+                    pr=pr,
+                    base_ref="main",
+                    ttl_hours=24,
+                    refresh=False,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertEqual(out["config_fingerprint"], "stable")
+        finally:
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_cure_flows_ensure_base_cache_cold_miss_uses_operator_seed_resolver(self) -> None:
+        tmp_cache = ROOT / ".tmp_test_flow_cache_hot_start_resolver"
+        tmp_sandbox = ROOT / ".tmp_test_flow_sandbox_hot_start_resolver"
+        try:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            tmp_cache.mkdir(parents=True, exist_ok=True)
+            tmp_sandbox.mkdir(parents=True, exist_ok=True)
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=tmp_sandbox,
+                cache_root=tmp_cache,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            hot_start_seed = {
+                "source_kind": "operator_workspace_config",
+                "workspace_path": "/tmp/workspace",
+                "config_path": "/tmp/workspace/chunkhound.json",
+                "db_path": "/tmp/workspace/.chunkhound",
+                "target_match_state": "match",
+                "runtime_match_state": "compatible",
+            }
+            called: dict[str, object] = {}
+
+            def fake_cache_prime(**kwargs):  # type: ignore[no-untyped-def]
+                called["kwargs"] = kwargs
+                return {"primed": True}
+
+            out = None
+            with mock.patch.object(rf, "cache_prime", side_effect=fake_cache_prime):
+                out = cure_flows.ensure_base_cache(
+                    paths=paths,
+                    pr=pr,
+                    base_ref="main",
+                    ttl_hours=24,
+                    refresh=False,
+                    operator_hot_start_resolver=lambda: hot_start_seed,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertEqual(out, {"primed": True})
+            self.assertEqual(called["kwargs"]["hot_start_seed"], hot_start_seed)
+        finally:
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_prompt_operator_chunkhound_base_cache_hot_start_retries_until_valid(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        stdin = self._FakeTty("/tmp/bad-workspace\n/tmp/bad-workspace/chunkhound.json\n/tmp/good-workspace\n/tmp/good-workspace/chunkhound.json\n")
+        stderr = self._FakeTty()
+        results = iter(
+            [
+                {
+                    "candidate_state": "rejected",
+                    "reason": "candidate_db_missing",
+                    "message": "ChunkHound DuckDB files are missing.",
+                },
+                {
+                    "candidate_state": "accepted",
+                    "source_kind": "operator_workspace_config",
+                    "workspace_path": "/tmp/good-workspace",
+                    "config_path": "/tmp/good-workspace/chunkhound.json",
+                    "db_path": "/tmp/good-workspace/.chunkhound",
+                    "target_match_state": "match",
+                    "runtime_match_state": "compatible",
+                },
+            ]
+        )
+
+        with mock.patch.object(
+            rf,
+            "validate_operator_chunkhound_seed_source",
+            side_effect=lambda **kwargs: next(results),
+        ) as validate_seed:
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+                stdin=stdin,
+                stderr=stderr,
+            )
+
+        self.assertEqual(validate_seed.call_count, 2)
+        self.assertEqual(selected["db_path"], "/tmp/good-workspace/.chunkhound")
+        rendered = stderr.getvalue()
+        self.assertIn("No usable CURe base cache exists", rendered)
+        self.assertIn("candidate_db_missing", rendered)
+        self.assertIn("ChunkHound DuckDB files are missing.", rendered)
+
+    def test_prompt_operator_chunkhound_base_cache_hot_start_blank_input_retries_until_new(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        stdin = self._FakeTty("\n\nnew\n")
+        stderr = self._FakeTty()
+
+        with mock.patch.object(
+            rf,
+            "validate_operator_chunkhound_seed_source",
+            side_effect=AssertionError("blank input should not validate"),
+        ):
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+                stdin=stdin,
+                stderr=stderr,
+            )
+
+        self.assertIsNone(selected)
+        rendered = stderr.getvalue()
+        self.assertIn("workspace_required", rendered)
+
+    def test_prompt_operator_chunkhound_base_cache_hot_start_non_tty_skips_prompt(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        stdin = StringIO("new\n")
+        stderr = StringIO()
+
+        with mock.patch.object(
+            rf,
+            "validate_operator_chunkhound_seed_source",
+            side_effect=AssertionError("non-tty prompt should not validate"),
+        ):
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+                stdin=stdin,
+                stderr=stderr,
+            )
+
+        self.assertIsNone(selected)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_cache_prime_records_hot_start_metadata_and_copies_seed_db(self) -> None:
+        root = ROOT / ".tmp_test_cache_prime_hot_start"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            seed_root = root / "seed"
+            source_workspace = root / "workspace"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            seed_root.mkdir(parents=True, exist_ok=True)
+            source_workspace.mkdir(parents=True, exist_ok=True)
+
+            source_db = source_workspace / ".chunkhound"
+            source_db.mkdir(parents=True, exist_ok=True)
+            (source_db / "chunks.db").write_text("seed-db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:3] == ["git", "-C", str(seed_root)]:
+                    if cmd[3:5] == ["rev-parse", "--is-inside-work-tree"]:
+                        return mock.Mock(stdout="true\n", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "--prune"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "origin"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["checkout", "-B"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:4] == ["rev-parse"]:
+                        return mock.Mock(
+                            stdout="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+                            stderr="",
+                            duration_seconds=0.0,
+                        )
+                if cmd[:2] == ["chunkhound", "index"]:
+                    return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                if cmd == ["chunkhound", "--version"]:
+                    return mock.Mock(stdout="chunkhound 1.2.3\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        {"chunkhound": {"base_config_path": str(base_cfg)}},
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(rf, "materialize_chunkhound_env_config", side_effect=fake_materialize_chunkhound_env_config),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(rf, "seed_dir", return_value=seed_root),
+            ):
+                meta = rf.cache_prime(
+                    paths=paths,
+                    host="github.com",
+                    owner="acme",
+                    repo="repo",
+                    base_ref="main",
+                    force=False,
+                    hot_start_seed={
+                        "source_kind": "operator_workspace_config",
+                        "workspace_path": str(source_workspace),
+                        "config_path": str(source_workspace / "chunkhound.json"),
+                        "db_path": str(source_db),
+                        "target_match_state": "match",
+                        "runtime_match_state": "compatible",
+                    },
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertEqual(meta["hot_start"]["source_kind"], "operator_workspace_config")
+            self.assertEqual(meta["hot_start"]["workspace_path"], str(source_workspace))
+            copied_db = Path(meta["db_path"]) / "chunks.db"
+            self.assertEqual(copied_db.read_text(encoding="utf-8"), "seed-db")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class BaselineSelectionTests(unittest.TestCase):
@@ -1665,6 +2030,178 @@ class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):
             self.assertEqual(candidate["rejection_reason"], "missing_repo_local_config")
             self.assertIsNone(candidate["config_path"])
             self.assertIsNone(candidate["db_path"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_operator_chunkhound_seed_source_accepts_matching_workspace_config(self) -> None:
+        root = ROOT / ".tmp_test_operator_seed_accept"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, db_path = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "remote", "get-url", "origin"]:
+                    return mock.Mock(
+                        stdout="git@github.com:acme/repo.git\n",
+                        stderr="",
+                        duration_seconds=0.0,
+                    )
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.validate_operator_chunkhound_seed_source(
+                    workspace_path=repo_root,
+                    config_path=config_path,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "accepted")
+            self.assertEqual(candidate["db_path"], str(db_path.resolve()))
+            self.assertEqual(candidate["config_path"], str(config_path.resolve()))
+            self.assertEqual(candidate["workspace_path"], str(repo_root.resolve()))
+            self.assertEqual(candidate["target_match_state"], "match")
+            self.assertEqual(candidate["runtime_match_state"], "compatible")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_operator_chunkhound_seed_source_rejects_remote_mismatch(self) -> None:
+        root = ROOT / ".tmp_test_operator_seed_remote_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, _ = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "remote", "get-url", "origin"]:
+                    return mock.Mock(stdout="git@github.com:other/repo.git\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.validate_operator_chunkhound_seed_source(
+                    workspace_path=repo_root,
+                    config_path=config_path,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "rejected")
+            self.assertEqual(candidate["reason"], "repo_remote_mismatch")
+            self.assertEqual(candidate["target_match_state"], "mismatch")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_operator_chunkhound_seed_source_rejects_config_mismatch(self) -> None:
+        root = ROOT / ".tmp_test_operator_seed_config_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, _ = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+                mutate_config=lambda config: config.setdefault("research", {}).__setitem__("algorithm", "semantic"),
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "remote", "get-url", "origin"]:
+                    return mock.Mock(stdout="git@github.com:acme/repo.git\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.validate_operator_chunkhound_seed_source(
+                    workspace_path=repo_root,
+                    config_path=config_path,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "rejected")
+            self.assertEqual(candidate["reason"], "config_mismatch")
+            self.assertEqual(candidate["runtime_match_state"], "incompatible")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_operator_chunkhound_seed_source_rejects_missing_db(self) -> None:
+        root = ROOT / ".tmp_test_operator_seed_missing_db"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_root = root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, db_path = self._write_repo_local_chunkhound_state(
+                repo_root=repo_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+            shutil.rmtree(db_path, ignore_errors=True)
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd == ["git", "-C", str(repo_root), "remote", "get-url", "origin"]:
+                    return mock.Mock(stdout="git@github.com:acme/repo.git\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd):
+                candidate = cure_flows.validate_operator_chunkhound_seed_source(
+                    workspace_path=repo_root,
+                    config_path=config_path,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "rejected")
+            self.assertEqual(candidate["reason"], "candidate_db_missing")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_operator_chunkhound_seed_source_rejects_workspace_root_mismatch(self) -> None:
+        root = ROOT / ".tmp_test_operator_seed_workspace_root_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            workspace_root = root / "workspace"
+            repo_root = workspace_root / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            resolved_runtime_config = self._runtime_seed_config()
+            config_path, _ = self._write_repo_local_chunkhound_state(
+                repo_root=workspace_root,
+                resolved_runtime_config=resolved_runtime_config,
+                config_name="chunkhound.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=17)
+
+            with mock.patch.object(
+                rf,
+                "run_cmd",
+                side_effect=AssertionError("workspace-root mismatch should fail before git validation"),
+            ):
+                candidate = cure_flows.validate_operator_chunkhound_seed_source(
+                    workspace_path=repo_root,
+                    config_path=config_path,
+                    pr=pr,
+                    resolved_runtime_config=resolved_runtime_config,
+                )
+
+            self.assertEqual(candidate["candidate_state"], "rejected")
+            self.assertEqual(candidate["reason"], "config_not_at_workspace_root")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

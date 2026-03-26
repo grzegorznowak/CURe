@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -1479,6 +1479,7 @@ def cache_prime(
     repo: str,
     base_ref: str,
     force: bool,
+    hot_start_seed: dict[str, Any] | None = None,
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
@@ -1521,6 +1522,10 @@ def cache_prime(
             database_provider="duckdb",
             database_path=db_path,
         )
+        if isinstance(hot_start_seed, dict):
+            source_db_raw = str(hot_start_seed.get("db_path") or "").strip()
+            if source_db_raw:
+                copy_duckdb_files(Path(source_db_raw).resolve(strict=False), db_path)
 
         cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
         env_cfg_fp = json_fingerprint(ch_cfg_path)
@@ -1587,6 +1592,15 @@ def cache_prime(
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        if isinstance(hot_start_seed, dict):
+            meta["hot_start"] = {
+                "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
+                "workspace_path": str(hot_start_seed.get("workspace_path") or ""),
+                "config_path": str(hot_start_seed.get("config_path") or ""),
+                "db_path": str(hot_start_seed.get("db_path") or ""),
+                "target_match_state": str(hot_start_seed.get("target_match_state") or "unknown"),
+                "runtime_match_state": str(hot_start_seed.get("runtime_match_state") or "unknown"),
+            }
         index_summary = parse_chunkhound_index_summary(
             "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
             scope="base_cache",
@@ -1700,6 +1714,155 @@ def _select_repo_local_chunkhound_config_path(repo_root: Path) -> tuple[Path | N
                 return candidate_path, file_name, "config_not_at_repo_root"
 
     return None, None, "missing_repo_root_config"
+
+
+def _operator_chunkhound_seed_validation_message(reason: str) -> str:
+    messages = {
+        "workspace_not_directory": "Workspace path must point to an existing directory.",
+        "missing_candidate_config": "ChunkHound config file is missing.",
+        "config_not_at_workspace_root": "ChunkHound config must live at the provided workspace root.",
+        "invalid_candidate_config": "ChunkHound config must be valid JSON.",
+        "missing_candidate_database": "ChunkHound config is missing the database block.",
+        "database_provider_mismatch": "ChunkHound config must use the DuckDB provider.",
+        "missing_candidate_db_path": "ChunkHound config is missing the DuckDB path.",
+        "candidate_db_outside_repo_root": "ChunkHound DuckDB path must stay inside the provided workspace.",
+        "candidate_db_missing": "ChunkHound DuckDB files are missing.",
+        "config_mismatch": "ChunkHound config is incompatible with CURe's active runtime settings.",
+        "origin_remote_unavailable": "Workspace git origin could not be resolved for repo identity validation.",
+        "origin_remote_unrecognized": "Workspace git origin format is not recognized for repo identity validation.",
+        "repo_remote_mismatch": "Workspace git origin does not match the PR repository.",
+    }
+    return messages.get(reason, "ChunkHound seed source validation failed.")
+
+
+def validate_operator_chunkhound_seed_source(
+    *,
+    workspace_path: Path,
+    config_path: Path,
+    pr: PullRequestRef,
+    resolved_runtime_config: dict[str, Any],
+) -> dict[str, Any]:
+    workspace_root = Path(workspace_path).expanduser().resolve(strict=False)
+    candidate_config_path = Path(config_path).expanduser()
+    if not candidate_config_path.is_absolute():
+        candidate_config_path = workspace_root / candidate_config_path
+    candidate_config_path = candidate_config_path.resolve(strict=False)
+    result: dict[str, Any] = {
+        "candidate_state": "rejected",
+        "reason": None,
+        "message": None,
+        "source_kind": "operator_workspace_config",
+        "workspace_path": str(workspace_root),
+        "config_path": str(candidate_config_path),
+        "db_path": None,
+        "target_match_state": "unknown",
+        "runtime_match_state": "unknown",
+    }
+
+    if not workspace_root.is_dir():
+        result["reason"] = "workspace_not_directory"
+        result["message"] = _operator_chunkhound_seed_validation_message("workspace_not_directory")
+        return result
+
+    if candidate_config_path.parent != workspace_root or candidate_config_path.name not in {
+        "chunkhound.json",
+        ".chunkhound.json",
+    }:
+        result["reason"] = "config_not_at_workspace_root"
+        result["message"] = _operator_chunkhound_seed_validation_message("config_not_at_workspace_root")
+        return result
+    if not candidate_config_path.is_file():
+        result["reason"] = "missing_candidate_config"
+        result["message"] = _operator_chunkhound_seed_validation_message("missing_candidate_config")
+        return result
+
+    try:
+        candidate_config = json.loads(candidate_config_path.read_text(encoding="utf-8"))
+    except Exception:
+        result["reason"] = "invalid_candidate_config"
+        result["message"] = _operator_chunkhound_seed_validation_message("invalid_candidate_config")
+        return result
+    if not isinstance(candidate_config, dict):
+        result["reason"] = "invalid_candidate_config"
+        result["message"] = _operator_chunkhound_seed_validation_message("invalid_candidate_config")
+        return result
+
+    database = candidate_config.get("database")
+    if not isinstance(database, dict):
+        result["reason"] = "missing_candidate_database"
+        result["message"] = _operator_chunkhound_seed_validation_message("missing_candidate_database")
+        return result
+
+    provider = str(database.get("provider") or "").strip().lower()
+    if provider != "duckdb":
+        result["reason"] = "database_provider_mismatch"
+        result["message"] = _operator_chunkhound_seed_validation_message("database_provider_mismatch")
+        return result
+
+    candidate_db_raw = str(database.get("path") or "").strip()
+    if not candidate_db_raw:
+        result["reason"] = "missing_candidate_db_path"
+        result["message"] = _operator_chunkhound_seed_validation_message("missing_candidate_db_path")
+        return result
+
+    candidate_db_path = Path(candidate_db_raw).expanduser()
+    if not candidate_db_path.is_absolute():
+        candidate_db_path = candidate_config_path.parent / candidate_db_path
+    candidate_db_path = candidate_db_path.resolve(strict=False)
+    result["db_path"] = str(candidate_db_path)
+
+    if not _is_relative_to(candidate_db_path, workspace_root):
+        result["reason"] = "candidate_db_outside_repo_root"
+        result["message"] = _operator_chunkhound_seed_validation_message("candidate_db_outside_repo_root")
+        return result
+    if not _duckdb_storage_exists(candidate_db_path):
+        result["reason"] = "candidate_db_missing"
+        result["message"] = _operator_chunkhound_seed_validation_message("candidate_db_missing")
+        return result
+
+    runtime_effective = _runtime_chunkhound_seed_match_config(
+        resolved_runtime_config=resolved_runtime_config
+    )
+    if _normalize_chunkhound_seed_match_config(candidate_config) != _normalize_chunkhound_seed_match_config(
+        runtime_effective
+    ):
+        result["reason"] = "config_mismatch"
+        result["message"] = _operator_chunkhound_seed_validation_message("config_mismatch")
+        result["runtime_match_state"] = "incompatible"
+        return result
+    result["runtime_match_state"] = "compatible"
+
+    try:
+        remote_url = _run_cmd(
+            ["git", "-C", str(workspace_root), "remote", "get-url", "origin"],
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        result["reason"] = "origin_remote_unavailable"
+        result["message"] = _operator_chunkhound_seed_validation_message("origin_remote_unavailable")
+        return result
+
+    remote_identity = _parse_git_remote_repo_identity(remote_url)
+    if remote_identity is None:
+        result["reason"] = "origin_remote_unrecognized"
+        result["message"] = _operator_chunkhound_seed_validation_message("origin_remote_unrecognized")
+        return result
+
+    resolved_repo_identity = _canonical_repo_identity(
+        host=remote_identity[0],
+        owner=remote_identity[1],
+        repo=remote_identity[2],
+    )
+    expected_repo_identity = _canonical_repo_identity(host=pr.host, owner=pr.owner, repo=pr.repo)
+    if resolved_repo_identity != expected_repo_identity:
+        result["reason"] = "repo_remote_mismatch"
+        result["message"] = _operator_chunkhound_seed_validation_message("repo_remote_mismatch")
+        result["target_match_state"] = "mismatch"
+        return result
+
+    result["candidate_state"] = "accepted"
+    result["target_match_state"] = "match"
+    return result
 
 
 def discover_repo_local_chunkhound_config(
@@ -2152,13 +2315,15 @@ def ensure_base_cache(
     base_ref: str,
     ttl_hours: int,
     refresh: bool,
+    hot_start_seed: dict[str, Any] | None = None,
+    operator_hot_start_resolver: Callable[[], dict[str, Any] | None] | None = None,
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
     effective_config_path = config_path or default_reviewflow_config_path()
     base_root = base_dir(paths, pr.host, pr.owner, pr.repo, base_ref)
     meta_path = base_root / "meta.json"
-    if refresh or not meta_path.is_file():
+    if refresh:
         log(f"Base cache refresh: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
         return _compat_cache_prime(
             paths=paths,
@@ -2168,6 +2333,25 @@ def ensure_base_cache(
             repo=pr.repo,
             base_ref=base_ref,
             force=False,
+            hot_start_seed=hot_start_seed,
+            quiet=quiet,
+            no_stream=no_stream,
+        )
+
+    if not meta_path.is_file():
+        resolved_hot_start_seed = hot_start_seed
+        if resolved_hot_start_seed is None and operator_hot_start_resolver is not None:
+            resolved_hot_start_seed = operator_hot_start_resolver()
+        log(f"Base cache miss: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
+        return _compat_cache_prime(
+            paths=paths,
+            config_path=effective_config_path,
+            host=pr.host,
+            owner=pr.owner,
+            repo=pr.repo,
+            base_ref=base_ref,
+            force=False,
+            hot_start_seed=resolved_hot_start_seed,
             quiet=quiet,
             no_stream=no_stream,
         )
@@ -2298,6 +2482,7 @@ __all__ = [
     'review_intelligence_prompt_vars',
     'chunkhound_env',
     'same_device',
+    'validate_operator_chunkhound_seed_source',
     'validate_and_record_codex_chunkhound_tool_proof',
     'validate_codex_chunkhound_tool_proof',
     'write_pr_context_file',
