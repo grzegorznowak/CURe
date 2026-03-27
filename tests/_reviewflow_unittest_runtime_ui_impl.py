@@ -3642,7 +3642,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             height=40,
         )
         joined = "\n".join(lines)
-        self.assertIn("step 3/7", joined)
+        self.assertIn("[step \u00b7 3/7]", joined)
         self.assertIn("Authentication checks", joined)
 
     def test_dashboard_hides_tails_in_quiet(self) -> None:
@@ -4300,9 +4300,9 @@ class InstallAndDoctorTests(unittest.TestCase):
             )
         joined = "\n".join(lines)
         self.assertIn("─ Review Snapshot", joined)
+        self.assertIn("Business: REQUEST CHANGES  |  Technical: APPROVE", joined)
         self.assertIn("Summary: Ticket ABAU-1026 aligns with the empty-state wording update.", joined)
-        self.assertIn("Business: REQUEST CHANGES", joined)
-        self.assertIn("Business issue: CTA copy is inconsistent with the approved wording.", joined)
+        self.assertIn("Biz issue: CTA copy is inconsistent with the approved wording.", joined)
 
 
 class TuiPrintFinalMarkdownTests(unittest.TestCase):
