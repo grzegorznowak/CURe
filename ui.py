@@ -1676,12 +1676,20 @@ class Dashboard:
 
     def _run(self) -> None:
         self._setup_tty()
-        last_render = 0.0
-        while not self._state.stop_requested():
-            self._poll_keys()
-            now = time.time()
-            if now - last_render >= self._refresh_interval:
-                meta = self._read_meta()
-                self._render(meta)
-                last_render = now
-            self._state.wait_activity(timeout=self._refresh_interval)
+        # Enter alternate screen buffer so the main scrollback is never touched.
+        self._stderr.write("\x1b[?1049h")
+        self._stderr.flush()
+        try:
+            last_render = 0.0
+            while not self._state.stop_requested():
+                self._poll_keys()
+                now = time.time()
+                if now - last_render >= self._refresh_interval:
+                    meta = self._read_meta()
+                    self._render(meta)
+                    last_render = now
+                self._state.wait_activity(timeout=self._refresh_interval)
+        finally:
+            # Exit alternate screen — terminal snaps back to the original scrollback.
+            self._stderr.write("\x1b[?1049l")
+            self._stderr.flush()
