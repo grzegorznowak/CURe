@@ -1014,6 +1014,23 @@ class HistoricalReviewsTests(unittest.TestCase):
         )
         self.assertEqual(summary, "llm=codex-cli/gpt-5.3-codex-spark/medium")
 
+    def test_resolve_codex_summary_prefers_runtime_adapter_model_for_claude(self) -> None:
+        summary = rf.resolve_codex_summary(
+            {
+                "llm": {
+                    "preset": "claude-cli",
+                    "provider": "claude",
+                    "model": None,
+                    "reasoning_effort": "high",
+                    "adapter": {
+                        "provider": "claude",
+                        "model": "claude-sonnet-4-6",
+                    },
+                }
+            }
+        )
+        self.assertEqual(summary, "llm=claude-cli/claude-sonnet-4-6/high")
+
     def test_scan_completed_sessions_for_pr_filters_and_sorts(self) -> None:
         root = ROOT / ".tmp_test_review_sandboxes"
         try:

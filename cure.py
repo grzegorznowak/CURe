@@ -622,6 +622,12 @@ def _merge_llm_usage(
 def record_llm_usage(llm_meta: dict[str, Any], adapter_meta: dict[str, Any] | None) -> dict[str, int] | None:
     if not isinstance(llm_meta, dict) or not isinstance(adapter_meta, dict):
         return None
+    runtime_provider = str(adapter_meta.get("provider") or "").strip()
+    if runtime_provider:
+        llm_meta["provider"] = runtime_provider
+    runtime_model = str(adapter_meta.get("model") or "").strip()
+    if runtime_model:
+        llm_meta["model"] = runtime_model
     incoming = _normalize_llm_usage(adapter_meta.get("usage"))
     if incoming is None:
         return _normalize_llm_usage(llm_meta.get("usage"))
@@ -740,8 +746,7 @@ def _mark_resume_noop_completed(
 
 
 def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
-    llm_meta = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
-    payload = dict(llm_meta)
+    payload = resolve_meta_llm(meta)
     multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
     multipass_llm = multipass.get("llm") if isinstance(multipass.get("llm"), dict) else {}
     review_artifact_llm = (
@@ -4415,6 +4420,33 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_llm_identity_from_adapter(adapter: object) -> dict[str, str]:
+    payload = adapter if isinstance(adapter, dict) else {}
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    out: dict[str, str] = {}
+    if provider:
+        out["provider"] = provider
+    if model:
+        out["model"] = model
+    return out
+
+
+def _default_llm_preset_for_provider(provider: object) -> str | None:
+    value = str(provider or "").strip().lower()
+    if value == "codex":
+        return DEFAULT_IMPLICIT_CODEX_PRESET
+    if value == "claude":
+        return "claude-cli"
+    if value == "gemini":
+        return "gemini-cli"
+    if value == "openai":
+        return "openai-responses"
+    if value == "openrouter":
+        return "openrouter-responses"
+    return None
+
+
 def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
     llm = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
     if llm:
@@ -4457,13 +4489,22 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
             if isinstance(out.get("capabilities"), dict)
             else {"supports_resume": False}
         )
+        runtime_identity = _runtime_llm_identity_from_adapter(out.get("adapter"))
+        if runtime_identity.get("provider") and not str(out.get("provider") or "").strip():
+            out["provider"] = runtime_identity["provider"]
+        if runtime_identity.get("model") and not str(out.get("model") or "").strip():
+            out["model"] = runtime_identity["model"]
+        if not _normalize_llm_preset_name(out.get("preset")):
+            inferred_preset = _default_llm_preset_for_provider(out.get("provider"))
+            if inferred_preset is not None:
+                out["preset"] = inferred_preset
         return out
     return _legacy_llm_meta_from_codex(meta)
 
 
 def resolve_codex_summary(meta: dict[str, Any]) -> str:
     llm = resolve_meta_llm(meta)
-    preset = _normalize_llm_preset_name(llm.get("preset")) or DEFAULT_IMPLICIT_CODEX_PRESET
+    preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
     plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
@@ -4475,6 +4516,15 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     if thinking:
         return f"llm={preset}/?/{thinking}"
     return f"llm={preset}/?"
+
+
+def _singlepass_review_phase_name(*, provider: object) -> str:
+    value = str(provider or "").strip().lower()
+    if value == "codex":
+        return "codex_review"
+    if value:
+        return f"{value}_review"
+    return "review"
 
 
 def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
@@ -8693,7 +8743,11 @@ def _pr_flow_impl(
                         prompt = rendered
 
                 assert prompt is not None
-                with phase("codex_review", progress=progress, quiet=quiet):
+                with phase(
+                    _singlepass_review_phase_name(provider=llm_resolved.get("provider")),
+                    progress=progress,
+                    quiet=quiet,
+                ):
                     review_result = run_llm_exec(
                         repo_dir=repo_dir,
                         resolved=llm_resolved,

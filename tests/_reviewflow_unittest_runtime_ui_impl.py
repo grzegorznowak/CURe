@@ -1212,6 +1212,9 @@ class CodexJsonProgressTests(unittest.TestCase):
         line = cure_commands._watch_line_for_payload(payload)
         self.assertIn("current=Checking changed files and narrowing scope", line)
 
+    def test_phase_label_treats_provider_specific_review_phase_as_generate_review(self) -> None:
+        self.assertEqual(rui._phase_label("claude_review"), "Generate review")
+
     def test_watch_line_for_payload_appends_chunkhound_cache_build_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-idx",
@@ -1499,6 +1502,57 @@ class CodexJsonProgressTests(unittest.TestCase):
 
         self.assertIn("live_progress", payload)
         self.assertIn("codex_events", payload["logs"])
+
+    def test_build_status_payload_prefers_runtime_adapter_model_and_provider_phase_for_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-claude"
+            repo_dir = session_dir / "repo"
+            logs_dir = session_dir / "work" / "logs"
+            review_md = session_dir / "review.md"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            review_md.write_text("# Review\n", encoding="utf-8")
+            for name in ("cure.log", "chunkhound.log", "codex.log"):
+                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-claude",
+                "status": "running",
+                "phase": "claude_review",
+                "phases": {"claude_review": {"status": "running"}},
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 12,
+                "created_at": "2026-03-17T12:00:00+00:00",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(session_dir / "work"),
+                    "logs_dir": str(logs_dir),
+                    "review_md": str(review_md),
+                },
+                "logs": {
+                    "cure": str(logs_dir / "cure.log"),
+                    "chunkhound": str(logs_dir / "chunkhound.log"),
+                    "codex": str(logs_dir / "codex.log"),
+                },
+                "llm": {
+                    "preset": "claude-cli",
+                    "provider": "claude",
+                    "model": None,
+                    "reasoning_effort": "high",
+                    "adapter": {
+                        "provider": "claude",
+                        "model": "claude-sonnet-4-6",
+                    },
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            payload = rf.build_status_payload("session-claude", sandbox_root=root)
+
+        self.assertEqual(payload["phase"], "claude_review")
+        self.assertEqual(payload["llm"]["summary"], "llm=claude-cli/claude-sonnet-4-6/high")
 
     def test_build_status_payload_includes_chunkhound_access_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3702,6 +3756,32 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("phase 1/1: Generate review", lines[0])
         joined = "\n".join(lines)
         self.assertIn("Verdict: biz=REQUEST CHANGES tech=REQUEST CHANGES", joined)
+
+    def test_dashboard_narrow_header_labels_claude_review_like_review_generation(self) -> None:
+        meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Claude Review",
+            "session_id": "s",
+            "created_at": "2026-03-04T00:00:00+00:00",
+            "status": "done",
+            "completed_at": "2026-03-04T00:05:00+00:00",
+            "phase": "claude_review",
+            "phases": {"claude_review": {"status": "done", "duration_seconds": 10.0}},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        lines = rui.build_dashboard_lines(
+            meta=meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=[],
+            no_stream=False,
+            width=90,
+            height=25,
+        )
+        self.assertIn("phase 1/1: Generate review", lines[0])
 
     def test_dashboard_narrow_layout_uses_single_column_sections(self) -> None:
         meta = {

@@ -691,6 +691,33 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_llm_identity_from_adapter(adapter: object) -> dict[str, str]:
+    payload = adapter if isinstance(adapter, dict) else {}
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    out: dict[str, str] = {}
+    if provider:
+        out["provider"] = provider
+    if model:
+        out["model"] = model
+    return out
+
+
+def _default_llm_preset_for_provider(provider: object) -> str | None:
+    value = str(provider or "").strip().lower()
+    if value == "codex":
+        return DEFAULT_IMPLICIT_CODEX_PRESET
+    if value == "claude":
+        return "claude-cli"
+    if value == "gemini":
+        return "gemini-cli"
+    if value == "openai":
+        return "openai-responses"
+    if value == "openrouter":
+        return "openrouter-responses"
+    return None
+
+
 def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
     llm = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
     if llm:
@@ -709,13 +736,22 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
             if isinstance(out.get("capabilities"), dict)
             else {"supports_resume": False}
         )
+        runtime_identity = _runtime_llm_identity_from_adapter(out.get("adapter"))
+        if runtime_identity.get("provider") and not str(out.get("provider") or "").strip():
+            out["provider"] = runtime_identity["provider"]
+        if runtime_identity.get("model") and not str(out.get("model") or "").strip():
+            out["model"] = runtime_identity["model"]
+        if not _normalize_llm_preset_name(out.get("preset")):
+            inferred_preset = _default_llm_preset_for_provider(out.get("provider"))
+            if inferred_preset is not None:
+                out["preset"] = inferred_preset
         return out
     return _legacy_llm_meta_from_codex(meta)
 
 
 def resolve_codex_summary(meta: dict[str, Any]) -> str:
     llm = resolve_meta_llm(meta)
-    preset = _normalize_llm_preset_name(llm.get("preset")) or DEFAULT_IMPLICIT_CODEX_PRESET
+    preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
     plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None

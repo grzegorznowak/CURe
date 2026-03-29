@@ -279,10 +279,32 @@ def _extract_claude_text_from_message(message: dict[str, Any] | None) -> str:
     return "".join(chunks).strip()
 
 
+def _extract_claude_payload_model(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    direct = str(payload.get("model") or "").strip()
+    if direct:
+        return direct
+    message = payload.get("message")
+    if isinstance(message, dict):
+        model = str(message.get("model") or "").strip()
+        if model:
+            return model
+    event = payload.get("event")
+    if isinstance(event, dict):
+        message = event.get("message")
+        if isinstance(message, dict):
+            model = str(message.get("model") or "").strip()
+            if model:
+                return model
+    return None
+
+
 def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
     result_payload: dict[str, Any] = {}
     assistant_payload: dict[str, Any] = {}
     session_id = ""
+    model = ""
     for raw_line in str(text or "").splitlines():
         raw = str(raw_line or "").strip()
         if not raw:
@@ -294,6 +316,7 @@ def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
         if not isinstance(payload, dict):
             continue
         session_id = str(payload.get("session_id") or session_id).strip()
+        model = str(_extract_claude_payload_model(payload) or model).strip()
         payload_type = str(payload.get("type") or "").strip()
         if payload_type == "assistant":
             assistant_payload = payload
@@ -304,6 +327,8 @@ def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
     if result_payload:
         if session_id and not str(result_payload.get("session_id") or "").strip():
             result_payload["session_id"] = session_id
+        if model and not str(result_payload.get("model") or "").strip():
+            result_payload["model"] = model
         return result_payload
 
     assistant_text = _extract_claude_text_from_message(assistant_payload.get("message"))
@@ -312,6 +337,8 @@ def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
         payload["result"] = assistant_text
     if session_id:
         payload["session_id"] = session_id
+    if model:
+        payload["model"] = model
     usage = _extract_usage_from_payload(assistant_payload)
     if usage is not None:
         payload["usage"] = usage
@@ -1116,6 +1143,8 @@ def run_claude_exec(
         resume=resume,
         adapter_meta={
             "transport": "cli-claude",
+            "provider": "claude",
+            "model": str(payload.get("model") or "").strip() or None,
             "command": safe_cmd_for_meta(cmd),
             "usage": usage,
         },

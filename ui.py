@@ -307,11 +307,14 @@ _PHASE_LABEL_OVERRIDES = {
 
 def _phase_label(name: str, *, debug: bool = False) -> str:
     raw = str(name or "").strip() or "?"
+    label: str | None
     if raw.startswith("codex_step_"):
         suffix = raw.removeprefix("codex_step_")
         label = f"Review step {int(suffix)}" if suffix.isdigit() else "Review step"
     else:
         label = _PHASE_LABEL_OVERRIDES.get(raw)
+    if not label and raw.endswith("_review") and raw != "followup_review":
+        label = "Generate review"
     if not label:
         label = raw.replace("_", " ").strip().title() or "?"
     if debug and raw != label:

@@ -179,6 +179,40 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
+    def test_refresh_session_review_footer_prefers_runtime_adapter_model_when_top_level_missing(self) -> None:
+        session_dir = ROOT / ".tmp_test_review_footer_runtime_model"
+        md = session_dir / "review.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+
+            rf._refresh_session_review_footer(
+                meta={
+                    "session_id": "session-claude",
+                    "created_at": "2026-03-12T22:00:00+00:00",
+                    "completed_at": "2026-03-12T22:00:07+00:00",
+                    "review_head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "llm": {
+                        "preset": "claude-cli",
+                        "provider": "claude",
+                        "model": None,
+                        "reasoning_effort": "high",
+                        "adapter": {
+                            "provider": "claude",
+                            "model": "claude-sonnet-4-6",
+                        },
+                        "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
+                    },
+                },
+                markdown_path=md,
+            )
+
+            rendered = md.read_text(encoding="utf-8")
+            self.assertIn("model claude-sonnet-4-6/high", rendered)
+            self.assertNotIn("model -/high", rendered)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
     def test_upsert_review_artifact_footer_is_idempotent_and_replaces_existing_footer(self) -> None:
         session_dir = ROOT / ".tmp_test_review_footer_upsert"
         md = session_dir / "review.md"
