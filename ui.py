@@ -136,6 +136,11 @@ def _normalize_verdict(raw: object) -> str | None:
     return text or None
 
 
+_EVIDENCE_RE = re.compile(
+    r"\[(reproduced|test-backed|static-inference|test-gap|low-confidence)\]"
+)
+
+
 def _format_verdicts(meta: dict[str, object]) -> str:
     verdicts = meta.get("verdicts")
     biz = None
@@ -251,12 +256,12 @@ def _multipass_line(meta: dict) -> str | None:
     step_count = current.get("step_count")
     title = str(current.get("step_title") or "").strip()
     if isinstance(step_index, int) and isinstance(step_count, int) and step_count > 0:
-        base = f"Multipass: stage={stage} step {step_index}/{step_count}"
+        tag = f"[{stage} \u00b7 {step_index}/{step_count}]"
     else:
-        base = f"Multipass: stage={stage}"
+        tag = f"[{stage}]"
     if title:
-        return f"{base} — {_truncate(title, 80)}"
-    return base
+        return f"{tag} {_truncate(title, 80)}"
+    return tag
 
 
 KNOWN_PHASE_PREFIX = (
@@ -641,6 +646,56 @@ def _dedupe_preserve_order(lines: list[str]) -> list[str]:
     return out
 
 
+def _parse_review_sections(text: str) -> dict:
+    """Parse a review.md into structured data for snapshot rendering."""
+    data: dict = {
+        "summary": None,
+        "business_verdict": None,
+        "technical_verdict": None,
+        "business": {"strengths": [], "in_scope_issues": [], "out_of_scope_issues": []},
+        "technical": {"strengths": [], "in_scope_issues": [], "out_of_scope_issues": []},
+        "evidence_labels": {},
+    }
+    section = ""
+    subsection = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line in {"####", "```"}:
+            continue
+        if line.startswith("## "):
+            section = "Business" if "Business" in line else ("Technical" if "Technical" in line else "")
+            subsection = ""
+            continue
+        if line.startswith("### "):
+            subsection = line[4:].strip()
+            continue
+        if line.startswith("**Summary**:") and data["summary"] is None:
+            data["summary"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("**Verdict**:"):
+            v = _normalize_verdict(line.split(":", 1)[1].strip())
+            if section == "Business":
+                data["business_verdict"] = v
+            elif section == "Technical":
+                data["technical_verdict"] = v
+            continue
+        if line.startswith("- ") and section in {"Business", "Technical"}:
+            item = line[2:].strip()
+            if item in {"None.", "None"}:
+                continue
+            sec = data[section.lower()]
+            if subsection == "Strengths":
+                sec["strengths"].append(item)
+            elif subsection == "In Scope Issues":
+                sec["in_scope_issues"].append(item)
+            elif subsection == "Out of Scope Issues":
+                sec["out_of_scope_issues"].append(item)
+            for m in _EVIDENCE_RE.finditer(item):
+                lbl = m.group(1)
+                data["evidence_labels"][lbl] = data["evidence_labels"].get(lbl, 0) + 1
+    return data
+
+
 def _review_snapshot_lines(*, review_md: str) -> list[str]:
     path_text = str(review_md or "").strip()
     if not path_text:
@@ -653,37 +708,51 @@ def _review_snapshot_lines(*, review_md: str) -> list[str]:
     except Exception:
         return []
 
-    section = ""
-    subsection = ""
+    data = _parse_review_sections(text)
     out: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line in {"####", "```"}:
-            continue
-        if line.startswith("## "):
-            if "Business / Product Assessment" in line:
-                section = "Business"
-            elif "Technical Assessment" in line:
-                section = "Technical"
-            else:
-                section = ""
-            subsection = ""
-            continue
-        if line.startswith("### "):
-            subsection = line[4:].strip()
-            continue
-        if line.startswith("**Summary**:"):
-            out.append(f"Summary: {line.split(':', 1)[1].strip()}")
-        elif line.startswith("**Verdict**:"):
-            verdict = line.split(":", 1)[1].strip()
-            out.append(f"{section or 'Verdict'}: {verdict}")
-        elif subsection == "In Scope Issues" and line.startswith("- "):
-            issue = line[2:].strip()
-            if issue != "None.":
-                out.append(f"{section or 'Review'} issue: {issue}")
-        if len(out) >= 5:
-            break
-    return out
+
+    # Line 1: verdict bar — most important signal, shown first.
+    bv = data["business_verdict"]
+    tv = data["technical_verdict"]
+    if bv or tv:
+        out.append(f"Business: {bv or '?'}  |  Technical: {tv or '?'}")
+
+    # Line 2: issue/strength counts — quick scannable summary.
+    count_parts = []
+    for domain, prefix in (("business", "Biz"), ("technical", "Tech")):
+        sec = data[domain]
+        n_issues = len(sec["in_scope_issues"])
+        n_strengths = len(sec["strengths"])
+        if n_issues or n_strengths:
+            parts = []
+            if n_issues:
+                parts.append(f"{n_issues} issue{'s' if n_issues != 1 else ''}")
+            if n_strengths:
+                parts.append(f"{n_strengths} strength{'s' if n_strengths != 1 else ''}")
+            count_parts.append(f"{prefix}: {' · '.join(parts)}")
+    if count_parts:
+        out.append("  ".join(count_parts))
+
+    # Line 3: summary sentence.
+    if data["summary"]:
+        out.append(f"Summary: {data['summary']}")
+
+    # Lines 4+: top in-scope issue per domain, with overflow count.
+    for domain, prefix in (("business", "Biz"), ("technical", "Tech")):
+        issues = data[domain]["in_scope_issues"]
+        if issues:
+            out.append(f"{prefix} issue: {_truncate(issues[0], 72)}")
+            if len(issues) > 1:
+                extra = len(issues) - 1
+                out.append(f"{prefix}: +{extra} more issue{'s' if extra != 1 else ''}")
+
+    # Final line: evidence label distribution when present.
+    labels = data["evidence_labels"]
+    if labels:
+        label_parts = [f"{v}\u00d7{k}" for k, v in sorted(labels.items(), key=lambda x: -x[1])]
+        out.append(f"Evidence: {', '.join(label_parts)}")
+
+    return out[:10]
 
 
 def _short_live_progress_ts(raw: object) -> str:
@@ -1347,6 +1416,7 @@ def build_dashboard_lines(
     ANSI_DIM = "\x1b[2m"
     ANSI_CYAN = "\x1b[36m"
     ANSI_GREEN = "\x1b[32m"
+    ANSI_YELLOW = "\x1b[33m"
     ANSI_RED = "\x1b[31m"
 
     def wrap(code: str, text: str) -> str:
@@ -1382,6 +1452,21 @@ def build_dashboard_lines(
             prefix, suffix = line.split(col_sep, 1)
             if suffix.lstrip().startswith("Failure:"):
                 out[i] = prefix + col_sep + wrap(ANSI_RED, suffix)
+
+    # Verdict word coloring: APPROVE/REQUEST CHANGES/REJECT wherever they appear in snapshot/dials.
+    # Skip out[0] (status bar) to avoid nesting color codes inside REVERSE+BOLD.
+    _VERDICT_COLORS = [
+        ("REQUEST CHANGES", ANSI_YELLOW),
+        ("APPROVE", ANSI_GREEN),
+        ("REJECT", ANSI_RED),
+    ]
+    for i, line in enumerate(out[1:], start=1):
+        new_line = line
+        for verdict_word, color_code in _VERDICT_COLORS:
+            if verdict_word in new_line:
+                new_line = new_line.replace(verdict_word, wrap(color_code, verdict_word))
+        if new_line != line:
+            out[i] = new_line
 
     # Phase markers: colorize phases (left column in wide, full line in narrow).
     if wide:
@@ -1591,12 +1676,20 @@ class Dashboard:
 
     def _run(self) -> None:
         self._setup_tty()
-        last_render = 0.0
-        while not self._state.stop_requested():
-            self._poll_keys()
-            now = time.time()
-            if now - last_render >= self._refresh_interval:
-                meta = self._read_meta()
-                self._render(meta)
-                last_render = now
-            self._state.wait_activity(timeout=self._refresh_interval)
+        # Enter alternate screen buffer so the main scrollback is never touched.
+        self._stderr.write("\x1b[?1049h")
+        self._stderr.flush()
+        try:
+            last_render = 0.0
+            while not self._state.stop_requested():
+                self._poll_keys()
+                now = time.time()
+                if now - last_render >= self._refresh_interval:
+                    meta = self._read_meta()
+                    self._render(meta)
+                    last_render = now
+                self._state.wait_activity(timeout=self._refresh_interval)
+        finally:
+            # Exit alternate screen — terminal snaps back to the original scrollback.
+            self._stderr.write("\x1b[?1049l")
+            self._stderr.flush()

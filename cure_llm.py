@@ -708,7 +708,7 @@ def build_claude_exec_cmd(
         cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
-    cmd.append(prompt)
+    cmd.extend(["--", prompt])
     return cmd
 
 
@@ -2302,7 +2302,19 @@ def prepare_review_agent_runtime(
         )
     elif provider == "claude":
         claude_dir = work_dir / "claude"
-        settings_path = _write_json_file(claude_dir / "settings.json", {})
+        settings_path = _write_json_file(
+            claude_dir / "settings.json",
+            {
+                "permissions": {
+                    "allow": [
+                        "Bash",
+                        "mcp__cure-chunkhound__search",
+                        "mcp__cure-chunkhound__research",
+                        "mcp__cure-chunkhound__code_research",
+                    ]
+                }
+            },
+        )
         runtime["staged_paths"]["claude_settings"] = str(settings_path)
         provider_args: list[str] = ["--setting-sources", "user", "--settings", str(settings_path)]
         for add_dir in add_dirs:
