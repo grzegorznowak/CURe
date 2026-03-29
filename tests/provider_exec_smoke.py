@@ -305,7 +305,7 @@ def run_provider_smoke(
                 "provider": "openai",
                 "endpoint": "responses",
                 "base_url": responses_base_url,
-                "api_key": "smoke-openai-key",
+                "api_key": "smoke-openai-key",  # pragma: allowlist secret
                 "model": "gpt-5-mini",
                 "headers": {},
                 "request": {},
@@ -320,7 +320,7 @@ def run_provider_smoke(
                 "provider": "openrouter",
                 "endpoint": "responses",
                 "base_url": responses_base_url,
-                "api_key": "smoke-openrouter-key",
+                "api_key": "smoke-openrouter-key",  # pragma: allowlist secret
                 "model": "openai/gpt-5-mini",
                 "headers": {
                     "HTTP-Referer": "https://example.test",
