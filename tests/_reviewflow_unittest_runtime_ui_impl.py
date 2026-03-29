@@ -1735,7 +1735,7 @@ class TuiDashboardTests(unittest.TestCase):
                 "--config",
                 "/tmp/reviewflow.toml",
                 "--agent-runtime-profile",
-                "strict",
+                "permissive",
                 "--sandbox-root",
                 "/tmp/sandboxes",
                 "--cache-root",
@@ -1746,7 +1746,7 @@ class TuiDashboardTests(unittest.TestCase):
         )
         self.assertEqual(args2.config_path, "/tmp/reviewflow.toml")
         self.assertFalse(args2.no_config)
-        self.assertEqual(args2.agent_runtime_profile, "strict")
+        self.assertEqual(args2.agent_runtime_profile, "permissive")
         self.assertEqual(args2.sandbox_root, "/tmp/sandboxes")
         self.assertEqual(args2.cache_root, "/tmp/cache")
         self.assertEqual(args2.codex_config_path, "/tmp/codex.toml")
@@ -3104,7 +3104,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                         f'base_config_path = "{base_cfg}"',
                         "",
                         "[agent_runtime]",
-                        'profile = "strict"',
+                        'profile = "permissive"',
                         "",
                         "[llm]",
                         'default_preset = "claude_default"',
@@ -3130,7 +3130,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertTrue(payload["cure_config"]["exists"])
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
-            self.assertEqual(payload["agent_runtime"]["profile"], "strict")
+            self.assertEqual(payload["agent_runtime"]["profile"], "permissive")
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -3421,7 +3421,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                         f'base_config_path = "{base_cfg}"',
                         "",
                         "[agent_runtime]",
-                        'profile = "balanced"',
+                        'profile = "permissive"',
                         "",
                         "[llm]",
                         'default_preset = "gemini_default"',

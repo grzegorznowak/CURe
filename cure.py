@@ -165,8 +165,8 @@ DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_PROMPT_PACKAGE = "prompts"
-AGENT_RUNTIME_PROFILE_CHOICES = ("balanced", "strict", "permissive")
-DEFAULT_AGENT_RUNTIME_PROFILE = "balanced"
+AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
+DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
@@ -2775,13 +2775,7 @@ def prepare_review_agent_runtime(
             resolution_meta=resolution_meta,
             include_sandbox=False,
         )
-        if profile == "balanced":
-            runtime["sandbox_mode"] = "workspace-write"
-            runtime["approval_policy"] = "on-request" if interactive else "never"
-        elif profile == "strict":
-            runtime["sandbox_mode"] = "read-only"
-            runtime["approval_policy"] = "on-request" if interactive else "never"
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["dangerously_bypass_approvals_and_sandbox"] = True
         else:
             raise ReviewflowError(f"Unsupported codex agent runtime profile: {profile!r}")
@@ -2826,11 +2820,7 @@ def prepare_review_agent_runtime(
             )
             runtime["staged_paths"]["claude_mcp_config"] = str(mcp_path)
             provider_args.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
-        if profile == "balanced":
-            runtime["permission_mode"] = "default" if interactive else "dontAsk"
-        elif profile == "strict":
-            runtime["permission_mode"] = "plan"
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["dangerously_skip_permissions"] = True
         else:
             raise ReviewflowError(f"Unsupported claude agent runtime profile: {profile!r}")
@@ -2842,17 +2832,7 @@ def prepare_review_agent_runtime(
         gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
         configured_sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
         seatbelt_profile = str(gemini_cfg.get("seatbelt_profile") or "").strip() or None
-        if profile == "balanced":
-            runtime["approval_mode"] = "auto_edit"
-            env["GEMINI_SANDBOX"] = configured_sandbox or "true"
-        elif profile == "strict":
-            runtime["approval_mode"] = "plan"
-            if not configured_sandbox:
-                raise ReviewflowError(
-                    "Gemini strict agent runtime requires [agent_runtime.gemini].sandbox to be configured."
-                )
-            env["GEMINI_SANDBOX"] = configured_sandbox
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["approval_mode"] = "yolo"
             if configured_sandbox:
                 env["GEMINI_SANDBOX"] = configured_sandbox
@@ -13305,43 +13285,28 @@ def _resolved_doctor_agent_runtime(
     gemini_cfg = runtime_cfg.get("gemini")
     gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
     if provider == "codex":
-        if profile == "permissive":
-            payload.update(
-                {
-                    "dangerously_bypass_approvals_and_sandbox": True,
-                    "sandbox_mode": None,
-                    "approval_policy": None,
-                }
-            )
-        else:
-            payload.update(
-                {
-                    "dangerously_bypass_approvals_and_sandbox": False,
-                    "sandbox_mode": ("read-only" if profile == "strict" else "workspace-write"),
-                    "approval_policy": "never",
-                }
-            )
+        payload.update(
+            {
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "sandbox_mode": None,
+                "approval_policy": None,
+            }
+        )
     elif provider == "claude":
         payload.update(
             {
-                "dangerously_skip_permissions": (profile == "permissive"),
-                "permission_mode": (
-                    None
-                    if profile == "permissive"
-                    else ("plan" if profile == "strict" else "dontAsk")
-                ),
+                "dangerously_skip_permissions": True,
+                "permission_mode": None,
             }
         )
     elif provider == "gemini":
         sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
         payload.update(
             {
-                "approval_mode": (
-                    "plan" if profile == "strict" else ("yolo" if profile == "permissive" else "auto_edit")
-                ),
+                "approval_mode": "yolo",
                 "sandbox": sandbox,
                 "seatbelt_profile": str(gemini_cfg.get("seatbelt_profile") or "").strip() or None,
-                "strict_ready": (bool(sandbox) if profile == "strict" else None),
+                "strict_ready": None,
             }
         )
     return payload
@@ -13524,23 +13489,6 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
                 detail=f"{provider}: {selected.detail}",
             )
         )
-    if provider == "gemini" and str(agent_runtime.get("profile") or "") == "strict":
-        if bool(agent_runtime.get("strict_ready")):
-            checks.append(
-                DoctorCheck(
-                    name="agent-runtime",
-                    status="ok",
-                    detail="gemini strict runtime backend configured",
-                )
-            )
-        else:
-            checks.append(
-                DoctorCheck(
-                    name="agent-runtime",
-                    status="fail",
-                    detail="gemini strict runtime requires [agent_runtime.gemini].sandbox",
-                )
-            )
     checks.append(_doctor_gh_auth_check())
     return checks
 
@@ -13759,7 +13707,7 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="agent_runtime_profile",
         choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
         default=None,
-        help="CURe-owned CLI coding-agent runtime posture (balanced, strict, permissive)",
+        help="CURe-owned CLI coding-agent runtime posture (permissive only)",
     )
 
 

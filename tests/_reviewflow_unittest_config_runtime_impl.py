@@ -1255,7 +1255,7 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[agent_runtime]",
-                        'profile = "strict"',
+                        'profile = "permissive"',
                         "",
                         "[agent_runtime.gemini]",
                         'sandbox = "runsc"',
@@ -1266,10 +1266,10 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             loaded, meta = rf.load_reviewflow_agent_runtime_config(config_path=cfg)
-            self.assertEqual(loaded["profile"], "strict")
+            self.assertEqual(loaded["profile"], "permissive")
             self.assertEqual(loaded["gemini"]["sandbox"], "runsc")
             self.assertEqual(loaded["gemini"]["seatbelt_profile"], "strict-open")
-            self.assertEqual(meta["agent_runtime"]["profile"], "strict")
+            self.assertEqual(meta["agent_runtime"]["profile"], "permissive")
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -1280,7 +1280,7 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[agent_runtime]",
-                        'profile = "strict"',
+                        'profile = "permissive"',
                         "",
                     ]
                 ),
@@ -1291,9 +1291,9 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 config_path=cfg,
                 config_enabled=True,
             )
-            self.assertEqual(profile, "strict")
+            self.assertEqual(profile, "permissive")
             self.assertEqual(source, "config")
-            self.assertEqual(loaded["profile"], "strict")
+            self.assertEqual(loaded["profile"], "permissive")
 
             with mock.patch.dict(
                 os.environ,
@@ -1309,11 +1309,11 @@ class AgentRuntimeConfigTests(unittest.TestCase):
             self.assertEqual(source, "env")
 
             profile, source, _, _ = rf.resolve_agent_runtime_profile(
-                cli_value="balanced",
+                cli_value="permissive",
                 config_path=cfg,
                 config_enabled=True,
             )
-            self.assertEqual(profile, "balanced")
+            self.assertEqual(profile, "permissive")
             self.assertEqual(source, "cli")
 
             profile, source, _, _ = rf.resolve_agent_runtime_profile(
@@ -1321,10 +1321,19 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 config_path=cfg,
                 config_enabled=False,
             )
-            self.assertEqual(profile, "balanced")
+            self.assertEqual(profile, "permissive")
             self.assertEqual(source, "default")
         finally:
             cfg.unlink(missing_ok=True)
+
+    def test_resolve_agent_runtime_profile_rejects_non_permissive_values(self) -> None:
+        for value in ("balanced", "strict"):
+            with self.assertRaises(rf.ReviewflowError):
+                rf.resolve_agent_runtime_profile(
+                    cli_value=value,
+                    config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=False,
+                )
 
 
 class AgentRuntimePolicyTests(unittest.TestCase):
@@ -1366,7 +1375,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
     def _runtime_args(self, *, profile: str | None = None) -> argparse.Namespace:
         return argparse.Namespace(agent_runtime_profile=profile)
 
-    def test_prepare_review_agent_runtime_maps_codex_profiles(self) -> None:
+    def test_prepare_review_agent_runtime_uses_permissive_codex_profile(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex"
         try:
             shutil.rmtree(root, ignore_errors=True)
@@ -1388,74 +1397,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                     clear=False,
                 ),
             ):
-                balanced = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="balanced"),
-                    resolved=self._llm_resolved("codex"),
-                    resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=True,
-                    repo_dir=repo,
-                    session_dir=session,
-                    work_dir=work,
-                    base_env={"PATH": "/usr/bin"},
-                    chunkhound_config_path=work / "chunkhound.json",
-                    chunkhound_db_path=work / ".chunkhound.db",
-                    chunkhound_cwd=work / "chunkhound",
-                    enable_mcp=True,
-                    interactive=False,
-                    paths=rf.DEFAULT_PATHS,
-                )
-                self.assertEqual(balanced["profile"], "balanced")
-                self.assertEqual(balanced["provider"], "codex")
-                self.assertEqual(balanced["sandbox_mode"], "workspace-write")
-                self.assertEqual(balanced["approval_policy"], "never")
-                self.assertFalse(balanced["dangerously_bypass_approvals_and_sandbox"])
-                self.assertEqual(balanced["env"]["CODEX_THREAD_ID"], "thread-123")
-                self.assertEqual(balanced["env"]["CODEX_HOME"], "/tmp/codex-home")
-                self.assertNotIn("CLAUDE_CODE_SESSION", balanced["env"])
-                self.assertIn("CODEX_THREAD_ID", balanced["metadata"]["env_keys"])
-                self.assertIn("--sandbox", balanced["codex_flags"])
-                self.assertIn("workspace-write", balanced["codex_flags"])
-                helper_path = Path(str(balanced["staged_paths"]["chunkhound_helper"]))
-                self.assertTrue(helper_path.is_file())
-                self.assertEqual(helper_path.parent, work / "bin")
-                self.assertEqual(balanced["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
-                self.assertEqual(balanced["env"]["PYTHONSAFEPATH"], "1")
-                self.assertEqual(balanced["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
-                helper_text = helper_path.read_text(encoding="utf-8")
-                self.assertIn("chunkhound mcp", helper_text)
-                self.assertIn("code_research", helper_text)
-                self.assertIn("DaemonDiscovery", helper_text)
-                self.assertIn("chunkhound_runtime_python", helper_text)
-                self.assertFalse(
-                    any(
-                        entry.startswith("mcp_servers.chunkhound.")
-                        for entry in balanced["codex_config_overrides"]
-                    )
-                )
-
-                strict = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="strict"),
-                    resolved=self._llm_resolved("codex"),
-                    resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=True,
-                    repo_dir=repo,
-                    session_dir=session,
-                    work_dir=work,
-                    base_env={"PATH": "/usr/bin"},
-                    chunkhound_config_path=work / "chunkhound.json",
-                    chunkhound_db_path=work / ".chunkhound.db",
-                    chunkhound_cwd=work / "chunkhound",
-                    enable_mcp=True,
-                    interactive=True,
-                    paths=rf.DEFAULT_PATHS,
-                )
-                self.assertEqual(strict["sandbox_mode"], "read-only")
-                self.assertEqual(strict["approval_policy"], "on-request")
-                self.assertFalse(strict["dangerously_bypass_approvals_and_sandbox"])
-
-                permissive = rf.prepare_review_agent_runtime(
+                runtime = rf.prepare_review_agent_runtime(
                     args=self._runtime_args(profile="permissive"),
                     resolved=self._llm_resolved("codex"),
                     resolution_meta=self._llm_resolution_meta(),
@@ -1472,13 +1414,37 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                     interactive=False,
                     paths=rf.DEFAULT_PATHS,
                 )
-                self.assertTrue(permissive["dangerously_bypass_approvals_and_sandbox"])
-                self.assertIsNone(permissive["sandbox_mode"])
-                self.assertIsNone(permissive["approval_policy"])
+                self.assertEqual(runtime["profile"], "permissive")
+                self.assertEqual(runtime["provider"], "codex")
+                self.assertIsNone(runtime["sandbox_mode"])
+                self.assertIsNone(runtime["approval_policy"])
+                self.assertTrue(runtime["dangerously_bypass_approvals_and_sandbox"])
+                self.assertEqual(runtime["env"]["CODEX_THREAD_ID"], "thread-123")
+                self.assertEqual(runtime["env"]["CODEX_HOME"], "/tmp/codex-home")
+                self.assertNotIn("CLAUDE_CODE_SESSION", runtime["env"])
+                self.assertIn("CODEX_THREAD_ID", runtime["metadata"]["env_keys"])
+                self.assertNotIn("--sandbox", runtime["codex_flags"])
+                helper_path = Path(str(runtime["staged_paths"]["chunkhound_helper"]))
+                self.assertTrue(helper_path.is_file())
+                self.assertEqual(helper_path.parent, work / "bin")
+                self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+                self.assertEqual(runtime["env"]["PYTHONSAFEPATH"], "1")
+                self.assertEqual(runtime["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
+                helper_text = helper_path.read_text(encoding="utf-8")
+                self.assertIn("chunkhound mcp", helper_text)
+                self.assertIn("code_research", helper_text)
+                self.assertIn("DaemonDiscovery", helper_text)
+                self.assertIn("chunkhound_runtime_python", helper_text)
+                self.assertFalse(
+                    any(
+                        entry.startswith("mcp_servers.chunkhound.")
+                        for entry in runtime["codex_config_overrides"]
+                    )
+                )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_prepare_review_agent_runtime_maps_claude_profiles_and_stages_files(self) -> None:
+    def test_prepare_review_agent_runtime_uses_permissive_claude_profile_and_stages_files(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_claude"
         try:
             shutil.rmtree(root, ignore_errors=True)
@@ -1501,7 +1467,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 ),
             ):
                 runtime = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="balanced"),
+                    args=self._runtime_args(profile="permissive"),
                     resolved=self._llm_resolved("claude"),
                     resolution_meta=self._llm_resolution_meta(),
                     reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
@@ -1517,9 +1483,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                     interactive=False,
                     paths=rf.DEFAULT_PATHS,
                 )
-            self.assertEqual(runtime["profile"], "balanced")
-            self.assertEqual(runtime["permission_mode"], "dontAsk")
-            self.assertFalse(runtime["dangerously_skip_permissions"])
+            self.assertEqual(runtime["profile"], "permissive")
+            self.assertIsNone(runtime["permission_mode"])
+            self.assertTrue(runtime["dangerously_skip_permissions"])
             self.assertEqual(runtime["env"]["CLAUDE_CODE_SESSION"], "claude-session-123")
             self.assertEqual(runtime["env"]["CLAUDE_HOME"], "/tmp/claude-home")
             self.assertNotIn("CODEX_THREAD_ID", runtime["env"])
@@ -1532,17 +1498,21 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 prompt="hello",
                 runtime_policy=runtime,
             )
+            self.assertIn("--verbose", cmd)
+            self.assertIn("--include-partial-messages", cmd)
+            self.assertIn("--output-format", cmd)
+            self.assertIn("stream-json", cmd)
             self.assertIn("--setting-sources", cmd)
             self.assertIn("user", cmd)
             self.assertIn("--settings", cmd)
             self.assertIn("--strict-mcp-config", cmd)
-            self.assertIn("--permission-mode", cmd)
-            self.assertIn("dontAsk", cmd)
+            self.assertIn("--dangerously-skip-permissions", cmd)
+            self.assertNotIn("--permission-mode", cmd)
             self.assertIn("--add-dir", cmd)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_prepare_review_agent_runtime_maps_gemini_profiles_and_stages_files(self) -> None:
+    def test_prepare_review_agent_runtime_uses_permissive_gemini_profile_and_stages_files(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_gemini"
         cfg = ROOT / ".tmp_test_agent_runtime_gemini.toml"
         try:
@@ -1565,48 +1535,6 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             )
 
             with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
-                balanced = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="balanced"),
-                    resolved=self._llm_resolved("gemini"),
-                    resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=cfg,
-                    config_enabled=True,
-                    repo_dir=repo,
-                    session_dir=session,
-                    work_dir=work,
-                    base_env={"PATH": "/usr/bin"},
-                    chunkhound_config_path=work / "chunkhound.json",
-                    chunkhound_db_path=work / ".chunkhound.db",
-                    chunkhound_cwd=work / "chunkhound",
-                    enable_mcp=True,
-                    interactive=False,
-                    paths=rf.DEFAULT_PATHS,
-                )
-                self.assertEqual(balanced["approval_mode"], "auto_edit")
-                self.assertTrue(Path(balanced["staged_paths"]["gemini_system_settings"]).is_file())
-                self.assertTrue(Path(balanced["staged_paths"]["gemini_trusted_folders"]).is_file())
-                self.assertEqual(balanced["env"]["GEMINI_SANDBOX"], "runsc")
-
-                strict = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="strict"),
-                    resolved=self._llm_resolved("gemini"),
-                    resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=cfg,
-                    config_enabled=True,
-                    repo_dir=repo,
-                    session_dir=session,
-                    work_dir=work,
-                    base_env={"PATH": "/usr/bin"},
-                    chunkhound_config_path=work / "chunkhound.json",
-                    chunkhound_db_path=work / ".chunkhound.db",
-                    chunkhound_cwd=work / "chunkhound",
-                    enable_mcp=True,
-                    interactive=False,
-                    paths=rf.DEFAULT_PATHS,
-                )
-                self.assertEqual(strict["approval_mode"], "plan")
-                self.assertEqual(strict["env"]["SEATBELT_PROFILE"], "strict-open")
-
                 permissive = rf.prepare_review_agent_runtime(
                     args=self._runtime_args(profile="permissive"),
                     resolved=self._llm_resolved("gemini"),
@@ -1625,6 +1553,10 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                     paths=rf.DEFAULT_PATHS,
                 )
                 self.assertEqual(permissive["approval_mode"], "yolo")
+                self.assertTrue(Path(permissive["staged_paths"]["gemini_system_settings"]).is_file())
+                self.assertTrue(Path(permissive["staged_paths"]["gemini_trusted_folders"]).is_file())
+                self.assertEqual(permissive["env"]["GEMINI_SANDBOX"], "runsc")
+                self.assertEqual(permissive["env"]["SEATBELT_PROFILE"], "strict-open")
                 cmd = rf.build_gemini_exec_cmd(
                     command="gemini",
                     model="gemini-2.5-pro",
@@ -1636,41 +1568,6 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
-
-    def test_prepare_review_agent_runtime_rejects_gemini_strict_without_hardened_backend(self) -> None:
-        root = ROOT / ".tmp_test_agent_runtime_gemini_strict_fail"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            repo = root / "repo"
-            session = root / "session"
-            work = session / "work"
-            repo.mkdir(parents=True, exist_ok=True)
-            work.mkdir(parents=True, exist_ok=True)
-
-            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
-                with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.prepare_review_agent_runtime(
-                        args=self._runtime_args(profile="strict"),
-                        resolved=self._llm_resolved("gemini"),
-                        resolution_meta=self._llm_resolution_meta(),
-                        reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                        config_enabled=True,
-                        repo_dir=repo,
-                        session_dir=session,
-                        work_dir=work,
-                        base_env={"PATH": "/usr/bin"},
-                        chunkhound_config_path=work / "chunkhound.json",
-                        chunkhound_db_path=work / ".chunkhound.db",
-                        chunkhound_cwd=work / "chunkhound",
-                        enable_mcp=True,
-                        interactive=False,
-                        paths=rf.DEFAULT_PATHS,
-                    )
-            self.assertIn("strict", str(ctx.exception))
-            self.assertIn("Gemini", str(ctx.exception))
-            self.assertIn("sandbox", str(ctx.exception))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
 
     def test_prepare_review_agent_runtime_hard_fails_when_provider_binary_missing(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_missing_binary"
@@ -1689,7 +1586,7 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.prepare_review_agent_runtime(
-                        args=self._runtime_args(profile="balanced"),
+                        args=self._runtime_args(profile="permissive"),
                         resolved=self._llm_resolved("claude"),
                         resolution_meta=self._llm_resolution_meta(),
                         reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
@@ -1743,3 +1640,184 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(request["json"]["reasoning"]["effort"], "high")
         self.assertEqual(request["json"]["max_output_tokens"], 9000)
         self.assertEqual(request["json"]["provider"]["sort"], "latency")
+
+
+class ClaudeLiveProgressTests(unittest.TestCase):
+    class _StubProgress:
+        def __init__(self) -> None:
+            self.meta: dict[str, object] = {}
+
+        def flush(self) -> None:
+            return None
+
+    def test_record_text_cli_live_output_updates_claude_progress(self) -> None:
+        progress = self._StubProgress()
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._record_text_cli_live_output(
+            progress=progress,
+            provider="claude",
+            text="Analyzing diff\nPlanning findings\n",
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["provider"], "claude")
+        self.assertEqual(live["source"], "claude_exec_text")
+        self.assertEqual(live["status"], "running")
+        self.assertEqual(live["current"]["text"], "Planning findings")
+        self.assertEqual(
+            [item["text"] for item in live["timeline"][-2:]],
+            ["Analyzing diff", "Planning findings"],
+        )
+
+    def test_record_text_cli_live_output_ignores_json_payload_lines(self) -> None:
+        progress = self._StubProgress()
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._record_text_cli_live_output(
+            progress=progress,
+            provider="claude",
+            text='{"result":"# Review","session_id":"abc"}\n',
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Claude CLI started.")
+        self.assertEqual(
+            [item["text"] for item in live["timeline"]],
+            ["Claude CLI started."],
+        )
+
+    def test_parse_claude_stream_payload_extracts_result_session_and_usage(self) -> None:
+        payload = cure_llm._parse_claude_stream_payload(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "hello world"},
+                                ],
+                                "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "hello world",
+                            "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                        }
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(payload["session_id"], "claude-session")
+        self.assertEqual(payload["result"], "hello world")
+        self.assertEqual(payload["usage"]["total_tokens"], 6)
+
+    def test_handle_claude_stream_chunk_updates_current_text_from_deltas(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "delta": {"type": "text_delta", "text": "Drafting"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "delta": {"type": "text_delta", "text": " review"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Drafting review")
+
+    def test_handle_claude_stream_chunk_surfaces_thinking_and_tool_use_progress(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "thinking_delta", "thinking": "Let me inspect the repo."},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"ls\",\"description\":\"List files\"}",
+                                },
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Bash: ls")
+        timeline_texts = [item["text"] for item in live["timeline"]]
+        self.assertIn("Thinking…", timeline_texts)
+        self.assertIn("Using Bash", timeline_texts)

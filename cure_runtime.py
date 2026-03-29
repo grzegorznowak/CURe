@@ -36,8 +36,8 @@ LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
-AGENT_RUNTIME_PROFILE_CHOICES = ("balanced", "strict", "permissive")
-DEFAULT_AGENT_RUNTIME_PROFILE = "balanced"
+AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
+DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
@@ -2499,41 +2499,28 @@ def _resolved_doctor_agent_runtime(
     gemini_cfg = runtime_cfg.get("gemini")
     gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
     if provider == "codex":
-        if profile == "permissive":
-            payload.update(
-                {
-                    "dangerously_bypass_approvals_and_sandbox": True,
-                    "sandbox_mode": None,
-                    "approval_policy": None,
-                }
-            )
-        else:
-            payload.update(
-                {
-                    "dangerously_bypass_approvals_and_sandbox": False,
-                    "sandbox_mode": ("read-only" if profile == "strict" else "workspace-write"),
-                    "approval_policy": "never",
-                }
-            )
+        payload.update(
+            {
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "sandbox_mode": None,
+                "approval_policy": None,
+            }
+        )
     elif provider == "claude":
         payload.update(
             {
-                "dangerously_skip_permissions": (profile == "permissive"),
-                "permission_mode": (
-                    None if profile == "permissive" else ("plan" if profile == "strict" else "dontAsk")
-                ),
+                "dangerously_skip_permissions": True,
+                "permission_mode": None,
             }
         )
     elif provider == "gemini":
         sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
         payload.update(
             {
-                "approval_mode": (
-                    "plan" if profile == "strict" else ("yolo" if profile == "permissive" else "auto_edit")
-                ),
+                "approval_mode": "yolo",
                 "sandbox": sandbox,
                 "seatbelt_profile": str(gemini_cfg.get("seatbelt_profile") or "").strip() or None,
-                "strict_ready": (bool(sandbox) if profile == "strict" else None),
+                "strict_ready": None,
             }
         )
     return payload
