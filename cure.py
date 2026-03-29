@@ -4750,6 +4750,16 @@ def _citation_records(text: str) -> list[dict[str, Any]]:
     return citations
 
 
+def _trailing_grounding_suffix_text(text: str, label: str) -> str:
+    marker = f"{label}:"
+    head, sep, tail = text.rpartition(marker)
+    if not sep:
+        return ""
+    if not head.strip() or not tail.strip():
+        return ""
+    return tail.strip()
+
+
 def _resolve_grounding_path(*, root_dir: Path, relative_path: str) -> Path | None:
     rel = str(relative_path or "").strip()
     if not rel:
@@ -4883,7 +4893,8 @@ def validate_multipass_step_grounding(
         body = bullet[2:].strip()
         if body == "None.":
             continue
-        bullet_citations = _citation_records(body)
+        evidence_suffix = _trailing_grounding_suffix_text(body, "Evidence")
+        bullet_citations = _citation_records(evidence_suffix)
         if not bullet_citations:
             errors.append(f"Findings bullet #{bullet_index} is missing a repo citation.")
             continue
@@ -4963,7 +4974,8 @@ def validate_multipass_synth_grounding(
             body = bullet[2:].strip()
             if body == "None.":
                 continue
-            bullet_citations = _citation_records(body)
+            sources_suffix = _trailing_grounding_suffix_text(body, "Sources")
+            bullet_citations = _citation_records(sources_suffix)
             if not bullet_citations:
                 errors.append(f"Section '### {title}' bullet #{bullet_index} is missing a primary-evidence citation.")
                 continue

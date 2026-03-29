@@ -634,6 +634,46 @@ class MultipassGroundingValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_multipass_step_grounding_ignores_inline_word_number_prose(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_inline_word_number_prose"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Findings",
+                        "- Listener repro used `tcp:127.0.0.1:0` and still points to the real file. Evidence: `pkg/module.py:2`",
+                        "",
+                        "### Suggested actions",
+                        "- Add validation",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(len(result["citations"]), 1)
+            self.assertEqual(result["citations"][0]["path"], "pkg/module.py")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_multipass_step_grounding_accepts_dot_prefixed_repo_citation(self) -> None:
         root = ROOT / ".tmp_test_step_grounding_dot_path"
         try:
@@ -817,6 +857,89 @@ class MultipassGroundingValidationTests(unittest.TestCase):
             self.assertTrue(result["valid"])
             self.assertEqual(result["errors"], [])
             self.assertTrue(any(citation["counts_as_primary"] for citation in result["citations"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_synth_grounding_ignores_inline_word_number_prose(self) -> None:
+        root = ROOT / ".tmp_test_synth_grounding_inline_word_number_prose"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            session_dir = root / "session"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            (repo_dir / "tests").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "tests" / "test_module.py").write_text("x\ny\nz\n", encoding="utf-8")
+            (work_dir / "pr-context.md").write_text("context\nmore context\n", encoding="utf-8")
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value stayed stable after `tcp:127.0.0.1:0` repro notes. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened after `tcp:127.0.0.1:0` checks. Sources: `work/pr-context.md:1`",
+                        "",
+                        "### In Scope Issues",
+                        "- Provenance is present despite `tcp:127.0.0.1:0` in prose. Sources: `pkg/module.py:3`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable after `tcp:127.0.0.1:0` repro. Sources: `tests/test_module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(
+                [citation["path"] for citation in result["citations"]],
+                ["pkg/module.py", "work/pr-context.md", "pkg/module.py", "tests/test_module.py"],
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
