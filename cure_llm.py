@@ -9,7 +9,7 @@ import shlex
 import shutil
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from cure_errors import ReviewflowError
 from cure_flows import chunkhound_env, ensure_review_config, materialize_chunkhound_env_config
@@ -139,6 +139,316 @@ def _flush_progress(progress: Any) -> None:
             flush()
         except Exception:
             pass
+
+
+def _compact_live_progress_text(text: object, *, max_chars: int = 240) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 1:
+        return value[:max_chars]
+    return value[: max_chars - 1] + "…"
+
+
+def _looks_like_json_payload_line(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw or not raw.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False
+    return isinstance(parsed, dict)
+
+
+def _ensure_text_cli_live_progress(*, progress: Any, provider: str, label: str) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None:
+        return
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    text = _compact_live_progress_text(label)
+    current = {"type": "provider_status", "text": text, "ts": timestamp}
+    live = meta.get("live_progress") if isinstance(meta.get("live_progress"), dict) else {}
+    live["source"] = f"{provider}_exec_text"
+    live["provider"] = provider
+    live["status"] = "running"
+    live["updated_at"] = timestamp
+    live["current"] = current
+    timeline = list(live.get("timeline")) if isinstance(live.get("timeline"), list) else []
+    last = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+    if last.get("text") != text or last.get("type") != "provider_status":
+        timeline.append(current)
+    if len(timeline) > _LIVE_PROGRESS_TIMELINE_MAX:
+        timeline = timeline[-_LIVE_PROGRESS_TIMELINE_MAX:]
+    live["timeline"] = timeline
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _set_text_cli_live_current(
+    *,
+    progress: Any,
+    provider: str,
+    text: str,
+    event_type: str = "provider_output",
+    add_timeline: bool = False,
+) -> None:
+    meta = _progress_meta_dict(progress)
+    raw = str(text or "").strip()
+    if meta is None or not raw:
+        return
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    item = {"type": event_type, "text": _compact_live_progress_text(raw), "ts": timestamp}
+    live = meta.get("live_progress") if isinstance(meta.get("live_progress"), dict) else {}
+    live["source"] = f"{provider}_exec_text"
+    live["provider"] = provider
+    live["status"] = "running"
+    live["updated_at"] = timestamp
+    live["current"] = item
+    if add_timeline:
+        timeline = list(live.get("timeline")) if isinstance(live.get("timeline"), list) else []
+        last = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+        if last.get("text") != item["text"] or last.get("type") != event_type:
+            timeline.append(item)
+        if len(timeline) > _LIVE_PROGRESS_TIMELINE_MAX:
+            timeline = timeline[-_LIVE_PROGRESS_TIMELINE_MAX:]
+        live["timeline"] = timeline
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _record_text_cli_live_output(*, progress: Any, provider: str, text: str) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None or not text:
+        return
+    lines: list[str] = []
+    for raw_line in str(text).splitlines():
+        raw = str(raw_line or "").strip()
+        if not raw or _looks_like_json_payload_line(raw):
+            continue
+        line = _compact_live_progress_text(raw)
+        lines.append(line)
+    if not lines:
+        return
+
+    live = meta.get("live_progress") if isinstance(meta.get("live_progress"), dict) else {}
+    live["source"] = f"{provider}_exec_text"
+    live["provider"] = provider
+    live["status"] = "running"
+    timeline = list(live.get("timeline")) if isinstance(live.get("timeline"), list) else []
+    current = live.get("current") if isinstance(live.get("current"), dict) else {}
+    for line in lines:
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        item = {"type": "provider_output", "text": line, "ts": timestamp}
+        last = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+        if last.get("text") != line or last.get("type") != "provider_output":
+            timeline.append(item)
+        current = item
+        live["updated_at"] = timestamp
+    if len(timeline) > _LIVE_PROGRESS_TIMELINE_MAX:
+        timeline = timeline[-_LIVE_PROGRESS_TIMELINE_MAX:]
+    live["timeline"] = timeline
+    live["current"] = current
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _finalize_text_cli_live_progress(*, progress: Any, provider: str, status: str) -> None:
+    meta = _progress_meta_dict(progress)
+    if meta is None:
+        return
+    live = meta.get("live_progress")
+    if not isinstance(live, dict) or str(live.get("provider") or "").strip() != provider:
+        return
+    live["status"] = str(status or "done")
+    live["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    meta["live_progress"] = live
+    _flush_progress(progress)
+
+
+def _extract_claude_text_from_message(message: dict[str, Any] | None) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    chunks: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() != "text":
+            continue
+        text = str(item.get("text") or "")
+        if text:
+            chunks.append(text)
+    return "".join(chunks).strip()
+
+
+def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
+    result_payload: dict[str, Any] = {}
+    assistant_payload: dict[str, Any] = {}
+    session_id = ""
+    for raw_line in str(text or "").splitlines():
+        raw = str(raw_line or "").strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        session_id = str(payload.get("session_id") or session_id).strip()
+        payload_type = str(payload.get("type") or "").strip()
+        if payload_type == "assistant":
+            assistant_payload = payload
+        elif payload_type == "result":
+            result_payload = payload
+        elif ("result" in payload) and result_payload == {}:
+            result_payload = payload
+    if result_payload:
+        if session_id and not str(result_payload.get("session_id") or "").strip():
+            result_payload["session_id"] = session_id
+        return result_payload
+
+    assistant_text = _extract_claude_text_from_message(assistant_payload.get("message"))
+    payload: dict[str, Any] = {}
+    if assistant_text:
+        payload["result"] = assistant_text
+    if session_id:
+        payload["session_id"] = session_id
+    usage = _extract_usage_from_payload(assistant_payload)
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
+    name = str(tool_name or "Tool").strip() or "Tool"
+    raw = str(input_payload or "").strip()
+    if not raw:
+        return f"Using {name}"
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        command = str(parsed.get("command") or "").strip()
+        description = str(parsed.get("description") or "").strip()
+        if name == "Bash" and command:
+            return f"Bash: {command}"
+        if description:
+            return f"{name}: {description}"
+        if command:
+            return f"{name}: {command}"
+    return f"Using {name}"
+
+
+def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, str], chunk: str) -> None:
+    for raw_line in str(chunk or "").splitlines():
+        raw = str(raw_line or "").strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            _record_text_cli_live_output(progress=progress, provider="claude", text=raw)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_type = str(payload.get("type") or "").strip()
+        if payload_type == "user":
+            tool_result = payload.get("tool_use_result")
+            tool_result = tool_result if isinstance(tool_result, dict) else {}
+            stdout_text = str(tool_result.get("stdout") or "").strip()
+            stderr_text = str(tool_result.get("stderr") or "").strip()
+            summary = stdout_text.splitlines()[0] if stdout_text else (stderr_text.splitlines()[0] if stderr_text else "")
+            if summary:
+                _set_text_cli_live_current(
+                    progress=progress,
+                    provider="claude",
+                    text=f"Tool result: {summary}",
+                    add_timeline=True,
+                )
+            continue
+        if payload_type != "stream_event":
+            continue
+        event = payload.get("event")
+        event = event if isinstance(event, dict) else {}
+        event_type = str(event.get("type") or "").strip()
+        index = str(event.get("index") or "")
+        block_key = f"block_{index}" if index else ""
+        if event_type == "content_block_start":
+            content_block = event.get("content_block")
+            content_block = content_block if isinstance(content_block, dict) else {}
+            block_type = str(content_block.get("type") or "").strip()
+            if block_key:
+                state[f"{block_key}_type"] = block_type
+            if block_type == "thinking":
+                if block_key:
+                    state[f"{block_key}_text"] = ""
+                _set_text_cli_live_current(
+                    progress=progress,
+                    provider="claude",
+                    text="Thinking…",
+                    event_type="provider_status",
+                    add_timeline=True,
+                )
+            elif block_type == "tool_use":
+                tool_name = str(content_block.get("name") or "Tool").strip() or "Tool"
+                if block_key:
+                    state[f"{block_key}_name"] = tool_name
+                    state[f"{block_key}_input"] = ""
+                _set_text_cli_live_current(
+                    progress=progress,
+                    provider="claude",
+                    text=f"Using {tool_name}",
+                    add_timeline=True,
+                )
+            elif block_type == "text" and block_key:
+                state[f"{block_key}_text"] = ""
+            continue
+
+        if event_type != "content_block_delta":
+            continue
+        delta = event.get("delta")
+        delta = delta if isinstance(delta, dict) else {}
+        delta_type = str(delta.get("type") or "").strip()
+        if delta_type == "text_delta":
+            delta_text = str(delta.get("text") or "")
+            if not delta_text:
+                continue
+            state["content"] = str(state.get("content") or "") + delta_text
+            _set_text_cli_live_current(progress=progress, provider="claude", text=state["content"])
+            continue
+        if delta_type == "thinking_delta":
+            delta_text = str(delta.get("thinking") or "")
+            if not delta_text:
+                continue
+            if block_key:
+                state[f"{block_key}_text"] = str(state.get(f"{block_key}_text") or "") + delta_text
+                current = str(state.get(f"{block_key}_text") or "").strip()
+            else:
+                current = delta_text
+            if current:
+                _set_text_cli_live_current(
+                    progress=progress,
+                    provider="claude",
+                    text=f"Thinking: {current}",
+                )
+            continue
+        if delta_type == "input_json_delta":
+            partial_json = str(delta.get("partial_json") or "")
+            if not partial_json:
+                continue
+            if block_key:
+                state[f"{block_key}_input"] = str(state.get(f"{block_key}_input") or "") + partial_json
+                tool_name = str(state.get(f"{block_key}_name") or "Tool")
+                current = _format_claude_tool_progress(
+                    tool_name=tool_name,
+                    input_payload=str(state.get(f"{block_key}_input") or ""),
+                )
+                _set_text_cli_live_current(progress=progress, provider="claude", text=current)
 
 
 def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
@@ -676,7 +986,13 @@ def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
-def _run_logged_text_command(*, cmd: list[str], cwd: Path, env: dict[str, str]):
+def _run_logged_text_command(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    stream_text_callback: Callable[[str], None] | None = None,
+):
     out = active_output()
     if out is not None:
         return out.run_logged_cmd(
@@ -686,6 +1002,7 @@ def _run_logged_text_command(*, cmd: list[str], cwd: Path, env: dict[str, str]):
             env=env,
             check=True,
             stream_requested=False,
+            stream_text_callback=stream_text_callback,
         )
     return run_cmd(cmd, cwd=cwd, env=env, check=True, stream=False, stream_label="codex")
 
@@ -697,7 +1014,14 @@ def build_claude_exec_cmd(
     prompt: str,
     runtime_policy: dict[str, Any] | None = None,
 ) -> list[str]:
-    cmd = [command, "--print", "--output-format", "json"]
+    cmd = [
+        command,
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+    ]
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     provider_args = policy.get("provider_args")
     if isinstance(provider_args, list):
@@ -754,8 +1078,24 @@ def run_claude_exec(
         runtime_policy=runtime_policy,
     )
     progress.record_cmd(cmd)
-    result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
-    payload = _extract_json_object(result.stdout) or {}
+    _ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+    stream_state: dict[str, str] = {"content": ""}
+    try:
+        result = _run_logged_text_command(
+            cmd=cmd,
+            cwd=repo_dir,
+            env=env,
+            stream_text_callback=lambda chunk: _handle_claude_stream_chunk(
+                progress=progress,
+                state=stream_state,
+                chunk=chunk,
+            ),
+        )
+    except Exception:
+        _finalize_text_cli_live_progress(progress=progress, provider="claude", status="error")
+        raise
+    _finalize_text_cli_live_progress(progress=progress, provider="claude", status="done")
+    payload = _parse_claude_stream_payload(result.stdout)
     text = str(payload.get("result") or result.stdout or "").strip()
     if not text:
         raise ReviewflowError("Claude did not return any printable review output.")
@@ -822,7 +1162,22 @@ def run_gemini_exec(
         runtime_policy=runtime_policy,
     )
     progress.record_cmd(cmd)
-    result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
+    _ensure_text_cli_live_progress(progress=progress, provider="gemini", label="Gemini CLI started.")
+    try:
+        result = _run_logged_text_command(
+            cmd=cmd,
+            cwd=repo_dir,
+            env=env,
+            stream_text_callback=lambda chunk: _record_text_cli_live_output(
+                progress=progress,
+                provider="gemini",
+                text=chunk,
+            ),
+        )
+    except Exception:
+        _finalize_text_cli_live_progress(progress=progress, provider="gemini", status="error")
+        raise
+    _finalize_text_cli_live_progress(progress=progress, provider="gemini", status="done")
     payload = _extract_json_object(result.stdout)
     text = str((payload or {}).get("response") or result.stdout or "").strip()
     if not text:
@@ -2277,13 +2632,7 @@ def prepare_review_agent_runtime(
             env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
             runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
         codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta, include_sandbox=False)
-        if profile == "balanced":
-            runtime["sandbox_mode"] = "workspace-write"
-            runtime["approval_policy"] = "on-request" if interactive else "never"
-        elif profile == "strict":
-            runtime["sandbox_mode"] = "read-only"
-            runtime["approval_policy"] = "on-request" if interactive else "never"
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["dangerously_bypass_approvals_and_sandbox"] = True
         else:
             raise ReviewflowError(f"Unsupported codex agent runtime profile: {profile!r}")
@@ -2335,11 +2684,7 @@ def prepare_review_agent_runtime(
             )
             runtime["staged_paths"]["claude_mcp_config"] = str(mcp_path)
             provider_args.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
-        if profile == "balanced":
-            runtime["permission_mode"] = "default" if interactive else "dontAsk"
-        elif profile == "strict":
-            runtime["permission_mode"] = "plan"
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["dangerously_skip_permissions"] = True
         else:
             raise ReviewflowError(f"Unsupported claude agent runtime profile: {profile!r}")
@@ -2351,17 +2696,7 @@ def prepare_review_agent_runtime(
         gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
         configured_sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
         seatbelt_profile = str(gemini_cfg.get("seatbelt_profile") or "").strip() or None
-        if profile == "balanced":
-            runtime["approval_mode"] = "auto_edit"
-            env["GEMINI_SANDBOX"] = configured_sandbox or "true"
-        elif profile == "strict":
-            runtime["approval_mode"] = "plan"
-            if not configured_sandbox:
-                raise ReviewflowError(
-                    "Gemini strict agent runtime requires [agent_runtime.gemini].sandbox to be configured."
-                )
-            env["GEMINI_SANDBOX"] = configured_sandbox
-        elif profile == "permissive":
+        if profile == "permissive":
             runtime["approval_mode"] = "yolo"
             if configured_sandbox:
                 env["GEMINI_SANDBOX"] = configured_sandbox

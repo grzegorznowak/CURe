@@ -12,6 +12,7 @@ python3 -m py_compile \
   "$repo_root/prompts/__init__.py"
 
 python3 -m unittest discover -s "$repo_root/tests" -p 'test_*.py'
+python3 "$repo_root/tests/provider_exec_smoke.py"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
