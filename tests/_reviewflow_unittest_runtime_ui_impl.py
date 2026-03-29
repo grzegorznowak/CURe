@@ -3400,7 +3400,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_doctor_flow_skips_executor_network_advisory_for_gemini(self) -> None:
+    def test_doctor_flow_raises_clear_error_for_removed_gemini_preset(self) -> None:
         root = ROOT / ".tmp_test_doctor_executor_network_gemini"
         cfg = root / "reviewflow.toml"
         base_cfg = root / "chunkhound.json"
@@ -3434,41 +3434,10 @@ class InstallAndDoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
-            stdout = StringIO()
-
-            def fake_which(name: str) -> str | None:
-                return {
-                    "chunkhound": f"/usr/bin/{name}",
-                    "gh": f"/usr/bin/{name}",
-                    "jira": f"/usr/bin/{name}",
-                    "codex": f"/usr/bin/{name}",
-                    "gemini": f"/usr/bin/{name}",
-                }.get(name)
-
-            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
-                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
-                    return mock.Mock(stdout="", stderr="", exit_code=0)
-                raise AssertionError(f"unexpected runtime command: {cmd}")
-
-            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
-                rf,
-                "_default_jira_config_path",
-                return_value=root / ".tmp_missing_jira.yml",
-            ), mock.patch.object(cure_runtime, "run_cmd", side_effect=fake_runtime_run_cmd), mock.patch.object(
-                rf,
-                "run_cmd",
-                side_effect=RuntimeError("not a git worktree"),
-            ), mock.patch.object(
-                cure_runtime.Path,
-                "cwd",
-                return_value=root,
-            ), mock.patch("sys.stdout", stdout):
-                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
-
-            self.assertEqual(rc, 0)
-            payload = json.loads(stdout.getvalue())
-            check_names = {item["name"] for item in payload["checks"]}
-            self.assertNotIn("executor-network", check_names)
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
+            self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
+            self.assertIn("gemini_default", str(ctx.exception))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

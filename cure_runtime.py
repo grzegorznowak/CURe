@@ -31,7 +31,7 @@ DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
+CLI_LLM_PROVIDERS = ("codex", "claude")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
@@ -41,7 +41,6 @@ DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
-    "gemini-cli",
     "openai-responses",
     "openrouter-responses",
 )
@@ -51,11 +50,6 @@ CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
     "FORCE_COLOR",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_GENAI_USE_VERTEXAI",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -860,6 +854,14 @@ def _string_list(raw: object) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+def _raise_removed_gemini_support(*, context: str) -> None:
+    supported = ", ".join(BUILTIN_LLM_PRESET_IDS)
+    raise ReviewflowError(
+        "Gemini support was removed from CURe. "
+        f"{context} Use supported presets instead: {supported}."
+    )
+
+
 def builtin_llm_presets() -> dict[str, dict[str, Any]]:
     return {
         "codex-cli": {
@@ -883,22 +885,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "transport": "cli",
             "provider": "claude",
             "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
-        "gemini-cli": {
-            "transport": "cli",
-            "provider": "gemini",
-            "command": "gemini",
             "endpoint": None,
             "base_url": None,
             "api_key": None,
@@ -951,8 +937,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
         return "codex-cli"
     if transport == "cli" and provider == "claude" and command in {"", "claude"}:
         return "claude-cli"
-    if transport == "cli" and provider == "gemini" and command in {"", "gemini"}:
-        return "gemini-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1021,19 +1005,27 @@ def load_reviewflow_llm_config(
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
     default_preset = str(llm.get("default_preset") or "").strip() or None
+    if default_preset == "gemini-cli":
+        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
 
     presets_raw = raw.get("llm_presets", {}) if isinstance(raw, dict) else {}
     presets_raw = presets_raw if isinstance(presets_raw, dict) else {}
     presets: dict[str, dict[str, Any]] = {}
     deprecated_explicit_presets: list[str] = []
     invalid_mixed_presets: list[str] = []
+    removed_gemini_presets: list[str] = []
     for raw_name, raw_preset in presets_raw.items():
         name = str(raw_name or "").strip()
         if not name or not isinstance(raw_preset, dict):
             continue
         builtin_id = str(raw_preset.get("preset") or "").strip()
+        transport = str(raw_preset.get("transport") or "").strip().lower()
+        provider = str(raw_preset.get("provider") or "").strip().lower()
         removed_keys = {"transport", "provider", "endpoint", "base_url", "command"}
         present_removed = [key for key in removed_keys if key in raw_preset]
+        if builtin_id == "gemini-cli" or (transport == "cli" and provider == "gemini"):
+            removed_gemini_presets.append(name)
+            continue
         if builtin_id:
             if present_removed:
                 invalid_mixed_presets.append(name)
@@ -1055,6 +1047,13 @@ def load_reviewflow_llm_config(
         raise ReviewflowError(
             "llm preset blocks cannot mix `preset = ...` with explicit transport/provider/command/base_url/endpoint "
             f"fields: {', '.join(sorted(invalid_mixed_presets))}"
+        )
+    if removed_gemini_presets:
+        _raise_removed_gemini_support(
+            context=(
+                "Remove or migrate Gemini llm preset blocks: "
+                f"{', '.join(sorted(removed_gemini_presets))}."
+            ),
         )
 
     cfg = {"default_preset": default_preset, "presets": presets}
@@ -1088,26 +1087,18 @@ def load_reviewflow_agent_runtime_config(
     raw = load_toml(path)
     section = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
     section = section if isinstance(section, dict) else {}
-    gemini = section.get("gemini", {})
-    gemini = gemini if isinstance(gemini, dict) else {}
+    if "gemini" in section:
+        _raise_removed_gemini_support(
+            context="Remove the `[agent_runtime.gemini]` block from the CURe config.",
+        )
 
     profile = _normalize_agent_runtime_profile(section.get("profile"), source="config")
-    sandbox = str(gemini.get("sandbox") or "").strip() or None
-    seatbelt_profile = str(gemini.get("seatbelt_profile") or "").strip() or None
-
-    cfg = {
-        "profile": profile,
-        "gemini": {
-            "sandbox": sandbox,
-            "seatbelt_profile": seatbelt_profile,
-        },
-    }
+    cfg = {"profile": profile}
     meta = {
         "config_path": str(path),
         "loaded": bool(raw),
         "agent_runtime": {
             "profile": profile,
-            "gemini": dict(cfg["gemini"]),
         },
     }
     return cfg, meta
@@ -1192,6 +1183,8 @@ def resolve_llm_config(
 
     selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
     preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
+    if selected_name == "gemini-cli":
+        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
     if selected_name:
         if selected_name in presets:
             base_preset = dict(presets[selected_name])
@@ -2461,7 +2454,7 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
 def _resolved_doctor_agent_runtime(
     runtime: ReviewflowRuntime, *, cli_profile: str | None = None
 ) -> dict[str, Any]:
-    profile, profile_source, runtime_cfg, _ = resolve_agent_runtime_profile(
+    profile, profile_source, _, _ = resolve_agent_runtime_profile(
         cli_value=cli_profile,
         config_path=runtime.config_path,
         config_enabled=runtime.config_enabled,
@@ -2496,8 +2489,6 @@ def _resolved_doctor_agent_runtime(
         return payload
 
     payload["supported"] = True
-    gemini_cfg = runtime_cfg.get("gemini")
-    gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
     if provider == "codex":
         payload.update(
             {
@@ -2511,16 +2502,6 @@ def _resolved_doctor_agent_runtime(
             {
                 "dangerously_skip_permissions": True,
                 "permission_mode": None,
-            }
-        )
-    elif provider == "gemini":
-        sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
-        payload.update(
-            {
-                "approval_mode": "yolo",
-                "sandbox": sandbox,
-                "seatbelt_profile": str(gemini_cfg.get("seatbelt_profile") or "").strip() or None,
-                "strict_ready": None,
             }
         )
     return payload
@@ -2818,11 +2799,6 @@ def _doctor_runtime_checks(
     if bool(agent_runtime.get("supported")) and provider and command and (provider != "codex"):
         selected = _doctor_executable_check(command)
         checks.append(DoctorCheck(name="agent-runtime-command", status=selected.status, detail=f"{provider}: {selected.detail}"))
-    if provider == "gemini" and str(agent_runtime.get("profile") or "") == "strict":
-        if bool(agent_runtime.get("strict_ready")):
-            checks.append(DoctorCheck(name="agent-runtime", status="ok", detail="gemini strict runtime backend configured"))
-        else:
-            checks.append(DoctorCheck(name="agent-runtime", status="fail", detail="gemini strict runtime requires [agent_runtime.gemini].sandbox"))
     if target is None:
         gh_auth = _doctor_gh_auth_check()
         checks.append(
@@ -2870,6 +2846,7 @@ __all__ = [
     "_doctor_runtime_checks",
     "_doctor_runtime_payload",
     "_plain_dict",
+    "_raise_removed_gemini_support",
     "_set_disabled_reviewflow_config_path",
     "_string_dict",
     "_string_list",

@@ -17,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 import cure as rf  # noqa: E402
-import cure_llm  # noqa: E402
 import cure_output  # noqa: E402
 import cure_runtime  # noqa: E402
 import ui as rui  # noqa: E402
@@ -132,19 +131,6 @@ print(
 )
 """
     _write_executable(bin_dir / "claude", body)
-
-
-def write_fake_gemini(bin_dir: Path, review_text: str) -> None:
-    body = f"""#!/usr/bin/env python3
-from __future__ import annotations
-import json
-import sys
-
-print("Inspecting repository", file=sys.stderr, flush=True)
-print("Summarizing findings", file=sys.stderr, flush=True)
-print(json.dumps({{"response": {review_text!r}, "usage": {{"input_tokens": 12, "output_tokens": 34, "total_tokens": 46}}}}), flush=True)
-"""
-    _write_executable(bin_dir / "gemini", body)
 
 
 class _ResponseHandler(BaseHTTPRequestHandler):
@@ -393,7 +379,7 @@ def run_provider_smoke(
             "dashboard_contains_live_progress": "─ Live Progress" in dashboard_joined,
             "dashboard_contains_current": bool(current_excerpt and current_excerpt in dashboard_joined),
         }
-        if provider in {"codex", "claude", "gemini"}:
+        if provider in {"codex", "claude"}:
             ensure(summary["transport"] == f"cli-{provider}", f"{provider}: unexpected transport {summary['transport']!r}")
             ensure(summary["live_progress_provider"] == provider, f"{provider}: live progress missing provider tag")
             ensure(summary["dashboard_contains_live_progress"], f"{provider}: dashboard did not render Live Progress")
@@ -411,7 +397,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--providers",
         nargs="+",
-        default=["codex", "claude", "gemini", "openai", "openrouter"],
+        default=["codex", "claude", "openai", "openrouter"],
         help="Providers to smoke test.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable output.")
@@ -428,7 +414,6 @@ def main() -> int:
         fake_bin.mkdir(parents=True, exist_ok=True)
         write_fake_codex(fake_bin, review_text)
         write_fake_claude(fake_bin, review_text)
-        write_fake_gemini(fake_bin, review_text)
         base_env = build_env(tmp_root=tmp_root, fake_bin=fake_bin)
 
         server = LocalResponsesServer()

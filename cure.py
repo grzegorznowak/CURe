@@ -159,7 +159,7 @@ DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude", "gemini")
+CLI_LLM_PROVIDERS = ("codex", "claude")
 LLM_RESUME_PROVIDERS = ("codex", "claude")
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
@@ -170,7 +170,6 @@ DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "claude-cli",
-    "gemini-cli",
     "openai-responses",
     "openrouter-responses",
 )
@@ -180,11 +179,6 @@ CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
     "FORCE_COLOR",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_GENAI_USE_VERTEXAI",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -1046,6 +1040,14 @@ def _string_list(raw: object) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+def _raise_removed_gemini_support(*, context: str) -> None:
+    supported = ", ".join(BUILTIN_LLM_PRESET_IDS)
+    raise ReviewflowError(
+        "Gemini support was removed from CURe. "
+        f"{context} Use supported presets instead: {supported}."
+    )
+
+
 def builtin_llm_presets() -> dict[str, dict[str, Any]]:
     return {
         "codex-cli": {
@@ -1069,22 +1071,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "transport": "cli",
             "provider": "claude",
             "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
-        "gemini-cli": {
-            "transport": "cli",
-            "provider": "gemini",
-            "command": "gemini",
             "endpoint": None,
             "base_url": None,
             "api_key": None,
@@ -1137,8 +1123,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
         return "codex-cli"
     if transport == "cli" and provider == "claude" and command in {"", "claude"}:
         return "claude-cli"
-    if transport == "cli" and provider == "gemini" and command in {"", "gemini"}:
-        return "gemini-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1209,19 +1193,27 @@ def load_reviewflow_llm_config(
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
     default_preset = str(llm.get("default_preset") or "").strip() or None
+    if default_preset == "gemini-cli":
+        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
 
     presets_raw = raw.get("llm_presets", {}) if isinstance(raw, dict) else {}
     presets_raw = presets_raw if isinstance(presets_raw, dict) else {}
     presets: dict[str, dict[str, Any]] = {}
     deprecated_explicit_presets: list[str] = []
     invalid_mixed_presets: list[str] = []
+    removed_gemini_presets: list[str] = []
     for raw_name, raw_preset in presets_raw.items():
         name = str(raw_name or "").strip()
         if not name or not isinstance(raw_preset, dict):
             continue
         builtin_id = str(raw_preset.get("preset") or "").strip()
+        transport = str(raw_preset.get("transport") or "").strip().lower()
+        provider = str(raw_preset.get("provider") or "").strip().lower()
         removed_keys = {"transport", "provider", "endpoint", "base_url", "command"}
         present_removed = [key for key in removed_keys if key in raw_preset]
+        if builtin_id == "gemini-cli" or (transport == "cli" and provider == "gemini"):
+            removed_gemini_presets.append(name)
+            continue
         if builtin_id:
             if present_removed:
                 invalid_mixed_presets.append(name)
@@ -1243,6 +1235,13 @@ def load_reviewflow_llm_config(
         raise ReviewflowError(
             "llm preset blocks cannot mix `preset = ...` with explicit transport/provider/command/base_url/endpoint "
             f"fields: {', '.join(sorted(invalid_mixed_presets))}"
+        )
+    if removed_gemini_presets:
+        _raise_removed_gemini_support(
+            context=(
+                "Remove or migrate Gemini llm preset blocks: "
+                f"{', '.join(sorted(removed_gemini_presets))}."
+            ),
         )
 
     cfg = {"default_preset": default_preset, "presets": presets}
@@ -1276,26 +1275,18 @@ def load_reviewflow_agent_runtime_config(
     raw = load_toml(path)
     section = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
     section = section if isinstance(section, dict) else {}
-    gemini = section.get("gemini", {})
-    gemini = gemini if isinstance(gemini, dict) else {}
+    if "gemini" in section:
+        _raise_removed_gemini_support(
+            context="Remove the `[agent_runtime.gemini]` block from the CURe config.",
+        )
 
     profile = _normalize_agent_runtime_profile(section.get("profile"), source="config")
-    sandbox = str(gemini.get("sandbox") or "").strip() or None
-    seatbelt_profile = str(gemini.get("seatbelt_profile") or "").strip() or None
-
-    cfg = {
-        "profile": profile,
-        "gemini": {
-            "sandbox": sandbox,
-            "seatbelt_profile": seatbelt_profile,
-        },
-    }
+    cfg = {"profile": profile}
     meta = {
         "config_path": str(path),
         "loaded": bool(raw),
         "agent_runtime": {
             "profile": profile,
-            "gemini": dict(cfg["gemini"]),
         },
     }
     return cfg, meta
@@ -1452,6 +1443,8 @@ def resolve_llm_config(
 
     selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
     preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
+    if selected_name == "gemini-cli":
+        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
     if selected_name:
         if selected_name in presets:
             base_preset = dict(presets[selected_name])
@@ -2369,54 +2362,6 @@ def run_claude_exec(
     )
 
 
-def build_gemini_exec_cmd(
-    *,
-    command: str,
-    model: str | None,
-    prompt: str,
-    runtime_policy: dict[str, Any] | None = None,
-) -> list[str]:
-    cmd = [command]
-    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
-    provider_args = policy.get("provider_args")
-    if isinstance(provider_args, list):
-        cmd.extend([str(item) for item in provider_args])
-    if model:
-        cmd.extend(["-m", model])
-    cmd.extend(["-p", prompt])
-    return cmd
-
-
-def run_gemini_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    env: dict[str, str],
-    progress: "SessionProgress",
-    runtime_policy: dict[str, Any] | None = None,
-) -> LlmRunResult:
-    cmd = build_gemini_exec_cmd(
-        command=str(resolved.get("command") or "gemini"),
-        model=str(resolved.get("model") or "").strip() or None,
-        prompt=prompt,
-        runtime_policy=runtime_policy,
-    )
-    progress.record_cmd(cmd)
-    result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
-    payload = _extract_json_object(result.stdout)
-    text = str((payload or {}).get("response") or result.stdout or "").strip()
-    if not text:
-        raise ReviewflowError("Gemini did not return any printable review output.")
-    output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    return LlmRunResult(
-        resume=None,
-        adapter_meta={"transport": "cli-gemini", "command": safe_cmd_for_meta(cmd)},
-    )
-
-
 def run_http_response_exec(
     *,
     repo_dir: Path,
@@ -2546,15 +2491,7 @@ def run_llm_exec(
             runtime_policy=runtime_policy,
         )
     if provider == "gemini":
-        return run_gemini_exec(
-            repo_dir=repo_dir,
-            resolved=resolved,
-            output_path=output_path,
-            prompt=prompt,
-            env=env,
-            progress=progress,
-            runtime_policy=runtime_policy,
-        )
+        _raise_removed_gemini_support(context="Gemini CLI execution is no longer available.")
     if provider in HTTP_LLM_PROVIDERS:
         return run_http_response_exec(
             repo_dir=repo_dir,
@@ -2683,18 +2620,6 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
-def _prepare_gemini_cli_home(*, work_dir: Path) -> tuple[Path, Path]:
-    home_root = work_dir / "gemini_home"
-    cli_dir = home_root / ".gemini"
-    if home_root.exists():
-        shutil.rmtree(home_root)
-    cli_dir.mkdir(parents=True, exist_ok=True)
-    src = real_user_home_dir() / ".gemini"
-    if src.is_dir():
-        shutil.copytree(src, cli_dir, dirs_exist_ok=True, copy_function=shutil.copy2)
-    return home_root, cli_dir
-
-
 def prepare_review_agent_runtime(
     *,
     args: argparse.Namespace,
@@ -2716,7 +2641,9 @@ def prepare_review_agent_runtime(
     _ = paths
     transport = str(resolved.get("transport") or "").strip().lower()
     provider = str(resolved.get("provider") or "").strip().lower()
-    profile, profile_source, runtime_cfg, runtime_meta = resolve_agent_runtime_profile(
+    if provider == "gemini":
+        _raise_removed_gemini_support(context="Gemini agent runtime preparation is no longer available.")
+    profile, profile_source, _, runtime_meta = resolve_agent_runtime_profile(
         cli_value=getattr(args, "agent_runtime_profile", None),
         config_path=reviewflow_config_path,
         config_enabled=config_enabled,
@@ -2826,47 +2753,6 @@ def prepare_review_agent_runtime(
             raise ReviewflowError(f"Unsupported claude agent runtime profile: {profile!r}")
         if runtime["permission_mode"]:
             provider_args.extend(["--permission-mode", str(runtime["permission_mode"])])
-        runtime["provider_args"] = provider_args
-    elif provider == "gemini":
-        gemini_cfg = runtime_cfg.get("gemini")
-        gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
-        configured_sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
-        seatbelt_profile = str(gemini_cfg.get("seatbelt_profile") or "").strip() or None
-        if profile == "permissive":
-            runtime["approval_mode"] = "yolo"
-            if configured_sandbox:
-                env["GEMINI_SANDBOX"] = configured_sandbox
-        else:
-            raise ReviewflowError(f"Unsupported gemini agent runtime profile: {profile!r}")
-        if seatbelt_profile:
-            env["SEATBELT_PROFILE"] = seatbelt_profile
-
-        home_root, cli_dir = _prepare_gemini_cli_home(work_dir=work_dir)
-        trusted_folders_path = _write_json_file(
-            cli_dir / "trustedFolders.json",
-            {str(repo_dir.resolve(strict=False)): "TRUST_FOLDER"},
-        )
-        system_settings: dict[str, Any] = {}
-        if enable_mcp:
-            system_settings["mcpServers"] = {
-                "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
-                    sandbox_repo_dir=repo_dir,
-                    chunkhound_config_path=chunkhound_config_path,
-                    chunkhound_db_path=chunkhound_db_path,
-                    chunkhound_cwd=chunkhound_cwd,
-                    trust=False,
-                )
-            }
-            system_settings["mcp"] = {"allowed": ["cure-chunkhound"]}
-        system_settings_path = _write_json_file(work_dir / "gemini" / "system-settings.json", system_settings)
-        env["GEMINI_CLI_HOME"] = str(home_root)
-        env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(system_settings_path)
-        runtime["staged_paths"]["gemini_home"] = str(home_root)
-        runtime["staged_paths"]["gemini_trusted_folders"] = str(trusted_folders_path)
-        runtime["staged_paths"]["gemini_system_settings"] = str(system_settings_path)
-        provider_args = ["--output-format", "json", "--approval-mode", str(runtime["approval_mode"])]
-        for add_dir in add_dirs:
-            provider_args.extend(["--include-directories", str(add_dir)])
         runtime["provider_args"] = provider_args
     else:
         raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
@@ -13247,7 +13133,7 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
 def _resolved_doctor_agent_runtime(
     runtime: ReviewflowRuntime, *, cli_profile: str | None = None
 ) -> dict[str, Any]:
-    profile, profile_source, runtime_cfg, _ = resolve_agent_runtime_profile(
+    profile, profile_source, _, _ = resolve_agent_runtime_profile(
         cli_value=cli_profile,
         config_path=runtime.config_path,
         config_enabled=runtime.config_enabled,
@@ -13282,8 +13168,6 @@ def _resolved_doctor_agent_runtime(
         return payload
 
     payload["supported"] = True
-    gemini_cfg = runtime_cfg.get("gemini")
-    gemini_cfg = gemini_cfg if isinstance(gemini_cfg, dict) else {}
     if provider == "codex":
         payload.update(
             {
@@ -13297,16 +13181,6 @@ def _resolved_doctor_agent_runtime(
             {
                 "dangerously_skip_permissions": True,
                 "permission_mode": None,
-            }
-        )
-    elif provider == "gemini":
-        sandbox = str(gemini_cfg.get("sandbox") or "").strip() or None
-        payload.update(
-            {
-                "approval_mode": "yolo",
-                "sandbox": sandbox,
-                "seatbelt_profile": str(gemini_cfg.get("seatbelt_profile") or "").strip() or None,
-                "strict_ready": None,
             }
         )
     return payload
@@ -13634,7 +13508,6 @@ from cure_llm import (
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
-    build_gemini_exec_cmd,
     cleanup_sensitive_staged_paths,
     codex_mcp_overrides_for_reviewflow,
     codex_resume_meta_dict,
@@ -13645,7 +13518,6 @@ from cure_llm import (
     record_llm_resume,
     run_claude_exec,
     run_codex_exec,
-    run_gemini_exec,
     run_http_response_exec,
     run_llm_exec,
 )

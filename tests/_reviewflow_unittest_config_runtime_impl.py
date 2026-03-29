@@ -1204,6 +1204,79 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+    def test_load_reviewflow_llm_config_rejects_removed_gemini_builtin_preset(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_gemini_builtin.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "gemini_default"',
+                        "",
+                        "[llm_presets.gemini_default]",
+                        'preset = "gemini-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
+            self.assertIn("gemini_default", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_gemini_explicit_provider(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_gemini_explicit.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "legacy_gemini"',
+                        "",
+                        "[llm_presets.legacy_gemini]",
+                        'transport = "cli"',
+                        'provider = "gemini"',
+                        'command = "gemini"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
+            self.assertIn("legacy_gemini", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_removed_gemini_builtin_selection(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_removed_gemini.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=None,
+                    cli_preset="gemini-cli",
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
+            self.assertIn("gemini-cli", str(ctx.exception))
+        finally:
+            base.unlink(missing_ok=True)
+
     def test_build_llm_meta_persists_env_keys_not_env_values(self) -> None:
         meta = rf.build_llm_meta(
             resolved={
@@ -1248,7 +1321,7 @@ class LlmPresetConfigTests(unittest.TestCase):
 
 
 class AgentRuntimeConfigTests(unittest.TestCase):
-    def test_load_reviewflow_agent_runtime_config_parses_profile_and_gemini_backend(self) -> None:
+    def test_load_reviewflow_agent_runtime_config_rejects_gemini_backend_block(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_agent_runtime.toml"
         try:
             cfg.write_text(
@@ -1265,11 +1338,10 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            loaded, meta = rf.load_reviewflow_agent_runtime_config(config_path=cfg)
-            self.assertEqual(loaded["profile"], "permissive")
-            self.assertEqual(loaded["gemini"]["sandbox"], "runsc")
-            self.assertEqual(loaded["gemini"]["seatbelt_profile"], "strict-open")
-            self.assertEqual(meta["agent_runtime"]["profile"], "permissive")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_agent_runtime_config(config_path=cfg)
+            self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
+            self.assertIn("[agent_runtime.gemini]", str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -1512,9 +1584,8 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_prepare_review_agent_runtime_uses_permissive_gemini_profile_and_stages_files(self) -> None:
+    def test_prepare_review_agent_runtime_rejects_removed_gemini_provider(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_gemini"
-        cfg = ROOT / ".tmp_test_agent_runtime_gemini.toml"
         try:
             shutil.rmtree(root, ignore_errors=True)
             repo = root / "repo"
@@ -1522,52 +1593,29 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             work = session / "work"
             repo.mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
-            cfg.write_text(
-                "\n".join(
-                    [
-                        "[agent_runtime.gemini]",
-                        'sandbox = "runsc"',
-                        'seatbelt_profile = "strict-open"',
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
 
             with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
-                permissive = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="permissive"),
-                    resolved=self._llm_resolved("gemini"),
-                    resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=cfg,
-                    config_enabled=True,
-                    repo_dir=repo,
-                    session_dir=session,
-                    work_dir=work,
-                    base_env={"PATH": "/usr/bin"},
-                    chunkhound_config_path=work / "chunkhound.json",
-                    chunkhound_db_path=work / ".chunkhound.db",
-                    chunkhound_cwd=work / "chunkhound",
-                    enable_mcp=True,
-                    interactive=False,
-                    paths=rf.DEFAULT_PATHS,
-                )
-                self.assertEqual(permissive["approval_mode"], "yolo")
-                self.assertTrue(Path(permissive["staged_paths"]["gemini_system_settings"]).is_file())
-                self.assertTrue(Path(permissive["staged_paths"]["gemini_trusted_folders"]).is_file())
-                self.assertEqual(permissive["env"]["GEMINI_SANDBOX"], "runsc")
-                self.assertEqual(permissive["env"]["SEATBELT_PROFILE"], "strict-open")
-                cmd = rf.build_gemini_exec_cmd(
-                    command="gemini",
-                    model="gemini-2.5-pro",
-                    prompt="hello",
-                    runtime_policy=permissive,
-                )
-                self.assertIn("--approval-mode", cmd)
-                self.assertIn("yolo", cmd)
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.prepare_review_agent_runtime(
+                        args=self._runtime_args(profile="permissive"),
+                        resolved=self._llm_resolved("gemini"),
+                        resolution_meta=self._llm_resolution_meta(),
+                        reviewflow_config_path=work / "runtime.toml",
+                        config_enabled=False,
+                        repo_dir=repo,
+                        session_dir=session,
+                        work_dir=work,
+                        base_env={"PATH": "/usr/bin"},
+                        chunkhound_config_path=work / "chunkhound.json",
+                        chunkhound_db_path=work / ".chunkhound.db",
+                        chunkhound_cwd=work / "chunkhound",
+                        enable_mcp=True,
+                        interactive=False,
+                        paths=rf.DEFAULT_PATHS,
+                    )
+                self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
         finally:
             shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
 
     def test_prepare_review_agent_runtime_hard_fails_when_provider_binary_missing(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_missing_binary"
