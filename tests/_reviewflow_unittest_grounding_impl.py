@@ -107,6 +107,57 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
+    def test_normalize_markdown_artifact_removes_stray_hash_delimiter_lines(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_session5"
+        md = session_dir / "review.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "## Technical Assessment",
+                        "**Verdict**: APPROVE",
+                        "####",
+                        "#### Valid Heading",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertNotIn("\n####\n", "\n" + normalized + "\n")
+            self.assertIn("#### Valid Heading", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_preserves_hash_delimiters_inside_fenced_blocks(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_session6"
+        md = session_dir / "review.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "## Technical Assessment",
+                        "####",
+                        "```text",
+                        "####",
+                        "literal sample",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertNotIn("\n## Technical Assessment\n####\n```text", "\n" + normalized)
+            self.assertIn("```text\n####\nliteral sample\n```", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
     def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
         version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         footer = cure_output.format_review_artifact_footer(

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import urllib.error
@@ -154,6 +155,35 @@ def _looks_like_json_payload_line(text: str) -> bool:
     except Exception:
         return False
     return isinstance(parsed, dict)
+
+
+def _looks_like_pathish_progress_line(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if re.fullmatch(r"[`'\"]?(?:[.~]{0,2}/|[A-Za-z]:\\)[^ \t`'\"]+[`'\"]?", raw):
+        return True
+    if re.fullmatch(r"[`'\"]?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+[`'\"]?", raw):
+        return True
+    return False
+
+
+def _summarize_claude_tool_result(tool_result: dict[str, Any] | None) -> str:
+    payload = tool_result if isinstance(tool_result, dict) else {}
+    for key in ("stdout", "stderr"):
+        source = str(payload.get(key) or "")
+        for raw_line in source.splitlines():
+            line = _compact_live_progress_text(raw_line)
+            if not line:
+                continue
+            if _looks_like_json_payload_line(line):
+                continue
+            if _looks_like_pathish_progress_line(line):
+                continue
+            if re.fullmatch(r"[#*_`~=\-]{3,}", line):
+                continue
+            return line
+    return ""
 
 
 def _ensure_text_cli_live_progress(*, progress: Any, provider: str, label: str) -> None:
@@ -381,10 +411,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, str], chunk: 
         payload_type = str(payload.get("type") or "").strip()
         if payload_type == "user":
             tool_result = payload.get("tool_use_result")
-            tool_result = tool_result if isinstance(tool_result, dict) else {}
-            stdout_text = str(tool_result.get("stdout") or "").strip()
-            stderr_text = str(tool_result.get("stderr") or "").strip()
-            summary = stdout_text.splitlines()[0] if stdout_text else (stderr_text.splitlines()[0] if stderr_text else "")
+            summary = _summarize_claude_tool_result(tool_result if isinstance(tool_result, dict) else None)
             if summary:
                 _set_text_cli_live_current(
                     progress=progress,

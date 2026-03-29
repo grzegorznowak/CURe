@@ -816,12 +816,34 @@ def _normalize_review_subsection_headings(text: str) -> str:
     return normalized
 
 
+def _strip_malformed_heading_delimiters(text: str) -> str:
+    lines = text.splitlines()
+    filtered: list[str] = []
+    in_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if re.fullmatch(r"`{3,}.*", stripped) or re.fullmatch(r"~{3,}.*", stripped):
+            in_fence = not in_fence
+            filtered.append(line)
+            continue
+        if not in_fence and re.fullmatch(r"\s*#{1,6}\s*", line):
+            continue
+        filtered.append(line)
+    if filtered == lines:
+        return text
+    normalized = "\n".join(filtered)
+    if text.endswith("\n"):
+        normalized += "\n"
+    return normalized
+
+
 def normalize_markdown_artifact(*, markdown_path: Path, session_dir: Path) -> None:
     if not markdown_path.is_file():
         return
     original = markdown_path.read_text(encoding="utf-8")
     normalized = _strip_whole_document_markdown_fence(original)
     normalized = _normalize_review_subsection_headings(normalized)
+    normalized = _strip_malformed_heading_delimiters(normalized)
     normalized = normalize_markdown_local_refs(normalized, session_dir=session_dir)
     if normalized != original:
         markdown_path.write_text(normalized, encoding="utf-8")

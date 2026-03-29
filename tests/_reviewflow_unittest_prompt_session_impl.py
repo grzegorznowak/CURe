@@ -136,6 +136,22 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertNotIn('/tmp/reviewflow_pr_${PR_NUMBER}', followup)
         self.assertNotIn('/tmp/reviewflow_pr_${PR_NUMBER}', big_followup)
 
+    def test_single_stage_templates_keep_summary_claims_evidence_bounded(self) -> None:
+        normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
+        big = (ROOT / "prompts" / "mrereview_gh_local_big.md").read_text(encoding="utf-8")
+
+        for text in (normal, big):
+            self.assertNotIn("mention the relevant ticket key(s) + business value alignment", text)
+            self.assertNotIn("\n####\n", "\n" + text + "\n")
+            self.assertIn(
+                "Use strong wording about ticket linkage, business value, or rendered behavior only when the available evidence supports it.",
+                text,
+            )
+            self.assertIn(
+                "Otherwise keep the wording explicitly scoped or uncertain.",
+                text,
+            )
+
     def test_review_templates_use_review_intelligence_placeholder_instead_of_hardcoded_tools(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
         big = (ROOT / "prompts" / "mrereview_gh_local_big.md").read_text(encoding="utf-8")

@@ -1869,3 +1869,60 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         timeline_texts = [item["text"] for item in live["timeline"]]
         self.assertIn("Thinking…", timeline_texts)
         self.assertIn("Using Bash", timeline_texts)
+
+    def test_handle_claude_stream_chunk_suppresses_low_signal_tool_results(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"ls README.md\",\"description\":\"List the README path\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "tool_use_result": {
+                                "stdout": "{\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}\n",
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Bash: ls README.md")
+        timeline_texts = [item["text"] for item in live["timeline"]]
+        self.assertIn("Using Bash", timeline_texts)
+        self.assertNotIn("Tool result: {\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}", timeline_texts)

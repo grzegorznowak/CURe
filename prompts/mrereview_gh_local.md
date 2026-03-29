@@ -96,7 +96,7 @@ Break the changes into logical groups, explain your grouping logic, then review 
 ### Steps taken
 - [1 line per major action]
 
-**Summary**: [One sentence summary; mention the relevant ticket key(s) + business value alignment]
+**Summary**: [One sentence summary of the change and review outcome. Use strong wording about ticket linkage, business value, or rendered behavior only when the available evidence supports it. Otherwise keep the wording explicitly scoped or uncertain.]
 
 ## Business / Product Assessment
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
@@ -124,5 +124,4 @@ Break the changes into logical groups, explain your grouping logic, then review 
 
 ### Reusability
 - ...
-####
 ```
