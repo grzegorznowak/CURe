@@ -725,7 +725,7 @@ class EnsureBaseCacheTests(unittest.TestCase):
             (base_root / "meta.json").write_text(
                 json.dumps(
                     {
-                        "indexed_at": "2026-03-26T00:00:00+00:00",
+                        "indexed_at": "3026-03-26T00:00:00+00:00",
                         "config_fingerprint": "stable",
                     }
                 ),
