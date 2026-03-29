@@ -13,13 +13,13 @@ Review GitHub pull requests inside isolated sandboxes — your working checkout 
 Paste one sentence into any Claude or Codex session:
 
 ```text
-use <CURE_REPO_URL> to review <PR_URL>
+install <CURE_REPO_URL> to be able to review <PR_URL>
 ```
 
 Example:
 
 ```text
-use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220
+install https://github.com/grzegorznowak/CURe to be able to review https://github.com/grzegorznowak/CURe/pull/1
 ```
 
 The agent bootstraps CURe, runs the review inside a sandbox, and leaves a `review.md` on disk.
