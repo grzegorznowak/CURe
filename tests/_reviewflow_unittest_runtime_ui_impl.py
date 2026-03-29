@@ -2609,8 +2609,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         jira_reference_url = "https://github.com/grzegorznowak/CURe/blob/main/JIRA.md"
-        self.assertIn("use <CURE_REPO_URL> to review <PR_URL>", readme)
-        self.assertIn("use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220", readme)
+        self.assertIn("install <CURE_REPO_URL> to be able to review <PR_URL>", readme)
+        self.assertIn("install https://github.com/grzegorznowak/CURe to be able to review https://github.com/grzegorznowak/CURe/pull/1", readme)
         self.assertIn("start with [SKILL.md](SKILL.md)", readme)
         self.assertIn(jira_reference_url, readme)
         self.assertIn("uv tool install cureview", readme)

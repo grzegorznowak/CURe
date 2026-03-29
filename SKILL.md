@@ -27,7 +27,7 @@ Use CURe when:
 The default operator kickoff is:
 
 ```text
-use <CURE_REPO_URL> to review <PR_URL>
+install <CURE_REPO_URL> to be able to review <PR_URL>
 ```
 
 Treat these as the primary inputs:
