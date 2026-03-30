@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chunkhound_summary import parse_chunkhound_index_summary
+
 import argparse
 import contextlib
 import fcntl
@@ -6548,6 +6550,7 @@ def cache_prime(
     repo: str,
     base_ref: str,
     force: bool,
+    reason: str | None = None,
     hot_start_seed: dict[str, Any] | None = None,
     quiet: bool = False,
     no_stream: bool = False,
@@ -6599,15 +6602,38 @@ def cache_prime(
         cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
         env_cfg_fp = json_fingerprint(ch_cfg_path)
         meta_path = base_root / "meta.json"
+        current_chunkhound_version = run_cmd(["chunkhound", "--version"]).stdout.strip()
 
+        build_reason = " ".join(str(reason or "").strip().split())
         need_reindex = force
+        rebuild_database = False
+        detected_reason = "refresh requested" if force else ""
         if not need_reindex and meta_path.is_file():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 if meta.get("config_fingerprint") != cfg_fp:
                     need_reindex = True
+                    detected_reason = "config changed"
+                else:
+                    cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
+                    if cached_chunkhound_version != current_chunkhound_version:
+                        need_reindex = True
+                        rebuild_database = True
+                        detected_reason = "ChunkHound version changed"
             except Exception:
                 need_reindex = True
+                detected_reason = "cache metadata unreadable"
+        elif not meta_path.is_file():
+            detected_reason = "cache miss"
+
+        if not build_reason:
+            build_reason = detected_reason
+
+        if rebuild_database and db_path.exists():
+            if db_path.is_dir():
+                shutil.rmtree(db_path, ignore_errors=True)
+            else:
+                db_path.unlink(missing_ok=True)
 
         env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
         index_cmd = [
@@ -6623,26 +6649,40 @@ def cache_prime(
         with phase(
             f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
         ):
-            _ = progress
+            index_reporter = ChunkhoundLiveProgressReporter(
+                progress=progress,
+                scope="base_cache",
+                reason=build_reason,
+            )
+            index_reporter.start()
             out = active_output()
-            if out is not None:
-                index_result = out.run_logged_cmd(
-                    index_cmd,
-                    kind="chunkhound",
-                    cwd=base_root,
-                    env=env,
-                    check=True,
-                    stream_requested=stream,
-                )
-            else:
-                index_result = run_cmd(
-                    index_cmd,
-                    cwd=base_root,
-                    env=env,
-                    check=True,
-                    stream=stream,
-                    stream_label="chunkhound",
-                )
+            index_ok = False
+            try:
+                index_reporter.mark_running()
+                if out is not None:
+                    index_result = out.run_logged_cmd(
+                        index_cmd,
+                        kind="chunkhound",
+                        cwd=base_root,
+                        env=env,
+                        check=True,
+                        stream_requested=stream,
+                        stream_text_callback=index_reporter.consume_text,
+                    )
+                else:
+                    index_result = run_cmd(
+                        index_cmd,
+                        cwd=base_root,
+                        env=env,
+                        check=True,
+                        stream=stream,
+                        stream_label="chunkhound",
+                    )
+                    index_reporter.consume_text(index_result.stdout)
+                    index_reporter.consume_text(index_result.stderr)
+                index_ok = True
+            finally:
+                index_reporter.finish(status="done" if index_ok else "error")
         db_size_bytes = path_size_bytes(db_path)
 
         meta = {
@@ -6658,10 +6698,12 @@ def cache_prime(
             "config_fingerprint": cfg_fp,
             "env_config_fingerprint": env_cfg_fp,
             "chunkhound": chunkhound_meta.get("chunkhound"),
-            "chunkhound_version": run_cmd(["chunkhound", "--version"]).stdout.strip(),
+            "chunkhound_version": current_chunkhound_version,
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        if build_reason:
+            meta["cache_build_reason"] = build_reason
         if isinstance(hot_start_seed, dict):
             meta["hot_start"] = {
                 "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
@@ -6671,6 +6713,12 @@ def cache_prime(
                 "target_match_state": str(hot_start_seed.get("target_match_state") or "unknown"),
                 "runtime_match_state": str(hot_start_seed.get("runtime_match_state") or "unknown"),
             }
+        index_summary = parse_chunkhound_index_summary(
+            "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+            scope="base_cache",
+        )
+        if index_summary is not None:
+            meta["index_summary"] = index_summary
         write_redacted_json(meta_path, meta)
         return meta
 

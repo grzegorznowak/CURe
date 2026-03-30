@@ -61,9 +61,10 @@ class ChunkhoundLiveProgressReporter:
         "followup": ("Preparing follow-up index", "Building follow-up index"),
     }
 
-    def __init__(self, *, progress: Any, scope: str) -> None:
+    def __init__(self, *, progress: Any, scope: str, reason: str | None = None) -> None:
         self._progress = progress
         self._scope = str(scope or "").strip() or "topup"
+        self._reason = " ".join(str(reason or "").strip().split())
         self._source = "chunkhound_cache_build"
         self._started_mono: float | None = None
         self._running = False
@@ -256,13 +257,19 @@ class ChunkhoundLiveProgressReporter:
     def _build_message_locked(self) -> str:
         prepare_label, active_label = self._label_pair_locked()
         label = active_label if self._running else prepare_label
-        parts = [label, f"{self._elapsed_seconds_locked()}s"]
+        parts = [label]
+        if self._reason:
+            parts.append(self._reason)
+        parts.append(f"{self._elapsed_seconds_locked()}s")
         parts.extend(self._summary_groups_locked())
         return " · ".join(part for part in parts if part)
 
     def _build_failure_message_locked(self) -> str:
         _, active_label = self._label_pair_locked()
-        return f"{active_label} failed after {self._elapsed_seconds_locked()}s"
+        parts = [f"{active_label} failed after {self._elapsed_seconds_locked()}s"]
+        if self._reason:
+            parts.append(self._reason)
+        return " · ".join(parts)
 
     def _set_live_progress_locked(
         self,
@@ -282,6 +289,10 @@ class ChunkhoundLiveProgressReporter:
         live["source"] = self._source
         live["provider"] = "chunkhound"
         live["scope"] = self._scope
+        if self._reason:
+            live["reason"] = self._reason
+        else:
+            live.pop("reason", None)
         live["status"] = "running"
         live["updated_at"] = timestamp
         current = {"type": event_type, "text": text, "ts": timestamp}

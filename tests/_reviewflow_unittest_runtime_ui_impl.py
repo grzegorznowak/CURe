@@ -1235,6 +1235,27 @@ class CodexJsonProgressTests(unittest.TestCase):
             line,
         )
 
+    def test_watch_line_for_payload_appends_base_cache_rebuild_reason(self) -> None:
+        payload = {
+            "session_id": "session-base",
+            "status": "running",
+            "phase": "ensure_base_cache",
+            "pr": {"owner": "acme", "repo": "repo", "number": 12},
+            "live_progress": {
+                "source": "chunkhound_cache_build",
+                "reason": "ChunkHound version changed",
+                "current": {
+                    "type": "chunkhound_cache_active",
+                    "text": "Refreshing base cache · ChunkHound version changed · 12s",
+                },
+            },
+        }
+        line = cure_commands._watch_line_for_payload(payload)
+        self.assertIn(
+            "current=Refreshing base cache · ChunkHound version changed · 12s",
+            line,
+        )
+
     def test_watch_line_for_payload_appends_chunkhound_preflight_summary(self) -> None:
         payload = {
             "session_id": "session-456",
@@ -4260,6 +4281,108 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Now: Building follow-up index · 9s · 36 files/144 chunks/144 emb", joined)
         self.assertIn("[12:00:00] Preparing follow-up index · 0s", joined)
         self.assertNotIn("─ Activity", joined)
+
+    def test_dashboard_running_shows_base_cache_rebuild_progress_updates(self) -> None:
+        base_meta = {
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 1,
+            "title": "Test PR",
+            "session_id": "s",
+            "created_at": "",
+            "status": "running",
+            "phase": "ensure_base_cache",
+            "phases": {"ensure_base_cache": {"status": "running"}},
+            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
+        }
+        preparing_meta = {
+            **base_meta,
+            "live_progress": {
+                "source": "chunkhound_cache_build",
+                "scope": "base_cache",
+                "reason": "ChunkHound version changed",
+                "current": {
+                    "type": "chunkhound_cache_prepare",
+                    "text": "Preparing base cache refresh · ChunkHound version changed · 0s",
+                    "ts": "2026-03-30T06:10:00+00:00",
+                },
+                "timeline": [
+                    {
+                        "type": "chunkhound_cache_prepare",
+                        "text": "Preparing base cache refresh · ChunkHound version changed · 0s",
+                        "ts": "2026-03-30T06:10:00+00:00",
+                    }
+                ],
+            },
+        }
+        active_meta = {
+            **base_meta,
+            "live_progress": {
+                "source": "chunkhound_cache_build",
+                "scope": "base_cache",
+                "reason": "ChunkHound version changed",
+                "current": {
+                    "type": "chunkhound_cache_active",
+                    "text": "Refreshing base cache · ChunkHound version changed · 14s · 120 files/4091 chunks/4091 emb",
+                    "ts": "2026-03-30T06:10:14+00:00",
+                },
+                "timeline": [
+                    {
+                        "type": "chunkhound_cache_prepare",
+                        "text": "Preparing base cache refresh · ChunkHound version changed · 0s",
+                        "ts": "2026-03-30T06:10:00+00:00",
+                    },
+                    {
+                        "type": "chunkhound_cache_active",
+                        "text": "Refreshing base cache · ChunkHound version changed · 14s · 120 files/4091 chunks/4091 emb",
+                        "ts": "2026-03-30T06:10:14+00:00",
+                    },
+                ],
+            },
+        }
+
+        preparing_lines = rui.build_dashboard_lines(
+            meta=preparing_meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=[],
+            codex_tail=[],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+        active_lines = rui.build_dashboard_lines(
+            meta=active_meta,
+            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
+            chunkhound_tail=["Processed: 4 files"],
+            codex_tail=[],
+            no_stream=False,
+            width=140,
+            height=30,
+            color=False,
+        )
+
+        preparing_joined = "\n".join(preparing_lines)
+        active_joined = "\n".join(active_lines)
+        self.assertIn("─ Live Progress", preparing_joined)
+        self.assertIn("Phase: Base cache", preparing_joined)
+        self.assertIn(
+            "Now: Preparing base cache refresh · ChunkHound version changed · 0s",
+            preparing_joined,
+        )
+        self.assertIn("─ Live Progress", active_joined)
+        self.assertIn("Phase: Base cache", active_joined)
+        self.assertIn(
+            "Now: Refreshing base cache · ChunkHound version changed · 14s · 120 files/4091 chunks/4091 emb",
+            active_joined,
+        )
+        self.assertIn(
+            "[06:10:00] Preparing base cache refresh · ChunkHound version changed · 0s",
+            active_joined,
+        )
+        self.assertNotEqual(preparing_joined, active_joined)
+        self.assertNotIn("─ Activity", active_joined)
 
     def test_dashboard_shows_chunkhound_preflight_stage_summary(self) -> None:
         meta = {

@@ -633,9 +633,241 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
             self.assertEqual(out, {"primed": True})
             self.assertIn("kwargs", called)
+            self.assertEqual(called["kwargs"]["reason"], "config changed")
         finally:
             shutil.rmtree(tmp_sandbox, ignore_errors=True)
             shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_ensure_base_cache_reprime_when_chunkhound_version_changes(self) -> None:
+        tmp_cache = ROOT / ".tmp_test_cache_version_mismatch"
+        tmp_sandbox = ROOT / ".tmp_test_sandbox_version_mismatch"
+        try:
+            tmp_cache.mkdir(parents=True, exist_ok=True)
+            tmp_sandbox.mkdir(parents=True, exist_ok=True)
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=tmp_sandbox,
+                cache_root=tmp_cache,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            base_ref = "main"
+            chunkhound_meta = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            cfg_fp = rf.fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
+
+            base_root = rf.base_dir(paths, pr.host, pr.owner, pr.repo, base_ref)
+            base_root.mkdir(parents=True, exist_ok=True)
+            meta_path = base_root / "meta.json"
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "indexed_at": "3026-03-05T00:00:00+00:00",
+                        "config_fingerprint": cfg_fp,
+                        "chunkhound_version": "chunkhound old",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            called: dict[str, object] = {}
+
+            def fake_cache_prime(**kwargs):  # type: ignore[no-untyped-def]
+                called["kwargs"] = kwargs
+                return {"primed": True}
+
+            old_cache_prime = rf.cache_prime
+            rf.cache_prime = fake_cache_prime  # type: ignore[assignment]
+            try:
+                with (
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(
+                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                            ),
+                            chunkhound_meta,
+                            {"indexing": {"exclude": []}},
+                        ),
+                    ),
+                    mock.patch.object(
+                        cure_flows,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(
+                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                            ),
+                            chunkhound_meta,
+                            {"indexing": {"exclude": []}},
+                        ),
+                    ),
+                    mock.patch.object(
+                        rf,
+                        "run_cmd",
+                        return_value=mock.Mock(
+                            stdout="chunkhound new\n",
+                            stderr="",
+                            duration_seconds=0.0,
+                        ),
+                    ),
+                ):
+                    out = rf.ensure_base_cache(
+                        paths=paths,
+                        pr=pr,
+                        base_ref=base_ref,
+                        ttl_hours=24,
+                        refresh=False,
+                        quiet=True,
+                        no_stream=True,
+                    )
+            finally:
+                rf.cache_prime = old_cache_prime  # type: ignore[assignment]
+
+            self.assertEqual(out, {"primed": True})
+            self.assertIn("kwargs", called)
+            self.assertEqual(called["kwargs"]["reason"], "ChunkHound version changed")
+        finally:
+            shutil.rmtree(tmp_sandbox, ignore_errors=True)
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_restore_session_chunkhound_db_from_baseline_refreshes_stale_base_cache(self) -> None:
+        root = ROOT / ".tmp_test_restore_chunkhound_db_version_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            stale_db = root / "stale-db"
+            fresh_db = root / "fresh-db"
+            stale_db.mkdir(parents=True, exist_ok=True)
+            fresh_db.mkdir(parents=True, exist_ok=True)
+            (stale_db / "chunks.db").write_text("stale", encoding="utf-8")
+            (fresh_db / "chunks.db").write_text("fresh", encoding="utf-8")
+            chunkhound_db_path = root / "session" / "work" / "chunkhound" / ".chunkhound.db"
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            meta = {
+                "base_cache": {
+                    "db_path": str(stale_db),
+                    "chunkhound_version": "chunkhound old",
+                },
+                "baseline_selection": {
+                    "selected_baseline_ref": "main",
+                },
+            }
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "ensure_base_cache",
+                    return_value={
+                        "db_path": str(fresh_db),
+                        "chunkhound_version": "chunkhound new",
+                    },
+                ) as ensure_base_cache,
+                mock.patch.object(
+                    rf,
+                    "run_cmd",
+                    return_value=mock.Mock(
+                        stdout="chunkhound new\n",
+                        stderr="",
+                        duration_seconds=0.0,
+                    ),
+                ),
+            ):
+                restored = rf.restore_session_chunkhound_db_from_baseline(
+                    meta=meta,
+                    paths=paths,
+                    config_path=None,
+                    pr=pr,
+                    chunkhound_db_path=chunkhound_db_path,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            ensure_base_cache.assert_called_once()
+            self.assertEqual(restored["db_path"], str(fresh_db))
+            self.assertEqual((chunkhound_db_path / "chunks.db").read_text(encoding="utf-8"), "fresh")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_restore_session_chunkhound_db_from_baseline_replaces_stale_session_db(self) -> None:
+        root = ROOT / ".tmp_test_restore_session_db_version_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            stale_db = root / "stale-db"
+            fresh_db = root / "fresh-db"
+            stale_db.mkdir(parents=True, exist_ok=True)
+            fresh_db.mkdir(parents=True, exist_ok=True)
+            (stale_db / "chunks.db").write_text("stale", encoding="utf-8")
+            (fresh_db / "chunks.db").write_text("fresh", encoding="utf-8")
+            chunkhound_db_path = root / "session" / "work" / "chunkhound" / ".chunkhound.db"
+            chunkhound_db_path.mkdir(parents=True, exist_ok=True)
+            (chunkhound_db_path / "chunks.db").write_text("session-stale", encoding="utf-8")
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+            meta = {
+                "base_cache": {
+                    "db_path": str(stale_db),
+                    "chunkhound_version": "chunkhound old",
+                },
+                "baseline_selection": {
+                    "selected_baseline_ref": "main",
+                },
+            }
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "ensure_base_cache",
+                    return_value={
+                        "db_path": str(fresh_db),
+                        "chunkhound_version": "chunkhound new",
+                    },
+                ) as ensure_base_cache,
+                mock.patch.object(
+                    rf,
+                    "run_cmd",
+                    return_value=mock.Mock(
+                        stdout="chunkhound new\n",
+                        stderr="",
+                        duration_seconds=0.0,
+                    ),
+                ),
+            ):
+                restored = rf.restore_session_chunkhound_db_from_baseline(
+                    meta=meta,
+                    paths=paths,
+                    config_path=None,
+                    pr=pr,
+                    chunkhound_db_path=chunkhound_db_path,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            ensure_base_cache.assert_called_once()
+            self.assertEqual(restored["db_path"], str(fresh_db))
+            self.assertEqual((chunkhound_db_path / "chunks.db").read_text(encoding="utf-8"), "fresh")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_ensure_base_cache_cold_miss_uses_operator_seed_resolver(self) -> None:
         tmp_cache = ROOT / ".tmp_test_cache_hot_start_resolver"
@@ -700,6 +932,7 @@ class EnsureBaseCacheTests(unittest.TestCase):
             self.assertEqual(out, {"primed": True})
             prompt_hot_start.assert_called_once()
             self.assertEqual(called["kwargs"]["hot_start_seed"], hot_start_seed)
+            self.assertEqual(called["kwargs"]["reason"], "cache miss")
         finally:
             shutil.rmtree(tmp_sandbox, ignore_errors=True)
             shutil.rmtree(tmp_cache, ignore_errors=True)
@@ -727,6 +960,7 @@ class EnsureBaseCacheTests(unittest.TestCase):
                     {
                         "indexed_at": "3026-03-26T00:00:00+00:00",
                         "config_fingerprint": "stable",
+                        "chunkhound_version": "chunkhound stable",
                     }
                 ),
                 encoding="utf-8",
@@ -757,6 +991,15 @@ class EnsureBaseCacheTests(unittest.TestCase):
                 ),
                 mock.patch.object(rf, "fingerprint_chunkhound_reviewflow_config", return_value="stable"),
                 mock.patch.object(cure_flows, "fingerprint_chunkhound_reviewflow_config", return_value="stable"),
+                mock.patch.object(
+                    rf,
+                    "run_cmd",
+                    return_value=mock.Mock(
+                        stdout="chunkhound stable\n",
+                        stderr="",
+                        duration_seconds=0.0,
+                    ),
+                ),
                 mock.patch.object(
                     rf,
                     "prompt_operator_chunkhound_base_cache_hot_start",
@@ -1010,6 +1253,114 @@ class EnsureBaseCacheTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_cache_prime_rebuilds_base_db_when_chunkhound_version_changes(self) -> None:
+        root = ROOT / ".tmp_test_cache_prime_version_mismatch"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            seed_root = root / "seed"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            seed_root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            chunkhound_meta = {"chunkhound": {"base_config_path": str(base_cfg)}}
+            cfg_fp = rf.fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
+            base_root = rf.base_dir(paths, "github.com", "acme", "repo", "main")
+            db_path = base_root / "db" / ".chunkhound.db"
+            db_path.mkdir(parents=True, exist_ok=True)
+            (db_path / "chunks.db").write_text("stale", encoding="utf-8")
+            meta_path = base_root / "meta.json"
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "config_fingerprint": cfg_fp,
+                        "chunkhound_version": "chunkhound old",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                if cmd[:3] == ["git", "-C", str(seed_root)]:
+                    if cmd[3:5] == ["rev-parse", "--is-inside-work-tree"]:
+                        return mock.Mock(stdout="true\n", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "--prune"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "origin"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["checkout", "-B"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:4] == ["rev-parse"]:
+                        return mock.Mock(
+                            stdout="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+                            stderr="",
+                            duration_seconds=0.0,
+                        )
+                if cmd == ["chunkhound", "--version"]:
+                    return mock.Mock(stdout="chunkhound new\n", stderr="", duration_seconds=0.0)
+                if cmd[:2] == ["chunkhound", "index"]:
+                    self.assertFalse(db_path.exists())
+                    db_path.mkdir(parents=True, exist_ok=True)
+                    (db_path / "chunks.db").write_text("fresh", encoding="utf-8")
+                    return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        chunkhound_meta,
+                        {"indexing": {"exclude": []}},
+                    ),
+                ),
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=fake_materialize_chunkhound_env_config,
+                ),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(rf, "seed_dir", return_value=seed_root),
+            ):
+                meta = rf.cache_prime(
+                    paths=paths,
+                    host="github.com",
+                    owner="acme",
+                    repo="repo",
+                    base_ref="main",
+                    force=False,
+                    quiet=True,
+                    no_stream=True,
+                )
+
+            self.assertEqual(meta["chunkhound_version"], "chunkhound new")
+            self.assertEqual((Path(meta["db_path"]) / "chunks.db").read_text(encoding="utf-8"), "fresh")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
     def test_cache_prime_publishes_live_progress_when_session_progress_is_available(self) -> None:
@@ -1053,6 +1404,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                 assert callable(callback)
                 current = progress.meta["live_progress"]["current"]["text"]
                 self.assertIn("Refreshing base cache", str(current))
+                self.assertIn("cache miss", str(current))
                 callback("Initial stats: 120 files, 4091 chunks, 4091 embeddings\n")
                 current = progress.meta["live_progress"]["current"]["text"]
                 self.assertIn("120 files/4091 chunks/4091 emb", str(current))
@@ -1139,6 +1491,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
             self.assertNotIn("live_progress", progress.meta)
             self.assertEqual(progress.meta["chunkhound"]["last_index"]["scope"], "base_cache")
             self.assertEqual(meta["index_summary"]["processed_files"], 4)
+            self.assertEqual(meta["cache_build_reason"], "cache miss")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

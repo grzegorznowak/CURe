@@ -1480,6 +1480,7 @@ def cache_prime(
     repo: str,
     base_ref: str,
     force: bool,
+    reason: str | None = None,
     hot_start_seed: dict[str, Any] | None = None,
     quiet: bool = False,
     no_stream: bool = False,
@@ -1531,15 +1532,38 @@ def cache_prime(
         cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
         env_cfg_fp = json_fingerprint(ch_cfg_path)
         meta_path = base_root / "meta.json"
+        current_chunkhound_version = _run_cmd(["chunkhound", "--version"]).stdout.strip()
 
+        build_reason = " ".join(str(reason or "").strip().split())
         need_reindex = force
+        rebuild_database = False
+        detected_reason = "refresh requested" if force else ""
         if not need_reindex and meta_path.is_file():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 if meta.get("config_fingerprint") != cfg_fp:
                     need_reindex = True
+                    detected_reason = "config changed"
+                else:
+                    cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
+                    if cached_chunkhound_version != current_chunkhound_version:
+                        need_reindex = True
+                        rebuild_database = True
+                        detected_reason = "ChunkHound version changed"
             except Exception:
                 need_reindex = True
+                detected_reason = "cache metadata unreadable"
+        elif not meta_path.is_file():
+            detected_reason = "cache miss"
+
+        if not build_reason:
+            build_reason = detected_reason
+
+        if rebuild_database and db_path.exists():
+            if db_path.is_dir():
+                shutil.rmtree(db_path, ignore_errors=True)
+            else:
+                db_path.unlink(missing_ok=True)
 
         env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
         index_cmd = [
@@ -1555,7 +1579,11 @@ def cache_prime(
         with phase(
             f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
         ):
-            index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="base_cache")
+            index_reporter = ChunkhoundLiveProgressReporter(
+                progress=progress,
+                scope="base_cache",
+                reason=build_reason,
+            )
             index_reporter.start()
             out = active_output()
             index_ok = False
@@ -1600,10 +1628,12 @@ def cache_prime(
             "config_fingerprint": cfg_fp,
             "env_config_fingerprint": env_cfg_fp,
             "chunkhound": chunkhound_meta.get("chunkhound"),
-            "chunkhound_version": _run_cmd(["chunkhound", "--version"]).stdout.strip(),
+            "chunkhound_version": current_chunkhound_version,
             "index_cmd": index_cmd,
             "index_duration_seconds": index_result.duration_seconds,
         }
+        if build_reason:
+            meta["cache_build_reason"] = build_reason
         if isinstance(hot_start_seed, dict):
             meta["hot_start"] = {
                 "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
@@ -2263,15 +2293,40 @@ def restore_session_chunkhound_db_from_baseline(
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any] | None:
-    if chunkhound_db_path.exists():
-        return None
-
     base_cache = meta.get("base_cache") if isinstance(meta.get("base_cache"), dict) else {}
+    baseline = resolve_session_baseline_selection(meta=meta)
+    selected_baseline_ref = str(baseline.get("selected_baseline_ref") or "").strip()
+    refresh_base_cache = False
+    try:
+        current_chunkhound_version = _run_cmd(["chunkhound", "--version"]).stdout.strip()
+    except Exception:
+        current_chunkhound_version = ""
+    cached_chunkhound_version = str((base_cache or {}).get("chunkhound_version") or "").strip()
+    if (
+        current_chunkhound_version
+        and cached_chunkhound_version
+        and cached_chunkhound_version != current_chunkhound_version
+    ):
+        refresh_base_cache = True
+        if selected_baseline_ref:
+            log(
+                "Session base cache ChunkHound version changed: "
+                f"{pr.owner}/{pr.repo}@{selected_baseline_ref} "
+                f"({cached_chunkhound_version} -> {current_chunkhound_version})",
+                quiet=quiet,
+            )
+
+    if chunkhound_db_path.exists():
+        if not refresh_base_cache:
+            return None
+        if chunkhound_db_path.is_dir():
+            shutil.rmtree(chunkhound_db_path, ignore_errors=True)
+        else:
+            chunkhound_db_path.unlink(missing_ok=True)
+
     base_db_raw = str((base_cache or {}).get("db_path") or "").strip()
     base_db_path = Path(base_db_raw).resolve() if base_db_raw else None
-    if not (base_db_path and base_db_path.exists()):
-        baseline = resolve_session_baseline_selection(meta=meta)
-        selected_baseline_ref = str(baseline.get("selected_baseline_ref") or "").strip()
+    if refresh_base_cache or not (base_db_path and base_db_path.exists()):
         if not selected_baseline_ref:
             return None
         base_cache = _compat_ensure_base_cache(
@@ -2347,6 +2402,7 @@ def ensure_base_cache(
             repo=pr.repo,
             base_ref=base_ref,
             force=False,
+            reason="refresh requested",
             hot_start_seed=hot_start_seed,
             quiet=quiet,
             no_stream=no_stream,
@@ -2366,6 +2422,7 @@ def ensure_base_cache(
             repo=pr.repo,
             base_ref=base_ref,
             force=False,
+            reason="cache miss",
             hot_start_seed=resolved_hot_start_seed,
             quiet=quiet,
             no_stream=no_stream,
@@ -2396,6 +2453,45 @@ def ensure_base_cache(
             repo=pr.repo,
             base_ref=base_ref,
             force=False,
+            reason="config changed",
+            quiet=quiet,
+            no_stream=no_stream,
+        )
+
+    try:
+        current_chunkhound_version = _run_cmd(["chunkhound", "--version"]).stdout.strip()
+    except Exception:
+        current_chunkhound_version = ""
+    cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
+    if current_chunkhound_version and cached_chunkhound_version != current_chunkhound_version:
+        if cached_chunkhound_version:
+            log(
+                "Base cache ChunkHound version changed: "
+                f"{pr.owner}/{pr.repo}@{base_ref} "
+                f"({cached_chunkhound_version} -> {current_chunkhound_version})",
+                quiet=quiet,
+            )
+        else:
+            log(
+                "Base cache missing ChunkHound version metadata: "
+                f"{pr.owner}/{pr.repo}@{base_ref} "
+                f"(current={current_chunkhound_version})",
+                quiet=quiet,
+            )
+        return _compat_cache_prime(
+            paths=paths,
+            config_path=effective_config_path,
+            progress=progress,
+            host=pr.host,
+            owner=pr.owner,
+            repo=pr.repo,
+            base_ref=base_ref,
+            force=False,
+            reason=(
+                "ChunkHound version changed"
+                if cached_chunkhound_version
+                else "missing ChunkHound version metadata"
+            ),
             quiet=quiet,
             no_stream=no_stream,
         )
@@ -2411,6 +2507,7 @@ def ensure_base_cache(
             repo=pr.repo,
             base_ref=base_ref,
             force=False,
+            reason="cache expired",
             quiet=quiet,
             no_stream=no_stream,
         )
