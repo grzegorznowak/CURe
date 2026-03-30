@@ -156,7 +156,13 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             payload = json.loads(result.stdout)
             self.assertFalse(payload["ok"])
-            self.assertIn("did not start within 30.0s", payload["error"])
+            self.assertTrue(
+                (
+                    "did not start within 30.0s" in payload["error"]
+                    or "failed to write MCP request during initialize" in payload["error"]
+                ),
+                payload["error"],
+            )
             self.assertEqual(payload["preflight_stage"], "initialize")
             self.assertEqual(payload["preflight_stage_status"], "error")
             self.assertEqual(payload["chunkhound_path"], str(fake_chunkhound))

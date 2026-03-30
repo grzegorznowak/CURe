@@ -608,15 +608,28 @@ class EnsureBaseCacheTests(unittest.TestCase):
             old_cache_prime = rf.cache_prime
             rf.cache_prime = fake_cache_prime  # type: ignore[assignment]
             try:
-                with mock.patch.object(
-                    rf,
-                    "load_chunkhound_runtime_config",
-                    return_value=(
-                        rf.ReviewflowChunkHoundConfig(
-                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                with (
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(
+                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                            ),
+                            {"chunkhound": {"base_config_path": "/tmp/base.json"}},
+                            {"indexing": {"exclude": []}},
                         ),
-                        {"chunkhound": {"base_config_path": "/tmp/base.json"}},
-                        {"indexing": {"exclude": []}},
+                    ),
+                    mock.patch.object(
+                        cure_flows,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(
+                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
+                            ),
+                            {"chunkhound": {"base_config_path": "/tmp/base.json"}},
+                            {"indexing": {"exclude": []}},
+                        ),
                     ),
                 ):
                     out = rf.ensure_base_cache(
