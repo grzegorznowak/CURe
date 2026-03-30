@@ -974,6 +974,7 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
         runtime,
         cli_profile=getattr(args, "agent_runtime_profile", None),
         pr_url=pr_url,
+        args=args,
     )
     if bool(getattr(args, "json_output", False)):
         ok_count = sum(1 for item in checks if item.status == "ok")
@@ -983,6 +984,7 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
             runtime,
             cli_profile=getattr(args, "agent_runtime_profile", None),
             pr_url=pr_url,
+            args=args,
         )
         payload["checks"] = [
             {"name": item.name, "status": item.status, "detail": item.detail} for item in checks

@@ -208,6 +208,13 @@ It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkho
 cure doctor --pr-url <PR_URL> --json
 ```
 
+Claude-first explicit override example:
+
+```bash
+cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli
+```
+
 Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [JIRA.md](JIRA.md): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
 That indexed ChunkHound-backed path is the default and recommended review workflow:
@@ -220,11 +227,11 @@ cure resume <session_id|PR_URL>
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
-Built-in Codex review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution with JSON output, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in Codex contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
+Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution with JSON output, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in CLI-provider contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
 
 Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
-Codex and Claude executor paths need internet / network access to obtain code-under-review context. If the sandbox blocks that access, ask the operator for help instead of pretending CURe can always bootstrap fully autonomously.
+Codex and Claude executor paths need internet / network access to obtain code-under-review context. If the sandbox blocks that access, ask the operator for help instead of pretending CURe can always bootstrap fully autonomously. If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`. If autodetect picks the wrong CLI provider, rerun the readiness and review commands with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 
 10. If the environment is ready, start the review:
 
@@ -268,6 +275,7 @@ When readiness still fails because a required secret is missing, inspect the act
 - the JSON file resolved from `[chunkhound].base_config_path`
 - for Jira-driven workflows, the active Jira CLI config at `~/.config/.jira/.config.yml` or the path from `JIRA_CONFIG_FILE`
 - if repo-root `chunkhound.json` or `.chunkhound.json` exists, summarize it as a setup hint and ask the operator whether it should be reused; do not silently adopt it
+- if autodetect picks the wrong CLI provider, rerun the readiness and review commands with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 
 Before stopping, turn the diagnosis into an exact local remediation recipe:
 - if a secret value is missing, do not invent it; tell the operator where to place it locally, prefer a current-shell export for the immediate retry, then a shell profile or existing local secret manager for persistence
@@ -346,6 +354,7 @@ Required behavior:
 - If `chunkhound` is still missing on `PATH`, the wizard may offer to run `cure install`; otherwise run `cure install` after bootstrap or repair.
 - Commands that require ChunkHound bootstrap (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late `[chunkhound]` config errors. On non-TTY runs, they should fail fast and point back to `cure init` plus `cure doctor`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
+- If autodetect picks the wrong CLI provider, rerun `cure doctor` and `cure pr` with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.

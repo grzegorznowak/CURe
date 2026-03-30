@@ -1160,6 +1160,17 @@ def _synthetic_legacy_codex_preset(
     return preset
 
 
+def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
+    current_env = os.environ if env is None else env
+    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
+    codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
+    if claude_detected and not codex_detected:
+        return "claude-cli", "detected_env"
+    if codex_detected and not claude_detected:
+        return "codex-cli", "detected_env"
+    return None, None
+
+
 def resolve_llm_config(
     *,
     base_codex_config_path: Path,
@@ -1181,8 +1192,15 @@ def resolve_llm_config(
     presets = presets if isinstance(presets, dict) else {}
     builtin_presets = builtin_llm_presets()
 
-    selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
-    preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
+    selected_name = str(cli_preset or "").strip()
+    preset_source = "cli" if selected_name else ""
+    if not selected_name:
+        selected_name = str(llm_cfg.get("default_preset") or "").strip()
+        preset_source = "cure.toml" if selected_name else ""
+    if not selected_name:
+        detected_name, detected_source = _autodetect_cli_preset_from_env()
+        selected_name = str(detected_name or "").strip()
+        preset_source = str(detected_source or "").strip()
     if selected_name == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
     if selected_name:
@@ -2452,33 +2470,38 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
 
 
 def _resolved_doctor_agent_runtime(
-    runtime: ReviewflowRuntime, *, cli_profile: str | None = None
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     profile, profile_source, _, _ = resolve_agent_runtime_profile(
         cli_value=cli_profile,
         config_path=runtime.config_path,
         config_enabled=runtime.config_enabled,
     )
-    llm_resolved, _ = resolve_llm_config(
+    llm_resolved, llm_meta = resolve_llm_config(
         base_codex_config_path=runtime.codex_base_config_path,
         reviewflow_config_path=runtime.config_path,
-        cli_preset=None,
-        cli_model=None,
-        cli_effort=None,
-        cli_plan_effort=None,
-        cli_verbosity=None,
-        cli_max_output_tokens=None,
-        cli_request_overrides=None,
-        cli_header_overrides=None,
-        deprecated_codex_model=None,
-        deprecated_codex_effort=None,
-        deprecated_codex_plan_effort=None,
+        cli_preset=getattr(args, "llm_preset", None),
+        cli_model=getattr(args, "llm_model", None),
+        cli_effort=getattr(args, "llm_effort", None),
+        cli_plan_effort=getattr(args, "llm_plan_effort", None),
+        cli_verbosity=getattr(args, "llm_verbosity", None),
+        cli_max_output_tokens=getattr(args, "llm_max_output_tokens", None),
+        cli_request_overrides=parse_llm_request_overrides(getattr(args, "llm_set", [])),
+        cli_header_overrides=parse_llm_header_overrides(getattr(args, "llm_header", [])),
+        deprecated_codex_model=getattr(args, "codex_model", None),
+        deprecated_codex_effort=getattr(args, "codex_effort", None),
+        deprecated_codex_plan_effort=getattr(args, "codex_plan_effort", None),
     )
     provider = str(llm_resolved.get("provider") or "").strip().lower()
     transport = str(llm_resolved.get("transport") or "").strip().lower()
     payload: dict[str, Any] = {
         "profile": profile,
         "profile_source": profile_source,
+        "preset": llm_resolved.get("preset"),
+        "preset_source": llm_meta.get("selected_preset_source"),
         "provider": provider,
         "transport": transport,
         "command": llm_resolved.get("command"),
@@ -2512,6 +2535,7 @@ def _doctor_runtime_payload(
     *,
     cli_profile: str | None = None,
     pr_url: str | None = None,
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     target = _resolve_doctor_target_context(pr_url)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
@@ -2569,7 +2593,7 @@ def _doctor_runtime_payload(
             source=runtime.codex_base_config_source,
             exists=runtime.codex_base_config_path.is_file(),
         ),
-        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
+        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args),
         "acknowledged_sources": _doctor_acknowledged_sources(target=target),
         "review_intelligence": review_intelligence_payload,
         "repo_local_chunkhound": repo_local_chunkhound,
@@ -2621,10 +2645,11 @@ def _doctor_runtime_checks(
     *,
     cli_profile: str | None = None,
     pr_url: str | None = None,
+    args: argparse.Namespace | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
-    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile)
+    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
@@ -2698,6 +2723,21 @@ def _doctor_runtime_checks(
         checks.append(DoctorCheck(name="codex-config", status="ok", detail=f"{runtime.codex_base_config_path} (source={runtime.codex_base_config_source})"))
     else:
         checks.append(DoctorCheck(name="codex-config", status="warn", detail=f"missing: {runtime.codex_base_config_path} (source={runtime.codex_base_config_source})"))
+
+    agent_runtime_detail = (
+        f"profile={agent_runtime.get('profile')} "
+        f"provider={agent_runtime.get('provider')} "
+        f"preset={agent_runtime.get('preset')} "
+        f"preset_source={agent_runtime.get('preset_source')} "
+        f"profile_source={agent_runtime.get('profile_source')}"
+    )
+    checks.append(
+        DoctorCheck(
+            name="agent-runtime",
+            status=("ok" if bool(agent_runtime.get("supported")) else "warn"),
+            detail=agent_runtime_detail if bool(agent_runtime.get("supported")) else f"{agent_runtime_detail} ({agent_runtime.get('detail')})",
+        )
+    )
 
     checks.append(_doctor_executable_check("chunkhound"))
     gh_check = _doctor_executable_check("gh")

@@ -409,7 +409,7 @@ class PromptTemplateTests(unittest.TestCase):
         for path in [ROOT / "README.md", ROOT / "SKILL.md"]:
             text = path.read_text(encoding="utf-8")
             self.assertIn(
-                "Built-in Codex review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
+                "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
                 text,
             )
             self.assertIn(

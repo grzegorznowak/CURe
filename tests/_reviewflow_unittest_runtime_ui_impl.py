@@ -1796,11 +1796,32 @@ class TuiDashboardTests(unittest.TestCase):
         subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
         pr_help = subparsers.choices["pr"].format_help()
         resume_help = subparsers.choices["resume"].format_help()
+        followup_help = subparsers.choices["followup"].format_help()
+        zip_help = subparsers.choices["zip"].format_help()
+        doctor_help = subparsers.choices["doctor"].format_help()
 
         self.assertIn("--no-index", pr_help)
         self.assertIn("Advanced opt-out for custom prompt flows", pr_help)
         self.assertRegex(pr_help, r"not\s+recommended")
+        self.assertIn("Skip running the built-in review agent", pr_help)
+        self.assertIn("Do not stream ChunkHound or review-agent output", pr_help)
         self.assertNotIn("--no-index", resume_help)
+        self.assertIn("Do not stream ChunkHound or review-agent output", resume_help)
+        self.assertIn("Do not stream ChunkHound or review-agent output", followup_help)
+        self.assertIn("Do not stream review-agent output", zip_help)
+        self.assertNotIn("codex review", pr_help.lower())
+        self.assertNotIn("chunkhound/codex output", pr_help.lower())
+        self.assertNotIn("chunkhound/codex output", resume_help.lower())
+        self.assertNotIn("chunkhound/codex output", followup_help.lower())
+        self.assertNotIn("codex output", zip_help.lower())
+        self.assertIn("--llm-preset", doctor_help)
+        self.assertIn("--llm-model", doctor_help)
+        self.assertIn("--llm-effort", doctor_help)
+        self.assertIn("--llm-plan-effort", doctor_help)
+        self.assertIn("--llm-verbosity", doctor_help)
+        self.assertIn("--llm-max-output-tokens", doctor_help)
+        self.assertIn("--llm-set", doctor_help)
+        self.assertIn("--llm-header", doctor_help)
 
         resume_args = parser.parse_args(["resume", "session-123", "--no-index"])
         self.assertTrue(resume_args.no_index)
@@ -1898,12 +1919,40 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(args.llm_plan_effort, "xhigh")
         self.assertEqual(args.llm_verbosity, "low")
         self.assertEqual(args.llm_max_output_tokens, 9000)
+
+    def test_parser_accepts_doctor_llm_override_flags(self) -> None:
+        p = rf.build_parser()
+        args = p.parse_args(
+            [
+                "doctor",
+                "--llm-preset",
+                "claude-cli",
+                "--llm-model",
+                "claude-sonnet-4-6",
+                "--llm-effort",
+                "high",
+                "--llm-plan-effort",
+                "high",
+                "--llm-verbosity",
+                "low",
+                "--llm-max-output-tokens",
+                "9000",
+                "--llm-set",
+                "top_p=0.9",
+                "--llm-header",
+                "X-Test=1",
+                "--json",
+            ]
+        )
+        self.assertEqual(args.llm_preset, "claude-cli")
+        self.assertEqual(args.llm_model, "claude-sonnet-4-6")
+        self.assertEqual(args.llm_effort, "high")
+        self.assertEqual(args.llm_plan_effort, "high")
+        self.assertEqual(args.llm_verbosity, "low")
+        self.assertEqual(args.llm_max_output_tokens, 9000)
         self.assertEqual(args.llm_set, ["top_p=0.9"])
-        self.assertEqual(args.llm_header, ["HTTP-Referer=https://example.com"])
-        self.assertEqual(args.codex_model, "gpt-5.3-codex-spark")
-        self.assertEqual(args.codex_effort, "low")
-        self.assertEqual(args.ui, "off")
-        self.assertEqual(args.verbosity, "debug")
+        self.assertEqual(args.llm_header, ["X-Test=1"])
+        self.assertTrue(args.json_output)
 
     def test_parser_accepts_ui_and_verbosity_flags(self) -> None:
         p = rf.build_parser()
@@ -2681,6 +2730,12 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("`repo-local-chunkhound` check", readme)
         self.assertIn("`executor-network` advisory check", readme)
         self.assertIn("Codex and Claude executor paths need internet / network access", readme)
+        self.assertIn("cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json", readme)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli", readme)
+        self.assertIn(
+            "If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            readme,
+        )
         self.assertIn("Hard Rule", skill)
         self.assertIn("When To Use CURe", skill)
         self.assertIn("Primary Inputs", skill)
@@ -2726,6 +2781,12 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("`repo-local-chunkhound` check", skill)
         self.assertIn("`executor-network` checks", skill)
         self.assertIn("Codex and Claude executor paths need internet / network access", skill)
+        self.assertIn("cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json", skill)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli", skill)
+        self.assertIn(
+            "If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            skill,
+        )
         self.assertNotIn("pip install", readme)
 
     def test_skill_documents_proactive_secret_and_config_remediation(self) -> None:
@@ -2755,6 +2816,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks", skill)
         self.assertIn("the active executor path is Codex or Claude", skill)
         self.assertIn("the required internet / network access for code-under-review context", skill)
+        self.assertIn(
+            "If autodetect picks the wrong CLI provider, rerun the readiness and review commands with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            skill,
+        )
 
     def test_docs_mark_no_index_as_advanced_opt_out(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -2778,7 +2843,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 
         for text in (readme, skill):
-            self.assertIn("staged CURe-managed ChunkHound helper", text)
+            self.assertIn(
+                "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
+                text,
+            )
             self.assertIn("`CURE_CHUNKHOUND_HELPER`", text)
             self.assertIn('`"$CURE_CHUNKHOUND_HELPER" search ...`', text)
             self.assertIn('`"$CURE_CHUNKHOUND_HELPER" research ...`', text)
@@ -3212,6 +3280,123 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
             self.assertEqual(payload["agent_runtime"]["profile"], "permissive")
+            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset_source"], "cure.toml")
+            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_json_respects_llm_preset_override(self) -> None:
+        root = ROOT / ".tmp_test_doctor_json_llm_override"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+            args = argparse.Namespace(
+                json_output=True,
+                llm_preset="claude-cli",
+                llm_model=None,
+                llm_effort=None,
+                llm_plan_effort=None,
+                llm_verbosity=None,
+                llm_max_output_tokens=None,
+                llm_set=[],
+                llm_header=[],
+                agent_runtime_profile=None,
+                pr_url=None,
+            )
+            with mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(args, runtime=runtime)
+            self.assertEqual(rc, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset_source"], "cli")
+            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doctor_flow_json_reports_detected_provider_source(self) -> None:
+        root = ROOT / ".tmp_test_doctor_json_detected_provider"
+        cfg = root / "reviewflow.toml"
+        base_cfg = root / "chunkhound.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "sandboxes").mkdir()
+            (root / "cache").mkdir()
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{root / "sandboxes"}"',
+                        f'cache_root = "{root / "cache"}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
+            stdout = StringIO()
+            args = argparse.Namespace(
+                json_output=True,
+                llm_preset=None,
+                llm_model=None,
+                llm_effort=None,
+                llm_plan_effort=None,
+                llm_verbosity=None,
+                llm_max_output_tokens=None,
+                llm_set=[],
+                llm_header=[],
+                agent_runtime_profile=None,
+                pr_url=None,
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION": "claude-session-123",
+                    "CLAUDE_HOME": "/tmp/claude-home",
+                    "CODEX_THREAD_ID": "",
+                    "CODEX_HOME": "",
+                },
+                clear=False,
+            ), mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
+                rf,
+                "_default_jira_config_path",
+                return_value=root / ".tmp_missing_jira.yml",
+            ), mock.patch("sys.stdout", stdout):
+                rc = rf.doctor_flow(args, runtime=runtime)
+            self.assertEqual(rc, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset_source"], "detected_env")
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
         finally:
             shutil.rmtree(root, ignore_errors=True)

@@ -1427,6 +1427,17 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
     return out
 
 
+def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
+    current_env = os.environ if env is None else env
+    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
+    codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
+    if claude_detected and not codex_detected:
+        return "claude-cli", "detected_env"
+    if codex_detected and not claude_detected:
+        return "codex-cli", "detected_env"
+    return None, None
+
+
 def resolve_llm_config(
     *,
     base_codex_config_path: Path,
@@ -1448,8 +1459,15 @@ def resolve_llm_config(
     presets = presets if isinstance(presets, dict) else {}
     builtin_presets = builtin_llm_presets()
 
-    selected_name = str(cli_preset or "").strip() or str(llm_cfg.get("default_preset") or "").strip()
-    preset_source = "cli" if str(cli_preset or "").strip() else "cure.toml"
+    selected_name = str(cli_preset or "").strip()
+    preset_source = "cli" if selected_name else ""
+    if not selected_name:
+        selected_name = str(llm_cfg.get("default_preset") or "").strip()
+        preset_source = "cure.toml" if selected_name else ""
+    if not selected_name:
+        detected_name, detected_source = _autodetect_cli_preset_from_env()
+        selected_name = str(detected_name or "").strip()
+        preset_source = str(detected_source or "").strip()
     if selected_name == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
     if selected_name:
@@ -13334,33 +13352,38 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
 
 
 def _resolved_doctor_agent_runtime(
-    runtime: ReviewflowRuntime, *, cli_profile: str | None = None
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     profile, profile_source, _, _ = resolve_agent_runtime_profile(
         cli_value=cli_profile,
         config_path=runtime.config_path,
         config_enabled=runtime.config_enabled,
     )
-    llm_resolved, _ = resolve_llm_config(
+    llm_resolved, llm_meta = resolve_llm_config(
         base_codex_config_path=runtime.codex_base_config_path,
         reviewflow_config_path=runtime.config_path,
-        cli_preset=None,
-        cli_model=None,
-        cli_effort=None,
-        cli_plan_effort=None,
-        cli_verbosity=None,
-        cli_max_output_tokens=None,
-        cli_request_overrides=None,
-        cli_header_overrides=None,
-        deprecated_codex_model=None,
-        deprecated_codex_effort=None,
-        deprecated_codex_plan_effort=None,
+        cli_preset=getattr(args, "llm_preset", None),
+        cli_model=getattr(args, "llm_model", None),
+        cli_effort=getattr(args, "llm_effort", None),
+        cli_plan_effort=getattr(args, "llm_plan_effort", None),
+        cli_verbosity=getattr(args, "llm_verbosity", None),
+        cli_max_output_tokens=getattr(args, "llm_max_output_tokens", None),
+        cli_request_overrides=parse_llm_request_overrides(getattr(args, "llm_set", [])),
+        cli_header_overrides=parse_llm_header_overrides(getattr(args, "llm_header", [])),
+        deprecated_codex_model=getattr(args, "codex_model", None),
+        deprecated_codex_effort=getattr(args, "codex_effort", None),
+        deprecated_codex_plan_effort=getattr(args, "codex_plan_effort", None),
     )
     provider = str(llm_resolved.get("provider") or "").strip().lower()
     transport = str(llm_resolved.get("transport") or "").strip().lower()
     payload: dict[str, Any] = {
         "profile": profile,
         "profile_source": profile_source,
+        "preset": llm_resolved.get("preset"),
+        "preset_source": llm_meta.get("selected_preset_source"),
         "provider": provider,
         "transport": transport,
         "command": llm_resolved.get("command"),
@@ -13389,7 +13412,12 @@ def _resolved_doctor_agent_runtime(
     return payload
 
 
-def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> dict[str, Any]:
+def _doctor_runtime_payload(
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any]:
     config_exists = runtime.config_path.is_file()
     payload: dict[str, Any] = {
         "cure_config": _doctor_path_payload(
@@ -13413,7 +13441,7 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | No
             source=runtime.codex_base_config_source,
             exists=runtime.codex_base_config_path.is_file(),
         ),
-        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile),
+        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args),
     }
 
     if not runtime.config_enabled:
@@ -13445,9 +13473,14 @@ def _doctor_runtime_payload(runtime: ReviewflowRuntime, *, cli_profile: str | No
     return payload
 
 
-def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | None = None) -> list[DoctorCheck]:
+def _doctor_runtime_checks(
+    runtime: ReviewflowRuntime,
+    *,
+    cli_profile: str | None = None,
+    args: argparse.Namespace | None = None,
+) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
-    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile)
+    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
     if not runtime.config_enabled:
@@ -13553,6 +13586,21 @@ def _doctor_runtime_checks(runtime: ReviewflowRuntime, *, cli_profile: str | Non
                 detail=f"missing: {runtime.codex_base_config_path} (source={runtime.codex_base_config_source})",
             )
         )
+
+    agent_runtime_detail = (
+        f"profile={agent_runtime.get('profile')} "
+        f"provider={agent_runtime.get('provider')} "
+        f"preset={agent_runtime.get('preset')} "
+        f"preset_source={agent_runtime.get('preset_source')} "
+        f"profile_source={agent_runtime.get('profile_source')}"
+    )
+    checks.append(
+        DoctorCheck(
+            name="agent-runtime",
+            status=("ok" if bool(agent_runtime.get("supported")) else "warn"),
+            detail=agent_runtime_detail if bool(agent_runtime.get("supported")) else f"{agent_runtime_detail} ({agent_runtime.get('detail')})",
+        )
+    )
 
     checks.extend(_doctor_executable_check(name) for name in ("chunkhound", "gh", "jira", "codex"))
     provider = str(agent_runtime.get("provider") or "").strip().lower()
@@ -13847,9 +13895,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         action="store_true",
         help="Advanced opt-out for custom prompt flows: skip ChunkHound indexing and built-in prompts (not recommended)",
     )
-    prp.add_argument("--no-review", action="store_true", help="Skip running codex review")
+    prp.add_argument("--no-review", action="store_true", help="Skip running the built-in review agent")
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    prp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    prp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
     prp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
@@ -13911,7 +13959,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     rp.add_argument("--no-index", action="store_true", help=argparse.SUPPRESS)
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    rp.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    rp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
@@ -13930,7 +13978,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help=codex_help,
     )
     fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    fup.add_argument("--no-stream", action="store_true", help="Do not stream chunkhound/codex output")
+    fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
@@ -13948,7 +13996,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help=codex_help,
     )
     zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    zp.add_argument("--no-stream", action="store_true", help="Do not stream codex output")
+    zp.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
     zp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     zp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
@@ -13994,6 +14042,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     )
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
+    add_llm_override_args(dp)
     add_agent_runtime_args(dp)
     dp.add_argument(
         "--json",

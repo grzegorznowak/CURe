@@ -1083,21 +1083,31 @@ class LlmPresetConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            resolved, meta = rf.resolve_llm_config(
-                base_codex_config_path=base,
-                reviewflow_config_path=rf_cfg,
-                cli_preset=None,
-                cli_model=None,
-                cli_effort=None,
-                cli_plan_effort=None,
-                cli_verbosity=None,
-                cli_max_output_tokens=None,
-                cli_request_overrides={},
-                cli_header_overrides={},
-                deprecated_codex_model=None,
-                deprecated_codex_effort=None,
-                deprecated_codex_plan_effort=None,
-            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION": "",
+                    "CLAUDE_HOME": "",
+                    "CODEX_THREAD_ID": "",
+                    "CODEX_HOME": "",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
             self.assertEqual(resolved["preset"], "codex-cli")
             self.assertEqual(resolved["selected_name"], "codex-cli")
             self.assertEqual(resolved["model"], "legacy-model")
@@ -1111,6 +1121,203 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_autodetects_claude_from_env_when_no_explicit_selection_exists(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_detect_claude.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_claude.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION": "claude-session-123",
+                    "CLAUDE_HOME": "/tmp/claude-home",
+                    "CODEX_THREAD_ID": "",
+                    "CODEX_HOME": "",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertEqual(resolved["preset"], "claude-cli")
+            self.assertEqual(resolved["provider"], "claude")
+            self.assertEqual(meta["selected_preset_source"], "detected_env")
+            self.assertEqual(meta["resolved_preset_id"], "claude-cli")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_autodetects_codex_from_env_when_no_explicit_selection_exists(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_detect_codex.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_codex.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_THREAD_ID": "thread-123",
+                    "CODEX_HOME": "/tmp/codex-home",
+                    "CLAUDE_CODE_SESSION": "",
+                    "CLAUDE_HOME": "",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertEqual(resolved["preset"], "codex-cli")
+            self.assertEqual(resolved["provider"], "codex")
+            self.assertEqual(meta["selected_preset_source"], "detected_env")
+            self.assertEqual(meta["resolved_preset_id"], "codex-cli")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_keeps_implicit_codex_when_marker_families_are_ambiguous(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_detect_ambiguous.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_ambiguous.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION": "claude-session-123",
+                    "CODEX_THREAD_ID": "thread-123",
+                    "CLAUDE_HOME": "",
+                    "CODEX_HOME": "",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertEqual(resolved["preset"], "codex-cli")
+            self.assertEqual(resolved["provider"], "codex")
+            self.assertEqual(meta["selected_preset_source"], "implicit_codex_cli")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_config_default_beats_env_autodetect(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_detect_config_priority.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_config_priority.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "claude_default"',
+                        "",
+                        "[llm_presets.claude_default]",
+                        'preset = "claude-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_THREAD_ID": "thread-123",
+                    "CODEX_HOME": "/tmp/codex-home",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertEqual(resolved["preset"], "claude-cli")
+            self.assertEqual(resolved["provider"], "claude")
+            self.assertEqual(meta["selected_preset_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_cli_preset_beats_env_autodetect(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_detect_cli_priority.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_THREAD_ID": "thread-123",
+                    "CODEX_HOME": "/tmp/codex-home",
+                },
+                clear=False,
+            ):
+                resolved, meta = rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=None,
+                    cli_preset="claude-cli",
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
+            self.assertEqual(resolved["preset"], "claude-cli")
+            self.assertEqual(resolved["provider"], "claude")
+            self.assertEqual(meta["selected_preset_source"], "cli")
+        finally:
+            base.unlink(missing_ok=True)
 
     def test_resolve_llm_config_codex_cli_builtin_default_effort_is_xhigh(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin_default.toml"
