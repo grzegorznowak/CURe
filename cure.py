@@ -6455,6 +6455,154 @@ def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     return env
 
 
+def _cleanup_chunkhound_db_path(chunkhound_db_path: Path) -> None:
+    if not chunkhound_db_path.exists():
+        return
+    if chunkhound_db_path.is_dir():
+        shutil.rmtree(chunkhound_db_path, ignore_errors=True)
+    else:
+        chunkhound_db_path.unlink(missing_ok=True)
+
+
+def _record_session_chunkhound_rebuild_fallback(
+    *,
+    progress: Any,
+    scope: str,
+    reuse_source_kind: str,
+    failed_cmd: list[str],
+    failed_error: ReviewflowSubprocessError,
+    retry_status: str,
+) -> None:
+    meta = getattr(progress, "meta", None)
+    if not isinstance(meta, dict):
+        return
+    chunkhound = meta.setdefault("chunkhound", {})
+    if not isinstance(chunkhound, dict):
+        chunkhound = {}
+        meta["chunkhound"] = chunkhound
+    chunkhound["reuse_rebuild_fallback"] = {
+        "scope": str(scope or "").strip() or "topup",
+        "reuse_source_kind": str(reuse_source_kind or "").strip() or "reused_db",
+        "decision": "clean_rebuild_retry",
+        "status": str(retry_status or "").strip() or "retrying",
+        "recorded_at": _utc_now_iso(),
+        "failed_cmd": list(failed_cmd),
+        "error": {
+            "exit_code": int(getattr(failed_error, "exit_code", 1) or 1),
+            "stderr": str(getattr(failed_error, "stderr", "") or ""),
+            "stdout": str(getattr(failed_error, "stdout", "") or ""),
+        },
+    }
+    flush = getattr(progress, "flush", None)
+    if callable(flush):
+        flush()
+
+
+def _run_session_chunkhound_index_with_rebuild_fallback(
+    *,
+    progress: Any,
+    scope: str,
+    quiet: bool,
+    stream: bool,
+    chunkhound_cfg: Any,
+    chunkhound_cfg_path: Path,
+    chunkhound_db_path: Path,
+    chunkhound_work_dir: Path,
+    repo_dir: Path,
+    reuse_source_kind: str,
+    seed_source_db_path: Path | None = None,
+) -> None:
+    env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+    index_cmd = [
+        "chunkhound",
+        "index",
+        str(repo_dir),
+        "--config",
+        str(chunkhound_cfg_path),
+    ]
+    out = active_output()
+    last_failure: ReviewflowSubprocessError | None = None
+
+    for attempt in (1, 2):
+        if attempt == 1:
+            if seed_source_db_path is not None:
+                _cleanup_chunkhound_db_path(chunkhound_db_path)
+                copy_duckdb_files(seed_source_db_path, chunkhound_db_path)
+        else:
+            _cleanup_chunkhound_db_path(chunkhound_db_path)
+
+        reporter = ChunkhoundLiveProgressReporter(
+            progress=progress,
+            scope=scope,
+            reason="compatibility canary or reuse failure" if attempt == 2 else None,
+        )
+        reporter.start()
+        index_ok = False
+        try:
+            progress.record_cmd(index_cmd)
+            reporter.mark_running()
+            if out is not None:
+                out.run_logged_cmd(
+                    index_cmd,
+                    kind="chunkhound",
+                    cwd=chunkhound_work_dir,
+                    env=env,
+                    check=True,
+                    stream_requested=stream,
+                    stream_text_callback=reporter.consume_text,
+                )
+            else:
+                result = run_cmd(
+                    index_cmd,
+                    cwd=chunkhound_work_dir,
+                    env=env,
+                    check=True,
+                    stream=stream,
+                    stream_label="chunkhound",
+                )
+                reporter.consume_text(result.stdout)
+                reporter.consume_text(result.stderr)
+            index_ok = True
+            if attempt == 2 and last_failure is not None:
+                _record_session_chunkhound_rebuild_fallback(
+                    progress=progress,
+                    scope=scope,
+                    reuse_source_kind=reuse_source_kind,
+                    failed_cmd=index_cmd,
+                    failed_error=last_failure,
+                    retry_status="recovered",
+                )
+            return
+        except ReviewflowSubprocessError as exc:
+            if attempt == 1:
+                last_failure = exc
+                _record_session_chunkhound_rebuild_fallback(
+                    progress=progress,
+                    scope=scope,
+                    reuse_source_kind=reuse_source_kind,
+                    failed_cmd=index_cmd,
+                    failed_error=exc,
+                    retry_status="retrying",
+                )
+                log(
+                    "ChunkHound reused DB failed during "
+                    f"{scope}; retrying once with a clean rebuild",
+                    quiet=quiet,
+                )
+                continue
+            _record_session_chunkhound_rebuild_fallback(
+                progress=progress,
+                scope=scope,
+                reuse_source_kind=reuse_source_kind,
+                failed_cmd=index_cmd,
+                failed_error=exc,
+                retry_status="failed",
+            )
+            raise
+        finally:
+            reporter.finish(status="done" if index_ok else "error")
+
+
 def ensure_review_config(paths: ReviewflowPaths, *, config_path: Path | None = None) -> None:
     _ = paths
     load_reviewflow_chunkhound_config(
@@ -8196,8 +8344,6 @@ def _pr_flow_impl(
                 raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
 
             with phase("index_topup", progress=progress, quiet=quiet):
-                index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="topup")
-                index_reporter.start()
                 seed_kind = (
                     str((seed_source_meta or {}).get("source_kind") or "shared_base_cache")
                     if isinstance(seed_source_meta, dict)
@@ -8207,51 +8353,19 @@ def _pr_flow_impl(
                     f"ChunkHound top-up index: seed={seed_kind} db={chunkhound_db_path}",
                     quiet=quiet,
                 )
-                if chunkhound_db_path.exists():
-                    if chunkhound_db_path.is_dir():
-                        shutil.rmtree(chunkhound_db_path, ignore_errors=True)
-                    else:
-                        chunkhound_db_path.unlink(missing_ok=True)
-                copy_duckdb_files(seed_source_db_path, chunkhound_db_path)
-
-                env = merged_env(
-                    chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
+                _run_session_chunkhound_index_with_rebuild_fallback(
+                    progress=progress,
+                    scope="topup",
+                    quiet=quiet,
+                    stream=stream,
+                    chunkhound_cfg=chunkhound_cfg,
+                    chunkhound_cfg_path=chunkhound_cfg_path,
+                    chunkhound_db_path=chunkhound_db_path,
+                    chunkhound_work_dir=chunkhound_work_dir,
+                    repo_dir=repo_dir,
+                    reuse_source_kind=seed_kind,
+                    seed_source_db_path=seed_source_db_path,
                 )
-                index_cmd = [
-                    "chunkhound",
-                    "index",
-                    str(repo_dir),
-                    "--config",
-                    str(chunkhound_cfg_path),
-                ]
-                progress.record_cmd(index_cmd)
-                out = active_output()
-                index_ok = False
-                try:
-                    index_reporter.mark_running()
-                    if out is not None:
-                        out.run_logged_cmd(
-                            index_cmd,
-                            kind="chunkhound",
-                            cwd=chunkhound_work_dir,
-                            env=env,
-                            check=True,
-                            stream_requested=stream,
-                            stream_text_callback=index_reporter.consume_text,
-                        )
-                    else:
-                        result = run_cmd(
-                            index_cmd,
-                            cwd=chunkhound_work_dir,
-                            env=env,
-                            stream=stream,
-                            stream_label="chunkhound",
-                        )
-                        index_reporter.consume_text(result.stdout)
-                        index_reporter.consume_text(result.stderr)
-                    index_ok = True
-                finally:
-                    index_reporter.finish(status="done" if index_ok else "error")
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -10450,43 +10564,18 @@ def _followup_flow_impl(
                 ).stdout.strip()
 
         with phase("followup_index", progress=progress, quiet=quiet):
-            index_reporter = ChunkhoundLiveProgressReporter(progress=progress, scope="followup")
-            index_reporter.start()
-            index_cmd = [
-                "chunkhound",
-                "index",
-                str(repo_dir),
-                "--config",
-                str(chunkhound_cfg_path),
-            ]
-            out_obj = active_output()
-            index_ok = False
-            try:
-                index_reporter.mark_running()
-                if out_obj is not None:
-                    out_obj.run_logged_cmd(
-                        index_cmd,
-                        kind="chunkhound",
-                        cwd=chunkhound_work_dir,
-                        env=env,
-                        check=True,
-                        stream_requested=stream,
-                        stream_text_callback=index_reporter.consume_text,
-                    )
-                else:
-                    result = run_cmd(
-                        index_cmd,
-                        cwd=chunkhound_work_dir,
-                        env=env,
-                        check=True,
-                        stream=stream,
-                        stream_label="chunkhound",
-                    )
-                    index_reporter.consume_text(result.stdout)
-                    index_reporter.consume_text(result.stderr)
-                index_ok = True
-            finally:
-                index_reporter.finish(status="done" if index_ok else "error")
+            _run_session_chunkhound_index_with_rebuild_fallback(
+                progress=progress,
+                scope="followup",
+                quiet=quiet,
+                stream=stream,
+                chunkhound_cfg=chunkhound_cfg,
+                chunkhound_cfg_path=chunkhound_cfg_path,
+                chunkhound_db_path=chunkhound_db_path,
+                chunkhound_work_dir=chunkhound_work_dir,
+                repo_dir=repo_dir,
+                reuse_source_kind="session_local_restore",
+            )
 
         # Pick follow-up prompt template based on the original profile (best-effort).
         prompt_meta = meta.get("prompt") if isinstance(meta.get("prompt"), dict) else {}

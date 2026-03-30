@@ -2,31 +2,28 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 from chunkhound_summary import parse_chunkhound_index_summary
-from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from cure_output import ChunkhoundLiveProgressReporter, _eprint, active_output, log
 from cure_runtime import (
     ReviewIntelligenceConfig,
-    ReviewflowChunkHoundConfig,
     build_review_intelligence_guidance,
     fingerprint_chunkhound_reviewflow_config,
     load_chunkhound_runtime_config,
-    load_review_intelligence_config,
     load_reviewflow_chunkhound_config,
 )
 from cure_sessions import PullRequestRef
@@ -36,10 +33,9 @@ from paths import (
     base_dir,
     default_reviewflow_config_path,
     repo_id_for_gh,
-    safe_ref_slug,
     seed_dir,
 )
-from run import ReviewflowSubprocessError, merged_env, run_cmd
+from run import ReviewflowSubprocessError, merged_env
 
 
 def _reviewflow():
@@ -62,6 +58,7 @@ PR_BASELINE_MAX_CHANGED_FILES = 1500
 PR_BASELINE_MAX_CHANGED_LINES = 100000
 GITHUB_COMPARE_FILES_HARD_LIMIT = 300
 DEFAULT_BASE_CACHE_TTL_HOURS = 24
+CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS = 30
 
 ChunkHoundToolRequirement = Literal["required", "guidance", "conditional"]
 
@@ -1463,6 +1460,30 @@ def materialize_chunkhound_env_config(
 
     write_json(output_config_path, cfg)
 
+
+def _sync_seed_checkout(
+    *,
+    paths: ReviewflowPaths,
+    host: str,
+    owner: str,
+    repo: str,
+    base_ref: str,
+    quiet: bool,
+) -> tuple[Path, str]:
+    seed = seed_dir(paths, host, owner, repo)
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    with phase(f"cache_seed_sync {owner}/{repo}@{base_ref}", progress=None, quiet=quiet):
+        if not seed.exists():
+            clone_seed_repo(host=host, owner=owner, repo=repo, seed=seed)
+        else:
+            _run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
+            _run_cmd(["git", "-C", str(seed), "fetch", "--prune", "origin"])
+
+        _run_cmd(["git", "-C", str(seed), "fetch", "origin", base_ref])
+        _run_cmd(["git", "-C", str(seed), "checkout", "-B", base_ref, f"origin/{base_ref}"])
+        base_sha = _run_cmd(["git", "-C", str(seed), "rev-parse", "HEAD"]).stdout.strip()
+    return seed, base_sha
+
 def ensure_review_config(paths: ReviewflowPaths, *, config_path: Path | None = None) -> None:
     _ = paths
     load_reviewflow_chunkhound_config(
@@ -1497,22 +1518,14 @@ def cache_prime(
     base_root = base_dir(paths, host, owner, repo, base_ref)
     base_root.mkdir(parents=True, exist_ok=True)
     with file_lock(base_root / ".cache_prime.lock", quiet=quiet):
-        seed = seed_dir(paths, host, owner, repo)
-        seed.parent.mkdir(parents=True, exist_ok=True)
-        with phase(f"cache_seed_sync {owner}/{repo}@{base_ref}", progress=None, quiet=quiet):
-            if not seed.exists():
-                clone_seed_repo(host=host, owner=owner, repo=repo, seed=seed)
-            else:
-                # Validate it's a git repo before fetching.
-                _run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
-                _run_cmd(["git", "-C", str(seed), "fetch", "--prune", "origin"])
-
-            # Reset seed to latest base ref.
-            _run_cmd(["git", "-C", str(seed), "fetch", "origin", base_ref])
-            _run_cmd(
-                ["git", "-C", str(seed), "checkout", "-B", base_ref, f"origin/{base_ref}"]
-            )
-            base_sha = _run_cmd(["git", "-C", str(seed), "rev-parse", "HEAD"]).stdout.strip()
+        seed, base_sha = _sync_seed_checkout(
+            paths=paths,
+            host=host,
+            owner=owner,
+            repo=repo,
+            base_ref=base_ref,
+            quiet=quiet,
+        )
 
         db_dir = base_root / "db"
         db_dir.mkdir(parents=True, exist_ok=True)
@@ -2464,37 +2477,68 @@ def ensure_base_cache(
         current_chunkhound_version = ""
     cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
     if current_chunkhound_version and cached_chunkhound_version != current_chunkhound_version:
-        if cached_chunkhound_version:
-            log(
-                "Base cache ChunkHound version changed: "
-                f"{pr.owner}/{pr.repo}@{base_ref} "
-                f"({cached_chunkhound_version} -> {current_chunkhound_version})",
+        source_db_raw = str(meta.get("db_path") or "").strip()
+        source_db_path = Path(source_db_raw).resolve(strict=False) if source_db_raw else None
+        with file_lock(base_root / ".cache_prime.lock", quiet=quiet):
+            compatibility = _run_base_cache_compatibility_canary(
+                paths=paths,
+                config_path=effective_config_path,
+                pr=pr,
+                base_ref=base_ref,
+                base_root=base_root,
+                source_db_path=(
+                    source_db_path
+                    if source_db_path is not None
+                    else (base_root / "db" / ".chunkhound.db")
+                ),
+                cached_chunkhound_version=cached_chunkhound_version,
+                current_chunkhound_version=current_chunkhound_version,
                 quiet=quiet,
             )
-        else:
+
+            if compatibility.get("decision") == "reuse":
+                promoted_db_path = base_root / "db" / ".chunkhound.db"
+                promoted_meta = dict(meta)
+                promoted_meta["indexed_at"] = _utc_now_iso()
+                promoted_meta["db_path"] = str(promoted_db_path)
+                promoted_meta["db_size_bytes"] = path_size_bytes(promoted_db_path)
+                promoted_meta["chunkhound_version"] = current_chunkhound_version
+                promoted_meta["compatibility"] = compatibility
+                promoted_meta["cache_origin"] = "compatibility_canary_promoted_reuse"
+                write_redacted_json(meta_path, promoted_meta)
+                log(
+                    "Base cache compatibility canary accepted reuse: "
+                    f"{pr.owner}/{pr.repo}@{base_ref}",
+                    quiet=quiet,
+                )
+                return promoted_meta
+
             log(
-                "Base cache missing ChunkHound version metadata: "
-                f"{pr.owner}/{pr.repo}@{base_ref} "
-                f"(current={current_chunkhound_version})",
+                "Base cache compatibility canary rejected reuse: "
+                f"{pr.owner}/{pr.repo}@{base_ref}",
                 quiet=quiet,
             )
-        return _compat_cache_prime(
-            paths=paths,
-            config_path=effective_config_path,
-            progress=progress,
-            host=pr.host,
-            owner=pr.owner,
-            repo=pr.repo,
-            base_ref=base_ref,
-            force=False,
-            reason=(
-                "ChunkHound version changed"
-                if cached_chunkhound_version
-                else "missing ChunkHound version metadata"
-            ),
-            quiet=quiet,
-            no_stream=no_stream,
-        )
+            rebuilt_meta = _compat_cache_prime(
+                paths=paths,
+                config_path=effective_config_path,
+                progress=progress,
+                host=pr.host,
+                owner=pr.owner,
+                repo=pr.repo,
+                base_ref=base_ref,
+                force=False,
+                reason=_version_drift_compatibility_reason(
+                    cached_chunkhound_version=cached_chunkhound_version,
+                    current_chunkhound_version=current_chunkhound_version,
+                ),
+                quiet=quiet,
+                no_stream=no_stream,
+            )
+            rebuilt_meta = dict(rebuilt_meta)
+            rebuilt_meta["compatibility"] = compatibility
+            rebuilt_meta["cache_origin"] = "fresh_rebuild"
+            write_redacted_json(meta_path, rebuilt_meta)
+            return rebuilt_meta
 
     if ttl_expired(str(meta.get("indexed_at") or ""), ttl_hours):
         log(f"Base cache expired: {pr.owner}/{pr.repo}@{base_ref}", quiet=quiet)
@@ -2541,13 +2585,212 @@ def copy_duckdb_files(src_db_path: Path, dst_db_path: Path) -> None:
         shutil.copytree(src_db_path, dst_db_path, copy_function=shutil.copy2)
         return
 
-    src_wal = src_db_path.with_suffix(src_db_path.suffix + ".wal")
-    dst_wal = dst_db_path.with_suffix(dst_db_path.suffix + ".wal")
-
     dst_db_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_db_path, dst_db_path)
-    if src_wal.exists():
-        shutil.copy2(src_wal, dst_wal)
+
+
+def _version_drift_compatibility_reason(
+    *,
+    cached_chunkhound_version: str,
+    current_chunkhound_version: str,
+) -> str:
+    if cached_chunkhound_version and current_chunkhound_version:
+        return (
+            "ChunkHound compatibility canary rejected reuse "
+            f"({cached_chunkhound_version} -> {current_chunkhound_version})"
+        )
+    return "ChunkHound compatibility canary rejected reuse"
+
+
+def _build_base_cache_compatibility_record(
+    *,
+    cached_chunkhound_version: str,
+    current_chunkhound_version: str,
+    decision: str,
+    result: str,
+    reason: str,
+    timeout_seconds: int,
+    probe_cmd: list[str] | None = None,
+    probe_duration_seconds: float | None = None,
+    index_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "checked_at": _utc_now_iso(),
+        "cached_chunkhound_version": cached_chunkhound_version,
+        "current_chunkhound_version": current_chunkhound_version,
+        "decision": decision,
+        "result": result,
+        "reason": " ".join(str(reason or "").strip().split()),
+        "probe_timeout_seconds": int(timeout_seconds),
+    }
+    if probe_cmd:
+        record["probe_cmd"] = list(probe_cmd)
+    if probe_duration_seconds is not None:
+        record["probe_duration_seconds"] = float(probe_duration_seconds)
+    if isinstance(index_summary, dict):
+        record["index_summary"] = dict(index_summary)
+    return record
+
+
+def _run_base_cache_compatibility_canary(
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path,
+    pr: PullRequestRef,
+    base_ref: str,
+    base_root: Path,
+    source_db_path: Path,
+    cached_chunkhound_version: str,
+    current_chunkhound_version: str,
+    quiet: bool,
+) -> dict[str, Any]:
+    if not source_db_path.exists():
+        return _build_base_cache_compatibility_record(
+            cached_chunkhound_version=cached_chunkhound_version,
+            current_chunkhound_version=current_chunkhound_version,
+            decision="rebuild",
+            result="missing_source_db",
+            reason=f"cached DB missing at {source_db_path}",
+            timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+        )
+
+    effective_config_path = config_path or default_reviewflow_config_path()
+    chunkhound_cfg, _, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
+        config_path=effective_config_path,
+        require=True,
+    )
+
+    seed, _ = _sync_seed_checkout(
+        paths=paths,
+        host=pr.host,
+        owner=pr.owner,
+        repo=pr.repo,
+        base_ref=base_ref,
+        quiet=quiet,
+    )
+    if not seed.exists():
+        return _build_base_cache_compatibility_record(
+            cached_chunkhound_version=cached_chunkhound_version,
+            current_chunkhound_version=current_chunkhound_version,
+            decision="rebuild",
+            result="missing_seed_repo",
+            reason=f"seed repo missing at {seed}",
+            timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+        )
+
+    canary_root = base_root / ".compat_canary"
+    shutil.rmtree(canary_root, ignore_errors=True)
+    canary_root.mkdir(parents=True, exist_ok=True)
+    canary_db_path = canary_root / ".chunkhound.db"
+    canary_cfg_path = canary_root / "chunkhound.json"
+    materialize_chunkhound_env_config(
+        resolved_config=resolved_chunkhound_cfg,
+        output_config_path=canary_cfg_path,
+        database_provider="duckdb",
+        database_path=canary_db_path,
+    )
+
+    try:
+        copy_duckdb_files(source_db_path, canary_db_path)
+    except Exception as exc:
+        shutil.rmtree(canary_root, ignore_errors=True)
+        return _build_base_cache_compatibility_record(
+            cached_chunkhound_version=cached_chunkhound_version,
+            current_chunkhound_version=current_chunkhound_version,
+            decision="rebuild",
+            result="copy_failed",
+            reason=f"canary copy failed: {exc}",
+            timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+        )
+
+    env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+    probe_cmd = [
+        "chunkhound",
+        "index",
+        str(seed),
+        "--config",
+        str(canary_cfg_path),
+    ]
+    log(
+        "Base cache compatibility canary: "
+        f"{pr.owner}/{pr.repo}@{base_ref} "
+        f"({cached_chunkhound_version or 'unknown'} -> {current_chunkhound_version or 'unknown'})",
+        quiet=quiet,
+    )
+
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            probe_cmd,
+            cwd=str(canary_root),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        duration = time.perf_counter() - started
+        shutil.rmtree(canary_root, ignore_errors=True)
+        return _build_base_cache_compatibility_record(
+            cached_chunkhound_version=cached_chunkhound_version,
+            current_chunkhound_version=current_chunkhound_version,
+            decision="rebuild",
+            result="timeout",
+            reason="compatibility canary timed out",
+            timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+            probe_cmd=probe_cmd,
+            probe_duration_seconds=duration,
+        )
+
+    duration = time.perf_counter() - started
+    combined_output = "\n".join(
+        part for part in (completed.stdout or "", completed.stderr or "") if part
+    )
+    index_summary = parse_chunkhound_index_summary(combined_output, scope="base_cache")
+    if completed.returncode != 0:
+        reason = (
+            f"compatibility canary exited with code {completed.returncode}"
+            if completed.returncode
+            else "compatibility canary failed"
+        )
+        shutil.rmtree(canary_root, ignore_errors=True)
+        return _build_base_cache_compatibility_record(
+            cached_chunkhound_version=cached_chunkhound_version,
+            current_chunkhound_version=current_chunkhound_version,
+            decision="rebuild",
+            result="probe_failed",
+            reason=reason,
+            timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+            probe_cmd=probe_cmd,
+            probe_duration_seconds=duration,
+            index_summary=index_summary,
+        )
+
+    canonical_db_path = base_root / "db" / ".chunkhound.db"
+    canonical_db_path.parent.mkdir(parents=True, exist_ok=True)
+    if canonical_db_path.exists():
+        if canonical_db_path.is_dir():
+            shutil.rmtree(canonical_db_path, ignore_errors=True)
+        else:
+            canonical_db_path.unlink(missing_ok=True)
+    shutil.move(str(canary_db_path), str(canonical_db_path))
+    shutil.rmtree(canary_root, ignore_errors=True)
+    return _build_base_cache_compatibility_record(
+        cached_chunkhound_version=cached_chunkhound_version,
+        current_chunkhound_version=current_chunkhound_version,
+        decision="reuse",
+        result="compatible",
+        reason="compatibility canary accepted cached DB reuse",
+        timeout_seconds=CHUNKHOUND_COMPATIBILITY_CANARY_TIMEOUT_SECONDS,
+        probe_cmd=probe_cmd,
+        probe_duration_seconds=duration,
+        index_summary=index_summary,
+    )
 
 def ensure_clean_git_worktree(*, repo_dir: Path) -> None:
     """Ensure the repo has no local changes that would block branch switches."""
