@@ -290,6 +290,11 @@ When no explicit preset or config default is selected, CURe only autodetects bet
 
 Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
 
+Example: use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220.
+That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended.
+The operator should not need to provide a local checkout path.
+It should not do a manual review outside CURe.
+
 For the full bootstrap contract around fresh installs, existing local setup, and operator handoff, use [SKILL.md](SKILL.md).
 
 ## Minimal Config
