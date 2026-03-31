@@ -478,6 +478,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(search_result.returncode, 0)
+            self.assertNotIn("preflight stage=", search_result.stderr)
             search_payload = json.loads(search_result.stdout)
             self.assertTrue(search_payload["ok"])
             self.assertEqual(search_payload["execution_stage"], "tools/call")
@@ -487,6 +488,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(search_payload["stage_trace"][-1]["status"], "ok")
 
             self.assertEqual(research_result.returncode, 1)
+            self.assertNotIn("preflight stage=", research_result.stderr)
             research_payload = json.loads(research_result.stdout)
             self.assertFalse(research_payload["ok"])
             self.assertEqual(research_payload["tool_name"], "code_research")

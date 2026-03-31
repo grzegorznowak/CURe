@@ -1469,7 +1469,15 @@ def _trim_tail_text(text: str, *, max_chars: int = 4000) -> str:
     return value[-max_chars:]
 
 
-def _emit_stage(stage: str, status: str, *, detail: str | None = None) -> None:
+def _emit_stage(
+    stage: str,
+    status: str,
+    *,
+    detail: str | None = None,
+    enabled: bool = True,
+) -> None:
+    if not enabled:
+        return
     message = f"preflight stage={{stage}} status={{status}}"
     detail_text = " ".join(str(detail or "").split())
     if detail_text:
@@ -1999,7 +2007,12 @@ def _tool_payload_base(
     return payload
 
 
-def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[str, Any]:
+def _run_preflight(
+    session: JsonRpcSession,
+    args: argparse.Namespace,
+    *,
+    emit_stage_lines: bool = True,
+) -> dict[str, Any]:
     _ = args
     started_at = time.monotonic()
     stage_trace: list[dict[str, Any]] = []
@@ -2010,13 +2023,13 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
         func: Any,
     ) -> tuple[bool, Any]:
         stage_started = time.monotonic()
-        _emit_stage(stage, "running")
+        _emit_stage(stage, "running", enabled=emit_stage_lines)
         try:
             result = func()
         except PreflightStageError as exc:
             status = "timeout" if exc.timeout else "error"
             detail = str(exc)
-            _emit_stage(stage, status, detail=detail)
+            _emit_stage(stage, status, detail=detail, enabled=emit_stage_lines)
             stage_trace.append(
                 _stage_trace_entry(
                     stage=stage,
@@ -2042,7 +2055,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
             )
         except Exception as exc:
             detail = str(exc)
-            _emit_stage(stage, "error", detail=detail)
+            _emit_stage(stage, "error", detail=detail, enabled=emit_stage_lines)
             stage_trace.append(
                 _stage_trace_entry(
                     stage=stage,
@@ -2066,7 +2079,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
                     stderr_tail=session._stderr_tail_text(),
                 ),
             )
-        _emit_stage(stage, "ok")
+        _emit_stage(stage, "ok", enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage=stage,
@@ -2103,7 +2116,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
         return init_response
     if "error" in init_response:
         detail = json.dumps(init_response["error"], sort_keys=True)
-        _emit_stage("initialize", "error", detail=detail)
+        _emit_stage("initialize", "error", detail=detail, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="initialize",
@@ -2152,7 +2165,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
         return tools_response
     if "error" in tools_response:
         detail = json.dumps(tools_response["error"], sort_keys=True)
-        _emit_stage("tools/list", "error", detail=detail)
+        _emit_stage("tools/list", "error", detail=detail, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="tools/list",
@@ -2183,10 +2196,10 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
     )
     missing_tools = [name for name in ("search", "code_research") if name not in available]
     stage_started = time.monotonic()
-    _emit_stage("tool_validation", "running")
+    _emit_stage("tool_validation", "running", enabled=emit_stage_lines)
     if missing_tools:
         detail = "required ChunkHound tools are unavailable: " + ", ".join(missing_tools)
-        _emit_stage("tool_validation", "error", detail=detail)
+        _emit_stage("tool_validation", "error", detail=detail, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="tool_validation",
@@ -2208,15 +2221,20 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
             daemon_meta=daemon_meta,
             stderr_tail=session._stderr_tail_text(),
         )
-    _emit_stage("tool_validation", "ok")
+    _emit_stage("tool_validation", "ok", enabled=emit_stage_lines)
     stage_trace.append(_stage_trace_entry(stage="tool_validation", status="ok", started_at=stage_started))
 
     stage_started = time.monotonic()
-    _emit_stage("daemon_metadata", "running")
+    _emit_stage("daemon_metadata", "running", enabled=emit_stage_lines)
     daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
     daemon_metadata_error = str(daemon_meta.get("daemon_metadata_error") or "").strip()
     if daemon_metadata_error:
-        _emit_stage("daemon_metadata", "error", detail=daemon_metadata_error)
+        _emit_stage(
+            "daemon_metadata",
+            "error",
+            detail=daemon_metadata_error,
+            enabled=emit_stage_lines,
+        )
         stage_trace.append(
             _stage_trace_entry(
                 stage="daemon_metadata",
@@ -2227,7 +2245,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
             )
         )
     else:
-        _emit_stage("daemon_metadata", "ok")
+        _emit_stage("daemon_metadata", "ok", enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="daemon_metadata",
@@ -2237,7 +2255,7 @@ def _run_preflight(session: JsonRpcSession, args: argparse.Namespace) -> dict[st
             )
         )
 
-    _emit_stage("complete", "ok")
+    _emit_stage("complete", "ok", enabled=emit_stage_lines)
     return _build_preflight_payload(
         ok=True,
         available_tools=available,
@@ -2283,7 +2301,7 @@ def _run_preflight_with_fallback(args: argparse.Namespace) -> dict[str, Any]:
 def _run_tool_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str, Any]:
     session = JsonRpcSession(transport_mode=transport_mode)
     try:
-        preflight = _run_preflight(session, args)
+        preflight = _run_preflight(session, args, emit_stage_lines=False)
         tool_name = _tool_name_for_command(args.command)
         if not preflight.get("ok"):
             return {{

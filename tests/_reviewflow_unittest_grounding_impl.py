@@ -6215,6 +6215,71 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_chunkhound_tool_proof_accepts_mixed_helper_output_with_final_json(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_mixed_output_json"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            search_payload = {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+            research_payload = {
+                "ok": True,
+                "command": "research",
+                "tool_name": "code_research",
+                "query": "cross-file question",
+                "helper_path": helper_path,
+                "result": {"summary": "grounded answer"},
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+            report = rf.validate_codex_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": "\n".join(
+                            [
+                                "preflight stage=initialize status=ok",
+                                "preflight stage=tools/list status=ok",
+                                json.dumps(search_payload, indent=2),
+                            ]
+                        ),
+                        "research": "\n".join(
+                            [
+                                "preflight stage=initialize status=ok",
+                                "preflight stage=notifications/initialized status=ok",
+                                "preflight stage=tools/list status=ok",
+                                json.dumps(research_payload, indent=2),
+                            ]
+                        ),
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_failed_call_details"], [])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_malformed_helper_json_fails_closed(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_bad_json"
         try:
@@ -6712,7 +6777,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "type": "command_execution",
                         "command": command
                         or f'/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" {command_name} "query"\'',
-                        "aggregated_output": json.dumps(payload, indent=2),
+                        "aggregated_output": (
+                            payload if isinstance(payload, str) else json.dumps(payload, indent=2)
+                        ),
                         "exit_code": 0,
                         "status": "completed",
                     },
@@ -7192,9 +7259,50 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+            search_payload = {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+            research_payload = {
+                "ok": True,
+                "command": "research",
+                "tool_name": "code_research",
+                "query": "cross-file question",
+                "helper_path": helper_path,
+                "result": {"summary": "grounded answer"},
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
             adapter_meta = self._write_helper_command_events(
                 work_dir=work_dir,
                 commands=["search", "research"],
+                raw_outputs={
+                    "search": "\n".join(
+                        [
+                            "preflight stage=initialize status=ok",
+                            "preflight stage=tools/list status=ok",
+                            json.dumps(search_payload, indent=2),
+                        ]
+                    ),
+                    "research": "\n".join(
+                        [
+                            "preflight stage=initialize status=ok",
+                            "preflight stage=notifications/initialized status=ok",
+                            "preflight stage=tools/list status=ok",
+                            json.dumps(research_payload, indent=2),
+                        ]
+                    ),
+                },
             )
             return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
 

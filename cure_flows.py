@@ -478,6 +478,9 @@ def _parse_chunkhound_helper_output(payload_text: object) -> dict[str, Any] | No
     text = str(payload_text or "").strip()
     if not text:
         return None
+    # Codex command_execution events can aggregate helper stderr progress lines
+    # with the final JSON payload. Treat the recovered JSON object as the proof
+    # artifact so older/noisy helper runs remain valid.
     candidates = [text]
     first_brace = text.find("{")
     last_brace = text.rfind("}")

@@ -26,7 +26,7 @@ Safety guardrail:
 2. Mandatory: use the staged ChunkHound helper:
    - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
    - Treat helper `research` as satisfying the `code_research` requirement.
-   - Availability is proven only by successful helper `search` or `research` execution that returns JSON.
+   - Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.
    - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query relevant to this step.
    - If this step is cross-file/architectural, also run a `research` query.

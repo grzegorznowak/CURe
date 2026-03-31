@@ -294,6 +294,9 @@ class PromptTemplateTests(unittest.TestCase):
             ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
             ROOT / "prompts" / "mrereview_gh_local_big_step.md",
             ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
         ]
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
@@ -306,7 +309,7 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "Availability is proven only by successful helper `search` or `research` execution that returns JSON.",
+                "Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.",
                 text,
             )
             self.assertIn(
@@ -413,11 +416,11 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                'successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution with JSON output',
+                'successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final JSON object for that call',
                 text,
             )
             self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
-            self.assertNotIn("tool call succeeds", text)
+            self.assertNotIn("with JSON output", text)
 
     def test_zip_template_discourages_file_writes_and_fenced_output(self) -> None:
         zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
