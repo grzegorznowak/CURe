@@ -14,11 +14,13 @@ from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
 from cure_flows import discover_repo_local_chunkhound_config
 from cure_runtime import (
+    LOCAL_AGENT_PRESET_BY_NAME,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
     _doctor_runtime_checks,
     _doctor_runtime_payload,
     load_chunkhound_runtime_config,
     load_reviewflow_chunkhound_config,
+    resolve_local_agent_selection,
     toml_string,
 )
 from cure_sessions import build_status_payload, resolve_observation_target
@@ -601,12 +603,204 @@ def _upsert_chunkhound_base_config_path(*, config_path: Path, runtime: Reviewflo
     return True
 
 
-def _wizard_summary_lines(*, selected_path: Path, will_install: bool, install_source: str | None) -> list[str]:
+def _upsert_llm_default_preset(*, config_path: Path, default_preset: str) -> bool:
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        text = ""
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read CURe config at {config_path}: {exc}") from exc
+
+    new_line = f"default_preset = {toml_string(default_preset)}"
+    if not text.strip():
+        config_path.write_text("[llm]\n" + new_line + "\n", encoding="utf-8")
+        return True
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReviewflowError(f"Failed to parse CURe config at {config_path}: {exc}") from exc
+
+    lines = text.splitlines()
+    replaced = False
+    in_llm = False
+    insert_at: int | None = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_llm and not replaced:
+                insert_at = idx
+                break
+            in_llm = stripped == "[llm]"
+            continue
+        if in_llm and stripped.startswith("default_preset"):
+            lines[idx] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        if insert_at is None and in_llm:
+            insert_at = len(lines)
+        if insert_at is not None:
+            lines.insert(insert_at, new_line)
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(["[llm]", new_line])
+
+    updated = "\n".join(lines)
+    if text.endswith("\n") or not updated.endswith("\n"):
+        updated += "\n"
+    if updated == text:
+        return False
+    config_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _ensure_bootstrap_files(
+    *,
+    runtime: ReviewflowRuntime,
+    force: bool = False,
+    stdout: TextIO | None = None,
+) -> Path:
+    out_stream = stdout or sys.stdout
+    config_path = runtime.config_path
+    existing_base_path = None if force else _load_existing_chunkhound_base_config_path(config_path)
+    chunkhound_base_config_path = existing_base_path or _default_chunkhound_base_config_path(config_path)
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    chunkhound_base_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config_changed = False
+    if force or not _path_has_text(config_path):
+        config_path.write_text(
+            _render_init_config(
+                runtime=runtime,
+                chunkhound_base_config_path=chunkhound_base_config_path,
+            ),
+            encoding="utf-8",
+        )
+        config_changed = True
+        print(f"Wrote CURe config: {config_path}", file=out_stream)
+    else:
+        config_changed = _upsert_chunkhound_base_config_path(
+            config_path=config_path,
+            runtime=runtime,
+            base_config_path=chunkhound_base_config_path,
+        )
+        if config_changed:
+            print(f"Updated CURe config: {config_path}", file=out_stream)
+        else:
+            print(f"Left existing CURe config unchanged: {config_path}", file=out_stream)
+
+    if force or not _path_has_text(chunkhound_base_config_path):
+        suffix = _write_chunkhound_base_config_file(chunkhound_base_config_path)
+        print(f"Wrote ChunkHound base config: {chunkhound_base_config_path}{suffix}", file=out_stream)
+    else:
+        print(f"Left existing ChunkHound base config unchanged: {chunkhound_base_config_path}", file=out_stream)
+    return chunkhound_base_config_path
+
+
+def _agent_guidance_lines(*, command_name: str) -> list[str]:
+    return [
+        "Supported local coding agents are `codex` and `claude`, detected from executables on PATH.",
+        f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` or `{PRIMARY_CLI_COMMAND} setup --agent claude` to persist a choice.",
+        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex|claude` to change the saved choice later.",
+        f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --json` before retrying `{PRIMARY_CLI_COMMAND} {command_name}`.",
+    ]
+
+
+def _prompt_for_agent_choice(
+    *,
+    installed_agents: list[str],
+    default_agent: str | None,
+    stdin: TextIO,
+    stderr: TextIO,
+) -> str:
+    choices_display = "/".join(installed_agents)
+    default_suffix = f" (default: {default_agent})" if default_agent else ""
+    while True:
+        raw = _read_wizard_line(
+            prompt=f"Select local coding agent [{choices_display}]{default_suffix}: ",
+            stdin=stdin,
+            stderr=stderr,
+        )
+        if raw is None:
+            raise ReviewflowError("setup wizard input failed.")
+        text = str(raw).strip().lower()
+        if not text and default_agent:
+            return default_agent
+        if text in installed_agents:
+            return text
+        stderr.write("Rejected: choose one of the installed supported agents.\n\n")
+        stderr.flush()
+
+
+def _resolve_bootstrap_agent_choice(
+    *,
+    runtime: ReviewflowRuntime,
+    cli_agent: str | None,
+    command_name: str,
+    stdin: TextIO | None = None,
+    stderr: TextIO | None = None,
+    interactive: bool,
+) -> dict[str, object]:
+    selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_agent=cli_agent,
+        env=os.environ,
+    )
+    status = str(selection.get("status") or "").strip()
+    if status in {"ready", "auto_selectable"}:
+        return {
+            "agent": selection.get("effective_agent"),
+            "persist": (status == "auto_selectable"),
+            "detail": selection.get("detail"),
+            "selection": selection,
+        }
+    if interactive:
+        in_stream = stdin or sys.stdin
+        err_stream = stderr or sys.stderr
+        installed_agents = list(selection.get("installed_agents") or [])
+        if not installed_agents:
+            raise ReviewflowError(
+                str(selection.get("detail") or "no supported local coding agent executable is installed on PATH")
+            )
+        chosen = _prompt_for_agent_choice(
+            installed_agents=installed_agents,
+            default_agent=str(selection.get("hinted_agent") or "").strip() or None,
+            stdin=in_stream,
+            stderr=err_stream,
+        )
+        return {
+            "agent": chosen,
+            "persist": True,
+            "detail": f"selected `{chosen}` during interactive setup",
+            "selection": selection,
+        }
+    detail = str(selection.get("detail") or "local coding agent readiness is blocked")
+    raise ReviewflowError("\n".join([detail, *_agent_guidance_lines(command_name=command_name)]))
+
+
+def _wizard_summary_lines(
+    *,
+    selected_path: Path,
+    selected_agent: str | None,
+    will_install: bool,
+    install_source: str | None,
+) -> list[str]:
     lines = [
         "",
         "Setup summary:",
         f"- ChunkHound base config: {selected_path}",
     ]
+    if selected_agent:
+        lines.append(f"- Local coding agent: {selected_agent}")
     if will_install:
         lines.append(f"- Run cure install now: yes (source={install_source})")
     else:
@@ -626,6 +820,7 @@ def _read_wizard_line(*, prompt: str, stdin: TextIO, stderr: TextIO) -> str | No
 def run_chunkhound_setup_wizard(
     *,
     runtime: ReviewflowRuntime,
+    cli_agent: str | None = None,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -684,6 +879,15 @@ def run_chunkhound_setup_wizard(
             }
 
         selected_path = Path(selected["path"]).resolve(strict=False)
+        agent_choice = _resolve_bootstrap_agent_choice(
+            runtime=runtime,
+            cli_agent=cli_agent,
+            command_name="setup",
+            stdin=in_stream,
+            stderr=err_stream,
+            interactive=True,
+        )
+        selected_agent = str(agent_choice.get("agent") or "").strip() or None
         chunkhound_missing = shutil.which("chunkhound") is None
         run_install = False
         install_source: str | None = None
@@ -706,6 +910,7 @@ def run_chunkhound_setup_wizard(
 
         for line in _wizard_summary_lines(
             selected_path=selected_path,
+            selected_agent=selected_agent,
             will_install=run_install,
             install_source=install_source,
         ):
@@ -727,6 +932,17 @@ def run_chunkhound_setup_wizard(
             print(f"Updated CURe config: {runtime.config_path}", file=out_stream)
         else:
             print(f"Left existing CURe config unchanged: {runtime.config_path}", file=out_stream)
+        if selected_agent:
+            preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]
+            preset_changed = _upsert_llm_default_preset(
+                config_path=runtime.config_path,
+                default_preset=preset,
+            )
+            action = "Updated" if preset_changed else "Left unchanged"
+            print(
+                f"{action} saved local agent preference: {selected_agent} ({preset})",
+                file=out_stream,
+            )
 
         if selected["kind"] == "generated_default":
             suffix = _write_chunkhound_base_config_file(selected_path)
@@ -758,6 +974,15 @@ def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRunti
             lines.append(str(exc))
     if shutil.which("chunkhound") is None:
         lines.append("ChunkHound CLI is not available on PATH.")
+    agent_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_preset=getattr(args, "llm_preset", None),
+        env=os.environ,
+    )
+    if bool(agent_selection.get("blocking")):
+        lines.append(str(agent_selection.get("detail") or "local coding agent readiness is blocked"))
 
     discovery = discover_repo_local_chunkhound_config(invocation_cwd=Path.cwd(), pr=None, resolved_runtime_config=None)
     state = str(discovery.get("candidate_state") or "").strip()
@@ -769,7 +994,8 @@ def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRunti
             f"{discovery.get('config_path')} ({discovery.get('reason') or 'unknown'})"
         )
 
-    lines.append(f"Run `{PRIMARY_CLI_COMMAND} init` in a TTY to configure CURe bootstrap.")
+    lines.append(f"Run `{PRIMARY_CLI_COMMAND} setup` in a TTY to configure CURe bootstrap.")
+    lines.extend(_agent_guidance_lines(command_name=command_name))
     pr_url = str(getattr(args, "pr_url", "") or "").strip()
     if pr_url:
         lines.append(f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --pr-url {pr_url} --json`.")
@@ -804,13 +1030,26 @@ def ensure_chunkhound_bootstrap_ready(
             load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
         except ReviewflowError:
             ready = False
-    if ready and shutil.which("chunkhound") is not None:
+    agent_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_preset=getattr(args, "llm_preset", None),
+        env=os.environ,
+    )
+    if ready and shutil.which("chunkhound") is not None and not bool(agent_selection.get("blocking")):
         return False
 
     in_stream = stdin or sys.stdin
     err_stream = stderr or sys.stderr
     if _stream_is_tty(in_stream) and _stream_is_tty(err_stream) and runtime.config_enabled:
-        return run_chunkhound_setup_wizard(runtime=runtime, stdin=in_stream, stdout=stdout, stderr=err_stream)
+        return run_chunkhound_setup_wizard(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            stdin=in_stream,
+            stdout=stdout,
+            stderr=err_stream,
+        )
 
     raise ReviewflowError("\n".join(_bootstrap_gate_problem_lines(command_name=command_name, runtime=runtime, args=args)))
 
@@ -820,45 +1059,68 @@ def init_flow(
     *,
     runtime: ReviewflowRuntime,
     stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
     if _stream_is_tty(stdin or sys.stdin) and _stream_is_tty(stderr or sys.stderr):
-        run_chunkhound_setup_wizard(runtime=runtime, stdin=stdin, stderr=stderr)
+        run_chunkhound_setup_wizard(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
         return 0
 
-    config_path = runtime.config_path
-    force = bool(getattr(args, "force", False))
-    existing_base_path = None if force else _load_existing_chunkhound_base_config_path(config_path)
-    chunkhound_base_config_path = existing_base_path or _default_chunkhound_base_config_path(config_path)
+    out_stream = stdout or sys.stdout
+    _ensure_bootstrap_files(runtime=runtime, force=bool(getattr(args, "force", False)), stdout=out_stream)
+    agent_choice = _resolve_bootstrap_agent_choice(
+        runtime=runtime,
+        cli_agent=getattr(args, "agent", None),
+        command_name=str(getattr(args, "cmd", "") or "setup"),
+        interactive=False,
+    )
+    selected_agent = str(agent_choice.get("agent") or "").strip() or None
+    if selected_agent:
+        preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]
+        changed = _upsert_llm_default_preset(config_path=runtime.config_path, default_preset=preset)
+        action = "Updated" if changed else "Left unchanged"
+        print(f"{action} saved local agent preference: {selected_agent} ({preset})", file=out_stream)
+    print(f"Next: {PRIMARY_CLI_COMMAND} install", file=out_stream)
+    return 0
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    chunkhound_base_config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config_written = False
-    if force or not _path_has_text(config_path):
-        config_path.write_text(
-            _render_init_config(
-                runtime=runtime,
-                chunkhound_base_config_path=chunkhound_base_config_path,
-            ),
-            encoding="utf-8",
-        )
-        config_written = True
-        print(f"Wrote CURe config: {config_path}")
-    else:
-        print(f"Left existing CURe config unchanged: {config_path}")
+def setup_flow(
+    args: argparse.Namespace,
+    *,
+    runtime: ReviewflowRuntime,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    return init_flow(args, runtime=runtime, stdin=stdin, stdout=stdout, stderr=stderr)
 
-    if not config_written and existing_base_path is None:
-        print(
-            "Left ChunkHound base config unchanged because the existing cure.toml does not declare `[chunkhound].base_config_path`."
-        )
-    elif force or not _path_has_text(chunkhound_base_config_path):
-        suffix = _write_chunkhound_base_config_file(chunkhound_base_config_path)
-        print(f"Wrote ChunkHound base config: {chunkhound_base_config_path}{suffix}")
-    else:
-        print(f"Left existing ChunkHound base config unchanged: {chunkhound_base_config_path}")
 
-    print(f"Next: {PRIMARY_CLI_COMMAND} install")
+def set_agent_flow(
+    args: argparse.Namespace,
+    *,
+    runtime: ReviewflowRuntime,
+    stdout: TextIO | None = None,
+) -> int:
+    out_stream = stdout or sys.stdout
+    _ensure_bootstrap_files(runtime=runtime, stdout=out_stream)
+    selected_agent = str(getattr(args, "agent", "") or "").strip().lower()
+    choice = _resolve_bootstrap_agent_choice(
+        runtime=runtime,
+        cli_agent=selected_agent,
+        command_name="set-agent",
+        interactive=False,
+    )
+    resolved_agent = str(choice.get("agent") or "").strip()
+    preset = LOCAL_AGENT_PRESET_BY_NAME[resolved_agent]
+    changed = _upsert_llm_default_preset(config_path=runtime.config_path, default_preset=preset)
+    action = "Updated" if changed else "Left unchanged"
+    print(f"{action} saved local agent preference: {resolved_agent} ({preset})", file=out_stream)
     return 0
 
 
@@ -1015,6 +1277,8 @@ __all__ = [
     "pr_flow",
     "preferred_cli_invocation",
     "resume_flow",
+    "set_agent_flow",
+    "setup_flow",
     "status_flow",
     "watch_flow",
     "zip_flow",

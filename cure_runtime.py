@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import sys
 import tomllib
-from typing import Any
+from typing import Any, Mapping
 import urllib.error
 import urllib.request
 
@@ -72,6 +72,11 @@ CLI_PROVIDER_SESSION_ENV_PREFIXES = {
     "codex": ("CODEX_",),
     "claude": ("CLAUDE_",),
 }
+LOCAL_AGENT_PRESET_BY_NAME = {
+    "codex": "codex-cli",
+    "claude": "claude-cli",
+}
+LOCAL_AGENT_NAME_BY_PRESET = {preset: agent for agent, preset in LOCAL_AGENT_PRESET_BY_NAME.items()}
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
@@ -1169,6 +1174,252 @@ def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tup
     if codex_detected and not claude_detected:
         return "codex-cli", "detected_env"
     return None, None
+
+
+def detect_installed_local_agents() -> dict[str, str]:
+    installed: dict[str, str] = {}
+    for agent in ("codex", "claude"):
+        path = shutil.which(agent)
+        if path:
+            installed[agent] = path
+    return installed
+
+
+def resolve_local_agent_selection(
+    *,
+    base_codex_config_path: Path,
+    reviewflow_config_path: Path | None,
+    config_enabled: bool,
+    cli_preset: str | None = None,
+    cli_agent: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    installed = detect_installed_local_agents()
+    installed_agents = sorted(installed.keys())
+    hinted_preset, hinted_source = _autodetect_cli_preset_from_env(env)
+    hinted_agent = LOCAL_AGENT_NAME_BY_PRESET.get(str(hinted_preset or "").strip())
+    if hinted_agent not in installed:
+        hinted_agent = None
+
+    result: dict[str, Any] = {
+        "installed_agents": installed_agents,
+        "installed_agent_paths": dict(installed),
+        "hinted_agent": hinted_agent,
+        "hint_source": hinted_source if hinted_agent else None,
+        "saved_preference": None,
+        "saved_preference_source": None,
+        "saved_preset": None,
+        "saved_provider": None,
+        "effective_agent": None,
+        "effective_preset": None,
+        "effective_provider": None,
+        "source": None,
+        "status": "missing",
+        "detail": "no supported local coding agent executable is installed on PATH",
+        "ready": False,
+        "blocking": True,
+    }
+
+    explicit_agent = str(cli_agent or "").strip().lower()
+    if explicit_agent:
+        preset = LOCAL_AGENT_PRESET_BY_NAME.get(explicit_agent)
+        if preset is None:
+            raise ReviewflowError("Unsupported agent. Expected one of: codex, claude")
+        if explicit_agent not in installed:
+            result.update(
+                {
+                    "saved_preference": explicit_agent,
+                    "saved_preference_source": "cli_agent",
+                    "effective_agent": explicit_agent,
+                    "effective_preset": preset,
+                    "effective_provider": explicit_agent,
+                    "source": "cli_agent",
+                    "status": "unavailable_cli_agent",
+                    "detail": f"`{explicit_agent}` is not installed on PATH",
+                    "ready": False,
+                    "blocking": True,
+                }
+            )
+            return result
+        result.update(
+            {
+                "saved_preference": explicit_agent,
+                "saved_preference_source": "cli_agent",
+                "saved_preset": preset,
+                "saved_provider": explicit_agent,
+                "effective_agent": explicit_agent,
+                "effective_preset": preset,
+                "effective_provider": explicit_agent,
+                "source": "cli_agent",
+                "status": "ready",
+                "detail": f"using explicit agent override `{explicit_agent}`",
+                "ready": True,
+                "blocking": False,
+            }
+        )
+        return result
+
+    cli_selected = str(cli_preset or "").strip()
+    if cli_selected:
+        resolved, _ = resolve_llm_config(
+            base_codex_config_path=base_codex_config_path,
+            reviewflow_config_path=reviewflow_config_path,
+            cli_preset=cli_selected,
+            cli_model=None,
+            cli_effort=None,
+            cli_plan_effort=None,
+            cli_verbosity=None,
+            cli_max_output_tokens=None,
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+        provider = str(resolved.get("provider") or "").strip().lower()
+        if provider not in LOCAL_AGENT_PRESET_BY_NAME:
+            result.update(
+                {
+                    "effective_preset": resolved.get("preset"),
+                    "effective_provider": provider or None,
+                    "source": "cli_preset",
+                    "status": "not_applicable",
+                    "detail": f"explicit preset `{cli_selected}` does not use a local codex/claude CLI provider",
+                    "ready": True,
+                    "blocking": False,
+                }
+            )
+            return result
+        preset = LOCAL_AGENT_PRESET_BY_NAME[provider]
+        if provider not in installed:
+            result.update(
+                {
+                    "effective_agent": provider,
+                    "effective_preset": preset,
+                    "effective_provider": provider,
+                    "source": "cli_preset",
+                    "status": "broken_cli_preset",
+                    "detail": f"explicit preset `{cli_selected}` resolved to `{provider}`, but `{provider}` is not installed on PATH",
+                    "ready": False,
+                    "blocking": True,
+                }
+            )
+            return result
+        result.update(
+            {
+                "effective_agent": provider,
+                "effective_preset": preset,
+                "effective_provider": provider,
+                "source": "cli_preset",
+                "status": "ready",
+                "detail": f"using one-shot preset override `{cli_selected}`",
+                "ready": True,
+                "blocking": False,
+            }
+        )
+        return result
+
+    llm_cfg = {"default_preset": None}
+    if config_enabled:
+        llm_cfg, _ = load_reviewflow_llm_config(config_path=reviewflow_config_path)
+    raw_saved_preset = str(llm_cfg.get("default_preset") or "").strip() or None
+    if raw_saved_preset:
+        resolved, _ = resolve_llm_config(
+            base_codex_config_path=base_codex_config_path,
+            reviewflow_config_path=reviewflow_config_path,
+            cli_preset=None,
+            cli_model=None,
+            cli_effort=None,
+            cli_plan_effort=None,
+            cli_verbosity=None,
+            cli_max_output_tokens=None,
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+        provider = str(resolved.get("provider") or "").strip().lower()
+        result.update(
+            {
+                "saved_preference": raw_saved_preset,
+                "saved_preference_source": "cure.toml",
+                "saved_preset": resolved.get("preset"),
+                "saved_provider": provider or None,
+            }
+        )
+        if provider not in LOCAL_AGENT_PRESET_BY_NAME:
+            result.update(
+                {
+                    "effective_preset": resolved.get("preset"),
+                    "effective_provider": provider or None,
+                    "source": "cure.toml",
+                    "status": "invalid_saved_preference",
+                    "detail": (
+                        f"saved default preset `{raw_saved_preset}` does not resolve to the required local "
+                        "codex/claude CLI provider"
+                    ),
+                    "ready": False,
+                    "blocking": True,
+                }
+            )
+            return result
+        if provider not in installed:
+            result.update(
+                {
+                    "effective_agent": provider,
+                    "effective_preset": LOCAL_AGENT_PRESET_BY_NAME[provider],
+                    "effective_provider": provider,
+                    "source": "cure.toml",
+                    "status": "broken_saved_preference",
+                    "detail": f"saved default preset `{raw_saved_preset}` resolves to `{provider}`, but `{provider}` is not installed on PATH",
+                    "ready": False,
+                    "blocking": True,
+                }
+            )
+            return result
+        result.update(
+            {
+                "effective_agent": provider,
+                "effective_preset": LOCAL_AGENT_PRESET_BY_NAME[provider],
+                "effective_provider": provider,
+                "source": "cure.toml",
+                "status": "ready",
+                "detail": f"using saved default preset `{raw_saved_preset}`",
+                "ready": True,
+                "blocking": False,
+            }
+        )
+        return result
+
+    if len(installed_agents) == 1:
+        selected = installed_agents[0]
+        result.update(
+            {
+                "effective_agent": selected,
+                "effective_preset": LOCAL_AGENT_PRESET_BY_NAME[selected],
+                "effective_provider": selected,
+                "source": "auto_single_installed",
+                "status": "auto_selectable",
+                "detail": f"exactly one supported local agent is installed: `{selected}`",
+                "ready": True,
+                "blocking": False,
+            }
+        )
+        return result
+    if len(installed_agents) > 1:
+        hint_text = f"; hinted default is `{hinted_agent}`" if hinted_agent else ""
+        result.update(
+            {
+                "source": None,
+                "status": "ambiguous",
+                "detail": "multiple supported local agents are installed and no saved choice exists" + hint_text,
+                "ready": False,
+                "blocking": True,
+            }
+        )
+        return result
+    return result
 
 
 def resolve_llm_config(
@@ -2497,6 +2748,13 @@ def _resolved_doctor_agent_runtime(
     )
     provider = str(llm_resolved.get("provider") or "").strip().lower()
     transport = str(llm_resolved.get("transport") or "").strip().lower()
+    selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_preset=getattr(args, "llm_preset", None),
+        env=os.environ,
+    )
     payload: dict[str, Any] = {
         "profile": profile,
         "profile_source": profile_source,
@@ -2505,6 +2763,12 @@ def _resolved_doctor_agent_runtime(
         "provider": provider,
         "transport": transport,
         "command": llm_resolved.get("command"),
+        "installed_agents": selection.get("installed_agents"),
+        "saved_preference": selection.get("saved_preference"),
+        "saved_preference_source": selection.get("saved_preference_source"),
+        "effective_agent": selection.get("effective_agent"),
+        "selection_status": selection.get("status"),
+        "selection_detail": selection.get("detail"),
     }
     if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
         payload["supported"] = False
@@ -2539,6 +2803,13 @@ def _doctor_runtime_payload(
 ) -> dict[str, Any]:
     target = _resolve_doctor_target_context(pr_url)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
+    agent_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_preset=getattr(args, "llm_preset", None),
+        env=os.environ,
+    )
     config_exists = runtime.config_path.is_file()
     if runtime.config_enabled:
         try:
@@ -2594,6 +2865,7 @@ def _doctor_runtime_payload(
             exists=runtime.codex_base_config_path.is_file(),
         ),
         "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args),
+        "agent_selection": agent_selection,
         "acknowledged_sources": _doctor_acknowledged_sources(target=target),
         "review_intelligence": review_intelligence_payload,
         "repo_local_chunkhound": repo_local_chunkhound,
@@ -2650,6 +2922,13 @@ def _doctor_runtime_checks(
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
     agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args)
+    agent_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_preset=getattr(args, "llm_preset", None),
+        env=os.environ,
+    )
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
     config_path = runtime.config_path
     config_prefix = f"{config_path} (source={runtime.config_source})"
@@ -2736,6 +3015,20 @@ def _doctor_runtime_checks(
             name="agent-runtime",
             status=("ok" if bool(agent_runtime.get("supported")) else "warn"),
             detail=agent_runtime_detail if bool(agent_runtime.get("supported")) else f"{agent_runtime_detail} ({agent_runtime.get('detail')})",
+        )
+    )
+    installed_agents = ", ".join(agent_selection.get("installed_agents") or []) or "<none>"
+    selection_detail = (
+        f"installed=[{installed_agents}] "
+        f"saved={agent_selection.get('saved_preference') or '<none>'} "
+        f"effective={agent_selection.get('effective_agent') or '<none>'} "
+        f"status={agent_selection.get('status')}"
+    )
+    checks.append(
+        DoctorCheck(
+            name="agent-selection",
+            status=("fail" if bool(agent_selection.get("blocking")) else "ok"),
+            detail=f"{selection_detail} ({agent_selection.get('detail')})",
         )
     )
 

@@ -1,6 +1,6 @@
 ---
 name: cure
-description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure init`, `cure pr`, `cure status`, `cure watch`, `resume`, and `zip`.
+description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure setup`, `cure pr`, `cure status`, `cure watch`, `resume`, and `zip`.
 metadata:
   short-description: Review GitHub PRs in isolated sandboxes with CURe
 ---
@@ -98,7 +98,7 @@ Version-pinned standalone fallback:
 curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8
 ```
 
-The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure init`, `cure install`, and `cure doctor` flow as the package path.
+The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure setup`, `cure install`, and `cure doctor` flow as the package path.
 
 5. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
 
@@ -114,27 +114,31 @@ export XDG_CACHE_HOME="$tmp_root/cache"
 Equivalent explicit override example:
 
 ```bash
-cure init \
+cure setup \
   --config /tmp/cure-public/cure.toml \
   --sandbox-root /tmp/cure-public/sandboxes \
   --cache-root /tmp/cure-public/cache
 ```
 
-6. Run `cure init` before `cure install` or `cure doctor`.
+6. Run `cure setup` before `cure install` or `cure doctor`.
+
+Compatibility note: `cure init` still works because it is an alias to `cure setup`, but `setup` is the canonical public command.
 
 Human persistent flow:
 
 ```bash
-cure init
+cure setup
 ```
 
 Agent ephemeral flow:
 
 ```bash
-uvx --from cureview cure init
+uvx --from cureview cure setup
 ```
 
-`cure init` writes the default local non-secret config files if they are missing:
+Compatibility alias: `uvx --from cureview cure init` still enters the same setup flow.
+
+`cure setup` writes the default local non-secret config files if they are missing, and `cure init` remains a compatibility alias:
 
 ```text
 ~/.config/cure/cure.toml
@@ -143,7 +147,7 @@ uvx --from cureview cure init
 
 When `--config` or `XDG_CONFIG_HOME` changes the config location, `chunkhound-base.json` is written alongside the selected `cure.toml`.
 
-Minimal `cure.toml` written by `cure init`:
+Minimal `cure.toml` written by `cure setup`:
 
 ```toml
 [paths]
@@ -163,13 +167,13 @@ mode = "when-referenced"
 base_config_path = "/absolute/path/to/chunkhound-base.json"
 ```
 
-If the base JSON file is missing, `cure init` creates it with `{}` first, then layers the embedding config below when a supported key already exists in the environment.
+If the base JSON file is missing, `cure setup` creates it with `{}` first, then layers the embedding config below when a supported key already exists in the environment.
 
 That structured `review_intelligence` registry is also the source for capability-aware prompt guidance plus the additive `review_intelligence` block in session metadata and `cure doctor --json`. Only `required` sources are preflighted; optional sources stay lazy and surface as `available`, `unavailable`, or `unknown` from facts CURe already staged.
 
 7. Auto-wire embeddings from the current environment when possible.
 
-If `VOYAGE_API_KEY` exists, `cure init` writes:
+If `VOYAGE_API_KEY` exists, `cure setup` writes. `cure init` reaches the same behavior because it is an alias:
 
 ```json
 {
@@ -180,7 +184,7 @@ If `VOYAGE_API_KEY` exists, `cure init` writes:
 }
 ```
 
-If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:
+If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes. `cure init` reaches the same behavior because it is an alias:
 
 ```json
 {
@@ -191,7 +195,7 @@ If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure init` writes:
 }
 ```
 
-If the file already exists and you want to rewrite it, rerun `cure init --force`.
+If the file already exists and you want to rewrite it, rerun `cure setup --force`.
 
 8. Provision ChunkHound:
 
@@ -199,8 +203,8 @@ If the file already exists and you want to rewrite it, rerun `cure init --force`
 cure install
 ```
 
-`cure install` provisions ChunkHound only.
-It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly.
+`cure install` still provisions ChunkHound, but it also repairs missing non-secret bootstrap files and persists a deterministic local-agent choice when it can.
+It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly. Use `--agent codex|claude` on `cure setup` or `cure install` when both executables are installed and you want a non-interactive choice, and use `cure set-agent codex|claude` to change the sticky selection later.
 
 9. Confirm readiness:
 
@@ -265,9 +269,9 @@ cure clean closed --json
 ## When To Stop And Ask
 
 Bootstrap everything non-secret before you stop:
-- run `cure init`
-- create `~/.config/cure/cure.toml` only when `cure init` is unavailable or the session explicitly requires a manual path
-- create `~/.config/cure/chunkhound-base.json` only when `cure init` is unavailable or the session explicitly requires a manual path
+- run `cure setup`
+- create `~/.config/cure/cure.toml` only when `cure setup` is unavailable or the session explicitly requires a manual path
+- create `~/.config/cure/chunkhound-base.json` only when `cure setup` is unavailable or the session explicitly requires a manual path
 - auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists
 
 When readiness still fails because a required secret is missing, inspect the actual active local files you already know about before you stop:
@@ -326,7 +330,7 @@ If the operator prefers OpenAI instead, switch the snippet to the OpenAI embeddi
 export OPENAI_API_KEY=<your-openai-api-key>
 ```
 
-4. If the existing JSON became stale, tell the operator to rerun `cure init --force`.
+4. If the existing JSON became stale, tell the operator to rerun `cure setup --force` (`cure init --force` still works as the compatibility alias).
 
 5. End with the rerun command:
 
@@ -347,12 +351,12 @@ Required behavior:
 - If CURe config already exists, inspect the active `cure.toml` and the JSON resolved from `[chunkhound].base_config_path` before creating new config files.
 - Look for repo-root `chunkhound.json` and `.chunkhound.json` as ask-first setup hints and ask the operator before reusing them.
 - Use a temp XDG root or explicit `--config` / `--sandbox-root` / `--cache-root` overrides when the session should not touch the default `~/.config/cure` layout.
-- Use `cure init` as the primary bootstrap and repair entry point.
-- On a TTY, expect `cure init` to act as an interactive setup wizard that can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config.
-- If `VOYAGE_API_KEY` is present, let `cure init` configure Voyage embeddings automatically.
-- Otherwise, if `OPENAI_API_KEY` is present, let `cure init` configure OpenAI embeddings automatically.
+- Use `cure setup` as the primary bootstrap and repair entry point. `cure init` remains a compatibility alias.
+- On a TTY, expect `cure setup` to act as an interactive setup wizard that can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config.
+- If `VOYAGE_API_KEY` is present, let `cure setup` configure Voyage embeddings automatically.
+- Otherwise, if `OPENAI_API_KEY` is present, let `cure setup` configure OpenAI embeddings automatically.
 - If `chunkhound` is still missing on `PATH`, the wizard may offer to run `cure install`; otherwise run `cure install` after bootstrap or repair.
-- Commands that require ChunkHound bootstrap (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late `[chunkhound]` config errors. On non-TTY runs, they should fail fast and point back to `cure init` plus `cure doctor`.
+- Commands that require bootstrap readiness (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
 - If autodetect picks the wrong CLI provider, rerun `cure doctor` and `cure pr` with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.

@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -13298,20 +13298,67 @@ def _chunkhound_not_on_path_error(*, uv_path: str | None) -> ReviewflowError:
 
 
 def install_flow(args: argparse.Namespace) -> int:
+    import cure_commands as command_surface
+
     explicit_source = hasattr(args, "chunkhound_source")
     chunkhound_source = str(getattr(args, "chunkhound_source", "release") or "release").strip()
     uv_path = shutil.which("uv")
     existing_chunkhound = shutil.which("chunkhound")
     if existing_chunkhound and not explicit_source:
         _eprint(f"Reusing existing ChunkHound on PATH: {existing_chunkhound}")
-        return 0
-    cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
-    _eprint(f"Installing ChunkHound from source={chunkhound_source}")
-    run_cmd(cmd)
-    chunkhound_path = shutil.which("chunkhound")
-    if not chunkhound_path:
+    else:
+        cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
+        _eprint(f"Installing ChunkHound from source={chunkhound_source}")
+        run_cmd(cmd)
+        chunkhound_path = shutil.which("chunkhound")
+        if not chunkhound_path:
+            raise _chunkhound_not_on_path_error(uv_path=uv_path)
+        _eprint(f"ChunkHound install complete: {chunkhound_path}")
+
+    runtime = resolve_runtime(args)
+    selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_agent=getattr(args, "agent", None),
+        env=os.environ,
+    )
+    if bool(selection.get("blocking")) and sys.stdin.isatty() and sys.stderr.isatty() and runtime.config_enabled:
+        command_surface.run_chunkhound_setup_wizard(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    else:
+        command_surface._ensure_bootstrap_files(runtime=runtime, stdout=sys.stdout)
+        agent_choice = command_surface._resolve_bootstrap_agent_choice(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            command_name="install",
+            interactive=False,
+        )
+        selected_agent = str(agent_choice.get("agent") or "").strip()
+        if selected_agent:
+            preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]
+            changed = command_surface._upsert_llm_default_preset(
+                config_path=runtime.config_path,
+                default_preset=preset,
+            )
+            action = "Updated" if changed else "Left unchanged"
+            print(f"{action} saved local agent preference: {selected_agent} ({preset})")
+
+    final_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        env=os.environ,
+    )
+    if shutil.which("chunkhound") is None:
         raise _chunkhound_not_on_path_error(uv_path=uv_path)
-    _eprint(f"ChunkHound install complete: {chunkhound_path}")
+    if bool(final_selection.get("blocking")):
+        raise ReviewflowError(str(final_selection.get("detail") or "bootstrap readiness is still blocked"))
     return 0
 
 
@@ -13674,6 +13721,7 @@ from cure_runtime import (
     DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
     HTTP_LLM_PROVIDERS,
+    LOCAL_AGENT_PRESET_BY_NAME,
     LLM_RESUME_PROVIDERS,
     LLM_TRANSPORT_CHOICES,
     MULTIPASS_MAX_STEPS_HARD_CAP,
@@ -13718,6 +13766,7 @@ from cure_runtime import (
     resolve_chunkhound_reviewflow_config,
     resolve_codex_base_config_path,
     resolve_codex_flags,
+    resolve_local_agent_selection,
     resolve_llm_config,
     resolve_llm_config_from_args,
     resolve_multipass_stage_llm_config,
@@ -13784,6 +13833,7 @@ from cure_commands import (
     pr_flow,
     preferred_cli_invocation,
     resume_flow,
+    set_agent_flow,
     status_flow,
     watch_flow,
     zip_flow,
@@ -14018,9 +14068,26 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
     wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
+    setupp = sub.add_parser(
+        "setup",
+        help="Configure CURe bootstrap state and persist the local coding agent choice",
+        parents=[runtime_parent],
+    )
+    setupp.add_argument(
+        "--force",
+        action="store_true",
+        help="Rewrite bootstrap files even when they already exist",
+    )
+    setupp.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help="Persist this local coding agent choice during setup",
+    )
+
     initp = sub.add_parser(
         "init",
-        help="Write the non-secret CURe bootstrap config files for the current runtime path layout",
+        help="Compatibility alias for `setup`",
         parents=[runtime_parent],
     )
     initp.add_argument(
@@ -14028,10 +14095,16 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         action="store_true",
         help="Rewrite bootstrap files even when they already exist",
     )
+    initp.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     ins = sub.add_parser(
         "install",
-        help="Install or update ChunkHound so the `chunkhound` CLI is available to CURe",
+        help="Install ChunkHound and repair CURe bootstrap readiness",
         parents=[runtime_parent],
     )
     ins.add_argument(
@@ -14040,6 +14113,19 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="ChunkHound source to install (default: release)",
     )
+    ins.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help="Persist this local coding agent choice while repairing bootstrap readiness",
+    )
+
+    sap = sub.add_parser(
+        "set-agent",
+        help="Persist the local coding agent choice used by CURe",
+        parents=[runtime_parent],
+    )
+    sap.add_argument("agent", choices=["codex", "claude"], help="Local coding agent to persist")
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
@@ -14082,8 +14168,10 @@ def main(
     paths = runtime.paths
 
     try:
-        if args.cmd == "init":
+        if args.cmd in {"init", "setup"}:
             return command_surface.init_flow(args, runtime=runtime)
+        if args.cmd == "set-agent":
+            return command_surface.set_agent_flow(args, runtime=runtime)
         if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
             runtime = runtime_surface.resolve_runtime(args)
             paths = runtime.paths
