@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -14,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_errors import ReviewflowError
@@ -171,6 +172,76 @@ def load_embedding_api_key_from_config(*, source_config_path: Path | None = None
     return None
 
 
+def _has_embedding_config(
+    *,
+    resolved_config: dict[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    source_env = env if env is not None else os.environ
+    for key in ("CHUNKHOUND_EMBEDDING__API_KEY", "VOYAGE_API_KEY", "OPENAI_API_KEY"):
+        if str(source_env.get(key) or "").strip():
+            return True
+    if not isinstance(resolved_config, dict):
+        return False
+    embedding = resolved_config.get("embedding")
+    if not isinstance(embedding, dict):
+        return False
+    return any(str(value).strip() for value in embedding.values() if value is not None)
+
+
+def _persist_discovered_embedding_config(
+    *,
+    base_config_path: Path,
+    discovered_config_path: Path,
+) -> bool:
+    try:
+        discovered_raw = json.loads(discovered_config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReviewflowError(
+            f"Failed to read discovered ChunkHound config at {discovered_config_path}: {exc}"
+        ) from exc
+
+    discovered_embedding = (
+        discovered_raw.get("embedding") if isinstance(discovered_raw, dict) else None
+    )
+    if not isinstance(discovered_embedding, dict) or not any(
+        str(value).strip() for value in discovered_embedding.values() if value is not None
+    ):
+        return False
+    try:
+        base_text = base_config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        base_raw: dict[str, Any] = {}
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read ChunkHound base config at {base_config_path}: {exc}") from exc
+    else:
+        if not base_text.strip():
+            base_raw = {}
+        else:
+            try:
+                parsed = json.loads(base_text)
+            except json.JSONDecodeError as exc:
+                raise ReviewflowError(
+                    f"Failed to parse ChunkHound base config at {base_config_path}: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ReviewflowError(
+                    f"ChunkHound base config at {base_config_path} must contain a JSON object."
+                )
+            base_raw = parsed
+
+    if base_raw.get("embedding") == discovered_embedding:
+        return False
+
+    updated = dict(base_raw)
+    updated["embedding"] = discovered_embedding
+    base_config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(base_config_path, updated)
+    return True
+
+
 def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     if os.environ.get("CHUNKHOUND_EMBEDDING__API_KEY"):
@@ -183,6 +254,58 @@ def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     if inferred:
         env["CHUNKHOUND_EMBEDDING__API_KEY"] = inferred
     return env
+
+
+def _stream_is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class _InteractiveChunkhoundIndexResult:
+    stdout: str = ""
+    stderr: str = ""
+    duration_seconds: float = 0.0
+
+
+def _missing_embedding_config_error(*, base_config_path: Path) -> ReviewflowError:
+    return ReviewflowError(
+        "\n".join(
+            [
+                f"ChunkHound embedding config is missing from {base_config_path}.",
+                "Add an `embedding` block, set `CHUNKHOUND_EMBEDDING__API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`, or run `cure setup` in a TTY before retrying.",
+            ]
+        )
+    )
+
+
+def _run_chunkhound_embedding_setup(
+    *,
+    index_cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    seed: Path,
+    base_config_path: Path,
+) -> _InteractiveChunkhoundIndexResult:
+    started = time.perf_counter()
+    subprocess.run(
+        index_cmd,
+        cwd=str(cwd),
+        env=env,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    persisted = _persist_discovered_embedding_config(
+        base_config_path=base_config_path,
+        discovered_config_path=seed / ".chunkhound.json",
+    )
+    if not persisted and not _has_embedding_config(resolved_config=None, env=os.environ):
+        raise _missing_embedding_config_error(base_config_path=base_config_path)
+    return _InteractiveChunkhoundIndexResult(duration_seconds=time.perf_counter() - started)
 
 def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -> dict[str, Any]:
     """Compute local diff stats using git (no GH API beyond checkout)."""
@@ -1509,6 +1632,40 @@ def cache_prime(
     quiet: bool = False,
     no_stream: bool = False,
 ) -> dict[str, Any]:
+    base_root = base_dir(paths, host, owner, repo, base_ref)
+    base_root.mkdir(parents=True, exist_ok=True)
+    with file_lock(base_root / ".cache_prime.lock", quiet=quiet):
+        return _cache_prime_locked(
+            paths=paths,
+            config_path=config_path,
+            progress=progress,
+            host=host,
+            owner=owner,
+            repo=repo,
+            base_ref=base_ref,
+            force=force,
+            reason=reason,
+            hot_start_seed=hot_start_seed,
+            quiet=quiet,
+            no_stream=no_stream,
+        )
+
+
+def _cache_prime_locked(
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    progress: Any | None = None,
+    host: str,
+    owner: str,
+    repo: str,
+    base_ref: str,
+    force: bool,
+    reason: str | None = None,
+    hot_start_seed: dict[str, Any] | None = None,
+    quiet: bool = False,
+    no_stream: bool = False,
+) -> dict[str, Any]:
     effective_config_path = config_path or default_reviewflow_config_path()
     ensure_review_config(paths, config_path=effective_config_path)
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
@@ -1517,155 +1674,176 @@ def cache_prime(
     )
 
     stream = (not quiet) and (not no_stream)
-
     base_root = base_dir(paths, host, owner, repo, base_ref)
-    base_root.mkdir(parents=True, exist_ok=True)
-    with file_lock(base_root / ".cache_prime.lock", quiet=quiet):
-        seed, base_sha = _sync_seed_checkout(
-            paths=paths,
-            host=host,
-            owner=owner,
-            repo=repo,
-            base_ref=base_ref,
-            quiet=quiet,
-        )
 
-        db_dir = base_root / "db"
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = db_dir / ".chunkhound.db"
-        ch_cfg_path = base_root / "chunkhound.json"
-        materialize_chunkhound_env_config(
-            resolved_config=resolved_chunkhound_cfg,
-            output_config_path=ch_cfg_path,
-            database_provider="duckdb",
-            database_path=db_path,
-        )
-        if isinstance(hot_start_seed, dict):
-            source_db_raw = str(hot_start_seed.get("db_path") or "").strip()
-            if source_db_raw:
-                copy_duckdb_files(Path(source_db_raw).resolve(strict=False), db_path)
+    seed, base_sha = _sync_seed_checkout(
+        paths=paths,
+        host=host,
+        owner=owner,
+        repo=repo,
+        base_ref=base_ref,
+        quiet=quiet,
+    )
 
-        cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
-        env_cfg_fp = json_fingerprint(ch_cfg_path)
-        meta_path = base_root / "meta.json"
-        current_chunkhound_version = _run_cmd(["chunkhound", "--version"]).stdout.strip()
+    db_dir = base_root / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / ".chunkhound.db"
+    ch_cfg_path = base_root / "chunkhound.json"
+    materialize_chunkhound_env_config(
+        resolved_config=resolved_chunkhound_cfg,
+        output_config_path=ch_cfg_path,
+        database_provider="duckdb",
+        database_path=db_path,
+    )
+    if isinstance(hot_start_seed, dict):
+        source_db_raw = str(hot_start_seed.get("db_path") or "").strip()
+        if source_db_raw:
+            copy_duckdb_files(Path(source_db_raw).resolve(strict=False), db_path)
 
-        build_reason = " ".join(str(reason or "").strip().split())
-        need_reindex = force
-        rebuild_database = False
-        detected_reason = "refresh requested" if force else ""
-        if not need_reindex and meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if meta.get("config_fingerprint") != cfg_fp:
-                    need_reindex = True
-                    detected_reason = "config changed"
-                else:
-                    cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
-                    if cached_chunkhound_version != current_chunkhound_version:
-                        need_reindex = True
-                        rebuild_database = True
-                        detected_reason = "ChunkHound version changed"
-            except Exception:
+    cfg_fp = fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
+    env_cfg_fp = json_fingerprint(ch_cfg_path)
+    meta_path = base_root / "meta.json"
+    current_chunkhound_version = _run_cmd(["chunkhound", "--version"]).stdout.strip()
+
+    build_reason = " ".join(str(reason or "").strip().split())
+    need_reindex = force
+    rebuild_database = False
+    detected_reason = "refresh requested" if force else ""
+    if not need_reindex and meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("config_fingerprint") != cfg_fp:
                 need_reindex = True
-                detected_reason = "cache metadata unreadable"
-        elif not meta_path.is_file():
-            detected_reason = "cache miss"
-
-        if not build_reason:
-            build_reason = detected_reason
-
-        if rebuild_database and db_path.exists():
-            if db_path.is_dir():
-                shutil.rmtree(db_path, ignore_errors=True)
+                detected_reason = "config changed"
             else:
-                db_path.unlink(missing_ok=True)
+                cached_chunkhound_version = str(meta.get("chunkhound_version") or "").strip()
+                if cached_chunkhound_version != current_chunkhound_version:
+                    need_reindex = True
+                    rebuild_database = True
+                    detected_reason = "ChunkHound version changed"
+        except Exception:
+            need_reindex = True
+            detected_reason = "cache metadata unreadable"
+    elif not meta_path.is_file():
+        detected_reason = "cache miss"
 
-        env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
-        index_cmd = [
-            "chunkhound",
-            "index",
-            str(seed),
-            "--config",
-            str(ch_cfg_path),
-        ]
-        if need_reindex and db_path.exists():
-            index_cmd.append("--force-reindex")
+    if not build_reason:
+        build_reason = detected_reason
 
-        with phase(
-            f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
-        ):
-            index_reporter = ChunkhoundLiveProgressReporter(
-                progress=progress,
-                scope="base_cache",
-                reason=build_reason,
-            )
-            index_reporter.start()
-            out = active_output()
-            index_ok = False
-            try:
-                index_reporter.mark_running()
-                if out is not None:
-                    index_result = out.run_logged_cmd(
-                        index_cmd,
-                        kind="chunkhound",
-                        cwd=base_root,
-                        env=env,
-                        check=True,
-                        stream_requested=stream,
-                        stream_text_callback=index_reporter.consume_text,
-                    )
-                else:
-                    index_result = _run_cmd(
-                        index_cmd,
-                        cwd=base_root,
-                        env=env,
-                        check=True,
-                        stream=stream,
-                        stream_label="chunkhound",
-                    )
-                    index_reporter.consume_text(index_result.stdout)
-                    index_reporter.consume_text(index_result.stderr)
-                index_ok = True
-            finally:
-                index_reporter.finish(status="done" if index_ok else "error")
-        db_size_bytes = path_size_bytes(db_path)
+    env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+    embedding_missing = not _has_embedding_config(
+        resolved_config=resolved_chunkhound_cfg,
+        env=env,
+    )
+    index_cmd = [
+        "chunkhound",
+        "index",
+        str(seed),
+        "--config",
+        str(ch_cfg_path),
+    ]
+    if need_reindex and db_path.exists():
+        index_cmd.append("--force-reindex")
 
-        meta = {
-            "host": host,
-            "owner": owner,
-            "repo": repo,
-            "base_ref": base_ref,
-            "base_sha": base_sha,
-            "indexed_at": _utc_now_iso(),
-            "db_path": str(db_path),
-            "db_size_bytes": db_size_bytes,
-            "chunkhound_config_path": str(ch_cfg_path),
-            "config_fingerprint": cfg_fp,
-            "env_config_fingerprint": env_cfg_fp,
-            "chunkhound": chunkhound_meta.get("chunkhound"),
-            "chunkhound_version": current_chunkhound_version,
-            "index_cmd": index_cmd,
-            "index_duration_seconds": index_result.duration_seconds,
-        }
-        if build_reason:
-            meta["cache_build_reason"] = build_reason
-        if isinstance(hot_start_seed, dict):
-            meta["hot_start"] = {
-                "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
-                "workspace_path": str(hot_start_seed.get("workspace_path") or ""),
-                "config_path": str(hot_start_seed.get("config_path") or ""),
-                "db_path": str(hot_start_seed.get("db_path") or ""),
-                "target_match_state": str(hot_start_seed.get("target_match_state") or "unknown"),
-                "runtime_match_state": str(hot_start_seed.get("runtime_match_state") or "unknown"),
-            }
-        index_summary = parse_chunkhound_index_summary(
-            "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+    with phase(
+        f"cache_chunkhound_index {owner}/{repo}@{base_ref}", progress=None, quiet=quiet
+    ):
+        index_reporter = ChunkhoundLiveProgressReporter(
+            progress=progress,
             scope="base_cache",
+            reason=build_reason,
         )
-        if index_summary is not None:
-            meta["index_summary"] = index_summary
-        write_redacted_json(meta_path, meta)
+        index_reporter.start()
+        out = active_output()
+        index_ok = False
+        try:
+            index_reporter.mark_running()
+            if embedding_missing and _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr):
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
+                index_result = _run_chunkhound_embedding_setup(
+                    index_cmd=index_cmd,
+                    cwd=base_root,
+                    env=env,
+                    seed=seed,
+                    base_config_path=chunkhound_cfg.base_config_path,
+                )
+            elif embedding_missing:
+                raise _missing_embedding_config_error(base_config_path=chunkhound_cfg.base_config_path)
+            elif out is not None:
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
+                index_result = out.run_logged_cmd(
+                    index_cmd,
+                    kind="chunkhound",
+                    cwd=base_root,
+                    env=env,
+                    check=True,
+                    stream_requested=stream,
+                    stream_text_callback=index_reporter.consume_text,
+                )
+            else:
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
+                index_result = _run_cmd(
+                    index_cmd,
+                    cwd=base_root,
+                    env=env,
+                    check=True,
+                    stream=stream,
+                    stream_label="chunkhound",
+                )
+                index_reporter.consume_text(index_result.stdout)
+                index_reporter.consume_text(index_result.stderr)
+            index_ok = True
+        finally:
+            index_reporter.finish(status="done" if index_ok else "error")
+    db_size_bytes = path_size_bytes(db_path)
+
+    meta = {
+        "host": host,
+        "owner": owner,
+        "repo": repo,
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "indexed_at": _utc_now_iso(),
+        "db_path": str(db_path),
+        "db_size_bytes": db_size_bytes,
+        "chunkhound_config_path": str(ch_cfg_path),
+        "config_fingerprint": cfg_fp,
+        "env_config_fingerprint": env_cfg_fp,
+        "chunkhound": chunkhound_meta.get("chunkhound"),
+        "chunkhound_version": current_chunkhound_version,
+        "index_cmd": index_cmd,
+        "index_duration_seconds": index_result.duration_seconds,
+    }
+    if build_reason:
+        meta["cache_build_reason"] = build_reason
+    if isinstance(hot_start_seed, dict):
+        meta["hot_start"] = {
+            "source_kind": str(hot_start_seed.get("source_kind") or "operator_workspace_config"),
+            "workspace_path": str(hot_start_seed.get("workspace_path") or ""),
+            "config_path": str(hot_start_seed.get("config_path") or ""),
+            "db_path": str(hot_start_seed.get("db_path") or ""),
+            "target_match_state": str(hot_start_seed.get("target_match_state") or "unknown"),
+            "runtime_match_state": str(hot_start_seed.get("runtime_match_state") or "unknown"),
+        }
+    index_summary = parse_chunkhound_index_summary(
+        "\n".join(part for part in (index_result.stdout, index_result.stderr) if part),
+        scope="base_cache",
+    )
+    if index_summary is not None:
+        meta["index_summary"] = index_summary
+    write_redacted_json(meta_path, meta)
     return meta
 
 
@@ -2521,7 +2699,7 @@ def ensure_base_cache(
                 f"{pr.owner}/{pr.repo}@{base_ref}",
                 quiet=quiet,
             )
-            rebuilt_meta = _compat_cache_prime(
+            rebuilt_meta = _cache_prime_locked(
                 paths=paths,
                 config_path=effective_config_path,
                 progress=progress,

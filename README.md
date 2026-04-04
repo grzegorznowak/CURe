@@ -40,7 +40,7 @@ Persistent install:
 
 ```bash
 uv tool install cureview
-cure init
+cure setup
 cure install
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
@@ -51,11 +51,13 @@ cure pr <PR_URL> --if-reviewed new
 Ephemeral agent run path:
 
 ```bash
-uvx --from cureview cure init
+uvx --from cureview cure setup
 uvx --from cureview cure install
 uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
+
+Compatibility alias: `uvx --from cureview cure init` still enters the same setup flow.
 
 Keep the README focused on the landing page and first success. For the full agent bootstrap contract, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
 
@@ -67,13 +69,13 @@ This is the primary public path and matches the package prove-out used for the f
 
 ```bash
 uv tool install cureview
-cure init
+cure setup
 cure install
 cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json
 cure pr https://github.com/chunkhound/chunkhound/pull/220 --if-reviewed new
 ```
 
-The `v0.1.2` public release prove-out verified that `uv tool install cureview`, `cure init`, `cure install`, and `cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json` all worked in a clean temp-home install, and that the installed tool exposed `cure` without the deprecated `reviewflow` CLI.
+The `v0.1.2` public release prove-out verified the package-first bootstrap flow in a clean temp-home install. `cure setup` is now the canonical command, and `cure init` remains a compatibility alias to the same bootstrap logic.
 
 ### Example 2: ephemeral agent bootstrap from the one-sentence kickoff
 
@@ -85,7 +87,7 @@ export XDG_CONFIG_HOME="$tmp_root/config"
 export XDG_STATE_HOME="$tmp_root/state"
 export XDG_CACHE_HOME="$tmp_root/cache"
 
-uvx --from cureview cure init
+uvx --from cureview cure setup
 uvx --from cureview cure install
 uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
@@ -99,7 +101,7 @@ If CURe is already partially configured, inspect the active local setup before c
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 ```
 
-On a TTY, `cure init` now acts as a setup wizard. It can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. If `chunkhound` is still missing on `PATH`, the wizard can also offer to run `cure install` before returning to the original command.
+On a TTY, `cure setup` acts as the setup wizard, and `cure init` remains a compatibility alias. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects installed `codex` and `claude` executables, persists the sticky choice through `default_preset`, and can offer to run `cure install` before returning to the original command when `chunkhound` is still missing on `PATH`.
 
 ### Example 3: what a finished review produces
 
@@ -131,7 +133,7 @@ Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-fi
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
-Commands that actually require ChunkHound bootstrap now fail or repair earlier instead of surfacing late `Missing required [chunkhound] section.` errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure init` plus `cure doctor`.
+Commands that actually require bootstrap now fail or repair earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor`.
 
 On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
 
@@ -162,6 +164,8 @@ cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli
 
 If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 
+To persist the choice for future runs, use `cure set-agent claude` or `cure set-agent codex`. `cure install` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
+
 Need the full bootstrap contract for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 
 ## Core Commands
@@ -174,13 +178,13 @@ cure pr <PR_URL> --if-reviewed new
 cure resume <session_id|PR_URL>
 ```
 
-Initialize non-secret bootstrap files:
+Initialize or repair non-secret bootstrap files:
 
 ```bash
-cure init
+cure setup
 ```
 
-When stdin/stderr are a real terminal, `cure init` is interactive and acts as the guided bootstrap/repair entry point.
+`cure init` remains available as a compatibility alias to `cure setup`.
 
 Start a fresh review:
 

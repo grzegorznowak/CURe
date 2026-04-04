@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -6414,6 +6414,76 @@ def load_embedding_api_key_from_config(*, source_config_path: Path | None = None
     return None
 
 
+def _has_embedding_config(
+    *,
+    resolved_config: dict[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    source_env = env if env is not None else os.environ
+    for key in ("CHUNKHOUND_EMBEDDING__API_KEY", "VOYAGE_API_KEY", "OPENAI_API_KEY"):
+        if str(source_env.get(key) or "").strip():
+            return True
+    if not isinstance(resolved_config, dict):
+        return False
+    embedding = resolved_config.get("embedding")
+    if not isinstance(embedding, dict):
+        return False
+    return any(str(value).strip() for value in embedding.values() if value is not None)
+
+
+def _persist_discovered_embedding_config(
+    *,
+    base_config_path: Path,
+    discovered_config_path: Path,
+) -> bool:
+    try:
+        discovered_raw = json.loads(discovered_config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReviewflowError(
+            f"Failed to read discovered ChunkHound config at {discovered_config_path}: {exc}"
+        ) from exc
+
+    discovered_embedding = (
+        discovered_raw.get("embedding") if isinstance(discovered_raw, dict) else None
+    )
+    if not isinstance(discovered_embedding, dict) or not any(
+        str(value).strip() for value in discovered_embedding.values() if value is not None
+    ):
+        return False
+    try:
+        base_text = base_config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        base_raw: dict[str, Any] = {}
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read ChunkHound base config at {base_config_path}: {exc}") from exc
+    else:
+        if not base_text.strip():
+            base_raw = {}
+        else:
+            try:
+                parsed = json.loads(base_text)
+            except json.JSONDecodeError as exc:
+                raise ReviewflowError(
+                    f"Failed to parse ChunkHound base config at {base_config_path}: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ReviewflowError(
+                    f"ChunkHound base config at {base_config_path} must contain a JSON object."
+                )
+            base_raw = parsed
+
+    if base_raw.get("embedding") == discovered_embedding:
+        return False
+
+    updated = dict(base_raw)
+    updated["embedding"] = discovered_embedding
+    base_config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(base_config_path, updated)
+    return True
+
+
 def migrate_storage_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
     _ = args
     _ = paths
@@ -6471,6 +6541,58 @@ def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     if inferred:
         env["CHUNKHOUND_EMBEDDING__API_KEY"] = inferred
     return env
+
+
+def _stream_is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class _InteractiveChunkhoundIndexResult:
+    stdout: str = ""
+    stderr: str = ""
+    duration_seconds: float = 0.0
+
+
+def _missing_embedding_config_error(*, base_config_path: Path) -> ReviewflowError:
+    return ReviewflowError(
+        "\n".join(
+            [
+                f"ChunkHound embedding config is missing from {base_config_path}.",
+                "Add an `embedding` block, set `CHUNKHOUND_EMBEDDING__API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`, or run `cure setup` in a TTY before retrying.",
+            ]
+        )
+    )
+
+
+def _run_chunkhound_embedding_setup(
+    *,
+    index_cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    seed: Path,
+    base_config_path: Path,
+) -> _InteractiveChunkhoundIndexResult:
+    started = time.perf_counter()
+    subprocess.run(
+        index_cmd,
+        cwd=str(cwd),
+        env=env,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    persisted = _persist_discovered_embedding_config(
+        base_config_path=base_config_path,
+        discovered_config_path=seed / ".chunkhound.json",
+    )
+    if not persisted and not _has_embedding_config(resolved_config=None, env=os.environ):
+        raise _missing_embedding_config_error(base_config_path=base_config_path)
+    return _InteractiveChunkhoundIndexResult(duration_seconds=time.perf_counter() - started)
 
 
 def _cleanup_chunkhound_db_path(chunkhound_db_path: Path) -> None:
@@ -6795,13 +6917,11 @@ def cache_prime(
         if not build_reason:
             build_reason = detected_reason
 
-        if rebuild_database and db_path.exists():
-            if db_path.is_dir():
-                shutil.rmtree(db_path, ignore_errors=True)
-            else:
-                db_path.unlink(missing_ok=True)
-
         env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+        embedding_missing = not _has_embedding_config(
+            resolved_config=resolved_chunkhound_cfg,
+            env=env,
+        )
         index_cmd = [
             "chunkhound",
             "index",
@@ -6825,7 +6945,27 @@ def cache_prime(
             index_ok = False
             try:
                 index_reporter.mark_running()
-                if out is not None:
+                if embedding_missing and _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr):
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
+                    index_result = _run_chunkhound_embedding_setup(
+                        index_cmd=index_cmd,
+                        cwd=base_root,
+                        env=env,
+                        seed=seed,
+                        base_config_path=chunkhound_cfg.base_config_path,
+                    )
+                elif embedding_missing:
+                    raise _missing_embedding_config_error(base_config_path=chunkhound_cfg.base_config_path)
+                elif out is not None:
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
                     index_result = out.run_logged_cmd(
                         index_cmd,
                         kind="chunkhound",
@@ -6836,6 +6976,11 @@ def cache_prime(
                         stream_text_callback=index_reporter.consume_text,
                     )
                 else:
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
                     index_result = run_cmd(
                         index_cmd,
                         cwd=base_root,
@@ -13298,20 +13443,68 @@ def _chunkhound_not_on_path_error(*, uv_path: str | None) -> ReviewflowError:
 
 
 def install_flow(args: argparse.Namespace) -> int:
+    import cure_commands as command_surface
+
     explicit_source = hasattr(args, "chunkhound_source")
     chunkhound_source = str(getattr(args, "chunkhound_source", "release") or "release").strip()
     uv_path = shutil.which("uv")
     existing_chunkhound = shutil.which("chunkhound")
     if existing_chunkhound and not explicit_source:
         _eprint(f"Reusing existing ChunkHound on PATH: {existing_chunkhound}")
-        return 0
-    cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
-    _eprint(f"Installing ChunkHound from source={chunkhound_source}")
-    run_cmd(cmd)
-    chunkhound_path = shutil.which("chunkhound")
-    if not chunkhound_path:
+    else:
+        cmd = build_chunkhound_install_command(chunkhound_source=chunkhound_source)
+        _eprint(f"Installing ChunkHound from source={chunkhound_source}")
+        run_cmd(cmd)
+        chunkhound_path = shutil.which("chunkhound")
+        if not chunkhound_path:
+            raise _chunkhound_not_on_path_error(uv_path=uv_path)
+        _eprint(f"ChunkHound install complete: {chunkhound_path}")
+
+    runtime = resolve_runtime(args)
+    selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        cli_agent=getattr(args, "agent", None),
+        env=os.environ,
+    )
+    if bool(selection.get("blocking")) and sys.stdin.isatty() and sys.stderr.isatty() and runtime.config_enabled:
+        command_surface.run_chunkhound_setup_wizard(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            install_args=args,
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    else:
+        agent_choice = command_surface._resolve_bootstrap_agent_choice(
+            runtime=runtime,
+            cli_agent=getattr(args, "agent", None),
+            command_name="install",
+            interactive=False,
+        )
+        command_surface._ensure_bootstrap_files(runtime=runtime, stdout=sys.stdout)
+        selected_agent = str(agent_choice.get("agent") or "").strip()
+        if selected_agent:
+            preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]
+            changed = command_surface._upsert_llm_default_preset(
+                config_path=runtime.config_path,
+                default_preset=preset,
+            )
+            action = "Updated" if changed else "Left unchanged"
+            print(f"{action} saved local agent preference: {selected_agent} ({preset})")
+
+    final_selection = resolve_local_agent_selection(
+        base_codex_config_path=runtime.codex_base_config_path,
+        reviewflow_config_path=runtime.config_path,
+        config_enabled=runtime.config_enabled,
+        env=os.environ,
+    )
+    if shutil.which("chunkhound") is None:
         raise _chunkhound_not_on_path_error(uv_path=uv_path)
-    _eprint(f"ChunkHound install complete: {chunkhound_path}")
+    if bool(final_selection.get("blocking")):
+        raise ReviewflowError(str(final_selection.get("detail") or "bootstrap readiness is still blocked"))
     return 0
 
 
@@ -13674,6 +13867,7 @@ from cure_runtime import (
     DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
     HTTP_LLM_PROVIDERS,
+    LOCAL_AGENT_PRESET_BY_NAME,
     LLM_RESUME_PROVIDERS,
     LLM_TRANSPORT_CHOICES,
     MULTIPASS_MAX_STEPS_HARD_CAP,
@@ -13718,6 +13912,7 @@ from cure_runtime import (
     resolve_chunkhound_reviewflow_config,
     resolve_codex_base_config_path,
     resolve_codex_flags,
+    resolve_local_agent_selection,
     resolve_llm_config,
     resolve_llm_config_from_args,
     resolve_multipass_stage_llm_config,
@@ -13784,6 +13979,7 @@ from cure_commands import (
     pr_flow,
     preferred_cli_invocation,
     resume_flow,
+    set_agent_flow,
     status_flow,
     watch_flow,
     zip_flow,
@@ -14018,9 +14214,26 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
     wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
+    setupp = sub.add_parser(
+        "setup",
+        help="Configure CURe bootstrap state and persist the local coding agent choice",
+        parents=[runtime_parent],
+    )
+    setupp.add_argument(
+        "--force",
+        action="store_true",
+        help="Rewrite bootstrap files even when they already exist",
+    )
+    setupp.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help="Persist this local coding agent choice during setup",
+    )
+
     initp = sub.add_parser(
         "init",
-        help="Write the non-secret CURe bootstrap config files for the current runtime path layout",
+        help="Compatibility alias for `setup`",
         parents=[runtime_parent],
     )
     initp.add_argument(
@@ -14028,10 +14241,16 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         action="store_true",
         help="Rewrite bootstrap files even when they already exist",
     )
+    initp.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     ins = sub.add_parser(
         "install",
-        help="Install or update ChunkHound so the `chunkhound` CLI is available to CURe",
+        help="Install ChunkHound and repair CURe bootstrap readiness",
         parents=[runtime_parent],
     )
     ins.add_argument(
@@ -14040,6 +14259,19 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="ChunkHound source to install (default: release)",
     )
+    ins.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default=None,
+        help="Persist this local coding agent choice while repairing bootstrap readiness",
+    )
+
+    sap = sub.add_parser(
+        "set-agent",
+        help="Persist the local coding agent choice used by CURe",
+        parents=[runtime_parent],
+    )
+    sap.add_argument("agent", choices=["codex", "claude"], help="Local coding agent to persist")
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
@@ -14082,8 +14314,10 @@ def main(
     paths = runtime.paths
 
     try:
-        if args.cmd == "init":
+        if args.cmd in {"init", "setup"}:
             return command_surface.init_flow(args, runtime=runtime)
+        if args.cmd == "set-agent":
+            return command_surface.set_agent_flow(args, runtime=runtime)
         if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
             runtime = runtime_surface.resolve_runtime(args)
             paths = runtime.paths
