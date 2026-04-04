@@ -1859,10 +1859,24 @@ class TuiDashboardTests(unittest.TestCase):
         args4 = p.parse_args(["doctor", "--pr-url", "https://github.com/acme/repo/pull/1", "--json"])
         self.assertEqual(args4.pr_url, "https://github.com/acme/repo/pull/1")
         self.assertTrue(args4.json_output)
-        args5 = p.parse_args(["init", "--config", "/tmp/cure.toml", "--sandbox-root", "/tmp/sandboxes", "--force"])
+        args5 = p.parse_args(
+            [
+                "setup",
+                "--config",
+                "/tmp/cure.toml",
+                "--sandbox-root",
+                "/tmp/sandboxes",
+                "--force",
+                "--chunkhound-source",
+                "git-main",
+                "--skip-install",
+            ]
+        )
         self.assertEqual(args5.config_path, "/tmp/cure.toml")
         self.assertEqual(args5.sandbox_root, "/tmp/sandboxes")
         self.assertTrue(args5.force)
+        self.assertEqual(args5.chunkhound_source, "git-main")
+        self.assertTrue(args5.skip_install)
         args6 = p.parse_args(["setup", "--agent", "claude"])
         self.assertEqual(args6.cmd, "setup")
         self.assertEqual(args6.agent, "claude")
@@ -1870,12 +1884,17 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(args7.cmd, "set-agent")
         self.assertEqual(args7.agent, "codex")
 
-    def test_parser_accepts_install_command(self) -> None:
+    def test_parser_rejects_init_command(self) -> None:
         p = rf.build_parser()
         self.assertEqual(p.prog, "cure")
-        args = p.parse_args(["install", "--chunkhound-source", "git-main", "--agent", "codex"])
-        self.assertEqual(args.chunkhound_source, "git-main")
-        self.assertEqual(args.agent, "codex")
+        with self.assertRaises(SystemExit):
+            p.parse_args(["init"])
+
+    def test_parser_rejects_install_command(self) -> None:
+        p = rf.build_parser()
+        self.assertEqual(p.prog, "cure")
+        with self.assertRaises(SystemExit):
+            p.parse_args(["install"])
 
     def test_console_main_dispatches_without_alias_warning(self) -> None:
         stderr = StringIO()
@@ -2156,7 +2175,7 @@ class RuntimeResolutionTests(unittest.TestCase):
 
 class CanonicalShellOwnershipTests(RuntimeResolutionTests):
     def test_cure_is_the_canonical_shell_surface(self) -> None:
-        self.assertIs(cure.init_flow, cure_commands.init_flow)
+        self.assertIs(cure.setup_flow, cure_commands.setup_flow)
         self.assertIs(cure.render_prompt, cure_flows.render_prompt)
         self.assertIs(cure.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(cure.commands_flow, cure_commands.commands_flow)
@@ -2165,7 +2184,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
 
     def test_reviewflow_reexports_active_extracted_owners(self) -> None:
         self.assertIs(rf.resolve_runtime, cure_runtime.resolve_runtime)
-        self.assertIs(rf.init_flow, cure_commands.init_flow)
+        self.assertIs(rf.setup_flow, cure_commands.setup_flow)
         self.assertIs(rf.render_prompt, cure_flows.render_prompt)
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
@@ -2256,18 +2275,19 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         resolve_runtime.assert_called_once()
         doctor_flow.assert_called_once_with(mock.ANY, runtime=runtime)
 
-    def test_main_dispatches_init_via_cure_runtime_and_cure_commands(self) -> None:
+    def test_main_dispatches_setup_via_cure_runtime_and_cure_commands(self) -> None:
         runtime = self._runtime()
         with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
-            cure_commands, "init_flow", return_value=7
-        ) as init_flow:
-            rc = rf.main(["init", "--force"])
+            cure_commands, "setup_flow", return_value=7
+        ) as setup_flow:
+            rc = rf.main(["setup", "--force", "--skip-install"])
 
         self.assertEqual(rc, 7)
         resolve_runtime.assert_called_once()
-        self.assertEqual(init_flow.call_count, 1)
-        self.assertTrue(init_flow.call_args.args[0].force)
-        self.assertIs(init_flow.call_args.kwargs["runtime"], runtime)
+        self.assertEqual(setup_flow.call_count, 1)
+        self.assertTrue(setup_flow.call_args.args[0].force)
+        self.assertTrue(setup_flow.call_args.args[0].skip_install)
+        self.assertIs(setup_flow.call_args.kwargs["runtime"], runtime)
 
     def test_main_gates_pr_before_dispatch_without_tty(self) -> None:
         runtime = self._runtime()
@@ -2845,15 +2865,16 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("start with [SKILL.md](SKILL.md)", readme)
         self.assertIn(jira_reference_url, readme)
         self.assertIn("uv tool install cureview", readme)
-        self.assertIn("uvx --from cureview cure init", readme)
+        self.assertIn("uvx --from cureview cure setup", readme)
         self.assertIn("Secondary Standalone Install", readme)
         self.assertIn("Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient.", readme)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh", readme)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8", readme)
-        self.assertIn("cure init", readme)
+        self.assertIn("cure setup", readme)
         self.assertIn("cure doctor --pr-url <PR_URL> --json", readme)
         self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", readme)
         self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", readme)
+        self.assertIn("`--skip-install`", readme)
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
         self.assertIn("cure watch <session_id|PR_URL>", readme)
@@ -2906,7 +2927,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("uv tool install cureview", skill)
         self.assertIn("uvx --from cureview cure --help", skill)
         self.assertIn("uvx --from cureview cure setup", skill)
-        self.assertIn("uvx --from cureview cure init", skill)
+        self.assertNotIn("uvx --from cureview cure init", skill)
         self.assertIn("Secondary standalone fallback only when the package path is unavailable:", skill)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh", skill)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8", skill)
@@ -2915,19 +2936,18 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("uv tool install --editable /path/to/cure", skill)
         self.assertIn("--config /tmp/cure-public/cure.toml", skill)
         self.assertIn("XDG_CONFIG_HOME", skill)
-        self.assertIn("cure install", skill)
-        self.assertIn("`cure install` still provisions ChunkHound", skill)
+        self.assertIn("`--skip-install`", skill)
         self.assertIn("repairs missing non-secret bootstrap files", skill)
         self.assertIn("cure set-agent codex|claude", skill)
         self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", skill)
         self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", skill)
-        self.assertIn("Run `cure setup` before `cure install` or `cure doctor`.", skill)
+        self.assertIn("Run `cure setup` before `cure doctor`.", skill)
         self.assertIn("[[review_intelligence.sources]]", skill)
         self.assertIn('name = "github"', skill)
         self.assertIn('mode = "when-referenced"', skill)
         self.assertNotIn("tool_prompt_fragment", skill)
-        self.assertIn("If `VOYAGE_API_KEY` exists, `cure setup` writes.", skill)
-        self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes.", skill)
+        self.assertIn("If `VOYAGE_API_KEY` exists, `cure setup` writes", skill)
+        self.assertIn("If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes", skill)
         self.assertIn("`available`, `unavailable`, or `unknown`", skill)
         self.assertIn("Only `required` sources are preflighted", skill)
         self.assertIn("If a required embedding secret is still missing", skill)
@@ -2967,7 +2987,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("\"provider\": \"voyage\"", skill)
         self.assertIn("\"model\": \"voyage-code-3\"", skill)
         self.assertIn("rerun `cure setup --force`", skill)
-        self.assertIn("`cure init --force` still works as the compatibility alias", skill)
+        self.assertNotIn("`cure init --force` still works as the compatibility alias", skill)
         self.assertIn("\"provider\": \"openai\"", skill)
         self.assertIn("\"model\": \"text-embedding-3-small\"", skill)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", skill)
@@ -3072,8 +3092,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         ]:
             self.assertIn(text, jira)
 
-    def test_init_flow_writes_public_bootstrap_files(self) -> None:
-        root = ROOT / ".tmp_test_cure_init"
+    def test_setup_flow_noninteractive_writes_configs_and_installs_chunkhound(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_install"
         config_path = root / "config" / "cure.toml"
         base_path = root / "config" / "chunkhound-base.json"
         runtime = rf.ReviewflowRuntime(
@@ -3090,14 +3110,32 @@ class InstallAndDoctorTests(unittest.TestCase):
             codex_base_config_source="default",
         )
         stdout = StringIO()
+        stderr = StringIO()
         try:
             shutil.rmtree(root, ignore_errors=True)
             with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), mock.patch.object(  # pragma: allowlist secret
+                cure_commands,
+                "_resolve_bootstrap_agent_choice",
+                return_value={"agent": "codex"},
+            ), mock.patch.object(
+                cure_commands,
+                "resolve_local_agent_selection",
+                return_value={"blocking": False},
+            ), mock.patch.object(
+                rf,
+                "_install_chunkhound",
+                return_value="/usr/bin/chunkhound",
+            ) as install_chunkhound, mock.patch.object(
                 shutil,
                 "which",
-                side_effect=lambda name: "/usr/bin/codex" if name == "codex" else None,
-            ), contextlib.redirect_stdout(stdout):
-                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime)
+                side_effect=[None, "/usr/bin/chunkhound"],
+            ):
+                rc = rf.setup_flow(
+                    argparse.Namespace(force=False, agent=None, cmd="setup"),
+                    runtime=runtime,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
 
             self.assertEqual(rc, 0)
             self.assertTrue(config_path.is_file())
@@ -3112,47 +3150,291 @@ class InstallAndDoctorTests(unittest.TestCase):
             base_payload = json.loads(base_path.read_text(encoding="utf-8"))
             self.assertEqual(base_payload["embedding"]["provider"], "voyage")
             self.assertEqual(base_payload["embedding"]["model"], "voyage-code-3")
+            install_chunkhound.assert_called_once_with(chunkhound_source="release", stderr=stderr)
             output = stdout.getvalue()
             self.assertIn("Wrote CURe config", output)
             self.assertIn("Wrote ChunkHound base config", output)
             self.assertIn("saved local agent preference: codex (codex-cli)", output)
-            self.assertIn("Next: cure install", output)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_init_flow_noninteractive_fails_when_multiple_agents_are_installed_without_saved_choice(self) -> None:
-        root = ROOT / ".tmp_test_cure_setup_ambiguous_agents"
-        config_path = root / "config" / "cure.toml"
-        base_path = root / "config" / "chunkhound-base.json"
+    def test_setup_flow_noninteractive_reuses_existing_chunkhound(self) -> None:
         runtime = rf.ReviewflowRuntime(
-            config_path=config_path,
+            config_path=Path("/tmp/cure.toml"),
             config_source="cli",
             config_enabled=True,
             paths=rf.ReviewflowPaths(
-                sandbox_root=root / "state" / "sandboxes",
-                cache_root=root / "cache",
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
             ),
             sandbox_root_source="cli",
             cache_root_source="cli",
-            codex_base_config_path=root / ".codex" / "config.toml",
-            codex_base_config_source="default",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
         )
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            with mock.patch.object(
-                shutil,
-                "which",
-                side_effect=lambda name: f"/usr/bin/{name}" if name in {"codex", "claude"} else None,
-            ):
-                with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime)
-            self.assertIn("multiple supported local agents are installed", str(ctx.exception))
-            self.assertFalse(config_path.exists())
-            self.assertFalse(base_path.exists())
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        stderr = StringIO()
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ), mock.patch.object(
+            cure_commands,
+            "_upsert_llm_default_preset",
+            return_value=True,
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={"blocking": False},
+        ), mock.patch.object(
+            rf,
+            "_install_chunkhound",
+        ) as install_chunkhound, mock.patch.object(
+            shutil,
+            "which",
+            return_value="/usr/bin/chunkhound",
+        ):
+            rc = rf.setup_flow(
+                argparse.Namespace(force=False, agent="codex", cmd="setup"),
+                runtime=runtime,
+                stdout=StringIO(),
+                stderr=stderr,
+            )
+        self.assertEqual(rc, 0)
+        install_chunkhound.assert_not_called()
+        self.assertIn("Reusing existing ChunkHound on PATH: /usr/bin/chunkhound", stderr.getvalue())
 
-    def test_init_flow_noninteractive_fails_when_saved_default_is_not_local_cli_provider(self) -> None:
+    def test_setup_flow_noninteractive_force_reinstalls_chunkhound(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ) as ensure_bootstrap_files, mock.patch.object(
+            cure_commands,
+            "_upsert_llm_default_preset",
+            return_value=True,
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={"blocking": False},
+        ), mock.patch.object(
+            rf,
+            "_install_chunkhound",
+            return_value="/usr/bin/chunkhound",
+        ) as install_chunkhound, mock.patch.object(
+            shutil,
+            "which",
+            return_value="/usr/bin/chunkhound",
+        ):
+            rc = rf.setup_flow(
+                argparse.Namespace(force=True, agent="codex", cmd="setup"),
+                runtime=runtime,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+        self.assertEqual(rc, 0)
+        ensure_bootstrap_files.assert_called_once_with(runtime=runtime, force=True, stdout=mock.ANY)
+        install_chunkhound.assert_called_once_with(chunkhound_source="release", stderr=mock.ANY)
+
+    def test_setup_flow_noninteractive_skip_install_with_chunkhound_on_path(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ), mock.patch.object(
+            cure_commands,
+            "_upsert_llm_default_preset",
+            return_value=True,
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={"blocking": False},
+        ), mock.patch.object(
+            rf,
+            "_install_chunkhound",
+        ) as install_chunkhound, mock.patch.object(
+            shutil,
+            "which",
+            return_value="/usr/bin/chunkhound",
+        ):
+            rc = rf.setup_flow(
+                argparse.Namespace(force=False, agent="codex", cmd="setup", skip_install=True),
+                runtime=runtime,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+        self.assertEqual(rc, 0)
+        install_chunkhound.assert_not_called()
+
+    def test_setup_flow_noninteractive_skip_install_without_chunkhound_fails(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ), mock.patch.object(
+            shutil,
+            "which",
+            return_value=None,
+        ):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.setup_flow(
+                    argparse.Namespace(force=False, agent="codex", cmd="setup", skip_install=True),
+                    runtime=runtime,
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+        self.assertIn("Remove --skip-install or install ChunkHound manually", str(ctx.exception))
+
+    def test_setup_flow_noninteractive_explicit_chunkhound_source(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ), mock.patch.object(
+            cure_commands,
+            "_upsert_llm_default_preset",
+            return_value=True,
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={"blocking": False},
+        ), mock.patch.object(
+            rf,
+            "_install_chunkhound",
+            return_value="/usr/bin/chunkhound",
+        ) as install_chunkhound, mock.patch.object(
+            shutil,
+            "which",
+            return_value="/usr/bin/chunkhound",
+        ):
+            rc = rf.setup_flow(
+                argparse.Namespace(
+                    force=False,
+                    agent="codex",
+                    cmd="setup",
+                    chunkhound_source="git-main",
+                ),
+                runtime=runtime,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+        self.assertEqual(rc, 0)
+        install_chunkhound.assert_called_once_with(chunkhound_source="git-main", stderr=mock.ANY)
+
+    def test_setup_flow_noninteractive_final_validation_fails_when_agent_blocked(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        with mock.patch.object(
+            cure_commands,
+            "_resolve_bootstrap_agent_choice",
+            return_value={"agent": "codex"},
+        ), mock.patch.object(
+            cure_commands,
+            "_ensure_bootstrap_files",
+        ), mock.patch.object(
+            cure_commands,
+            "_upsert_llm_default_preset",
+            return_value=True,
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={"blocking": True, "detail": "agent selection still blocked"},
+        ), mock.patch.object(
+            rf,
+            "_install_chunkhound",
+            return_value="/usr/bin/chunkhound",
+        ), mock.patch.object(
+            shutil,
+            "which",
+            side_effect=[None, "/usr/bin/chunkhound"],
+        ):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.setup_flow(
+                    argparse.Namespace(force=False, agent="codex", cmd="setup"),
+                    runtime=runtime,
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+        self.assertIn("agent selection still blocked", str(ctx.exception))
+
+    def test_setup_flow_noninteractive_fails_when_saved_default_is_not_local_cli_provider(self) -> None:
         root = ROOT / ".tmp_test_cure_setup_nonlocal_saved_default"
         config_path = root / "config" / "cure.toml"
         runtime = rf.ReviewflowRuntime(
@@ -3198,7 +3480,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 side_effect=lambda name: "/usr/bin/chunkhound" if name == "chunkhound" else None,
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.init_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime)
+                    rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime)
             self.assertIn("saved default preset `router_default` does not resolve", str(ctx.exception))
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -3235,7 +3517,33 @@ class InstallAndDoctorTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_init_flow_tty_wizard_selects_repo_local_config(self) -> None:
+    def test_setup_flow_dispatches_wizard_on_tty(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=Path("/tmp/cure.toml"),
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=Path("/tmp/sandboxes"),
+                cache_root=Path("/tmp/cache"),
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=Path("/tmp/codex.toml"),
+            codex_base_config_source="cli",
+        )
+        stdin = _FakeTty()
+        stderr = _FakeTty()
+        with mock.patch.object(cure_commands, "run_chunkhound_setup_wizard", return_value=True) as wizard:
+            rc = rf.setup_flow(
+                argparse.Namespace(force=False, agent=None, cmd="setup"),
+                runtime=runtime,
+                stdin=stdin,
+                stderr=stderr,
+            )
+        self.assertEqual(rc, 0)
+        wizard.assert_called_once()
+
+    def test_setup_flow_tty_wizard_selects_repo_local_config(self) -> None:
         root = ROOT / ".tmp_test_cure_init_wizard_repo_local"
         repo_root = root / "repo"
         config_path = root / "config" / "cure.toml"
@@ -3267,16 +3575,15 @@ class InstallAndDoctorTests(unittest.TestCase):
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
-                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime, stdin=stdin, stderr=stderr)
+                rc = rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime, stdin=stdin, stderr=stderr)
 
             self.assertEqual(rc, 0)
             self.assertIn(str(repo_cfg), config_path.read_text(encoding="utf-8"))
             self.assertIn("Updated CURe config", stdout.getvalue())
-            self.assertNotIn("Next: cure install", stdout.getvalue())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_init_flow_tty_wizard_accepts_custom_path_and_install_source(self) -> None:
+    def test_setup_flow_tty_wizard_accepts_custom_path_and_install_source(self) -> None:
         root = ROOT / ".tmp_test_cure_init_wizard_custom"
         config_path = root / "config" / "cure.toml"
         custom_cfg = root / "custom-base.json"
@@ -3316,18 +3623,18 @@ class InstallAndDoctorTests(unittest.TestCase):
             ), mock.patch.object(
                 shutil, "which", side_effect=fake_which
             ), mock.patch.object(
-                rf, "install_flow", return_value=0
-            ) as install_flow:
-                rc = rf.init_flow(
+                rf, "_install_chunkhound", return_value="/usr/bin/chunkhound"
+            ) as install_chunkhound:
+                rc = rf.setup_flow(
                     argparse.Namespace(
                         force=False,
                         agent=None,
+                        cmd="setup",
                         config_path=str(config_path),
                         no_config=False,
                         sandbox_root=str(runtime.paths.sandbox_root),
                         cache_root=str(runtime.paths.cache_root),
                         codex_config_path=str(runtime.codex_base_config_path),
-                        llm_preset="claude-cli",
                     ),
                     runtime=runtime,
                     stdin=stdin,
@@ -3335,21 +3642,99 @@ class InstallAndDoctorTests(unittest.TestCase):
                 )
 
             self.assertEqual(rc, 0)
-            install_flow.assert_called_once()
-            install_args = install_flow.call_args.args[0]
-            self.assertEqual(install_args.chunkhound_source, "git-main")
-            self.assertEqual(install_args.config_path, str(config_path))
-            self.assertEqual(install_args.sandbox_root, str(runtime.paths.sandbox_root))
-            self.assertEqual(install_args.cache_root, str(runtime.paths.cache_root))
-            self.assertIsNone(install_args.codex_config_path)
-            self.assertFalse(install_args.no_config)
-            self.assertEqual(install_args.agent, "codex")
-            self.assertEqual(install_args.llm_preset, "claude-cli")
+            install_chunkhound.assert_called_once_with(chunkhound_source="git-main", stderr=stderr)
             self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_init_flow_tty_wizard_does_not_offer_incompatible_repo_local_config(self) -> None:
+    def test_setup_flow_tty_wizard_force_reinstalls_existing_chunkhound(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_wizard_force_reinstall"
+        config_path = root / "config" / "cure.toml"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
+            ), mock.patch.object(
+                rf, "_install_chunkhound", return_value="/usr/bin/chunkhound"
+            ) as install_chunkhound:
+                rc = rf.setup_flow(
+                    argparse.Namespace(force=True, agent=None, cmd="setup"),
+                    runtime=runtime,
+                    stdin=stdin,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(rc, 0)
+            install_chunkhound.assert_called_once_with(chunkhound_source="release", stderr=stderr)
+            self.assertIn("Install ChunkHound now: yes (source=release)", stderr.getvalue())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_setup_flow_tty_wizard_explicit_source_reinstalls_existing_chunkhound(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_wizard_explicit_source"
+        config_path = root / "config" / "cure.toml"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
+            ), mock.patch.object(
+                rf, "_install_chunkhound", return_value="/usr/bin/chunkhound"
+            ) as install_chunkhound:
+                rc = rf.setup_flow(
+                    argparse.Namespace(force=False, agent=None, cmd="setup", chunkhound_source="git-main"),
+                    runtime=runtime,
+                    stdin=stdin,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(rc, 0)
+            install_chunkhound.assert_called_once_with(chunkhound_source="git-main", stderr=stderr)
+            self.assertIn("Install ChunkHound now: yes (source=git-main)", stderr.getvalue())
+            self.assertNotIn("Install source [release/git-main]", stderr.getvalue())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_setup_flow_tty_wizard_does_not_offer_incompatible_repo_local_config(self) -> None:
         root = ROOT / ".tmp_test_cure_init_wizard_incompatible_repo_local"
         repo_root = root / "repo"
         config_path = root / "config" / "cure.toml"
@@ -3391,7 +3776,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
-                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime, stdin=stdin, stderr=stderr)
+                rc = rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime, stdin=stdin, stderr=stderr)
 
             self.assertEqual(rc, 0)
             self.assertIn(str(generated_path), config_path.read_text(encoding="utf-8"))
@@ -3402,7 +3787,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             os.chdir(old_cwd)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_init_flow_tty_wizard_offers_invocation_cwd_chunkhound_json_when_repo_discovery_is_absent(self) -> None:
+    def test_setup_flow_tty_wizard_offers_invocation_cwd_chunkhound_json_when_repo_discovery_is_absent(self) -> None:
         root = ROOT / ".tmp_test_cure_init_wizard_cwd_chunkhound"
         config_path = root / "config" / "cure.toml"
         cwd_cfg = root / "chunkhound.json"
@@ -3435,7 +3820,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
-                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime, stdin=stdin, stderr=stderr)
+                rc = rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime, stdin=stdin, stderr=stderr)
 
             self.assertEqual(rc, 0)
             self.assertIn(str(cwd_cfg), config_path.read_text(encoding="utf-8"))
@@ -3453,30 +3838,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertNotIn("reviewflow.py clean", text)
             self.assertNotIn("reviewflow.py list", text)
 
-    def test_install_flow_runs_constructed_command(self) -> None:
-        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
-            shutil,
-            "which",
-            side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
-        ):
-            rc = rf.install_flow(argparse.Namespace(chunkhound_source="git-main", agent="codex"))
-        self.assertEqual(rc, 0)
-        self.assertEqual(
-            run_cmd.call_args.args[0],
-            rf.build_chunkhound_install_command(chunkhound_source="git-main"),
-        )
-
-    def test_install_flow_reuses_existing_chunkhound_on_path_by_default(self) -> None:
-        with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
-            shutil,
-            "which",
-            side_effect=lambda name: "/usr/bin/uv" if name == "uv" else (f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None),
-        ):
-            rc = rf.install_flow(argparse.Namespace(agent="codex"))
-        self.assertEqual(rc, 0)
-        run_cmd.assert_not_called()
-
-    def test_install_flow_errors_when_chunkhound_still_missing_from_path(self) -> None:
+    def test_install_chunkhound_errors_when_chunkhound_still_missing_from_path(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run_cmd(cmd, **kwargs):  # type: ignore[no-untyped-def]
@@ -3514,38 +3876,10 @@ class InstallAndDoctorTests(unittest.TestCase):
             "/home/vscode/.local/share/uv/tools/reviewflow/bin/python",
         ):
             with self.assertRaises(rf.ReviewflowError) as ctx:
-                rf.install_flow(argparse.Namespace(chunkhound_source="release", agent="codex"))
+                rf._install_chunkhound(chunkhound_source="release", stderr=StringIO())
         self.assertIn("still not available on PATH", str(ctx.exception))
         self.assertIn("uv tool bin dir", str(ctx.exception))
         self.assertIn(["/usr/bin/uv", "tool", "install", "--force", "chunkhound"], calls)
-
-    def test_install_flow_noninteractive_blocked_agent_selection_leaves_no_bootstrap_files(self) -> None:
-        root = ROOT / ".tmp_test_install_blocked_selection"
-        cfg = root / "config" / "cure.toml"
-        base_cfg = root / "config" / "chunkhound-base.json"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            with mock.patch.object(
-                shutil,
-                "which",
-                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex", "claude"} else None,
-            ):
-                with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.install_flow(
-                        argparse.Namespace(
-                            agent=None,
-                            config_path=str(cfg),
-                            no_config=False,
-                            sandbox_root=None,
-                            cache_root=None,
-                            codex_config_path=None,
-                        )
-                    )
-            self.assertIn("multiple supported local agents are installed", str(ctx.exception))
-            self.assertFalse(cfg.exists())
-            self.assertFalse(base_cfg.exists())
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
 
     def test_doctor_runtime_checks_report_healthy_state(self) -> None:
         root = ROOT / ".tmp_test_doctor_ok"

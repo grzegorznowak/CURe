@@ -41,23 +41,19 @@ Persistent install:
 ```bash
 uv tool install cureview
 cure setup
-cure install
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
 ```
 
-`cure install` reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly.
+`cure setup` reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` when you want CURe to install or replace that binary explicitly, or `--skip-install` when `chunkhound` is already available and should be left untouched.
 
 Ephemeral agent run path:
 
 ```bash
 uvx --from cureview cure setup
-uvx --from cureview cure install
 uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
-
-Compatibility alias: `uvx --from cureview cure init` still enters the same setup flow.
 
 Keep the README focused on the landing page and first success. For the full agent bootstrap contract, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
 
@@ -70,12 +66,11 @@ This is the primary public path and matches the package prove-out used for the f
 ```bash
 uv tool install cureview
 cure setup
-cure install
 cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json
 cure pr https://github.com/chunkhound/chunkhound/pull/220 --if-reviewed new
 ```
 
-The `v0.1.2` public release prove-out verified the package-first bootstrap flow in a clean temp-home install. `cure setup` is now the canonical command, and `cure init` remains a compatibility alias to the same bootstrap logic.
+The `v0.1.2` public release prove-out verified the package-first bootstrap flow in a clean temp-home install. `cure setup` is the single public bootstrap command.
 
 ### Example 2: ephemeral agent bootstrap from the one-sentence kickoff
 
@@ -88,7 +83,6 @@ export XDG_STATE_HOME="$tmp_root/state"
 export XDG_CACHE_HOME="$tmp_root/cache"
 
 uvx --from cureview cure setup
-uvx --from cureview cure install
 uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
@@ -101,7 +95,7 @@ If CURe is already partially configured, inspect the active local setup before c
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 ```
 
-On a TTY, `cure setup` acts as the setup wizard, and `cure init` remains a compatibility alias. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects installed `codex` and `claude` executables, persists the sticky choice through `default_preset`, and can offer to run `cure install` before returning to the original command when `chunkhound` is still missing on `PATH`.
+On a TTY, `cure setup` acts as the setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects installed `codex` and `claude` executables, persists the sticky choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH`.
 
 ### Example 3: what a finished review produces
 
@@ -164,7 +158,7 @@ cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli
 
 If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 
-To persist the choice for future runs, use `cure set-agent claude` or `cure set-agent codex`. `cure install` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
+To persist the choice for future runs, use `cure set-agent claude` or `cure set-agent codex`. `cure setup` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
 
 Need the full bootstrap contract for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 
@@ -183,8 +177,6 @@ Initialize or repair non-secret bootstrap files:
 ```bash
 cure setup
 ```
-
-`cure init` remains available as a compatibility alias to `cure setup`.
 
 Start a fresh review:
 
@@ -257,8 +249,7 @@ curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cur
 The installer downloads the matching release asset into `~/.local/bin/cure`. After that, the bootstrap/readiness flow is unchanged:
 
 ```bash
-cure init
-cure install
+cure setup
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
 ```
@@ -271,8 +262,7 @@ Persistent human install should use the public package:
 
 ```bash
 uv tool install cureview
-cure init
-cure install
+cure setup
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
 ```
@@ -309,15 +299,15 @@ Default config path:
 ~/.config/cure/cure.toml
 ```
 
-By default `cure init` also writes:
+By default `cure setup` also writes:
 
 ```text
 ~/.config/cure/chunkhound-base.json
 ```
 
-If you need a disposable or non-default layout, set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` before `cure init`, or pass `--config`, `--sandbox-root`, and `--cache-root` directly to `cure init`.
+If you need a disposable or non-default layout, set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` before `cure setup`, or pass `--config`, `--sandbox-root`, and `--cache-root` directly to `cure setup`.
 
-Minimal config written by `cure init`:
+Minimal config written by `cure setup`:
 
 ```toml
 [paths]
@@ -355,7 +345,7 @@ synth_reasoning_effort = "xhigh"
 
 When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 
-If an embedding key is already present in the environment, `cure init` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure init` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure init` writes the OpenAI embedding model into the active ChunkHound base config and continues.
+If an embedding key is already present in the environment, `cure setup` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure setup` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure setup` writes the OpenAI embedding model into the active ChunkHound base config and continues.
 
 If no supported key is present, the agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review.
 

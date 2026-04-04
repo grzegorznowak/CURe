@@ -581,7 +581,7 @@ def test_bootstrap_gate_non_tty(binary: Path, env: dict[str, str], sandbox_root:
     )
     ensure(proc.returncode != 0, "bootstrap gate should fail non-zero when config is disabled")
     ensure("CURe bootstrap is not ready" in proc.stderr, "bootstrap gate message missing")
-    ensure("Run `cure init` in a TTY" in proc.stderr, "bootstrap gate next step missing")
+    ensure("Run `cure setup` in a TTY" in proc.stderr, "bootstrap gate next step missing")
     ensure("doctor --pr-url https://github.com/acme/repo/pull/26 --json" in proc.stderr, "bootstrap gate doctor guidance missing")
 
 
