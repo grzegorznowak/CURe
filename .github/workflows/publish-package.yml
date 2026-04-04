@@ -7,17 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing git tag to publish, for example v0.1.0rc1
+        description: Existing git tag to publish, for example v0.2.0
         required: true
         type: string
-      target:
-        description: Target package index for a manual rerun
-        required: true
-        default: testpypi
-        type: choice
-        options:
-          - testpypi
-          - pypi
 
 permissions:
   contents: read
@@ -30,8 +22,6 @@ jobs:
       package_name: ${{ steps.meta.outputs.package_name }}
       version: ${{ steps.meta.outputs.version }}
       ref_name: ${{ steps.meta.outputs.ref_name }}
-      manual_target: ${{ steps.meta.outputs.manual_target }}
-      publish_target: ${{ steps.meta.outputs.publish_target }}
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
 
     steps:
@@ -53,7 +43,6 @@ jobs:
         env:
           PACKAGE_NAME: "cureview"
           REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          MANUAL_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || '' }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -66,9 +55,7 @@ jobs:
           version = project["version"]
           expected_package_name = os.environ["PACKAGE_NAME"]
           ref_name = os.environ["REF_NAME"]
-          manual_target = os.environ.get("MANUAL_TARGET", "")
           is_prerelease = any(marker in version for marker in ("a", "b", "rc", "dev"))
-          publish_target = manual_target or ("testpypi" if is_prerelease else "pypi")
 
           if package_name != expected_package_name:
               raise SystemExit(f"Expected package name {expected_package_name}, found {package_name!r}")
@@ -76,13 +63,16 @@ jobs:
               raise SystemExit(
                   f"Tag {ref_name!r} does not match project.version {version!r}; expected v{version}"
               )
+          if is_prerelease:
+              raise SystemExit(
+                  "Pre-release package publication is not configured. "
+                  "Use a final v<version> tag for PyPI publication."
+              )
 
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
               fh.write(f"package_name={package_name}\n")
               fh.write(f"version={version}\n")
               fh.write(f"ref_name={ref_name}\n")
-              fh.write(f"manual_target={manual_target}\n")
-              fh.write(f"publish_target={publish_target}\n")
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")
           PY
 
@@ -115,33 +105,9 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish to TestPyPI
-    needs: build
-    if: ${{ needs.build.outputs.publish_target == 'testpypi' }}
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/cureview
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v4
-        with:
-          name: package-dists
-          path: dist
-
-      - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    if: ${{ needs.build.outputs.publish_target == 'pypi' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -212,10 +178,9 @@ jobs:
     name: Publish GitHub Release assets
     needs:
       - build
-      - publish-testpypi
       - publish-pypi
       - build-standalone-assets
-    if: ${{ (needs.build.outputs.publish_target == 'testpypi' && needs.publish-testpypi.result == 'success') || (needs.build.outputs.publish_target == 'pypi' && needs.publish-pypi.result == 'success') }}
+    if: ${{ needs.publish-pypi.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -6,23 +6,21 @@ This repo publishes the public CURe package as `cureview`, while the installed c
 
 - `project.version` in `pyproject.toml` is the source of truth for the package version.
 - The release tag must be `v<version>` and must match `project.version` exactly.
-- Pre-release tags such as `v0.1.0rc1`, `v0.1.0b1`, or `v0.1.0.dev1` publish to TestPyPI.
-- Final tags such as `v0.1.0` publish to PyPI.
+- Final tags such as `v0.2.0` publish to PyPI.
+- Pre-release package publication is not configured in this repository.
 - The publish workflow is [`.github/workflows/publish-package.yml`](.github/workflows/publish-package.yml).
-- The public package pages are:
-  - TestPyPI: https://test.pypi.org/p/cureview
-  - PyPI: https://pypi.org/p/cureview
+- The public package page is: https://pypi.org/p/cureview
 
 ## Trusted Publishing Setup
 
-Configure Trusted Publishing on both indices before the first release:
+Configure Trusted Publishing on PyPI before the first release:
 
-1. Create the `cureview` project on TestPyPI and PyPI if it does not already exist.
-2. Add a Trusted Publisher on each index that points at this repository and workflow file:
+1. Create the `cureview` project on PyPI if it does not already exist.
+2. Add a Trusted Publisher on PyPI that points at this repository and workflow file:
    - owner/repo: this GitHub repository
    - workflow: `.github/workflows/publish-package.yml`
-   - environment: `testpypi` on TestPyPI, `pypi` on PyPI
-3. In GitHub, create the matching `testpypi` environment and `pypi` environment.
+   - environment: `pypi`
+3. In GitHub, create the matching `pypi` environment.
 4. Apply any required reviewers or branch/tag protections to the `pypi` environment before the first production publish.
 
 The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so no long-lived PyPI API token should be stored in repo secrets. The action produces publish attestations unless explicitly disabled; this workflow does not disable them.
@@ -32,8 +30,7 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
 1. Update `project.version` in `pyproject.toml`.
 2. Commit the version bump.
 3. Create and push the matching tag.
-   - TestPyPI prove-out example: `git tag v0.1.0rc1 && git push origin v0.1.0rc1`
-   - Production example: `git tag v0.1.0 && git push origin v0.1.0`
+   - Production example: `git tag v0.2.0 && git push origin v0.2.0`
 4. Wait for `Publish Package` to finish.
 5. Verify the package page and install smoke:
    - `uvx --from cureview cure --help`
@@ -52,9 +49,7 @@ Tagged releases also build a secondary standalone channel after the package publ
   - `cureview-v<version>-macos-x86_64.tar.gz`
   - `cureview-v<version>-macos-arm64.tar.gz`
   - `SHA256SUMS`
-- GitHub Release assets are uploaded only after the matching package publish succeeds:
-  - TestPyPI-targeted tags/reruns must finish `publish-testpypi`
-  - PyPI-targeted tags/reruns must finish `publish-pypi`
+- GitHub Release assets are uploaded only after the matching PyPI publish succeeds.
 - The public install script is [`install-cure.sh`](install-cure.sh).
 - The installer remains a secondary path. Do not rewrite the README/SKILL contract to make it look equivalent to the package-first default.
 
@@ -93,7 +88,7 @@ Run the first public prove-out as an explicit evidence-gathering exercise, not a
    - run `cure init`
    - run `cure install`
    - run `cure doctor --pr-url <public github PR> --json`
-3. Push the matching tag and let `publish-package.yml` publish to the appropriate index.
+3. Push the matching tag and let `publish-package.yml` publish to PyPI.
 4. Run the published-package smoke with the public commands:
    - `uvx --from cureview cure --help`
    - `uvx --from cureview cure init`
@@ -117,13 +112,13 @@ For the standalone follow-on channel, verify all of the following before closing
 
 Store every prove-out log in `public_release_evidence/` with a dated filename such as:
 
-- `public_release_evidence/2026-03-19-v0.1.0rc1-testpypi.md`
-- `public_release_evidence/2026-03-19-v0.1.0-pypi.md`
+- `public_release_evidence/2026-04-04-v0.2.0-local-artifact-smoke.md`
+- `public_release_evidence/2026-04-04-v0.2.0-pypi.md`
 
 Each evidence log should capture:
 
 - the exact version and tag
-- whether the run targeted local artifact smoke, TestPyPI, or PyPI
+- whether the run targeted local artifact smoke or PyPI
 - the exact commands run
 - the observed package/install result
 - whether the verified public executable was `cure`
@@ -138,8 +133,7 @@ Treat the evidence file, not memory, as the handoff artifact for future sessions
 Use the `workflow_dispatch` entry on `publish-package.yml` only for rerunning an existing tag that already matches `project.version`.
 
 - `release_tag` must be an existing `v<version>` tag.
-- `target=testpypi` is the safe default for prove-outs and reruns.
-- `target=pypi` is reserved for an approved rerun of a final release tag after the TestPyPI path is already understood.
+- manual reruns publish the existing final tag to PyPI using the workflow on `main`.
 
 The workflow itself enforces the tag/version match and refuses to publish if `pyproject.toml` is still on the old package name or the wrong version.
 
@@ -149,8 +143,8 @@ If the prove-out fails before PyPI publication:
 
 1. Do not force a PyPI rerun.
 2. Fix the issue on `main`.
-3. Bump to a new version or prerelease version.
-4. Push a new matching tag and rerun the TestPyPI prove-out first.
+3. Bump to a new final version.
+4. Push a new matching tag and rerun the local artifact prove-out before publishing again.
 
 If a final release already reached PyPI but the package is not usable:
 
@@ -163,7 +157,7 @@ If a final release already reached PyPI but the package is not usable:
 If the failure is only in the GitHub workflow or index-side configuration:
 
 1. Keep the version/tag decision explicit in the evidence log.
-2. Prefer `workflow_dispatch` reruns only when the existing tag is still the correct release candidate.
+2. Prefer `workflow_dispatch` reruns only when the existing final tag is still the correct release candidate.
 3. Record whether the failure was GitHub environment protection, Trusted Publisher setup, or index acceptance.
 
 If the package publish succeeded but the standalone asset upload or checksum manifest is missing:

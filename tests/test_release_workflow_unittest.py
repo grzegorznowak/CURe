@@ -33,9 +33,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("uses: pypa/gh-action-pypi-publish@release/v1", workflow)
-        self.assertIn("repository-url: https://test.pypi.org/legacy/", workflow)
-        self.assertIn("name: testpypi", workflow)
         self.assertIn("name: pypi", workflow)
+        self.assertNotIn("publish-testpypi:", workflow)
+        self.assertNotIn("repository-url: https://test.pypi.org/legacy/", workflow)
+        self.assertNotIn("name: testpypi", workflow)
 
     def test_publish_workflow_gates_release_tag_shape_and_package_version(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
@@ -43,23 +44,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Validate tag and package metadata", workflow)
         self.assertIn('PACKAGE_NAME: "cureview"', workflow)
         self.assertIn('if ref_name != f"v{version}":', workflow)
-        self.assertIn("publish_target = manual_target or (\"testpypi\" if is_prerelease else \"pypi\")", workflow)
-        self.assertIn("fh.write(f\"publish_target={publish_target}", workflow)
         self.assertIn("fh.write(f\"is_prerelease={'true' if is_prerelease else 'false'}", workflow)
-        self.assertIn("needs.build.outputs.publish_target == 'testpypi'", workflow)
-        self.assertIn("needs.build.outputs.publish_target == 'pypi'", workflow)
+        self.assertIn("Pre-release package publication is not configured.", workflow)
+        self.assertNotIn("publish_target = manual_target or (\"testpypi\" if is_prerelease else \"pypi\")", workflow)
+        self.assertNotIn("fh.write(f\"publish_target={publish_target}", workflow)
 
     def test_release_runbook_documents_version_and_environment_policy(self) -> None:
         release_doc = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
 
         self.assertIn("`project.version` in `pyproject.toml`", release_doc)
         self.assertIn("`v<version>`", release_doc)
-        self.assertIn("`v0.1.0rc1`", release_doc)
-        self.assertIn("`v0.1.0`", release_doc)
+        self.assertIn("`v0.2.0`", release_doc)
         self.assertIn("`publish-package.yml`", release_doc)
         self.assertIn("Trusted Publishing", release_doc)
-        self.assertIn("`testpypi` environment", release_doc)
         self.assertIn("`pypi` environment", release_doc)
+        self.assertNotIn("`testpypi` environment", release_doc)
 
     def test_release_runbook_matches_public_package_name(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -67,7 +66,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertEqual(pyproject["project"]["name"], "cureview")
         self.assertIn("https://pypi.org/p/cureview", release_doc)
-        self.assertIn("https://test.pypi.org/p/cureview", release_doc)
+        self.assertNotIn("https://test.pypi.org/p/cureview", release_doc)
 
     def test_release_runbook_documents_proveout_evidence_and_rollback(self) -> None:
         release_doc = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
