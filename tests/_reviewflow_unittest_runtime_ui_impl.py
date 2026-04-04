@@ -2294,7 +2294,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         resolve_runtime.assert_called_once()
         pr_flow.assert_not_called()
         self.assertIn("CURe bootstrap is not ready", stderr.getvalue())
-        self.assertIn("Run `cure init` in a TTY", stderr.getvalue())
+        self.assertIn("Run `cure setup` in a TTY", stderr.getvalue())
 
     def test_main_runs_tty_bootstrap_wizard_before_dispatching_pr(self) -> None:
         root = ROOT / ".tmp_story26_main_pr_gate"
@@ -2334,7 +2334,9 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
                     "config_file_name": "chunkhound.json",
                 },
             ), mock.patch.object(
-                shutil, "which", return_value="/usr/bin/chunkhound"
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
                 rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
 
@@ -2376,7 +2378,9 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             ), mock.patch.object(
                 cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
             ), mock.patch.object(
-                shutil, "which", return_value="/usr/bin/chunkhound"
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
                 rc = rf.main(["resume", "session-123"])
 
@@ -2443,7 +2447,9 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             ), mock.patch.object(
                 cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
             ), mock.patch.object(
-                shutil, "which", return_value="/usr/bin/chunkhound"
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
             ):
                 rc = rf.main(["cache", "prime", "acme/repo", "--base", "main"])
 
@@ -2451,6 +2457,146 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
             self.assertEqual(resolve_runtime.call_count, 2)
             cache_prime.assert_called_once()
             self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_main_gates_pr_before_dispatch_when_embedding_config_is_missing_without_tty(self) -> None:
+        root = ROOT / ".tmp_story14_missing_embedding_gate"
+        config_path = root / "config" / "cure.toml"
+        base_cfg = root / "config" / "chunkhound-base.json"
+        runtime = self._runtime()
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source=runtime.config_source,
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source=runtime.sandbox_root_source,
+            cache_root_source=runtime.cache_root_source,
+            codex_base_config_path=runtime.codex_base_config_path,
+            codex_base_config_source=runtime.codex_base_config_source,
+        )
+        stderr = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            base_cfg.parent.mkdir(parents=True, exist_ok=True)
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{runtime.paths.sandbox_root}"',
+                        f'cache_root = "{runtime.paths.cache_root}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                        "[llm]",
+                        'default_preset = "codex-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+                cure_commands, "pr_flow", return_value=17
+            ) as pr_flow, mock.patch("sys.stderr", stderr), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
+            ):
+                rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+            self.assertEqual(rc, 2)
+            resolve_runtime.assert_called_once()
+            pr_flow.assert_not_called()
+            self.assertIn("ChunkHound embedding config is missing", stderr.getvalue())
+            self.assertIn("Run `cure setup` in a TTY", stderr.getvalue())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_main_runs_tty_setup_wizard_before_dispatch_when_embedding_config_is_missing(self) -> None:
+        root = ROOT / ".tmp_story14_missing_embedding_tty_gate"
+        config_path = root / "config" / "cure.toml"
+        base_cfg = root / "config" / "chunkhound-base.json"
+        runtime = self._runtime()
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source=runtime.config_source,
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source=runtime.sandbox_root_source,
+            cache_root_source=runtime.cache_root_source,
+            codex_base_config_path=runtime.codex_base_config_path,
+            codex_base_config_source=runtime.codex_base_config_source,
+        )
+        stdin = _FakeTty()
+        stderr = _FakeTty()
+        stdout = StringIO()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            base_cfg.parent.mkdir(parents=True, exist_ok=True)
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[paths]",
+                        f'sandbox_root = "{runtime.paths.sandbox_root}"',
+                        f'cache_root = "{runtime.paths.cache_root}"',
+                        "",
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                        "[llm]",
+                        'default_preset = "codex-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(cure_runtime, "resolve_runtime", side_effect=[runtime, runtime]) as resolve_runtime,
+                mock.patch.object(cure_commands, "run_chunkhound_setup_wizard", return_value=True) as wizard,
+                mock.patch.object(cure_commands, "pr_flow", return_value=17) as pr_flow,
+                mock.patch("sys.stdin", stdin),
+                mock.patch("sys.stderr", stderr),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.object(
+                    shutil,
+                    "which",
+                    side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
+                ),
+            ):
+                call_order = mock.Mock()
+                call_order.attach_mock(wizard, "wizard")
+                call_order.attach_mock(pr_flow, "pr_flow")
+                rc = rf.main(["pr", "https://github.com/acme/repo/pull/1"])
+
+            self.assertEqual(rc, 17)
+            self.assertEqual(resolve_runtime.call_count, 2)
+            self.assertEqual(
+                call_order.mock_calls,
+                [
+                    mock.call.wizard(
+                        runtime=runtime,
+                        cli_agent=None,
+                        stdin=stdin,
+                        stdout=None,
+                        stderr=stderr,
+                    ),
+                    mock.call.pr_flow(
+                        mock.ANY,
+                        paths=runtime.paths,
+                        config_path=config_path,
+                        codex_base_config_path=runtime.codex_base_config_path,
+                    ),
+                ],
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3198,10 +3344,12 @@ class InstallAndDoctorTests(unittest.TestCase):
         stdin = _FakeTty("\ny\n")
         stderr = _FakeTty()
         stdout = StringIO()
+        old_cwd = Path.cwd()
         try:
             shutil.rmtree(root, ignore_errors=True)
             repo_root.mkdir(parents=True, exist_ok=True)
             repo_cfg.write_text("{}", encoding="utf-8")
+            os.chdir(root)
             with contextlib.redirect_stdout(stdout), mock.patch.object(
                 cure_commands,
                 "discover_repo_local_chunkhound_config",
@@ -3224,6 +3372,49 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn(str(repo_cfg), stderr.getvalue())
             self.assertIn("not auto-selectable", stderr.getvalue())
         finally:
+            os.chdir(old_cwd)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_init_flow_tty_wizard_offers_invocation_cwd_chunkhound_json_when_repo_discovery_is_absent(self) -> None:
+        root = ROOT / ".tmp_test_cure_init_wizard_cwd_chunkhound"
+        config_path = root / "config" / "cure.toml"
+        cwd_cfg = root / "chunkhound.json"
+        runtime = rf.ReviewflowRuntime(
+            config_path=config_path,
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.ReviewflowPaths(
+                sandbox_root=root / "state" / "sandboxes",
+                cache_root=root / "cache",
+            ),
+            sandbox_root_source="cli",
+            cache_root_source="cli",
+            codex_base_config_path=root / ".codex" / "config.toml",
+            codex_base_config_source="default",
+        )
+        stdin = _FakeTty("\ny\n")
+        stderr = _FakeTty()
+        stdout = StringIO()
+        old_cwd = Path.cwd()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            cwd_cfg.write_text("{}", encoding="utf-8")
+            os.chdir(root)
+            with contextlib.redirect_stdout(stdout), mock.patch.object(
+                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
+            ), mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
+            ):
+                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime, stdin=stdin, stderr=stderr)
+
+            self.assertEqual(rc, 0)
+            self.assertIn(str(cwd_cfg), config_path.read_text(encoding="utf-8"))
+            self.assertIn("Updated CURe config", stdout.getvalue())
+        finally:
+            os.chdir(old_cwd)
             shutil.rmtree(root, ignore_errors=True)
 
     def test_user_facing_contract_text_has_no_workspace_hardcoding(self) -> None:

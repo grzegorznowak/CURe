@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
-from cure_flows import discover_repo_local_chunkhound_config
+from cure_flows import _has_embedding_config, discover_repo_local_chunkhound_config
 from cure_runtime import (
     LOCAL_AGENT_PRESET_BY_NAME,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
@@ -518,6 +518,13 @@ def _collect_chunkhound_base_config_choices(
                 label=f"Use repo-local {label_name} ({candidate})",
             )
 
+    for preferred_name in ("chunkhound.json", ".chunkhound.json"):
+        add_choice(
+            kind="invocation_cwd",
+            path=invocation_cwd / preferred_name,
+            label=f"Use {preferred_name} from the current directory ({(invocation_cwd / preferred_name).resolve(strict=False)})",
+        )
+
     generated_path = _default_chunkhound_base_config_path(runtime.config_path)
     choices.append(
         {
@@ -969,9 +976,18 @@ def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRunti
         lines.append("`--no-config` disables the CURe bootstrap config, so the setup wizard cannot persist a base config.")
     else:
         try:
-            load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+            chunkhound_cfg, _, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
+                config_path=runtime.config_path,
+                require=True,
+            )
         except ReviewflowError as exc:
             lines.append(str(exc))
+        else:
+            if not _has_embedding_config(resolved_config=resolved_chunkhound_cfg, env=os.environ):
+                lines.append(f"ChunkHound embedding config is missing from {chunkhound_cfg.base_config_path}.")
+                lines.append(
+                    "Add an `embedding` block, set `CHUNKHOUND_EMBEDDING__API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`, or rerun `cure setup`."
+                )
     if shutil.which("chunkhound") is None:
         lines.append("ChunkHound CLI is not available on PATH.")
     agent_selection = resolve_local_agent_selection(
@@ -1025,11 +1041,22 @@ def ensure_chunkhound_bootstrap_ready(
         return False
 
     ready = runtime.config_enabled
+    embedding_missing = False
     if ready:
         try:
-            load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+            _, _, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
+                config_path=runtime.config_path,
+                require=True,
+            )
         except ReviewflowError:
             ready = False
+        else:
+            embedding_missing = not _has_embedding_config(
+                resolved_config=resolved_chunkhound_cfg,
+                env=os.environ,
+            )
+            if embedding_missing:
+                ready = False
     agent_selection = resolve_local_agent_selection(
         base_codex_config_path=runtime.codex_base_config_path,
         reviewflow_config_path=runtime.config_path,

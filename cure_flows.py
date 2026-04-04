@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -14,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_errors import ReviewflowError
@@ -171,6 +172,76 @@ def load_embedding_api_key_from_config(*, source_config_path: Path | None = None
     return None
 
 
+def _has_embedding_config(
+    *,
+    resolved_config: dict[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    source_env = env if env is not None else os.environ
+    for key in ("CHUNKHOUND_EMBEDDING__API_KEY", "VOYAGE_API_KEY", "OPENAI_API_KEY"):
+        if str(source_env.get(key) or "").strip():
+            return True
+    if not isinstance(resolved_config, dict):
+        return False
+    embedding = resolved_config.get("embedding")
+    if not isinstance(embedding, dict):
+        return False
+    return any(str(value).strip() for value in embedding.values() if value is not None)
+
+
+def _persist_discovered_embedding_config(
+    *,
+    base_config_path: Path,
+    discovered_config_path: Path,
+) -> bool:
+    try:
+        discovered_raw = json.loads(discovered_config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReviewflowError(
+            f"Failed to read discovered ChunkHound config at {discovered_config_path}: {exc}"
+        ) from exc
+
+    discovered_embedding = (
+        discovered_raw.get("embedding") if isinstance(discovered_raw, dict) else None
+    )
+    if not isinstance(discovered_embedding, dict) or not any(
+        str(value).strip() for value in discovered_embedding.values() if value is not None
+    ):
+        return False
+    try:
+        base_text = base_config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        base_raw: dict[str, Any] = {}
+    except OSError as exc:
+        raise ReviewflowError(f"Failed to read ChunkHound base config at {base_config_path}: {exc}") from exc
+    else:
+        if not base_text.strip():
+            base_raw = {}
+        else:
+            try:
+                parsed = json.loads(base_text)
+            except json.JSONDecodeError as exc:
+                raise ReviewflowError(
+                    f"Failed to parse ChunkHound base config at {base_config_path}: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ReviewflowError(
+                    f"ChunkHound base config at {base_config_path} must contain a JSON object."
+                )
+            base_raw = parsed
+
+    if base_raw.get("embedding") == discovered_embedding:
+        return False
+
+    updated = dict(base_raw)
+    updated["embedding"] = discovered_embedding
+    base_config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(base_config_path, updated)
+    return True
+
+
 def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     if os.environ.get("CHUNKHOUND_EMBEDDING__API_KEY"):
@@ -183,6 +254,58 @@ def chunkhound_env(*, source_config_path: Path | None = None) -> dict[str, str]:
     if inferred:
         env["CHUNKHOUND_EMBEDDING__API_KEY"] = inferred
     return env
+
+
+def _stream_is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class _InteractiveChunkhoundIndexResult:
+    stdout: str = ""
+    stderr: str = ""
+    duration_seconds: float = 0.0
+
+
+def _missing_embedding_config_error(*, base_config_path: Path) -> ReviewflowError:
+    return ReviewflowError(
+        "\n".join(
+            [
+                f"ChunkHound embedding config is missing from {base_config_path}.",
+                "Add an `embedding` block, set `CHUNKHOUND_EMBEDDING__API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`, or run `cure setup` in a TTY before retrying.",
+            ]
+        )
+    )
+
+
+def _run_chunkhound_embedding_setup(
+    *,
+    index_cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    seed: Path,
+    base_config_path: Path,
+) -> _InteractiveChunkhoundIndexResult:
+    started = time.perf_counter()
+    subprocess.run(
+        index_cmd,
+        cwd=str(cwd),
+        env=env,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    persisted = _persist_discovered_embedding_config(
+        base_config_path=base_config_path,
+        discovered_config_path=seed / ".chunkhound.json",
+    )
+    if not persisted and not _has_embedding_config(resolved_config=None, env=os.environ):
+        raise _missing_embedding_config_error(base_config_path=base_config_path)
+    return _InteractiveChunkhoundIndexResult(duration_seconds=time.perf_counter() - started)
 
 def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -> dict[str, Any]:
     """Compute local diff stats using git (no GH API beyond checkout)."""
@@ -1582,6 +1705,10 @@ def cache_prime(
                 db_path.unlink(missing_ok=True)
 
         env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+        embedding_missing = not _has_embedding_config(
+            resolved_config=resolved_chunkhound_cfg,
+            env=env,
+        )
         index_cmd = [
             "chunkhound",
             "index",
@@ -1605,7 +1732,17 @@ def cache_prime(
             index_ok = False
             try:
                 index_reporter.mark_running()
-                if out is not None:
+                if embedding_missing and _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr):
+                    index_result = _run_chunkhound_embedding_setup(
+                        index_cmd=index_cmd,
+                        cwd=base_root,
+                        env=env,
+                        seed=seed,
+                        base_config_path=chunkhound_cfg.base_config_path,
+                    )
+                elif embedding_missing:
+                    raise _missing_embedding_config_error(base_config_path=chunkhound_cfg.base_config_path)
+                elif out is not None:
                     index_result = out.run_logged_cmd(
                         index_cmd,
                         kind="chunkhound",
