@@ -368,9 +368,8 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_generated_chunkhound_helper_uses_tool_specific_tools_call_timeouts(self) -> None:
-        root = ROOT / ".tmp_test_chunkhound_helper_tool_call_timeouts"
+        root = Path(tempfile.mkdtemp(prefix="cure_test_chunkhound_helper_tool_call_timeouts_", dir=ROOT))
         try:
-            shutil.rmtree(root, ignore_errors=True)
             repo_dir = root / "repo"
             work_dir = root / "work"
             helper_cwd = root / "chunkhound"

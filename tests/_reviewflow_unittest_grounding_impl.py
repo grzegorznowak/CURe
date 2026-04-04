@@ -652,12 +652,9 @@ class EnsureBaseCacheTests(unittest.TestCase):
             shutil.rmtree(tmp_cache, ignore_errors=True)
 
     def test_ensure_base_cache_rebuilds_when_compatibility_canary_rejects_reuse(self) -> None:
-        tmp_cache = ROOT / ".tmp_test_cache_version_canary_reject"
-        tmp_sandbox = ROOT / ".tmp_test_sandbox_version_canary_reject"
+        tmp_cache = Path(tempfile.mkdtemp(prefix="cure_test_cache_version_canary_reject_", dir=ROOT))
+        tmp_sandbox = Path(tempfile.mkdtemp(prefix="cure_test_sandbox_version_canary_reject_", dir=ROOT))
         try:
-            tmp_cache.mkdir(parents=True, exist_ok=True)
-            tmp_sandbox.mkdir(parents=True, exist_ok=True)
-
             paths = rf.ReviewflowPaths(
                 sandbox_root=tmp_sandbox,
                 cache_root=tmp_cache,
@@ -689,72 +686,78 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
             called: dict[str, object] = {}
 
-            def fake_cache_prime(**kwargs):  # type: ignore[no-untyped-def]
+            def fake_cache_prime_locked(**kwargs):  # type: ignore[no-untyped-def]
                 called["kwargs"] = kwargs
                 return {"primed": True}
 
-            old_cache_prime = rf.cache_prime
-            rf.cache_prime = fake_cache_prime  # type: ignore[assignment]
-            try:
-                with (
-                    mock.patch.object(
-                        rf,
-                        "load_chunkhound_runtime_config",
-                        return_value=(
-                            rf.ReviewflowChunkHoundConfig(
-                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
-                            ),
-                            chunkhound_meta,
-                            {"indexing": {"exclude": []}},
+            with (
+                mock.patch.object(
+                    rf,
+                    "cache_prime",
+                    side_effect=AssertionError("public cache_prime wrapper should not be called"),
+                ),
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(
+                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
                         ),
+                        chunkhound_meta,
+                        {"indexing": {"exclude": []}},
                     ),
-                    mock.patch.object(
-                        cure_flows,
-                        "load_chunkhound_runtime_config",
-                        return_value=(
-                            rf.ReviewflowChunkHoundConfig(
-                                base_config_path=ROOT / ".tmp_chunkhound_base.json"
-                            ),
-                            chunkhound_meta,
-                            {"indexing": {"exclude": []}},
+                ),
+                mock.patch.object(
+                    cure_flows,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(
+                            base_config_path=ROOT / ".tmp_chunkhound_base.json"
                         ),
+                        chunkhound_meta,
+                        {"indexing": {"exclude": []}},
                     ),
-                    mock.patch.object(
-                        rf,
-                        "run_cmd",
-                        return_value=mock.Mock(
-                            stdout="chunkhound new\n",
-                            stderr="",
-                            duration_seconds=0.0,
-                        ),
+                ),
+                mock.patch.object(
+                    rf,
+                    "run_cmd",
+                    return_value=mock.Mock(
+                        stdout="chunkhound new\n",
+                        stderr="",
+                        duration_seconds=0.0,
                     ),
-                    mock.patch.object(
-                        cure_flows,
-                        "_run_base_cache_compatibility_canary",
-                        return_value={
-                            "checked_at": "2026-03-30T07:00:00+00:00",
-                            "cached_chunkhound_version": "chunkhound old",
-                            "current_chunkhound_version": "chunkhound new",
-                            "decision": "rebuild",
-                            "result": "probe_failed",
-                            "reason": "compatibility canary exited with code 134",
-                            "probe_timeout_seconds": 30,
-                        },
-                    ) as canary,
-                ):
-                    out = rf.ensure_base_cache(
-                        paths=paths,
-                        pr=pr,
-                        base_ref=base_ref,
-                        ttl_hours=24,
-                        refresh=False,
-                        quiet=True,
-                        no_stream=True,
-                    )
-            finally:
-                rf.cache_prime = old_cache_prime  # type: ignore[assignment]
+                ),
+                mock.patch.object(
+                    cure_flows,
+                    "_cache_prime_locked",
+                    side_effect=fake_cache_prime_locked,
+                ) as cache_prime_locked,
+                mock.patch.object(
+                    cure_flows,
+                    "_run_base_cache_compatibility_canary",
+                    return_value={
+                        "checked_at": "2026-03-30T07:00:00+00:00",
+                        "cached_chunkhound_version": "chunkhound old",
+                        "current_chunkhound_version": "chunkhound new",
+                        "decision": "rebuild",
+                        "result": "probe_failed",
+                        "reason": "compatibility canary exited with code 134",
+                        "probe_timeout_seconds": 30,
+                    },
+                ) as canary,
+            ):
+                out = rf.ensure_base_cache(
+                    paths=paths,
+                    pr=pr,
+                    base_ref=base_ref,
+                    ttl_hours=24,
+                    refresh=False,
+                    quiet=True,
+                    no_stream=True,
+                )
 
             canary.assert_called_once()
+            cache_prime_locked.assert_called_once()
             self.assertTrue(out["primed"])
             self.assertEqual(out["compatibility"]["decision"], "rebuild")
             self.assertEqual(out["cache_origin"], "fresh_rebuild")
@@ -766,6 +769,164 @@ class EnsureBaseCacheTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_sandbox, ignore_errors=True)
             shutil.rmtree(tmp_cache, ignore_errors=True)
+
+    def test_public_ensure_base_cache_canary_reject_rebuild_completes_without_deadlock(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="cure_test_cache_reject_subprocess_", dir=ROOT))
+        try:
+            import textwrap
+
+            script = textwrap.dedent(
+                """
+                import json
+                import sys
+                import tempfile
+                from pathlib import Path
+                from unittest import mock
+
+                import cure as rf
+                import cure_flows
+
+                root = Path(sys.argv[1])
+                cache_root = root / "cache"
+                sandbox_root = root / "sandbox"
+                seed_root = root / "seed"
+                cache_root.mkdir(parents=True, exist_ok=True)
+                sandbox_root.mkdir(parents=True, exist_ok=True)
+                seed_root.mkdir(parents=True, exist_ok=True)
+
+                base_cfg = root / "chunkhound-base.json"
+                base_cfg.write_text(
+                    json.dumps({"embedding": {"provider": "openai", "model": "text-embedding-3-small"}}),
+                    encoding="utf-8",
+                )
+
+                paths = rf.ReviewflowPaths(
+                    sandbox_root=sandbox_root,
+                    cache_root=cache_root,
+                    review_chunkhound_config=root / "reviewflow.toml",
+                    main_chunkhound_config=root / "chunkhound.toml",
+                )
+                pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+                base_ref = "main"
+                chunkhound_meta = {"chunkhound": {"base_config_path": str(base_cfg)}}
+                cfg_fp = rf.fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
+
+                base_root = rf.base_dir(paths, pr.host, pr.owner, pr.repo, base_ref)
+                db_path = base_root / "db" / ".chunkhound.db"
+                db_path.mkdir(parents=True, exist_ok=True)
+                (db_path / "chunks.db").write_text("stale", encoding="utf-8")
+                meta_path = base_root / "meta.json"
+                meta_path.parent.mkdir(parents=True, exist_ok=True)
+                meta_path.write_text(
+                    json.dumps(
+                        {
+                            "indexed_at": "3026-03-05T00:00:00+00:00",
+                            "config_fingerprint": cfg_fp,
+                            "chunkhound_version": "chunkhound old",
+                            "db_path": str(db_path),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                def fake_materialize(
+                    *,
+                    resolved_config,
+                    output_config_path,
+                    database_provider,
+                    database_path,
+                ):
+                    output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_config_path.write_text("{}", encoding="utf-8")
+                    database_path.parent.mkdir(parents=True, exist_ok=True)
+
+                def fake_run_cmd(cmd, **kwargs):
+                    if cmd == ["chunkhound", "--version"]:
+                        return mock.Mock(stdout="chunkhound new\\n", stderr="", duration_seconds=0.0)
+                    if cmd[:2] == ["chunkhound", "index"]:
+                        target = base_root / "db" / ".chunkhound.db"
+                        target.mkdir(parents=True, exist_ok=True)
+                        (target / "chunks.db").write_text("fresh", encoding="utf-8")
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[:1] == ["git"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    raise AssertionError(f"unexpected command: {cmd}")
+
+                with (
+                    mock.patch.object(rf, "ensure_review_config"),
+                    mock.patch.object(cure_flows, "ensure_review_config"),
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            chunkhound_meta,
+                            {"embedding": {"provider": "openai", "model": "text-embedding-3-small"}},
+                        ),
+                    ),
+                    mock.patch.object(
+                        cure_flows,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            chunkhound_meta,
+                            {"embedding": {"provider": "openai", "model": "text-embedding-3-small"}},
+                        ),
+                    ),
+                    mock.patch.object(rf, "materialize_chunkhound_env_config", side_effect=fake_materialize),
+                    mock.patch.object(cure_flows, "materialize_chunkhound_env_config", side_effect=fake_materialize),
+                    mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                    mock.patch.object(cure_flows, "_run_cmd", side_effect=fake_run_cmd),
+                    mock.patch.object(rf, "seed_dir", return_value=seed_root),
+                    mock.patch.object(
+                        cure_flows,
+                        "_sync_seed_checkout",
+                        return_value=(seed_root, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+                    ),
+                    mock.patch.object(
+                        cure_flows,
+                        "_run_base_cache_compatibility_canary",
+                        return_value={
+                            "checked_at": "2026-04-04T09:13:33+00:00",
+                            "cached_chunkhound_version": "chunkhound old",
+                            "current_chunkhound_version": "chunkhound new",
+                            "decision": "rebuild",
+                            "result": "probe_failed",
+                            "reason": "compatibility canary exited with code 134",
+                            "probe_timeout_seconds": 30,
+                        },
+                    ),
+                ):
+                    result = rf.ensure_base_cache(
+                        paths=paths,
+                        config_path=root / "reviewflow.toml",
+                        pr=pr,
+                        base_ref=base_ref,
+                        ttl_hours=24,
+                        refresh=False,
+                        quiet=True,
+                        no_stream=True,
+                    )
+
+                print(json.dumps({"cache_origin": result["cache_origin"], "db_path": result["db_path"]}))
+                """
+            )
+
+            completed = subprocess.run(
+                [sys.executable, "-c", script, str(root)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            payload = json.loads(completed.stdout.strip())
+            self.assertEqual(payload["cache_origin"], "fresh_rebuild")
+            self.assertTrue(Path(payload["db_path"]).exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_restore_session_chunkhound_db_from_baseline_refreshes_stale_base_cache(self) -> None:
         root = ROOT / ".tmp_test_restore_chunkhound_db_version_mismatch"
