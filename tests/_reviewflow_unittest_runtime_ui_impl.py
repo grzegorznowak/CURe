@@ -2946,11 +2946,11 @@ class InstallAndDoctorTests(unittest.TestCase):
         stdout = StringIO()
         try:
             shutil.rmtree(root, ignore_errors=True)
-            with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), mock.patch.object(
+            with mock.patch.dict(os.environ, {"VOYAGE_API_KEY": "test-voyage"}, clear=False), mock.patch.object(  # pragma: allowlist secret
                 shutil,
                 "which",
                 side_effect=lambda name: "/usr/bin/codex" if name == "codex" else None,
-            ), contextlib.redirect_stdout(stdout):  # pragma: allowlist secret
+            ), contextlib.redirect_stdout(stdout):
                 rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime)
 
             self.assertEqual(rc, 0)
