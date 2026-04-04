@@ -6917,12 +6917,6 @@ def cache_prime(
         if not build_reason:
             build_reason = detected_reason
 
-        if rebuild_database and db_path.exists():
-            if db_path.is_dir():
-                shutil.rmtree(db_path, ignore_errors=True)
-            else:
-                db_path.unlink(missing_ok=True)
-
         env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
         embedding_missing = not _has_embedding_config(
             resolved_config=resolved_chunkhound_cfg,
@@ -6952,6 +6946,11 @@ def cache_prime(
             try:
                 index_reporter.mark_running()
                 if embedding_missing and _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr):
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
                     index_result = _run_chunkhound_embedding_setup(
                         index_cmd=index_cmd,
                         cwd=base_root,
@@ -6962,6 +6961,11 @@ def cache_prime(
                 elif embedding_missing:
                     raise _missing_embedding_config_error(base_config_path=chunkhound_cfg.base_config_path)
                 elif out is not None:
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
                     index_result = out.run_logged_cmd(
                         index_cmd,
                         kind="chunkhound",
@@ -6972,6 +6976,11 @@ def cache_prime(
                         stream_text_callback=index_reporter.consume_text,
                     )
                 else:
+                    if rebuild_database and db_path.exists():
+                        if db_path.is_dir():
+                            shutil.rmtree(db_path, ignore_errors=True)
+                        else:
+                            db_path.unlink(missing_ok=True)
                     index_result = run_cmd(
                         index_cmd,
                         cwd=base_root,
@@ -13463,18 +13472,19 @@ def install_flow(args: argparse.Namespace) -> int:
         command_surface.run_chunkhound_setup_wizard(
             runtime=runtime,
             cli_agent=getattr(args, "agent", None),
+            install_args=args,
             stdin=sys.stdin,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
     else:
-        command_surface._ensure_bootstrap_files(runtime=runtime, stdout=sys.stdout)
         agent_choice = command_surface._resolve_bootstrap_agent_choice(
             runtime=runtime,
             cli_agent=getattr(args, "agent", None),
             command_name="install",
             interactive=False,
         )
+        command_surface._ensure_bootstrap_files(runtime=runtime, stdout=sys.stdout)
         selected_agent = str(agent_choice.get("agent") or "").strip()
         if selected_agent:
             preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]

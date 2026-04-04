@@ -1996,6 +1996,107 @@ class EnsureBaseCacheTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_cache_prime_preserves_existing_db_when_version_drift_hits_missing_embedding_without_tty(self) -> None:
+        root = ROOT / ".tmp_test_cache_prime_version_drift_missing_embedding"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            cache_root = root / "cache"
+            sandbox_root = root / "sandbox"
+            seed_root = root / "seed"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            seed_root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+
+            paths = rf.ReviewflowPaths(
+                sandbox_root=sandbox_root,
+                cache_root=cache_root,
+                review_chunkhound_config=ROOT / ".tmp_unused_review_cfg.json",
+                main_chunkhound_config=ROOT / ".tmp_unused_main_cfg.json",
+            )
+            chunkhound_meta = {"chunkhound": {"base_config_path": str(base_cfg)}}
+            cfg_fp = rf.fingerprint_chunkhound_reviewflow_config(chunkhound_meta)
+            base_root = rf.base_dir(paths, "github.com", "acme", "repo", "main")
+            db_path = base_root / "db" / ".chunkhound.db"
+            db_path.mkdir(parents=True, exist_ok=True)
+            chunks_db = db_path / "chunks.db"
+            chunks_db.write_text("stale", encoding="utf-8")
+            meta_path = base_root / "meta.json"
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            meta_payload = {
+                "config_fingerprint": cfg_fp,
+                "chunkhound_version": "chunkhound old",
+                "db_path": str(db_path),
+            }
+            meta_path.write_text(json.dumps(meta_payload), encoding="utf-8")
+
+            commands: list[list[str]] = []
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                commands.append(cmd)
+                if cmd[:3] == ["git", "-C", str(seed_root)]:
+                    if cmd[3:5] == ["rev-parse", "--is-inside-work-tree"]:
+                        return mock.Mock(stdout="true\n", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "--prune"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["fetch", "origin"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:5] == ["checkout", "-B"]:
+                        return mock.Mock(stdout="", stderr="", duration_seconds=0.0)
+                    if cmd[3:4] == ["rev-parse"]:
+                        return mock.Mock(stdout="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", stderr="", duration_seconds=0.0)
+                if cmd == ["chunkhound", "--version"]:
+                    return mock.Mock(stdout="chunkhound new\n", stderr="", duration_seconds=0.0)
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "load_chunkhound_runtime_config",
+                    return_value=(
+                        rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                        chunkhound_meta,
+                        {},
+                    ),
+                ),
+                mock.patch.object(rf, "ensure_review_config"),
+                mock.patch.object(rf, "materialize_chunkhound_env_config", side_effect=fake_materialize_chunkhound_env_config),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(rf, "seed_dir", return_value=seed_root),
+                mock.patch("sys.stdin", StringIO()),
+                mock.patch("sys.stderr", StringIO()),
+            ):
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.cache_prime(
+                        paths=paths,
+                        host="github.com",
+                        owner="acme",
+                        repo="repo",
+                        base_ref="main",
+                        force=False,
+                        quiet=True,
+                        no_stream=True,
+                    )
+
+            self.assertIn("ChunkHound embedding config is missing", str(ctx.exception))
+            self.assertEqual(chunks_db.read_text(encoding="utf-8"), "stale")
+            self.assertEqual(json.loads(meta_path.read_text(encoding="utf-8")), meta_payload)
+            self.assertFalse(any(cmd[:2] == ["chunkhound", "index"] for cmd in commands))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_cache_prime_tty_embedding_setup_persists_discovered_embedding_config(self) -> None:
         root = ROOT / ".tmp_test_cache_prime_tty_embedding_setup"
         try:

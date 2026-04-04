@@ -2584,6 +2584,7 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
                     mock.call.wizard(
                         runtime=runtime,
                         cli_agent=None,
+                        install_args=mock.ANY,
                         stdin=stdin,
                         stdout=None,
                         stderr=stderr,
@@ -3122,6 +3123,7 @@ class InstallAndDoctorTests(unittest.TestCase):
     def test_init_flow_noninteractive_fails_when_multiple_agents_are_installed_without_saved_choice(self) -> None:
         root = ROOT / ".tmp_test_cure_setup_ambiguous_agents"
         config_path = root / "config" / "cure.toml"
+        base_path = root / "config" / "chunkhound-base.json"
         runtime = rf.ReviewflowRuntime(
             config_path=config_path,
             config_source="cli",
@@ -3145,6 +3147,8 @@ class InstallAndDoctorTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime)
             self.assertIn("multiple supported local agents are installed", str(ctx.exception))
+            self.assertFalse(config_path.exists())
+            self.assertFalse(base_path.exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3225,7 +3229,9 @@ class InstallAndDoctorTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.set_agent_flow(argparse.Namespace(agent="claude"), runtime=runtime)
             self.assertIn("`claude` is not installed on PATH", str(ctx.exception))
-            self.assertIn("`cure set-agent`", str(ctx.exception))
+            self.assertIn("Use `cure set-agent codex|claude`", str(ctx.exception))
+            self.assertFalse(config_path.exists())
+            self.assertFalse((root / "config" / "chunkhound-base.json").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3312,11 +3318,33 @@ class InstallAndDoctorTests(unittest.TestCase):
             ), mock.patch.object(
                 rf, "install_flow", return_value=0
             ) as install_flow:
-                rc = rf.init_flow(argparse.Namespace(force=False, agent=None), runtime=runtime, stdin=stdin, stderr=stderr)
+                rc = rf.init_flow(
+                    argparse.Namespace(
+                        force=False,
+                        agent=None,
+                        config_path=str(config_path),
+                        no_config=False,
+                        sandbox_root=str(runtime.paths.sandbox_root),
+                        cache_root=str(runtime.paths.cache_root),
+                        codex_config_path=str(runtime.codex_base_config_path),
+                        llm_preset="claude-cli",
+                    ),
+                    runtime=runtime,
+                    stdin=stdin,
+                    stderr=stderr,
+                )
 
             self.assertEqual(rc, 0)
             install_flow.assert_called_once()
-            self.assertEqual(install_flow.call_args.args[0].chunkhound_source, "git-main")
+            install_args = install_flow.call_args.args[0]
+            self.assertEqual(install_args.chunkhound_source, "git-main")
+            self.assertEqual(install_args.config_path, str(config_path))
+            self.assertEqual(install_args.sandbox_root, str(runtime.paths.sandbox_root))
+            self.assertEqual(install_args.cache_root, str(runtime.paths.cache_root))
+            self.assertIsNone(install_args.codex_config_path)
+            self.assertFalse(install_args.no_config)
+            self.assertEqual(install_args.agent, "codex")
+            self.assertEqual(install_args.llm_preset, "claude-cli")
             self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -3490,6 +3518,34 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("still not available on PATH", str(ctx.exception))
         self.assertIn("uv tool bin dir", str(ctx.exception))
         self.assertIn(["/usr/bin/uv", "tool", "install", "--force", "chunkhound"], calls)
+
+    def test_install_flow_noninteractive_blocked_agent_selection_leaves_no_bootstrap_files(self) -> None:
+        root = ROOT / ".tmp_test_install_blocked_selection"
+        cfg = root / "config" / "cure.toml"
+        base_cfg = root / "config" / "chunkhound-base.json"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            with mock.patch.object(
+                shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex", "claude"} else None,
+            ):
+                with self.assertRaises(rf.ReviewflowError) as ctx:
+                    rf.install_flow(
+                        argparse.Namespace(
+                            agent=None,
+                            config_path=str(cfg),
+                            no_config=False,
+                            sandbox_root=None,
+                            cache_root=None,
+                            codex_config_path=None,
+                        )
+                    )
+            self.assertIn("multiple supported local agents are installed", str(ctx.exception))
+            self.assertFalse(cfg.exists())
+            self.assertFalse(base_cfg.exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_doctor_runtime_checks_report_healthy_state(self) -> None:
         root = ROOT / ".tmp_test_doctor_ok"
@@ -3672,8 +3728,68 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
             self.assertEqual(payload["agent_runtime"]["preset_source"], "cli")
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+            self.assertEqual(payload["agent_selection"]["source"], "cli_preset")
+            self.assertEqual(payload["agent_selection"]["status"], "broken_cli_preset")
+            self.assertIn("explicit preset `claude-cli` resolved to `claude`", payload["agent_selection"]["detail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_bootstrap_gate_guidance_preserves_llm_preset_and_reports_selection_summary(self) -> None:
+        runtime = rf.ReviewflowRuntime(
+            config_path=ROOT / ".tmp_story14_bootstrap_guidance.toml",
+            config_source="cli",
+            config_enabled=True,
+            paths=rf.DEFAULT_PATHS,
+            sandbox_root_source="default",
+            cache_root_source="default",
+            codex_base_config_path=ROOT / ".tmp_story14_bootstrap_guidance_codex.toml",
+            codex_base_config_source="default",
+        )
+        args = argparse.Namespace(
+            cmd="pr",
+            pr_url="https://github.com/acme/repo/pull/1",
+            llm_preset="claude-cli",
+            agent=None,
+        )
+        with mock.patch.object(
+            cure_commands,
+            "load_chunkhound_runtime_config",
+            return_value=(
+                rf.ReviewflowChunkHoundConfig(base_config_path=ROOT / ".tmp_missing_base.json"),
+                {"chunkhound": {"base_config_path": str(ROOT / ".tmp_missing_base.json")}},
+                {},
+            ),
+        ), mock.patch.object(
+            cure_commands,
+            "resolve_local_agent_selection",
+            return_value={
+                "installed_agents": ["codex", "claude"],
+                "saved_preference": None,
+                "effective_agent": None,
+                "status": "ambiguous",
+                "detail": "multiple supported local agents are installed and no saved choice exists",
+                "blocking": True,
+            },
+        ), mock.patch.object(
+            cure_commands,
+            "discover_repo_local_chunkhound_config",
+            return_value={"candidate_state": "absent"},
+        ), mock.patch.object(
+            shutil,
+            "which",
+            return_value="/usr/bin/chunkhound",
+        ):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                cure_commands.ensure_chunkhound_bootstrap_ready(
+                    args,
+                    runtime=runtime,
+                    stdin=StringIO(),
+                    stderr=StringIO(),
+                )
+        detail = str(ctx.exception)
+        self.assertIn("Local agent selection: installed=[codex, claude] saved=<none> effective=<none> status=ambiguous", detail)
+        self.assertIn("multiple supported local agents are installed and no saved choice exists", detail)
+        self.assertIn("cure doctor --pr-url https://github.com/acme/repo/pull/1 --llm-preset claude-cli --json", detail)
 
     def test_doctor_flow_json_reports_detected_provider_source(self) -> None:
         root = ROOT / ".tmp_test_doctor_json_detected_provider"

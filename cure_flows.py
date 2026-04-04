@@ -1730,12 +1730,6 @@ def _cache_prime_locked(
     if not build_reason:
         build_reason = detected_reason
 
-    if rebuild_database and db_path.exists():
-        if db_path.is_dir():
-            shutil.rmtree(db_path, ignore_errors=True)
-        else:
-            db_path.unlink(missing_ok=True)
-
     env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
     embedding_missing = not _has_embedding_config(
         resolved_config=resolved_chunkhound_cfg,
@@ -1765,6 +1759,11 @@ def _cache_prime_locked(
         try:
             index_reporter.mark_running()
             if embedding_missing and _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr):
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
                 index_result = _run_chunkhound_embedding_setup(
                     index_cmd=index_cmd,
                     cwd=base_root,
@@ -1775,6 +1774,11 @@ def _cache_prime_locked(
             elif embedding_missing:
                 raise _missing_embedding_config_error(base_config_path=chunkhound_cfg.base_config_path)
             elif out is not None:
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
                 index_result = out.run_logged_cmd(
                     index_cmd,
                     kind="chunkhound",
@@ -1785,6 +1789,11 @@ def _cache_prime_locked(
                     stream_text_callback=index_reporter.consume_text,
                 )
             else:
+                if rebuild_database and db_path.exists():
+                    if db_path.is_dir():
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    else:
+                        db_path.unlink(missing_ok=True)
                 index_result = _run_cmd(
                     index_cmd,
                     cwd=base_root,

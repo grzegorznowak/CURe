@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 import tomllib
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Mapping, TextIO
 
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_errors import ReviewflowError
@@ -716,8 +716,73 @@ def _agent_guidance_lines(*, command_name: str) -> list[str]:
         "Supported local coding agents are `codex` and `claude`, detected from executables on PATH.",
         f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` or `{PRIMARY_CLI_COMMAND} setup --agent claude` to persist a choice.",
         f"Use `{PRIMARY_CLI_COMMAND} set-agent codex|claude` to change the saved choice later.",
-        f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --json` before retrying `{PRIMARY_CLI_COMMAND} {command_name}`.",
     ]
+
+
+def _format_agent_selection_summary(selection: Mapping[str, object]) -> str:
+    installed_agents = selection.get("installed_agents")
+    installed_text = ", ".join(str(item) for item in installed_agents) if isinstance(installed_agents, list) else ""
+    return (
+        "Local agent selection: "
+        f"installed=[{installed_text or '<none>'}] "
+        f"saved={selection.get('saved_preference') or '<none>'} "
+        f"effective={selection.get('effective_agent') or '<none>'} "
+        f"status={selection.get('status') or '<unknown>'}"
+    )
+
+
+def _doctor_ready_command(*, command_name: str, args: argparse.Namespace) -> str:
+    parts = [PRIMARY_CLI_COMMAND, "doctor"]
+    pr_url = str(getattr(args, "pr_url", "") or "").strip()
+    if pr_url:
+        parts.extend(["--pr-url", pr_url])
+    llm_preset = str(getattr(args, "llm_preset", "") or "").strip()
+    if llm_preset:
+        parts.extend(["--llm-preset", llm_preset])
+    parts.append("--json")
+    _ = command_name
+    return " ".join(parts)
+
+
+def _build_install_args(
+    *,
+    runtime: ReviewflowRuntime,
+    base_args: argparse.Namespace | None,
+    chunkhound_source: str,
+    agent: str | None,
+) -> argparse.Namespace:
+    namespace = argparse.Namespace(
+        chunkhound_source=chunkhound_source,
+        agent=agent,
+        config_path=(str(runtime.config_path) if runtime.config_source == "cli" else None),
+        no_config=(not runtime.config_enabled),
+        sandbox_root=(
+            str(runtime.paths.sandbox_root) if runtime.sandbox_root_source == "cli" else None
+        ),
+        cache_root=(
+            str(runtime.paths.cache_root) if runtime.cache_root_source == "cli" else None
+        ),
+        codex_config_path=(
+            str(runtime.codex_base_config_path)
+            if runtime.codex_base_config_source == "cli"
+            else None
+        ),
+    )
+    if base_args is not None:
+        for name in (
+            "llm_preset",
+            "llm_model",
+            "llm_effort",
+            "llm_plan_effort",
+            "llm_verbosity",
+            "llm_max_output_tokens",
+            "llm_set",
+            "llm_header",
+            "agent_runtime_profile",
+        ):
+            if hasattr(base_args, name):
+                setattr(namespace, name, getattr(base_args, name))
+    return namespace
 
 
 def _prompt_for_agent_choice(
@@ -828,6 +893,7 @@ def run_chunkhound_setup_wizard(
     *,
     runtime: ReviewflowRuntime,
     cli_agent: str | None = None,
+    install_args: argparse.Namespace | None = None,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -961,7 +1027,14 @@ def run_chunkhound_setup_wizard(
             )
         if run_install:
             assert install_source is not None
-            _reviewflow().install_flow(argparse.Namespace(chunkhound_source=install_source))
+            _reviewflow().install_flow(
+                _build_install_args(
+                    runtime=runtime,
+                    base_args=install_args,
+                    chunkhound_source=install_source,
+                    agent=selected_agent,
+                )
+            )
             if shutil.which("chunkhound") is None:
                 raise ReviewflowError(
                     "ChunkHound installation completed but `chunkhound` is still not available on PATH. "
@@ -997,6 +1070,7 @@ def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRunti
         cli_preset=getattr(args, "llm_preset", None),
         env=os.environ,
     )
+    lines.append(_format_agent_selection_summary(agent_selection))
     if bool(agent_selection.get("blocking")):
         lines.append(str(agent_selection.get("detail") or "local coding agent readiness is blocked"))
 
@@ -1012,11 +1086,7 @@ def _bootstrap_gate_problem_lines(*, command_name: str, runtime: ReviewflowRunti
 
     lines.append(f"Run `{PRIMARY_CLI_COMMAND} setup` in a TTY to configure CURe bootstrap.")
     lines.extend(_agent_guidance_lines(command_name=command_name))
-    pr_url = str(getattr(args, "pr_url", "") or "").strip()
-    if pr_url:
-        lines.append(f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --pr-url {pr_url} --json`.")
-    else:
-        lines.append(f"Inspect readiness with `{PRIMARY_CLI_COMMAND} doctor --json`.")
+    lines.append(f"Inspect readiness with `{_doctor_ready_command(command_name=command_name, args=args)}`.")
     return lines
 
 
@@ -1073,6 +1143,7 @@ def ensure_chunkhound_bootstrap_ready(
         return run_chunkhound_setup_wizard(
             runtime=runtime,
             cli_agent=getattr(args, "agent", None),
+            install_args=args,
             stdin=in_stream,
             stdout=stdout,
             stderr=err_stream,
@@ -1093,6 +1164,7 @@ def init_flow(
         run_chunkhound_setup_wizard(
             runtime=runtime,
             cli_agent=getattr(args, "agent", None),
+            install_args=args,
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -1100,13 +1172,13 @@ def init_flow(
         return 0
 
     out_stream = stdout or sys.stdout
-    _ensure_bootstrap_files(runtime=runtime, force=bool(getattr(args, "force", False)), stdout=out_stream)
     agent_choice = _resolve_bootstrap_agent_choice(
         runtime=runtime,
         cli_agent=getattr(args, "agent", None),
         command_name=str(getattr(args, "cmd", "") or "setup"),
         interactive=False,
     )
+    _ensure_bootstrap_files(runtime=runtime, force=bool(getattr(args, "force", False)), stdout=out_stream)
     selected_agent = str(agent_choice.get("agent") or "").strip() or None
     if selected_agent:
         preset = LOCAL_AGENT_PRESET_BY_NAME[selected_agent]
@@ -1135,7 +1207,6 @@ def set_agent_flow(
     stdout: TextIO | None = None,
 ) -> int:
     out_stream = stdout or sys.stdout
-    _ensure_bootstrap_files(runtime=runtime, stdout=out_stream)
     selected_agent = str(getattr(args, "agent", "") or "").strip().lower()
     choice = _resolve_bootstrap_agent_choice(
         runtime=runtime,
@@ -1143,6 +1214,7 @@ def set_agent_flow(
         command_name="set-agent",
         interactive=False,
     )
+    _ensure_bootstrap_files(runtime=runtime, stdout=out_stream)
     resolved_agent = str(choice.get("agent") or "").strip()
     preset = LOCAL_AGENT_PRESET_BY_NAME[resolved_agent]
     changed = _upsert_llm_default_preset(config_path=runtime.config_path, default_preset=preset)
