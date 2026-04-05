@@ -962,7 +962,21 @@ def validate_chunkhound_tool_proof(
             if not isinstance(payload, dict):
                 continue
             item_id = _first_nonempty_string(entry.get("item_id")) or f"claude-tool-use-{idx}"
+            command = _first_nonempty_string(entry.get("command"))
             payload_helper_path = str(payload.get("helper_path") or "").strip()
+            if not _command_uses_staged_chunkhound_helper(command=command, helper_path=helper_path):
+                declared_tool = _chunkhound_helper_declared_tool_name(payload)
+                failure_detail = _chunkhound_helper_detail_for_report(
+                    payload=payload,
+                    item_id=item_id,
+                    command_excerpt=command_excerpt,
+                    detail_override="Claude Bash command did not invoke staged helper",
+                )
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                if declared_tool:
+                    latest_failed_helper_calls[declared_tool] = failure_detail
+                continue
             if payload_helper_path != helper_path:
                 declared_tool = _chunkhound_helper_declared_tool_name(payload)
                 failure_detail = _chunkhound_helper_detail_for_report(

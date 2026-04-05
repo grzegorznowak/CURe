@@ -6314,6 +6314,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         *,
         payloads: list[dict[str, object]],
         helper_path: str = "/tmp/cure/work/bin/cure-chunkhound",
+        command: str | None = None,
     ) -> dict[str, object]:
         entries = []
         for payload in payloads:
@@ -6321,6 +6322,8 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 {
                     "payload": payload,
                     "stdout_excerpt": json.dumps(payload, sort_keys=True),
+                    "command": command
+                    or '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle"\'',
                 }
             )
         return {
@@ -7175,6 +7178,95 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 f"claude tool_use_result via {helper_path}",
             ],
         )
+
+    def test_validate_chunkhound_tool_proof_rejects_forged_claude_stdout_without_helper_command(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                command='/bin/bash -lc \'printf "{\\"ok\\": true}"\'',
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("search", str(report["failure_reason"]))
+        self.assertTrue(
+            any("did not invoke staged helper" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
+        )
+
+    def test_validate_chunkhound_tool_proof_accepts_batched_claude_helper_entries(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_helper_path": helper_path,
+                "chunkhound_tool_proof_entries": [
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "stdout_excerpt": "batched helper stdout",
+                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
+                    },
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "stdout_excerpt": "batched helper stdout",
+                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
 
     def test_validate_chunkhound_tool_proof_claude_missing_helper_path_fails_closed(self) -> None:
         report = rf.validate_chunkhound_tool_proof(

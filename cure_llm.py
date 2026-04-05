@@ -396,37 +396,59 @@ def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
     return f"Using {name}"
 
 
-def _parse_chunkhound_helper_output_text(payload_text: object) -> dict[str, Any] | None:
+def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str, Any]]:
     text = str(payload_text or "").strip()
     if not text:
-        return None
-    candidates = [text]
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if 0 <= first_brace < last_brace:
-        candidates.append(text[first_brace : last_brace + 1])
-    for candidate in candidates:
+        return []
+    payloads: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        candidate = str(raw_line or "").strip()
+        if not candidate or not candidate.startswith("{"):
+            continue
         try:
             payload = json.loads(candidate)
         except Exception:
             continue
         if isinstance(payload, dict):
-            return payload
+            payloads.append(payload)
+    if payloads:
+        return payloads
+    for candidate in (text,):
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return [payload]
+    return []
+
+
+def _latest_claude_bash_command(state: dict[str, Any]) -> str | None:
+    raw_queue = state.get("bash_tool_commands")
+    queue = raw_queue if isinstance(raw_queue, list) else []
+    while queue:
+        candidate = queue.pop(0)
+        if isinstance(candidate, str) and candidate.strip():
+            state["bash_tool_commands"] = queue
+            return candidate.strip()
+    state["bash_tool_commands"] = queue
     return None
 
 
 def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: object) -> None:
-    payload = _parse_chunkhound_helper_output_text(stdout_text)
-    if payload is None:
+    payloads = _parse_chunkhound_helper_output_texts(stdout_text)
+    if not payloads:
         return
     entries = state.setdefault("chunkhound_tool_proof_entries", [])
     if not isinstance(entries, list):
         entries = []
         state["chunkhound_tool_proof_entries"] = entries
+    command = _latest_claude_bash_command(state)
     stdout_excerpt = str(stdout_text or "").strip()
     if len(stdout_excerpt) > 240:
         stdout_excerpt = stdout_excerpt[:240].rstrip() + "..."
-    entries.append({"payload": payload, "stdout_excerpt": stdout_excerpt})
+    for payload in payloads:
+        entries.append({"payload": payload, "stdout_excerpt": stdout_excerpt, "command": command})
 
 
 def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: str) -> None:
@@ -483,9 +505,9 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 )
             elif block_type == "tool_use":
                 tool_name = str(content_block.get("name") or "Tool").strip() or "Tool"
-                if block_key:
-                    state[f"{block_key}_name"] = tool_name
-                    state[f"{block_key}_input"] = ""
+            if block_key:
+                state[f"{block_key}_name"] = tool_name
+                state[f"{block_key}_input"] = ""
                 _set_text_cli_live_current(
                     progress=progress,
                     provider="claude",
@@ -531,6 +553,25 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
             if block_key:
                 state[f"{block_key}_input"] = str(state.get(f"{block_key}_input") or "") + partial_json
                 tool_name = str(state.get(f"{block_key}_name") or "Tool")
+                if tool_name == "Bash":
+                    bash_commands = state.setdefault("bash_tool_commands", [])
+                    if not isinstance(bash_commands, list):
+                        bash_commands = []
+                        state["bash_tool_commands"] = bash_commands
+                    try:
+                        parsed_input = json.loads(str(state.get(f"{block_key}_input") or ""))
+                    except Exception:
+                        parsed_input = None
+                    if isinstance(parsed_input, dict):
+                        command_text = str(parsed_input.get("command") or "").strip()
+                        if command_text:
+                            if bash_commands and bash_commands[-1] == str(state.get(f"{block_key}_command") or "").strip():
+                                bash_commands[-1] = command_text
+                            elif str(state.get(f"{block_key}_command") or "").strip():
+                                bash_commands.append(command_text)
+                            else:
+                                bash_commands.append(command_text)
+                            state[f"{block_key}_command"] = command_text
                 current = _format_claude_tool_progress(
                     tool_name=tool_name,
                     input_payload=str(state.get(f"{block_key}_input") or ""),
