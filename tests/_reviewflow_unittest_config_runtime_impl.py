@@ -1769,8 +1769,15 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertEqual(runtime["env"]["CLAUDE_HOME"], "/tmp/claude-home")
             self.assertNotIn("CODEX_THREAD_ID", runtime["env"])
             self.assertIn("CLAUDE_CODE_SESSION", runtime["metadata"]["env_keys"])
+            helper_path = Path(str(runtime["staged_paths"]["chunkhound_helper"]))
+            self.assertTrue(helper_path.is_file())
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+            self.assertEqual(runtime["env"]["PYTHONSAFEPATH"], "1")
+            self.assertEqual(runtime["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
             self.assertTrue(Path(runtime["staged_paths"]["claude_settings"]).is_file())
-            self.assertTrue(Path(runtime["staged_paths"]["claude_mcp_config"]).is_file())
+            self.assertNotIn("claude_mcp_config", runtime["staged_paths"])
+            settings_payload = json.loads(Path(runtime["staged_paths"]["claude_settings"]).read_text(encoding="utf-8"))
+            self.assertEqual(settings_payload["permissions"]["allow"], ["Bash"])
             cmd = rf.build_claude_exec_cmd(
                 command="claude",
                 model="claude-sonnet-4-6",
@@ -1784,7 +1791,8 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertIn("--setting-sources", cmd)
             self.assertIn("user", cmd)
             self.assertIn("--settings", cmd)
-            self.assertIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--mcp-config", cmd)
             self.assertIn("--dangerously-skip-permissions", cmd)
             self.assertNotIn("--permission-mode", cmd)
             self.assertIn("--add-dir", cmd)
@@ -1903,6 +1911,9 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             self.meta: dict[str, object] = {}
 
         def flush(self) -> None:
+            return None
+
+        def record_cmd(self, _cmd: object) -> None:
             return None
 
     def test_record_text_cli_live_output_updates_claude_progress(self) -> None:
@@ -2133,3 +2144,141 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         timeline_texts = [item["text"] for item in live["timeline"]]
         self.assertIn("Using Bash", timeline_texts)
         self.assertNotIn("Tool result: {\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}", timeline_texts)
+
+    def test_handle_claude_stream_chunk_extracts_chunkhound_helper_proof_entries(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=json.dumps(
+                {
+                    "type": "user",
+                    "tool_use_result": {
+                        "stdout": "\n".join(
+                            [
+                                "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                                json.dumps(
+                                    {
+                                        "ok": True,
+                                        "command": "search",
+                                        "tool_name": "search",
+                                        "query": "needle",
+                                        "helper_path": helper_path,
+                                        "result": {
+                                            "results": [],
+                                            "pagination": {"offset": 0, "total_results": 0},
+                                        },
+                                        "execution_stage": "tools/call",
+                                        "execution_stage_status": "ok",
+                                    }
+                                ),
+                            ]
+                        )
+                        + "\n",
+                        "stderr": "",
+                    },
+                }
+            ),
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["payload"]["helper_path"], helper_path)
+        self.assertIn("cure-chunkhound: tools/call waiting", entries[0]["stdout_excerpt"])
+        self.assertNotIn("chunkhound_helper_path", state)
+
+    def test_build_claude_resume_command_includes_chunkhound_helper_env(self) -> None:
+        command = cure_llm.build_claude_resume_command(
+            repo_dir=Path("/tmp/repo"),
+            session_id="claude-session-123",
+            env={
+                "ANTHROPIC_API_KEY": "test-key",
+                "CURE_CHUNKHOUND_HELPER": "/tmp/work/bin/cure-chunkhound",
+                "PYTHONSAFEPATH": "1",
+            },
+            command="claude",
+            runtime_policy={"provider_args": ["--settings", "/tmp/settings.json"]},
+        )
+
+        self.assertIn("CURE_CHUNKHOUND_HELPER=", command)
+        self.assertIn("PYTHONSAFEPATH=", command)
+        self.assertIn("--resume claude-session-123", command)
+
+    def test_run_claude_exec_records_staged_helper_path_not_streamed_helper_path(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_output.md"
+        try:
+            streamed_helper_path = "/tmp/other/cure-chunkhound"
+            staged_helper_path = "/tmp/work/bin/cure-chunkhound"
+
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "tool_use_result": {
+                                "stdout": json.dumps(
+                                    {
+                                        "ok": True,
+                                        "command": "search",
+                                        "tool_name": "search",
+                                        "helper_path": streamed_helper_path,
+                                        "result": {
+                                            "results": [],
+                                            "pagination": {"offset": 0, "total_results": 0},
+                                        },
+                                    }
+                                ),
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "# Review",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"CURE_CHUNKHOUND_HELPER": staged_helper_path, "PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                        "staged_paths": {"chunkhound_helper": staged_helper_path},
+                    },
+                )
+
+            self.assertEqual(result.adapter_meta["chunkhound_helper_path"], staged_helper_path)
+            entries = result.adapter_meta["chunkhound_tool_proof_entries"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["payload"]["helper_path"], streamed_helper_path)
+        finally:
+            output_path.unlink(missing_ok=True)

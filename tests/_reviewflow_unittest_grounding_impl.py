@@ -6309,6 +6309,26 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             )
         return self._write_event_payloads(root=root, payloads=payloads)
 
+    def _claude_helper_adapter_meta(
+        self,
+        *,
+        payloads: list[dict[str, object]],
+        helper_path: str = "/tmp/cure/work/bin/cure-chunkhound",
+    ) -> dict[str, object]:
+        entries = []
+        for payload in payloads:
+            entries.append(
+                {
+                    "payload": payload,
+                    "stdout_excerpt": json.dumps(payload, sort_keys=True),
+                }
+            )
+        return {
+            "provider": "claude",
+            "chunkhound_helper_path": helper_path,
+            "chunkhound_tool_proof_entries": entries,
+        }
+
     def test_validate_and_record_chunkhound_tool_proof_persists_report_and_meta(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_tool_proof_validation"
         try:
@@ -6318,7 +6338,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6356,7 +6376,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            first = rf.validate_and_record_codex_chunkhound_tool_proof(
+            first = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6367,7 +6387,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                     tool_names=["list_mcp_resources"],
                 ),
             )
-            second = rf.validate_and_record_codex_chunkhound_tool_proof(
+            second = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6404,7 +6424,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6448,7 +6468,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6483,7 +6503,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6494,7 +6514,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                     commands=["search", "research"],
                 ),
             )
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6530,7 +6550,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6557,7 +6577,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -6584,7 +6604,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6618,7 +6638,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6667,7 +6687,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6718,7 +6738,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 "execution_stage": "tools/call",
                 "execution_stage_status": "ok",
             }
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6759,7 +6779,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6785,7 +6805,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6832,7 +6852,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6873,7 +6893,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6918,7 +6938,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6964,7 +6984,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -7018,7 +7038,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7042,7 +7062,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -7066,7 +7086,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7090,7 +7110,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7106,6 +7126,207 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertFalse(report["valid"])
             self.assertEqual(report["observed_successful_calls"], [])
             self.assertEqual(report["observed_evidence_sources"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_accepts_claude_helper_entries(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["provider"], "claude")
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+        self.assertEqual(
+            [detail["command_excerpt"] for detail in report["observed_successful_call_details"]],
+            [
+                f"claude tool_use_result via {helper_path}",
+                f"claude tool_use_result via {helper_path}",
+            ],
+        )
+
+    def test_validate_chunkhound_tool_proof_claude_missing_helper_path_fails_closed(self) -> None:
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_tool_proof_entries": [
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        },
+                        "stdout_excerpt": "helper payload",
+                    },
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
+                            "result": {"summary": "grounded answer"},
+                        },
+                        "stdout_excerpt": "helper payload",
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("missing staged helper path", str(report["failure_reason"]))
+
+    def test_validate_chunkhound_tool_proof_rejected_claude_entries_remain_visible_when_valid(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": "/tmp/other/cure-chunkhound",
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        self.assertTrue(
+            any(detail["tool_name"] == "search" for detail in report["observed_failed_call_details"])
+        )
+        self.assertTrue(
+            any("path mismatch" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
+        )
+
+    def test_validate_and_record_chunkhound_tool_proof_mixed_provider_report_uses_latest_provider(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_tool_proof_mixed_provider_report"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            first = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_codex_events(root=root, tool_names=["search", "code_research"]),
+            )
+            second = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="claude",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._claude_helper_adapter_meta(
+                    helper_path=helper_path,
+                    payloads=[
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                    ],
+                ),
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertEqual(persisted["schema_version"], 2)
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertEqual([run["provider"] for run in persisted["runs"]], ["codex", "claude"])
+            self.assertEqual(meta["chunkhound"]["tool_validation"]["provider"], "claude")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8798,7 +9019,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     "grounding_mode": "strict",
                 },
             }
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",

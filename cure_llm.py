@@ -396,7 +396,40 @@ def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
     return f"Using {name}"
 
 
-def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, str], chunk: str) -> None:
+def _parse_chunkhound_helper_output_text(payload_text: object) -> dict[str, Any] | None:
+    text = str(payload_text or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if 0 <= first_brace < last_brace:
+        candidates.append(text[first_brace : last_brace + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: object) -> None:
+    payload = _parse_chunkhound_helper_output_text(stdout_text)
+    if payload is None:
+        return
+    entries = state.setdefault("chunkhound_tool_proof_entries", [])
+    if not isinstance(entries, list):
+        entries = []
+        state["chunkhound_tool_proof_entries"] = entries
+    stdout_excerpt = str(stdout_text or "").strip()
+    if len(stdout_excerpt) > 240:
+        stdout_excerpt = stdout_excerpt[:240].rstrip() + "..."
+    entries.append({"payload": payload, "stdout_excerpt": stdout_excerpt})
+
+
+def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: str) -> None:
     for raw_line in str(chunk or "").splitlines():
         raw = str(raw_line or "").strip()
         if not raw:
@@ -411,6 +444,11 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, str], chunk: 
         payload_type = str(payload.get("type") or "").strip()
         if payload_type == "user":
             tool_result = payload.get("tool_use_result")
+            if isinstance(tool_result, dict):
+                _append_claude_chunkhound_tool_proof(
+                    state=state,
+                    stdout_text=tool_result.get("stdout"),
+                )
             summary = _summarize_claude_tool_result(tool_result if isinstance(tool_result, dict) else None)
             if summary:
                 _set_text_cli_live_current(
@@ -1095,7 +1133,15 @@ def build_claude_resume_command(
 ) -> str:
     env_prefix = _build_env_prefix_assignments(
         env,
-        ("ANTHROPIC_API_KEY", "GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR"),
+        (
+            "ANTHROPIC_API_KEY",
+            "GH_CONFIG_DIR",
+            "JIRA_CONFIG_FILE",
+            "NETRC",
+            "CURE_WORK_DIR",
+            "CURE_CHUNKHOUND_HELPER",
+            "PYTHONSAFEPATH",
+        ),
     )
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     resume_cmd = [command]
@@ -1128,7 +1174,14 @@ def run_claude_exec(
     )
     progress.record_cmd(cmd)
     _ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
-    stream_state: dict[str, str] = {"content": ""}
+    stream_state: dict[str, Any] = {"content": ""}
+    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+    staged_paths = policy.get("staged_paths") if isinstance(policy.get("staged_paths"), dict) else {}
+    staged_helper_path = str(
+        staged_paths.get("chunkhound_helper")
+        or env.get(_CURE_CHUNKHOUND_HELPER_ENV)
+        or ""
+    ).strip()
     try:
         result = _run_logged_text_command(
             cmd=cmd,
@@ -1174,6 +1227,8 @@ def run_claude_exec(
             "model": str(payload.get("model") or "").strip() or None,
             "command": safe_cmd_for_meta(cmd),
             "usage": usage,
+            "chunkhound_tool_proof_entries": list(stream_state.get("chunkhound_tool_proof_entries") or []),
+            "chunkhound_helper_path": staged_helper_path or None,
         },
     )
 
@@ -1403,6 +1458,7 @@ CHUNKHOUND_DB = Path({json.dumps(str(helper_db))})
 HELPER_PATH = Path(__file__).resolve()
 CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
 _STDERR_TAIL_MAX = 16000
+_HEARTBEAT_INTERVAL_SECONDS = 10.0
 _PREFLIGHT_STAGE_TIMEOUTS = {{
     "spawn": 3.0,
     "initialize": 10.0,
@@ -1759,13 +1815,31 @@ class JsonRpcSession:
             )
         return remaining
 
-    def _read_message(self, *, stage: str, timeout_seconds: float, deadline: float) -> dict[str, Any]:
+    def _read_message(
+        self,
+        *,
+        stage: str,
+        timeout_seconds: float,
+        deadline: float,
+        heartbeat_enabled: bool = False,
+    ) -> dict[str, Any]:
+        last_heartbeat_at = time.monotonic()
         while True:
             message = self._try_extract_message()
             if message is not None:
                 return message
             if not self._stdout_open:
                 raise self._stage_error(stage, self._closed_stream_detail(stage))
+            if heartbeat_enabled:
+                now = time.monotonic()
+                if now - last_heartbeat_at >= _HEARTBEAT_INTERVAL_SECONDS:
+                    elapsed = max(0.0, float(timeout_seconds) - max(0.0, float(deadline) - now))
+                    try:
+                        sys.stdout.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
+                    last_heartbeat_at = now
             remaining = self._remaining_timeout(
                 stage=stage,
                 timeout_seconds=timeout_seconds,
@@ -1809,6 +1883,7 @@ class JsonRpcSession:
         *,
         stage: str,
         timeout_seconds: float,
+        heartbeat_enabled: bool = False,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         self.ensure_started(stage=stage, timeout_seconds=timeout_seconds, deadline=deadline)
@@ -1823,6 +1898,7 @@ class JsonRpcSession:
                 stage=stage,
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
+                heartbeat_enabled=heartbeat_enabled,
             )
             if message.get("id") == request_id:
                 return message
@@ -2329,6 +2405,7 @@ def _run_tool_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str
                 {{"name": tool_name, "arguments": payload}},
                 stage="tools/call",
                 timeout_seconds=tool_timeout_seconds,
+                heartbeat_enabled=True,
             )
             result = _extract_result_content(response)
         except PreflightStageError as exc:
@@ -2647,16 +2724,22 @@ def prepare_review_agent_runtime(
         )
     elif provider == "claude":
         claude_dir = work_dir / "claude"
+        if enable_mcp:
+            env["PYTHONSAFEPATH"] = "1"
+            chunkhound_helper = write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=chunkhound_config_path,
+                chunkhound_db_path=chunkhound_db_path,
+                chunkhound_cwd=chunkhound_cwd,
+            )
+            env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
+            runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
         settings_path = _write_json_file(
             claude_dir / "settings.json",
             {
                 "permissions": {
-                    "allow": [
-                        "Bash",
-                        "mcp__cure-chunkhound__search",
-                        "mcp__cure-chunkhound__research",
-                        "mcp__cure-chunkhound__code_research",
-                    ]
+                    "allow": ["Bash"]
                 }
             },
         )
@@ -2664,22 +2747,6 @@ def prepare_review_agent_runtime(
         provider_args: list[str] = ["--setting-sources", "user", "--settings", str(settings_path)]
         for add_dir in add_dirs:
             provider_args.extend(["--add-dir", str(add_dir)])
-        if enable_mcp:
-            mcp_path = _write_json_file(
-                claude_dir / "mcp.json",
-                {
-                    "mcpServers": {
-                        "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
-                            sandbox_repo_dir=repo_dir,
-                            chunkhound_config_path=chunkhound_config_path,
-                            chunkhound_db_path=chunkhound_db_path,
-                            chunkhound_cwd=chunkhound_cwd,
-                        )
-                    }
-                },
-            )
-            runtime["staged_paths"]["claude_mcp_config"] = str(mcp_path)
-            provider_args.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
         if profile == "permissive":
             runtime["dangerously_skip_permissions"] = True
         else:
@@ -2702,7 +2769,7 @@ def prepare_review_agent_runtime(
         "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
         "chunkhound_access_mode": (
             _CURE_CHUNKHOUND_ACCESS_MODE
-            if provider == "codex" and bool(runtime["staged_paths"].get("chunkhound_helper"))
+            if provider in {"codex", "claude"} and bool(runtime["staged_paths"].get("chunkhound_helper"))
             else None
         ),
         "env_keys": sorted(env.keys()),

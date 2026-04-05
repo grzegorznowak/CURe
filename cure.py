@@ -2327,6 +2327,8 @@ def build_claude_resume_command(
             "JIRA_CONFIG_FILE",
             "NETRC",
             "CURE_WORK_DIR",
+            "CURE_CHUNKHOUND_HELPER",
+            "PYTHONSAFEPATH",
         ),
     )
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
@@ -5796,7 +5798,7 @@ def _finalize_multipass_step_result(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=provider,
@@ -7751,14 +7753,16 @@ def _run_chunkhound_access_preflight(
     progress: SessionProgress | None = None,
 ) -> dict[str, Any] | None:
     metadata = runtime_policy.get("metadata") if isinstance(runtime_policy, dict) else {}
-    if str((metadata or {}).get("provider") or "").strip() != "codex":
+    provider = str((metadata or {}).get("provider") or "").strip()
+    access_mode = str((metadata or {}).get("chunkhound_access_mode") or "").strip()
+    if access_mode != "cli_helper_daemon":
         return None
     helper_raw = _chunkhound_helper_path(runtime_policy)
     if not helper_raw:
-        if str((metadata or {}).get("chunkhound_access_mode") or "").strip():
+        if access_mode:
             raise ReviewflowError(
                 "ChunkHound helper preflight failed before review generation: "
-                "CURe did not stage a ChunkHound helper for this Codex run."
+                f"CURe did not stage a ChunkHound helper for this {provider or 'review'} run."
             )
         return None
 
@@ -7908,7 +7912,7 @@ def _run_review_intelligence_preflight(
         )
 
 
-def _enforce_codex_chunkhound_tool_proof(
+def _enforce_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
     work_dir: Path,
@@ -7922,7 +7926,7 @@ def _enforce_codex_chunkhound_tool_proof(
         return None
     if chunkhound_prompt_contract_for_template(template_name) is None:
         return None
-    report = validate_and_record_codex_chunkhound_tool_proof(
+    report = validate_and_record_chunkhound_tool_proof(
         meta=meta,
         work_dir=work_dir,
         provider=provider,
@@ -8761,7 +8765,7 @@ def _pr_flow_impl(
                         plan_run_entry["llm_provider"] = plan_result.resume.provider
                     plan_run_entry["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
                     progress.flush()
-                    plan_tool_report = _enforce_codex_chunkhound_tool_proof(
+                    plan_tool_report = _enforce_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
                         provider=str(llm_resolved.get("provider") or ""),
@@ -8979,7 +8983,7 @@ def _pr_flow_impl(
                                 else None
                             )
                             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                        _enforce_codex_chunkhound_tool_proof(
+                        _enforce_chunkhound_tool_proof(
                             meta=progress.meta,
                             work_dir=work_dir,
                             provider=str(llm_resolved.get("provider") or ""),
@@ -9113,7 +9117,7 @@ def _pr_flow_impl(
                             else None
                         )
                         record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                    _enforce_codex_chunkhound_tool_proof(
+                    _enforce_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
                         provider=str(llm_resolved.get("provider") or ""),
@@ -9298,7 +9302,7 @@ def _run_incremental_completed_multipass_resume(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=str(plan_llm["resolved"].get("provider") or ""),
@@ -9534,7 +9538,7 @@ def _run_incremental_completed_multipass_resume(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=str(synth_llm["resolved"].get("provider") or ""),
@@ -10154,7 +10158,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                plan_tool_report = _enforce_codex_chunkhound_tool_proof(
+                plan_tool_report = _enforce_chunkhound_tool_proof(
                     meta=progress.meta,
                     work_dir=work_dir,
                     provider=str(llm_resolved.get("provider") or ""),
@@ -10430,7 +10434,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                _enforce_codex_chunkhound_tool_proof(
+                _enforce_chunkhound_tool_proof(
                     meta=progress.meta,
                     work_dir=work_dir,
                     provider=str(llm_resolved.get("provider") or ""),
@@ -10839,7 +10843,7 @@ def _followup_flow_impl(
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
         try:
-            _enforce_codex_chunkhound_tool_proof(
+            _enforce_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider=str(llm_resolved.get("provider") or ""),
@@ -13941,8 +13945,8 @@ from cure_flows import (
     restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
     validate_operator_chunkhound_seed_source,
-    validate_and_record_codex_chunkhound_tool_proof,
-    validate_codex_chunkhound_tool_proof,
+    validate_and_record_chunkhound_tool_proof,
+    validate_chunkhound_tool_proof,
 )
 from cure_llm import (
     CodexResumeInfo,
