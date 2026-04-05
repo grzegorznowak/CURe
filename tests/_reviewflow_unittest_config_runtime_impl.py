@@ -2197,7 +2197,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             repo_dir=Path("/tmp/repo"),
             session_id="claude-session-123",
             env={
-                "ANTHROPIC_API_KEY": "test-key",
+                "ANTHROPIC_API_KEY": "test-key",  # pragma: allowlist secret
                 "CURE_CHUNKHOUND_HELPER": "/tmp/work/bin/cure-chunkhound",
                 "PYTHONSAFEPATH": "1",
             },
