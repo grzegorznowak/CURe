@@ -6318,12 +6318,17 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
     ) -> dict[str, object]:
         entries = []
         for payload in payloads:
+            payload_command = str((payload if isinstance(payload, dict) else {}).get("command") or "").strip().lower()
+            default_command = (
+                '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle"\''
+                if payload_command == "search"
+                else '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" research "cross-file question"\''
+            )
             entries.append(
                 {
                     "payload": payload,
                     "stdout_excerpt": json.dumps(payload, sort_keys=True),
-                    "command": command
-                    or '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle"\'',
+                    "command": command or default_command,
                 }
             )
         return {
@@ -7187,7 +7192,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             prompt_template_name="mrereview_gh_local.md",
             adapter_meta=self._claude_helper_adapter_meta(
                 helper_path=helper_path,
-                command='/bin/bash -lc \'printf "{\\"ok\\": true}"\'',
+                command='/bin/bash -lc \'printf "$CURE_CHUNKHOUND_HELPER"; printf "{\\"ok\\": true}"\'',
                 payloads=[
                     {
                         "ok": True,
@@ -7218,7 +7223,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("search", str(report["failure_reason"]))
         self.assertTrue(
-            any("did not invoke staged helper" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
+            any("did not invoke staged helper for the claimed tool" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
         )
 
     def test_validate_chunkhound_tool_proof_accepts_batched_claude_helper_entries(self) -> None:

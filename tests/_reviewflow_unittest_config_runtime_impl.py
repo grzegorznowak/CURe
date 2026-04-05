@@ -2309,6 +2309,91 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual([entry["payload"]["tool_name"] for entry in entries], ["search", "code_research"])
         self.assertTrue(all("CURE_CHUNKHOUND_HELPER" in entry["command"] for entry in entries))
 
+    def test_handle_claude_stream_chunk_keeps_non_tool_blocks_safe_after_bash_usage(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"echo hi\",\"description\":\"Say hi\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "thinking_delta", "thinking": "considering"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 2,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 2,
+                                "delta": {"type": "text_delta", "text": "Final review text"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Final review text")
+
     def test_build_claude_resume_command_includes_chunkhound_helper_env(self) -> None:
         command = cure_llm.build_claude_resume_command(
             repo_dir=Path("/tmp/repo"),

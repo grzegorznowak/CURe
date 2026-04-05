@@ -576,6 +576,38 @@ def _command_uses_staged_chunkhound_helper(*, command: object, helper_path: obje
     return any(pattern.search(text) is not None for pattern in helper_patterns)
 
 
+def _command_invokes_staged_chunkhound_helper_tool(
+    *,
+    command: object,
+    helper_path: object,
+    tool_name: str,
+) -> bool:
+    text = " ".join(str(command or "").split())
+    if not text:
+        return False
+    normalized_tool = _normalize_chunkhound_tool_name(tool_name)
+    if normalized_tool == "search":
+        helper_subcommand = "search"
+    elif normalized_tool == "code_research":
+        helper_subcommand = "research"
+    else:
+        return False
+
+    env_helper = r'(?:"\$\{?CURE_CHUNKHOUND_HELPER\}?"|\'\$\{?CURE_CHUNKHOUND_HELPER\}?\'|\$\{?CURE_CHUNKHOUND_HELPER\}?)'
+    patterns = [
+        re.compile(rf"(?<![\w./-]){env_helper}\s+{re.escape(helper_subcommand)}(?![\w./-])"),
+    ]
+
+    helper = str(helper_path or "").strip()
+    if helper:
+        path_token = re.escape(helper)
+        patterns.append(
+            re.compile(rf"(?<![\w./-])(?:{path_token}|\"{path_token}\"|'{path_token}')\s+{re.escape(helper_subcommand)}(?![\w./-])")
+        )
+
+    return any(pattern.search(text) is not None for pattern in patterns)
+
+
 def _chunkhound_helper_command_excerpt(command: object) -> str | None:
     text = " ".join(str(command or "").split())
     if not text:
@@ -963,14 +995,19 @@ def validate_chunkhound_tool_proof(
                 continue
             item_id = _first_nonempty_string(entry.get("item_id")) or f"claude-tool-use-{idx}"
             command = _first_nonempty_string(entry.get("command"))
+            declared_tool = _chunkhound_helper_declared_tool_name(payload)
+            expected_tool = declared_tool or _normalize_chunkhound_tool_name(payload.get("tool_name"))
             payload_helper_path = str(payload.get("helper_path") or "").strip()
-            if not _command_uses_staged_chunkhound_helper(command=command, helper_path=helper_path):
-                declared_tool = _chunkhound_helper_declared_tool_name(payload)
+            if not _command_invokes_staged_chunkhound_helper_tool(
+                command=command,
+                helper_path=helper_path,
+                tool_name=expected_tool,
+            ):
                 failure_detail = _chunkhound_helper_detail_for_report(
                     payload=payload,
                     item_id=item_id,
                     command_excerpt=command_excerpt,
-                    detail_override="Claude Bash command did not invoke staged helper",
+                    detail_override="Claude Bash command did not invoke staged helper for the claimed tool",
                 )
                 if failure_detail not in observed_failed_call_details:
                     observed_failed_call_details.append(failure_detail)
@@ -978,7 +1015,6 @@ def validate_chunkhound_tool_proof(
                     latest_failed_helper_calls[declared_tool] = failure_detail
                 continue
             if payload_helper_path != helper_path:
-                declared_tool = _chunkhound_helper_declared_tool_name(payload)
                 failure_detail = _chunkhound_helper_detail_for_report(
                     payload=payload,
                     item_id=item_id,

@@ -505,9 +505,9 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 )
             elif block_type == "tool_use":
                 tool_name = str(content_block.get("name") or "Tool").strip() or "Tool"
-            if block_key:
-                state[f"{block_key}_name"] = tool_name
-                state[f"{block_key}_input"] = ""
+                if block_key:
+                    state[f"{block_key}_name"] = tool_name
+                    state[f"{block_key}_input"] = ""
                 _set_text_cli_live_current(
                     progress=progress,
                     provider="claude",
