@@ -1985,6 +1985,50 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(payload["result"], "hello world")
         self.assertEqual(payload["usage"]["total_tokens"], 6)
 
+    def test_parse_claude_stream_payload_prefers_higher_turn_count_non_error_result(self) -> None:
+        main_review = "Main review\n" + ("detailed finding\n" * 20)
+        short_follow_up = "The ChunkHound helper research query also completed successfully."
+        error_blob = "Error summary\n" + ("stack frame\n" * 40)
+
+        payload = cure_llm._parse_claude_stream_payload(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": main_review,
+                            "num_turns": 46,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": short_follow_up,
+                            "num_turns": 1,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": error_blob,
+                            "num_turns": 99,
+                            "is_error": True,
+                        }
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(payload["session_id"], "claude-session")
+        self.assertEqual(payload["result"], main_review)
+        self.assertNotEqual(payload["result"], short_follow_up)
+        self.assertNotEqual(payload["result"], error_blob)
+        self.assertNotEqual(payload.get("is_error"), True)
+
     def test_handle_claude_stream_chunk_updates_current_text_from_deltas(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
@@ -2482,5 +2526,65 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             entries = result.adapter_meta["chunkhound_tool_proof_entries"]
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["payload"]["helper_path"], streamed_helper_path)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_uses_streamed_text_when_selected_result_is_empty(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_stream_fallback.md"
+        streamed_text = "# Review\n\nGrounded streamed review text."
+        try:
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "delta": {"type": "text_delta", "text": streamed_text},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "",
+                            "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                    },
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), streamed_text + "\n")
+            self.assertIsNotNone(result.resume)
+            self.assertEqual(result.resume.session_id, "claude-session")
+            self.assertEqual(result.adapter_meta["usage"]["total_tokens"], 8)
         finally:
             output_path.unlink(missing_ok=True)

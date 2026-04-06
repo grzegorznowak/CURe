@@ -331,7 +331,7 @@ def _extract_claude_payload_model(payload: dict[str, Any] | None) -> str | None:
 
 
 def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
-    result_payload: dict[str, Any] = {}
+    result_payloads: list[dict[str, Any]] = []
     assistant_payload: dict[str, Any] = {}
     session_id = ""
     model = ""
@@ -351,9 +351,10 @@ def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
         if payload_type == "assistant":
             assistant_payload = payload
         elif payload_type == "result":
-            result_payload = payload
-        elif ("result" in payload) and result_payload == {}:
-            result_payload = payload
+            result_payloads.append(payload)
+        elif "result" in payload:
+            result_payloads.append(payload)
+    result_payload = _select_claude_result_payload(result_payloads)
     if result_payload:
         if session_id and not str(result_payload.get("session_id") or "").strip():
             result_payload["session_id"] = session_id
@@ -373,6 +374,34 @@ def _parse_claude_stream_payload(text: str) -> dict[str, Any]:
     if usage is not None:
         payload["usage"] = usage
     return payload
+
+
+def _claude_result_payload_rank(payload: dict[str, Any], index: int) -> tuple[int, int, int, int, int]:
+    result_text = str(payload.get("result") or "")
+    raw_turns = payload.get("num_turns")
+    try:
+        num_turns = int(raw_turns)
+    except Exception:
+        num_turns = -1
+    is_error = payload.get("is_error") is True
+    return (
+        1 if result_text.strip() else 0,
+        0 if is_error else 1,
+        num_turns,
+        len(result_text),
+        index,
+    )
+
+
+def _select_claude_result_payload(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    best_payload: dict[str, Any] = {}
+    best_rank: tuple[int, int, int, int, int] | None = None
+    for index, payload in enumerate(payloads):
+        rank = _claude_result_payload_rank(payload, index)
+        if best_rank is None or rank > best_rank:
+            best_payload = payload
+            best_rank = rank
+    return best_payload
 
 
 def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
@@ -1239,7 +1268,11 @@ def run_claude_exec(
         raise
     _finalize_text_cli_live_progress(progress=progress, provider="claude", status="done")
     payload = _parse_claude_stream_payload(result.stdout)
-    text = str(payload.get("result") or result.stdout or "").strip()
+    streamed_text = str(stream_state.get("content") or "").strip()
+    text = str(payload.get("result") or "").strip()
+    if not text:
+        assistant_text = _extract_claude_text_from_message(payload.get("message"))
+        text = str(streamed_text or assistant_text or result.stdout or "").strip()
     if not text:
         raise ReviewflowError("Claude did not return any printable review output.")
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
