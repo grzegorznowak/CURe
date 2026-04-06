@@ -2188,11 +2188,35 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         timeline_texts = [item["text"] for item in live["timeline"]]
         self.assertIn("Using Bash", timeline_texts)
         self.assertNotIn("Tool result: {\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}", timeline_texts)
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
 
     def test_handle_claude_stream_chunk_extracts_chunkhound_helper_proof_entries(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
 
         cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
         cure_llm._handle_claude_stream_chunk(
@@ -2231,28 +2255,19 @@ class ClaudeLiveProgressTests(unittest.TestCase):
                     json.dumps(
                         {
                             "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
                             "tool_use_result": {
-                                "stdout": "\n".join(
-                                    [
-                                        "cure-chunkhound: tools/call waiting (10.0s elapsed)",
-                                        json.dumps(
-                                            {
-                                                "ok": True,
-                                                "command": "search",
-                                                "tool_name": "search",
-                                                "query": "needle",
-                                                "helper_path": helper_path,
-                                                "result": {
-                                                    "results": [],
-                                                    "pagination": {"offset": 0, "total_results": 0},
-                                                },
-                                                "execution_stage": "tools/call",
-                                                "execution_stage_status": "ok",
-                                            }
-                                        ),
-                                    ]
-                                )
-                                + "\n",
+                                "stdout": stdout_text,
                                 "stderr": "",
                             },
                         }
@@ -2265,6 +2280,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["payload"]["tool_name"], "search")
         self.assertEqual(entries[0]["payload"]["helper_path"], helper_path)
+        self.assertEqual(entries[0]["tool_use_id"], "toolu_1")
         self.assertIn("cure-chunkhound: tools/call waiting", entries[0]["stdout_excerpt"])
         self.assertIn("CURE_CHUNKHOUND_HELPER", entries[0]["command"])
         self.assertNotIn("chunkhound_helper_path", state)
@@ -2273,6 +2289,36 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         progress = self._StubProgress()
         state = {"content": ""}
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
 
         cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
         cure_llm._handle_claude_stream_chunk(
@@ -2311,35 +2357,19 @@ class ClaudeLiveProgressTests(unittest.TestCase):
                     json.dumps(
                         {
                             "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
                             "tool_use_result": {
-                                "stdout": "\n".join(
-                                    [
-                                        json.dumps(
-                                            {
-                                                "ok": True,
-                                                "command": "search",
-                                                "tool_name": "search",
-                                                "query": "needle",
-                                                "helper_path": helper_path,
-                                                "result": {
-                                                    "results": [],
-                                                    "pagination": {"offset": 0, "total_results": 0},
-                                                },
-                                            }
-                                        ),
-                                        json.dumps(
-                                            {
-                                                "ok": True,
-                                                "command": "research",
-                                                "tool_name": "code_research",
-                                                "query": "question",
-                                                "helper_path": helper_path,
-                                                "result": {"summary": "grounded answer"},
-                                            }
-                                        ),
-                                    ]
-                                )
-                                + "\n",
+                                "stdout": stdout_text,
                                 "stderr": "",
                             },
                         }
@@ -2352,6 +2382,200 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(len(entries), 2)
         self.assertEqual([entry["payload"]["tool_name"] for entry in entries], ["search", "code_research"])
         self.assertTrue(all("CURE_CHUNKHOUND_HELPER" in entry["command"] for entry in entries))
+        self.assertEqual([entry["tool_use_id"] for entry in entries], ["toolu_1", "toolu_1"])
+
+    def test_handle_claude_stream_chunk_raises_when_helper_payload_has_no_documented_tool_result_block(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = json.dumps(
+            {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+            }
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        with self.assertRaisesRegex(rf.ReviewflowError, "tool_result contract mismatch"):
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": "toolu_1",
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "tool_use_result": {
+                                    "stdout": stdout_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+    def test_handle_claude_stream_chunk_extracts_helper_proof_entries_from_real_search_fixture(self) -> None:
+        progress = self._StubProgress()
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+        fixture_text = fixture_path.read_text(encoding="utf-8")
+        tool_use_id = ""
+        for raw in fixture_text.splitlines():
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                continue
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            for block in message.get("content") or []:
+                if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                    continue
+                tool_use_id = str(block.get("tool_use_id") or "").strip()
+                if tool_use_id:
+                    break
+            if tool_use_id:
+                break
+        self.assertTrue(tool_use_id)
+        state = {
+            "content": "",
+            "bash_tool_commands_by_id": {tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'},
+        }
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_text,
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["tool_use_id"], tool_use_id)
+        self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
+        self.assertEqual(entries[0]["command"], '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
+
+    def test_handle_claude_stream_chunk_ignores_real_backgrounded_research_fixture_without_helper_payload(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_path.read_text(encoding="utf-8"),
+        )
+
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+        live = progress.meta["live_progress"]
+        self.assertIn("background task completed successfully", live["current"]["text"].lower())
+
+    def test_real_claude_fixtures_are_shape_preserving_redacted(self) -> None:
+        search_fixture = (ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson").read_text(
+            encoding="utf-8"
+        )
+        research_fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+        ).read_text(encoding="utf-8")
+
+        for body in (search_fixture, research_fixture):
+            self.assertNotRegex(body, r"/(?:tmp|home|workspaces|opt|usr)/")
+            self.assertIn("<QUERY>", body)
+            self.assertIn("<ABS_PATH>", body)
+        self.assertIn("tools/call", search_fixture)
+        self.assertIn("notifications/initialized", search_fixture)
+        self.assertIn("projects/CURe/cure.py", search_fixture)
+        self.assertNotIn("tools<ABS_PATH>", search_fixture)
+        self.assertNotIn("notifications<ABS_PATH>", search_fixture)
+        self.assertNotIn("projects<ABS_PATH>", search_fixture)
+        self.assertIn("<BACKGROUND_TASK_ID>", research_fixture)
+
+    def test_real_claude_probe_absolute_path_redaction_preserves_relative_slash_values(self) -> None:
+        import real_claude_probe
+
+        replacements = {str(real_claude_probe.REPO_ROOT): "<CURE_REPO_ROOT>"}
+
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "tools/call",
+                key="execution_stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "tools/call",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "notifications/initialized",
+                key="stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "notifications/initialized",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "projects/CURe/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "<CURE_REPO_ROOT>/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<CURE_REPO_ROOT>/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "/workspaces/cure_workspace/projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<ABS_PATH>",
+        )
 
     def test_handle_claude_stream_chunk_keeps_non_tool_blocks_safe_after_bash_usage(self) -> None:
         progress = self._StubProgress()
@@ -2466,7 +2690,57 @@ class ClaudeLiveProgressTests(unittest.TestCase):
                 [
                     json.dumps(
                         {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
                             "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": json.dumps(
+                                            {
+                                                "ok": True,
+                                                "command": "search",
+                                                "tool_name": "search",
+                                                "helper_path": streamed_helper_path,
+                                                "result": {
+                                                    "results": [],
+                                                    "pagination": {"offset": 0, "total_results": 0},
+                                                },
+                                            }
+                                        ),
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
                             "tool_use_result": {
                                 "stdout": json.dumps(
                                     {

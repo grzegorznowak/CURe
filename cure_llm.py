@@ -425,6 +425,15 @@ def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
     return f"Using {name}"
 
 
+def _is_chunkhound_helper_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    helper_path = str(payload.get("helper_path") or "").strip()
+    if not helper_path:
+        return False
+    return any(str(payload.get(key) or "").strip() for key in ("command", "preflight_stage", "execution_stage"))
+
+
 def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str, Any]]:
     text = str(payload_text or "").strip()
     if not text:
@@ -438,7 +447,7 @@ def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str
             payload = json.loads(candidate)
         except Exception:
             continue
-        if isinstance(payload, dict):
+        if _is_chunkhound_helper_payload(payload):
             payloads.append(payload)
     if payloads:
         return payloads
@@ -447,7 +456,7 @@ def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str
             payload = json.loads(candidate)
         except Exception:
             continue
-        if isinstance(payload, dict):
+        if _is_chunkhound_helper_payload(payload):
             return [payload]
     return []
 
@@ -464,20 +473,71 @@ def _latest_claude_bash_command(state: dict[str, Any]) -> str | None:
     return None
 
 
-def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: object) -> None:
+def _extract_claude_tool_result_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    message = payload.get("message")
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    results: list[dict[str, Any]] = []
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() == "tool_result":
+            results.append(item)
+    return results
+
+
+def _extract_claude_tool_result_text(block: dict[str, Any]) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() == "text":
+            text = str(item.get("text") or "")
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: object, tool_use_id: str | None) -> None:
     payloads = _parse_chunkhound_helper_output_texts(stdout_text)
     if not payloads:
         return
+    resolved_tool_use_id = str(tool_use_id or "").strip()
+    if not resolved_tool_use_id:
+        raise ReviewflowError(
+            "Claude tool_result contract mismatch: helper payload was present without a documented tool_use_id."
+        )
     entries = state.setdefault("chunkhound_tool_proof_entries", [])
     if not isinstance(entries, list):
         entries = []
         state["chunkhound_tool_proof_entries"] = entries
-    command = _latest_claude_bash_command(state)
+    raw_commands = state.setdefault("bash_tool_commands_by_id", {})
+    commands_by_id = raw_commands if isinstance(raw_commands, dict) else {}
+    if raw_commands is not commands_by_id:
+        state["bash_tool_commands_by_id"] = commands_by_id
+    command = str(commands_by_id.get(resolved_tool_use_id) or "").strip()
+    if not command:
+        raise ReviewflowError(
+            "Claude tool_result contract mismatch: helper payload tool_use_id did not match a captured Bash command."
+        )
     stdout_excerpt = str(stdout_text or "").strip()
     if len(stdout_excerpt) > 240:
         stdout_excerpt = stdout_excerpt[:240].rstrip() + "..."
     for payload in payloads:
-        entries.append({"payload": payload, "stdout_excerpt": stdout_excerpt, "command": command})
+        entries.append(
+            {
+                "payload": payload,
+                "stdout_excerpt": stdout_excerpt,
+                "command": command,
+                "tool_use_id": resolved_tool_use_id,
+            }
+        )
 
 
 def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: str) -> None:
@@ -495,10 +555,23 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
         payload_type = str(payload.get("type") or "").strip()
         if payload_type == "user":
             tool_result = payload.get("tool_use_result")
-            if isinstance(tool_result, dict):
+            top_level_stdout = tool_result.get("stdout") if isinstance(tool_result, dict) else None
+            top_level_helper_payloads = _parse_chunkhound_helper_output_texts(top_level_stdout)
+            documented_helper_payloads_seen = False
+            for tool_result_block in _extract_claude_tool_result_blocks(payload):
+                result_text = _extract_claude_tool_result_text(tool_result_block)
+                if not _parse_chunkhound_helper_output_texts(result_text):
+                    continue
+                documented_helper_payloads_seen = True
                 _append_claude_chunkhound_tool_proof(
                     state=state,
-                    stdout_text=tool_result.get("stdout"),
+                    stdout_text=result_text,
+                    tool_use_id=str(tool_result_block.get("tool_use_id") or "").strip() or None,
+                )
+            if top_level_helper_payloads and not documented_helper_payloads_seen:
+                raise ReviewflowError(
+                    "Claude tool_result contract mismatch: helper payload was present in tool_use_result stdout "
+                    "without a documented message.content tool_result block."
                 )
             summary = _summarize_claude_tool_result(tool_result if isinstance(tool_result, dict) else None)
             if summary:
@@ -537,6 +610,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 if block_key:
                     state[f"{block_key}_name"] = tool_name
                     state[f"{block_key}_input"] = ""
+                    state[f"{block_key}_tool_use_id"] = str(content_block.get("id") or "").strip()
                 _set_text_cli_live_current(
                     progress=progress,
                     provider="claude",
@@ -583,10 +657,10 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 state[f"{block_key}_input"] = str(state.get(f"{block_key}_input") or "") + partial_json
                 tool_name = str(state.get(f"{block_key}_name") or "Tool")
                 if tool_name == "Bash":
-                    bash_commands = state.setdefault("bash_tool_commands", [])
-                    if not isinstance(bash_commands, list):
-                        bash_commands = []
-                        state["bash_tool_commands"] = bash_commands
+                    raw_commands = state.setdefault("bash_tool_commands_by_id", {})
+                    commands_by_id = raw_commands if isinstance(raw_commands, dict) else {}
+                    if raw_commands is not commands_by_id:
+                        state["bash_tool_commands_by_id"] = commands_by_id
                     try:
                         parsed_input = json.loads(str(state.get(f"{block_key}_input") or ""))
                     except Exception:
@@ -594,13 +668,10 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     if isinstance(parsed_input, dict):
                         command_text = str(parsed_input.get("command") or "").strip()
                         if command_text:
-                            if bash_commands and bash_commands[-1] == str(state.get(f"{block_key}_command") or "").strip():
-                                bash_commands[-1] = command_text
-                            elif str(state.get(f"{block_key}_command") or "").strip():
-                                bash_commands.append(command_text)
-                            else:
-                                bash_commands.append(command_text)
                             state[f"{block_key}_command"] = command_text
+                            tool_use_id = str(state.get(f"{block_key}_tool_use_id") or "").strip()
+                            if tool_use_id:
+                                commands_by_id[tool_use_id] = command_text
                 current = _format_claude_tool_progress(
                     tool_name=tool_name,
                     input_payload=str(state.get(f"{block_key}_input") or ""),
