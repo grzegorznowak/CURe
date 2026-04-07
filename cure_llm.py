@@ -15,6 +15,10 @@ from typing import TYPE_CHECKING, Any, Callable
 from cure_errors import ReviewflowError
 from cure_output import (
     CodexJsonEventSink,
+    _claude_summary_text,
+    _compact_claude_text,
+    _extract_claude_message_blocks,
+    _extract_claude_tool_result_id,
     _shell_join,
     active_output,
     normalize_markdown_artifact,
@@ -139,12 +143,7 @@ def _flush_progress(progress: Any) -> None:
 
 
 def _compact_live_progress_text(text: object, *, max_chars: int = 240) -> str:
-    value = " ".join(str(text or "").split())
-    if len(value) <= max_chars:
-        return value
-    if max_chars <= 1:
-        return value[:max_chars]
-    return value[: max_chars - 1] + "…"
+    return _compact_claude_text(text, max_chars=max_chars)
 
 
 def _looks_like_json_payload_line(text: str) -> bool:
@@ -169,14 +168,6 @@ def _looks_like_pathish_progress_line(text: str) -> bool:
     return False
 
 
-def _summarize_claude_text_block(text: object) -> str:
-    compact = _compact_live_progress_text(text, max_chars=120)
-    if not compact:
-        return ""
-    match = re.search(r"(.+?[.!?])(?:\s|$)", compact)
-    if match:
-        return _compact_live_progress_text(match.group(1), max_chars=120)
-    return compact
 
 
 def _summarize_claude_tool_result(
@@ -516,43 +507,6 @@ def _latest_claude_bash_command(state: dict[str, Any]) -> str | None:
     return None
 
 
-def _extract_claude_tool_result_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    message = payload.get("message")
-    message = message if isinstance(message, dict) else {}
-    content = message.get("content")
-    blocks = content if isinstance(content, list) else []
-    results: list[dict[str, Any]] = []
-    for item in blocks:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("type") or "").strip() == "tool_result":
-            results.append(item)
-    return results
-
-
-def _extract_claude_tool_use_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    message = payload.get("message")
-    message = message if isinstance(message, dict) else {}
-    content = message.get("content")
-    blocks = content if isinstance(content, list) else []
-    results: list[dict[str, Any]] = []
-    for item in blocks:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("type") or "").strip() == "tool_use":
-            results.append(item)
-    return results
-
-
-def _extract_claude_tool_use_id(payload: dict[str, Any]) -> str:
-    tool_use_id = str(payload.get("tool_use_id") or "").strip()
-    if tool_use_id:
-        return tool_use_id
-    for block in _extract_claude_tool_result_blocks(payload):
-        tool_use_id = str(block.get("tool_use_id") or "").strip()
-        if tool_use_id:
-            return tool_use_id
-    return ""
 
 
 def _extract_claude_tool_result_text(block: dict[str, Any]) -> str:
@@ -662,7 +616,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 )
             continue
         if payload_type == "assistant":
-            for tool_use_block in _extract_claude_tool_use_blocks(payload):
+            for tool_use_block in _extract_claude_message_blocks(payload, block_type="tool_use"):
                 tool_use_id = str(tool_use_block.get("id") or "").strip()
                 tool_name = str(tool_use_block.get("name") or "Tool").strip() or "Tool"
                 input_payload = tool_use_block.get("input")
@@ -700,7 +654,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
             top_level_stdout = tool_result.get("stdout") if isinstance(tool_result, dict) else None
             top_level_helper_payloads = _parse_chunkhound_helper_output_texts(top_level_stdout)
             documented_helper_payloads_seen = False
-            for tool_result_block in _extract_claude_tool_result_blocks(payload):
+            for tool_result_block in _extract_claude_message_blocks(payload, block_type="tool_result"):
                 result_text = _extract_claude_tool_result_text(tool_result_block)
                 if not _parse_chunkhound_helper_output_texts(result_text):
                     continue
@@ -715,7 +669,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     "Claude tool_result contract mismatch: helper payload was present in tool_use_result stdout "
                     "without a documented message.content tool_result block."
                 )
-            tool_use_id = _extract_claude_tool_use_id(payload)
+            tool_use_id = _extract_claude_tool_result_id(payload)
             raw_commands = state.setdefault("bash_tool_commands_by_id", {})
             commands_by_id = raw_commands if isinstance(raw_commands, dict) else {}
             if raw_commands is not commands_by_id:
@@ -784,7 +738,7 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
         if event_type == "content_block_stop":
             if block_key and str(state.get(f"{block_key}_type") or "").strip() == "text":
                 completed = str(state.get(f"{block_key}_text") or state.get("content") or "")
-                summary = _summarize_claude_text_block(completed)
+                summary = _claude_summary_text(completed)
                 if summary:
                     _set_text_cli_live_current(
                         progress=progress,

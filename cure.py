@@ -5427,6 +5427,46 @@ def _grounding_skipped_prompt_text(skipped_records: list[dict[str, Any]]) -> str
     return "\n".join(lines)
 
 
+def _prepare_synth_inputs(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+    session_id: str,
+    session_dir: Path,
+    work_dir: Path,
+    review_md_path: Path,
+) -> tuple[list[str], str]:
+    """Persist grounding summary, build skipped-step disclosure text, and enforce
+    the all-skipped terminal guard shared across PR, incremental resume, and main
+    resume flows.  Returns ``(synth_step_outputs, skipped_prompt_text)`` when at
+    least one step survives grounding; raises ``ReviewflowError`` otherwise."""
+    synth_step_outputs = _persist_grounding_summary(meta=meta, step_entries=step_entries)
+    raw_skipped = meta.setdefault("multipass", {}).get("grounding_skipped_steps")
+    skipped_prompt_text = _grounding_skipped_prompt_text(
+        raw_skipped if isinstance(raw_skipped, list) else []
+    )
+    if not synth_step_outputs:
+        meta["status"] = "error"
+        meta.setdefault("multipass", {})["status"] = "step_failed"
+        _emit_multipass_grounding_failure_playbook(
+            meta=meta,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            artifact_path=review_md_path,
+            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
+            resume_from="steps",
+        )
+        raise ReviewflowError(
+            "All multipass steps were grounding-skipped; review synthesis cannot continue."
+        )
+    return synth_step_outputs, skipped_prompt_text
+
+
+# Non-TTY resume returns "rerun" intentionally: Story 35 policy requires that
+# previously skipped grounding steps are automatically rerun when there is no
+# interactive TTY to prompt the user.  Do not change this return value without
+# a deliberate policy decision.
 def _resolve_resume_grounding_skip_choice(
     *,
     meta: dict[str, Any],
@@ -9249,27 +9289,14 @@ def _pr_flow_impl(
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
-                    synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
-                    skipped_prompt_text = _grounding_skipped_prompt_text(
-                        progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
-                        if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
-                        else []
+                    synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+                        meta=progress.meta,
+                        step_entries=step_entries,
+                        session_id=session_id,
+                        session_dir=session_dir,
+                        work_dir=work_dir,
+                        review_md_path=review_md_path,
                     )
-                    if not synth_step_outputs:
-                        progress.meta["status"] = "error"
-                        progress.meta.setdefault("multipass", {})["status"] = "step_failed"
-                        _emit_multipass_grounding_failure_playbook(
-                            meta=progress.meta,
-                            session_id=session_id,
-                            session_dir=session_dir,
-                            work_dir=work_dir,
-                            artifact_path=review_md_path,
-                            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
-                            resume_from="steps",
-                        )
-                        raise ReviewflowError(
-                            "All multipass steps were grounding-skipped; review synthesis cannot continue."
-                        )
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
                         "step_index": int(len(synth_step_outputs)),
@@ -9868,25 +9895,14 @@ def _run_incremental_completed_multipass_resume(
             ]
             progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
             _update_multipass_step_progress(progress.meta)
-    synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
-    skipped_prompt_text = _grounding_skipped_prompt_text(
-        progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
-        if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
-        else []
+    synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+        meta=progress.meta,
+        step_entries=step_entries,
+        session_id=session_id,
+        session_dir=session_dir,
+        work_dir=work_dir,
+        review_md_path=review_md_path,
     )
-    if not synth_step_outputs:
-        progress.meta["status"] = "error"
-        progress.meta.setdefault("multipass", {})["status"] = "step_failed"
-        _emit_multipass_grounding_failure_playbook(
-            meta=progress.meta,
-            session_id=session_id,
-            session_dir=session_dir,
-            work_dir=work_dir,
-            artifact_path=review_md_path,
-            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
-            resume_from="steps",
-        )
-        raise ReviewflowError("All multipass steps were grounding-skipped; review synthesis cannot continue.")
 
     progress.meta.setdefault("multipass", {})["current"] = {
         "stage": "resume_synth",
@@ -10799,25 +10815,14 @@ def _resume_flow_impl(
                 progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
                 _update_multipass_step_progress(progress.meta)
 
-        synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
-        skipped_prompt_text = _grounding_skipped_prompt_text(
-            progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
-            if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
-            else []
+        synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+            meta=progress.meta,
+            step_entries=step_entries,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            review_md_path=review_md_path,
         )
-        if not synth_step_outputs:
-            progress.meta["status"] = "error"
-            progress.meta.setdefault("multipass", {})["status"] = "step_failed"
-            _emit_multipass_grounding_failure_playbook(
-                meta=progress.meta,
-                session_id=session_id,
-                session_dir=session_dir,
-                work_dir=work_dir,
-                artifact_path=review_md_path,
-                validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
-                resume_from="steps",
-            )
-            raise ReviewflowError("All multipass steps were grounding-skipped; review synthesis cannot continue.")
 
         should_synth = (
             from_phase in {"synth", "plan", "steps"}

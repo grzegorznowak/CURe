@@ -1762,6 +1762,114 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["text"], cure_output._compact_codex_text(long_message))
         self.assertEqual(tail.tail(2)[-1], cure_output._compact_codex_text(long_message))
 
+    def test_claude_stream_event_sink_preserves_raw_events_and_emits_readable_progress(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        stderr = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        sink = cure_output.ClaudeStreamEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            also_to=stderr,
+            on_event=events.append,
+        )
+
+        sink.write(json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}) + "\n")
+        sink.write(
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text"},
+                    },
+                }
+            )
+            + "\n"
+        )
+        sink.write(
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Checking changed files and narrowing scope."},
+                    },
+                }
+            )
+            + "\n"
+        )
+        sink.write(
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {"type": "content_block_stop", "index": 0},
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+
+        self.assertIn('"type": "system"', raw.getvalue())
+        self.assertIn("Claude session started.", display.getvalue())
+        self.assertIn("Claude: Checking changed files and narrowing scope.", display.getvalue())
+        self.assertIn("Claude: Checking changed files and narrowing scope.", stderr.getvalue())
+        self.assertEqual(events[-1]["type"], "assistant_text")
+        self.assertEqual(tail.tail(1)[0], "Claude: Checking changed files and narrowing scope.")
+
+    def test_claude_stream_event_sink_uses_real_search_fixture_without_partial_tool_noise(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=50)
+        sink = cure_output.ClaudeStreamEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+        )
+        fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+        ).read_text(encoding="utf-8")
+
+        sink.write(fixture)
+        sink.flush()
+
+        rendered_lines = [line.strip() for line in display.getvalue().splitlines() if line.strip()]
+        self.assertIn('Claude session started.', rendered_lines)
+        self.assertIn('[tool] Bash: "$CURE_CHUNKHOUND_HELPER" search "<QUERY>"', rendered_lines)
+        self.assertNotIn('[tool] Bash', rendered_lines)
+        result_lines = [
+            line
+            for line in rendered_lines
+            if line.startswith('[result] Bash: "$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
+        ]
+        self.assertEqual(len(result_lines), 1)
+        self.assertNotIn("chunkhound_module_path", result_lines[0])
+        self.assertNotIn('{"chunkhound_module_path"', result_lines[0])
+
+    def test_claude_stream_event_sink_hides_thinking_from_real_background_fixture(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=50)
+        sink = cure_output.ClaudeStreamEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+        )
+        fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+        ).read_text(encoding="utf-8")
+
+        sink.write(fixture)
+        sink.flush()
+
+        rendered = display.getvalue()
+        self.assertNotIn("Thinking", rendered)
+        self.assertIn("The background task completed successfully (exit code 0).", rendered)
+
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-123",
@@ -2087,6 +2195,47 @@ class CodexJsonProgressTests(unittest.TestCase):
 
         self.assertIn("live_progress", payload)
         self.assertIn("codex_events", payload["logs"])
+
+    def test_build_status_payload_includes_claude_events_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-claude-events"
+            repo_dir = session_dir / "repo"
+            logs_dir = session_dir / "work" / "logs"
+            review_md = session_dir / "review.md"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            review_md.write_text("# Review\n", encoding="utf-8")
+            for name in ("cure.log", "chunkhound.log", "codex.log", "claude.events.jsonl"):
+                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-claude-events",
+                "status": "running",
+                "phase": "claude_review",
+                "phases": {"claude_review": {"status": "running"}},
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 12,
+                "created_at": "2026-03-17T12:00:00+00:00",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(session_dir / "work"),
+                    "logs_dir": str(logs_dir),
+                    "review_md": str(review_md),
+                },
+                "logs": {
+                    "cure": str(logs_dir / "cure.log"),
+                    "chunkhound": str(logs_dir / "chunkhound.log"),
+                    "codex": str(logs_dir / "codex.log"),
+                    "claude_events": str(logs_dir / "claude.events.jsonl"),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            payload = rf.build_status_payload("session-claude-events", sandbox_root=root)
+
+        self.assertIn("claude_events", payload["logs"])
 
     def test_build_status_payload_prefers_runtime_adapter_model_and_provider_phase_for_claude(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4232,6 +4381,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["agent_runtime"]["provider"], "claude")
             self.assertEqual(payload["agent_selection"]["saved_preference"], "claude_default")
             self.assertEqual(payload["agent_selection"]["effective_agent"], "claude")
+
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5003,6 +5153,50 @@ class InstallAndDoctorTests(unittest.TestCase):
             height=25,
         )
         self.assertIn("phase 1/1: Generate review", lines[0])
+
+    def test_live_progress_lines_prefixes_assistant_text_timeline_only(self) -> None:
+        lines = rui._live_progress_lines(
+            meta={
+                "phase": "claude_review",
+                "live_progress": {
+                    "current": {"type": "assistant_text", "text": "Checking scope"},
+                    "timeline": [
+                        {"type": "assistant_text", "text": "Checking scope", "ts": "2026-04-07T05:00:00+00:00"},
+                        {"type": "tool_result", "text": "[result] Search completed", "ts": "2026-04-07T05:00:01+00:00"},
+                    ],
+                },
+            },
+            width=120,
+            max_lines=12,
+        )
+
+        self.assertIn("Now: Checking scope", lines)
+        self.assertIn("[05:00:00] Claude: Checking scope", lines)
+        self.assertIn("[05:00:01] [result] Search completed", lines)
+
+    def test_live_progress_lines_shows_twelve_history_lines(self) -> None:
+        timeline = [
+            {"type": "assistant_text", "text": f"item {idx}", "ts": f"2026-04-07T05:00:{idx:02d}+00:00"}
+            for idx in range(12)
+        ]
+        lines = rui._live_progress_lines(
+            meta={
+                "phase": "claude_review",
+                "live_progress": {
+                    "current": {"type": "provider_output", "text": "Working"},
+                    "timeline": timeline,
+                },
+            },
+            width=120,
+            max_lines=12,
+        )
+
+        self.assertEqual(len(lines), 14)
+        self.assertEqual(lines[0], "Phase: Generate review")
+        self.assertEqual(lines[1], "Now: Working")
+        self.assertIn("[05:00:00] Claude: item 0", lines)
+        self.assertIn("[05:00:01] Claude: item 1", lines)
+        self.assertIn("[05:00:11] Claude: item 11", lines)
 
     def test_dashboard_narrow_layout_uses_single_column_sections(self) -> None:
         meta = {

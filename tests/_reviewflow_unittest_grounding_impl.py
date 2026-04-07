@@ -203,6 +203,75 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
+    def test_normalize_markdown_artifact_unchanged_when_no_heading_present(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_no_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "Just plain text with no heading.\nAnother line.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_unchanged_for_deeper_heading_at_line_zero(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_deep_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "#### Deep Heading At Line Zero\nSome content here.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_strips_blank_lines_before_heading(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_blank_before_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "",
+                        "",
+                        "## Review Findings",
+                        "- Something important.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("## Review Findings"),
+                f"Expected blank preamble to be stripped, got: {normalized[:80]!r}",
+            )
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_crlf_input_structurally_correct(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_crlf"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_bytes(
+                b"Let me produce the output.\r\n\r\n## Step Result\r\nContent here.\r\n"
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("## Step Result"),
+                f"Expected CRLF preamble stripped, got: {normalized[:80]!r}",
+            )
+            self.assertNotIn("produce the output", normalized)
+            self.assertIn("Content here.", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
     def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
         version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         footer = cure_output.format_review_artifact_footer(
@@ -12388,6 +12457,104 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         self.assertTrue(ui_enabled)
         prompt_mock.assert_called_once()
         self.assertEqual(choice, "keep")
+
+    def test_prepare_synth_inputs_returns_outputs_and_skipped_text_when_valid_steps_remain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            entries = [
+                rf.MultipassStepEntry(
+                    index=1,
+                    step_id="01",
+                    step_title="Safety",
+                    step_focus="f",
+                    output_path=root / "review.step-01.md",
+                    prompt="p",
+                    should_run=True,
+                ),
+                rf.MultipassStepEntry(
+                    index=2,
+                    step_id="02",
+                    step_title="Perf",
+                    step_focus="f",
+                    output_path=root / "review.step-02.md",
+                    prompt="p",
+                    should_run=True,
+                ),
+            ]
+            meta: dict[str, Any] = {
+                "session_id": "test-session",
+                "multipass": {
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "Safety", "reason": "no cite"}
+                    ],
+                },
+            }
+
+            synth_outputs, skipped_text = rf._prepare_synth_inputs(
+                meta=meta,
+                step_entries=entries,
+                session_id="test-session",
+                session_dir=session_dir,
+                work_dir=work_dir,
+                review_md_path=review_md_path,
+            )
+
+            self.assertEqual(synth_outputs, [str(root / "review.step-02.md")])
+            self.assertIn("01", skipped_text)
+            self.assertIn("Safety", skipped_text)
+            self.assertIn("no cite", skipped_text)
+
+    def test_prepare_synth_inputs_raises_and_emits_playbook_when_all_steps_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Safety",
+                step_focus="f",
+                output_path=root / "review.step-01.md",
+                prompt="p",
+                should_run=True,
+            )
+            meta: dict[str, Any] = {
+                "session_id": "test-session",
+                "multipass": {
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "Safety", "reason": "no cite"}
+                    ],
+                },
+            }
+            emitted_playbook: list[str] = []
+
+            def capture_playbook(**kwargs: Any) -> None:
+                emitted_playbook.append(str(kwargs.get("validation") or ""))
+
+            with (
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook", side_effect=capture_playbook),
+                self.assertRaises(rf.ReviewflowError),
+            ):
+                rf._prepare_synth_inputs(
+                    meta=meta,
+                    step_entries=[entry],
+                    session_id="test-session",
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    review_md_path=review_md_path,
+                )
+
+            self.assertTrue(emitted_playbook, "Expected grounding failure playbook to be emitted")
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
 
     def test_persist_grounding_summary_prefers_current_step_state_over_stale_persisted_skip(self) -> None:
         entry = rf.MultipassStepEntry(
