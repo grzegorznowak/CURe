@@ -97,6 +97,7 @@ class CodexRunResult:
 
 _LIVE_PROGRESS_TIMELINE_MAX = 8
 _CURE_CHUNKHOUND_HELPER_ENV = "CURE_CHUNKHOUND_HELPER"
+_CURE_CHUNKHOUND_DRY_RUN_ENV = "CURE_CHUNKHOUND_DRY_RUN"
 _CURE_CHUNKHOUND_ACCESS_MODE = "cli_helper_daemon"
 
 
@@ -1281,6 +1282,7 @@ def build_claude_resume_command(
             "NETRC",
             "CURE_WORK_DIR",
             "CURE_CHUNKHOUND_HELPER",
+            "CURE_CHUNKHOUND_DRY_RUN",
             "PYTHONSAFEPATH",
         ),
     )
@@ -1686,6 +1688,78 @@ def _emit_stage(
         message += f" detail={{detail_text}}"
     sys.stderr.write(message + "\\n")
     sys.stderr.flush()
+
+
+def _dry_run_enabled() -> bool:
+    return str(os.environ.get("CURE_CHUNKHOUND_DRY_RUN") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dry_run_stage_trace(*, command: str) -> list[dict[str, Any]]:
+    trace: list[dict[str, Any]] = [
+        {{"stage": "initialize", "status": "ok", "elapsed_seconds": 0.0}},
+        {{"stage": "notifications/initialized", "status": "ok", "elapsed_seconds": 0.0}},
+        {{"stage": "tools/list", "status": "ok", "elapsed_seconds": 0.0}},
+    ]
+    if command != "preflight":
+        trace.append({{"stage": "tools/call", "status": "ok", "elapsed_seconds": 0.0}})
+    return trace
+
+
+def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
+    command = str(args.command or "").strip()
+    helper_path = str(HELPER_PATH)
+    if command == "preflight":
+        return {{
+            "ok": True,
+            "command": "preflight",
+            "helper_path": helper_path,
+            "available_tools": ["search", "code_research"],
+            "preflight_stage": "tools/list",
+            "preflight_stage_status": "ok",
+            "stage_trace": _dry_run_stage_trace(command="preflight"),
+            "elapsed_seconds": 0.0,
+            "helper_exit_code": 0,
+            "mcp_transport": "dry_run",
+            "dry_run": True,
+        }}
+    if command == "search":
+        return {{
+            "ok": True,
+            "command": "search",
+            "tool_name": "search",
+            "query": getattr(args, "query", None),
+            "path": getattr(args, "path", None),
+            "helper_path": helper_path,
+            "result": {{
+                "results": [],
+                "pagination": {{
+                    "offset": int(getattr(args, "offset", 0) or 0),
+                    "page_size": int(getattr(args, "page_size", 10) or 10),
+                    "total_results": 0,
+                }},
+            }},
+            "execution_stage": "tools/call",
+            "execution_stage_status": "ok",
+            "stage_trace": _dry_run_stage_trace(command=command),
+            "mcp_transport": "dry_run",
+            "dry_run": True,
+        }}
+    return {{
+        "ok": True,
+        "command": "research",
+        "tool_name": "code_research",
+        "query": getattr(args, "query", None),
+        "path": getattr(args, "path", None),
+        "helper_path": helper_path,
+        "result": {{
+            "summary": "dry-run ChunkHound research stub; no real ChunkHound call was made.",
+        }},
+        "execution_stage": "tools/call",
+        "execution_stage_status": "ok",
+        "stage_trace": _dry_run_stage_trace(command=command),
+        "mcp_transport": "dry_run",
+        "dry_run": True,
+    }}
 
 
 def _base_cmd() -> list[str]:
@@ -2660,6 +2734,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if _dry_run_enabled():
+        return _emit(_dry_run_payload(args), exit_code=0)
     if args.command == "preflight":
         try:
             payload = _run_preflight_with_fallback(args)
@@ -2795,6 +2871,9 @@ def prepare_review_agent_runtime(
     env = augment_cli_provider_session_env(env=env, provider=provider)
     env.update(_string_dict(resolved.get("env")))
     env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
+    chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
+    if chunkhound_dry_run:
+        env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
     add_dirs = _dedupe_paths([session_dir, work_dir])
     runtime: dict[str, Any] = {
         "profile": profile,
@@ -2818,6 +2897,7 @@ def prepare_review_agent_runtime(
             "resolved_profile": profile,
             "profile_source": profile_source,
             "agent_runtime": runtime_meta.get("agent_runtime"),
+            "chunkhound_dry_run": chunkhound_dry_run,
         },
     }
     if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
@@ -2829,6 +2909,7 @@ def prepare_review_agent_runtime(
             "transport": transport,
             "supported": False,
             "detail": "agent runtime profiles apply only to CLI coding-agent providers",
+            "chunkhound_dry_run": chunkhound_dry_run,
             "env_keys": sorted(env.keys()),
             "add_dirs": [str(path) for path in add_dirs],
             "staged_paths": dict(staged_paths),
@@ -2912,6 +2993,7 @@ def prepare_review_agent_runtime(
         "approval_mode": runtime["approval_mode"],
         "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
         "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
+        "chunkhound_dry_run": chunkhound_dry_run,
         "chunkhound_access_mode": (
             _CURE_CHUNKHOUND_ACCESS_MODE
             if provider in {"codex", "claude"} and bool(runtime["staged_paths"].get("chunkhound_helper"))
@@ -3038,7 +3120,7 @@ def build_codex_resume_command(
     _ = add_dirs
     assignments: list[str] = []
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR"):
+    for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR", "CURE_CHUNKHOUND_DRY_RUN"):
         value = str(env.get(key) or "").strip()
         if value:
             assignments.append(f"{key}={shlex.quote(value)}")

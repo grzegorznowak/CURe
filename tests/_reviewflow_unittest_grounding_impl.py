@@ -346,6 +346,7 @@ class CodexResumeTests(unittest.TestCase):
             env={
                 "GH_CONFIG_DIR": str(session_dir / "work" / "gh_config"),
                 "CURE_WORK_DIR": str(session_dir / "work"),
+                "CURE_CHUNKHOUND_DRY_RUN": "1",
             },
             codex_flags=["-m", "gpt-5.2", "--search", "--sandbox", "danger-full-access"],
             codex_config_overrides=['mcp_servers.chunkhound.command="chunkhound"'],
@@ -355,6 +356,7 @@ class CodexResumeTests(unittest.TestCase):
         self.assertIn(f"cd {repo_dir}", cmd)
         self.assertIn("env GH_CONFIG_DIR=", cmd)
         self.assertIn("CURE_WORK_DIR=", cmd)
+        self.assertIn("CURE_CHUNKHOUND_DRY_RUN=", cmd)
         self.assertIn("codex resume", cmd)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertIn("--add-dir /tmp", cmd)
@@ -7593,6 +7595,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         llm_resolved_override: dict[str, object] | None = None,
         llm_resolution_meta_override: dict[str, object] | None = None,
         runtime_policy_override: dict[str, object] | None = None,
+        extra_cli_args: list[str] | None = None,
     ) -> tuple[Path, list[str]]:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
@@ -7612,18 +7615,19 @@ class CodexToolProofFlowTests(unittest.TestCase):
             encoding="utf-8",
         )
         paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
-        args = rf.build_parser().parse_args(
-            [
-                "pr",
-                "https://github.com/acme/repo/pull/14",
-                "--if-reviewed",
-                "new",
-                "--ui",
-                "off",
-                "--quiet",
-                "--no-stream",
-            ]
-        )
+        cli_args = [
+            "pr",
+            "https://github.com/acme/repo/pull/14",
+            "--if-reviewed",
+            "new",
+            "--ui",
+            "off",
+            "--quiet",
+            "--no-stream",
+        ]
+        if extra_cli_args:
+            cli_args.extend(extra_cli_args)
+        args = rf.build_parser().parse_args(cli_args)
         calls: list[str] = []
         llm_param_count = len(inspect.signature(llm_side_effect).parameters)
         multipass_defaults = (
@@ -8683,6 +8687,56 @@ class CodexToolProofFlowTests(unittest.TestCase):
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, [])
             self.assertEqual(meta["status"], "error")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_dry_run_chunkhound_marks_session_metadata_and_keeps_tool_proof(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_dry_run"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        runtime_policy = self._codex_runtime_policy()
+        runtime_policy["env"] = {
+            "CURE_CHUNKHOUND_HELPER": "/tmp/cure/work/bin/cure-chunkhound",
+            "CURE_CHUNKHOUND_DRY_RUN": "1",
+        }
+        runtime_policy["metadata"] = {
+            "provider": "codex",
+            "chunkhound_access_mode": "cli_helper_daemon",
+            "chunkhound_dry_run": True,
+        }
+        runtime_policy["staged_paths"] = {
+            "chunkhound_helper": "/tmp/cure/work/bin/cure-chunkhound",
+        }
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+            runtime_policy_override=runtime_policy,
+            extra_cli_args=["--dry-run-chunkhound"],
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertTrue(meta["notes"]["dry_run_chunkhound"])
+            self.assertTrue(meta["options"]["dry_run_chunkhound"])
+            self.assertTrue(meta["chunkhound"]["dry_run"])
+            self.assertTrue(meta["agent_runtime"]["chunkhound_dry_run"])
+            self.assertEqual(meta["codex"]["env"]["CURE_CHUNKHOUND_DRY_RUN"], "1")
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

@@ -1651,8 +1651,16 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             "runtime_overrides": {},
         }
 
-    def _runtime_args(self, *, profile: str | None = None) -> argparse.Namespace:
-        return argparse.Namespace(agent_runtime_profile=profile)
+    def _runtime_args(
+        self,
+        *,
+        profile: str | None = None,
+        dry_run_chunkhound: bool = False,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            agent_runtime_profile=profile,
+            dry_run_chunkhound=dry_run_chunkhound,
+        )
 
     def test_prepare_review_agent_runtime_uses_permissive_codex_profile(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex"
@@ -1796,6 +1804,41 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertIn("--dangerously-skip-permissions", cmd)
             self.assertNotIn("--permission-mode", cmd)
             self.assertIn("--add-dir", cmd)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_marks_chunkhound_dry_run_in_env_and_metadata(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_chunkhound_dry_run"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive", dry_run_chunkhound=True),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_DRY_RUN"], "1")
+            self.assertTrue(runtime["metadata"]["chunkhound_dry_run"])
+            self.assertTrue(runtime["config"]["chunkhound_dry_run"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -2669,6 +2712,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             env={
                 "ANTHROPIC_API_KEY": "test-key",  # pragma: allowlist secret
                 "CURE_CHUNKHOUND_HELPER": "/tmp/work/bin/cure-chunkhound",
+                "CURE_CHUNKHOUND_DRY_RUN": "1",
                 "PYTHONSAFEPATH": "1",
             },
             command="claude",
@@ -2676,6 +2720,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         )
 
         self.assertIn("CURE_CHUNKHOUND_HELPER=", command)
+        self.assertIn("CURE_CHUNKHOUND_DRY_RUN=", command)
         self.assertIn("PYTHONSAFEPATH=", command)
         self.assertIn("--resume claude-session-123", command)
 

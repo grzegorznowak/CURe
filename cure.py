@@ -2328,6 +2328,7 @@ def build_claude_resume_command(
             "NETRC",
             "CURE_WORK_DIR",
             "CURE_CHUNKHOUND_HELPER",
+            "CURE_CHUNKHOUND_DRY_RUN",
             "PYTHONSAFEPATH",
         ),
     )
@@ -3199,6 +3200,7 @@ def build_codex_resume_command(
         "JIRA_CONFIG_FILE",
         "NETRC",
         "CURE_WORK_DIR",
+        "CURE_CHUNKHOUND_DRY_RUN",
     ):
         value = str(env.get(key) or "").strip()
         if value:
@@ -7455,6 +7457,10 @@ def _record_chunkhound_access_meta(
             "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
             "helper_env_var": "CURE_CHUNKHOUND_HELPER",
             "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
+            "dry_run": bool(
+                (runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")
+                or str(env.get("CURE_CHUNKHOUND_DRY_RUN") or "").strip()
+            ),
             "preflight_ok": bool(payload.get("ok")),
             "updated_at": _utc_now_iso(),
         }
@@ -8104,6 +8110,7 @@ def _pr_flow_impl(
     prompt_profile_requested = str(getattr(args, "prompt_profile", "auto"))
     big_if_files = int(getattr(args, "big_if_files", 30))
     big_if_lines = int(getattr(args, "big_if_lines", 1500))
+    chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     progress.init(
         {
             "session_id": session_id,
@@ -8133,6 +8140,7 @@ def _pr_flow_impl(
             "notes": {
                 "no_index": bool(args.no_index),
                 "no_review": bool(args.no_review),
+                "dry_run_chunkhound": chunkhound_dry_run,
             },
             "agent_desc": {
                 "source": agent_desc_source,
@@ -8147,6 +8155,7 @@ def _pr_flow_impl(
                 "prompt_profile": prompt_profile_requested,
                 "big_if_files": big_if_files,
                 "big_if_lines": big_if_lines,
+                "dry_run_chunkhound": chunkhound_dry_run,
             },
         }
     )
@@ -8154,6 +8163,7 @@ def _pr_flow_impl(
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
     progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
+    progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
     progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
     progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
@@ -8604,6 +8614,7 @@ def _pr_flow_impl(
                         "NETRC": env.get("NETRC"),
                         "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
                         "CURE_CHUNKHOUND_HELPER": env.get("CURE_CHUNKHOUND_HELPER"),
+                        "CURE_CHUNKHOUND_DRY_RUN": env.get("CURE_CHUNKHOUND_DRY_RUN"),
                     },
                     "helpers": _chunkhound_helper_refs(runtime_policy),
                 }
@@ -8615,6 +8626,9 @@ def _pr_flow_impl(
                 env=env,
                 adapter_meta=adapter_meta,
                 helpers=_chunkhound_helper_refs(runtime_policy),
+            )
+            progress.meta.setdefault("chunkhound", {})["dry_run"] = bool(
+                (runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")
             )
             review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
                 review_intelligence_cfg=review_intelligence_cfg,
@@ -8629,6 +8643,9 @@ def _pr_flow_impl(
                 capability_summary=review_intelligence_capabilities,
             )
             progress.flush()
+
+            if bool((runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")):
+                log("ChunkHound helper: dry-run mode enabled", quiet=quiet)
 
             with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
                 _run_chunkhound_access_preflight(
@@ -14094,6 +14111,11 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--no-index",
         action="store_true",
         help="Advanced opt-out for custom prompt flows: skip ChunkHound indexing and built-in prompts (not recommended)",
+    )
+    prp.add_argument(
+        "--dry-run-chunkhound",
+        action="store_true",
+        help="Use deterministic staged-helper ChunkHound stub responses for `cure pr` without real ChunkHound calls",
     )
     prp.add_argument("--no-review", action="store_true", help="Skip running the built-in review agent")
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")

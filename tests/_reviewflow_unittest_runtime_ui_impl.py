@@ -681,6 +681,86 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_generated_chunkhound_helper_dry_run_returns_contract_valid_stub_payloads(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_dry_run"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            env = os.environ.copy()
+            env["CURE_CHUNKHOUND_DRY_RUN"] = "1"
+
+            preflight = subprocess.run(
+                [str(helper_path), "preflight"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            search = subprocess.run(
+                [str(helper_path), "search", "needle", "--page-size", "3", "--offset", "2"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            research = subprocess.run(
+                [str(helper_path), "research", "cross-file question"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(preflight.returncode, 0)
+            self.assertEqual(search.returncode, 0)
+            self.assertEqual(research.returncode, 0)
+
+            preflight_payload = json.loads(preflight.stdout)
+            self.assertTrue(preflight_payload["ok"])
+            self.assertEqual(preflight_payload["available_tools"], ["search", "code_research"])
+            self.assertEqual(preflight_payload["preflight_stage"], "tools/list")
+            self.assertEqual(preflight_payload["mcp_transport"], "dry_run")
+            self.assertTrue(preflight_payload["dry_run"])
+
+            search_payload = json.loads(search.stdout)
+            self.assertTrue(search_payload["ok"])
+            self.assertEqual(search_payload["tool_name"], "search")
+            self.assertEqual(search_payload["execution_stage"], "tools/call")
+            self.assertEqual(search_payload["result"]["results"], [])
+            self.assertEqual(search_payload["result"]["pagination"]["offset"], 2)
+            self.assertEqual(search_payload["result"]["pagination"]["page_size"], 3)
+            self.assertEqual(search_payload["mcp_transport"], "dry_run")
+            self.assertTrue(search_payload["dry_run"])
+
+            research_payload = json.loads(research.stdout)
+            self.assertTrue(research_payload["ok"])
+            self.assertEqual(research_payload["tool_name"], "code_research")
+            self.assertEqual(research_payload["execution_stage"], "tools/call")
+            self.assertIn("dry-run ChunkHound research stub", research_payload["result"]["summary"])
+            self.assertEqual(research_payload["mcp_transport"], "dry_run")
+            self.assertTrue(research_payload["dry_run"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_generated_chunkhound_helper_ignores_broken_stdout_pipe_during_heartbeat(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_heartbeat_broken_stdout"
         try:
