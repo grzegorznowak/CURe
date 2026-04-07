@@ -165,14 +165,23 @@ def _sanitize_value(
         return {
             str(k): _sanitize_value(v, replacements=replacements, key=str(k), path=path + (str(k),))
             for k, v in value.items()
+            if str(k) != "apiKeySource"
         }
     if isinstance(value, list):
         return [_sanitize_value(item, replacements=replacements, key=key, path=path) for item in value]
     if not isinstance(value, str):
         return value
     text = str(value)
+    if key == "uuid" and text:
+        return "<UUID>"
+    if key == "tool_use_id" and text:
+        return "<CLAUDE_TOOL_USE_ID>"
     if key == "session_id" and text:
         return "<CLAUDE_SESSION_ID>"
+    if key == "id" and text.startswith("msg_"):
+        return "<CLAUDE_MESSAGE_ID>"
+    if key == "id" and text.startswith("toolu_"):
+        return "<CLAUDE_TOOL_USE_ID>"
     stripped = text.strip()
     if stripped.startswith("{") or stripped.startswith("["):
         try:
