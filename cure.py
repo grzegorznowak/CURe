@@ -36,7 +36,7 @@ from typing import Any, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
-from cure_errors import ReviewflowError
+from cure_errors import ReviewflowError, StepGroundingValidationError
 from cure_output import (
     ChunkhoundLiveProgressReporter,
     ReviewflowOutput,
@@ -50,6 +50,8 @@ from cure_output import (
     format_review_artifact_footer,
     normalize_markdown_artifact,
     normalize_markdown_local_refs,
+    prompt_grounding_retry_skip,
+    prompt_resume_grounding_skipped_steps,
     safe_cmd_for_meta,
     set_active_output,
     sha256_text,
@@ -203,6 +205,7 @@ DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
+_MULTIPASS_STEP_GROUNDING_MAX_RETRIES = 1
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
@@ -5289,6 +5292,175 @@ def _validate_or_reuse_synth_artifact(
     return bool(result.get("valid")), result
 
 
+def _grounding_skipped_step_records(
+    meta: dict[str, Any],
+    *,
+    prefer_persisted: bool = False,
+) -> list[dict[str, Any]]:
+    mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    step_states = mp.get("step_states") if isinstance(mp.get("step_states"), list) else []
+    state_records: list[dict[str, Any]] = []
+    for item in step_states:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").strip().lower() != "grounding_skipped":
+            continue
+        state_records.append(
+            {
+                "step_index": int(item.get("step_index") or 0),
+                "step_id": str(item.get("step_id") or "").strip(),
+                "step_title": str(item.get("step_title") or "").strip(),
+                "reason": _grounding_compact_reason(item),
+            }
+        )
+    persisted_records = (
+        mp.get("grounding_skipped_steps")
+        if isinstance(mp.get("grounding_skipped_steps"), list)
+        else []
+    )
+    if prefer_persisted and persisted_records:
+        return [dict(item) for item in persisted_records if isinstance(item, dict)]
+    if step_states:
+        return state_records
+    if persisted_records:
+        return [dict(item) for item in persisted_records if isinstance(item, dict)]
+    return []
+
+
+def _grounding_skipped_step_ids(meta: dict[str, Any]) -> set[str]:
+    skipped: set[str] = set()
+    for item in _grounding_skipped_step_records(meta):
+        step_id = str(item.get("step_id") or "").strip()
+        if step_id:
+            skipped.add(step_id)
+    return skipped
+
+
+def _grounding_compact_reason(validation: dict[str, Any] | None) -> str:
+    if isinstance(validation, dict):
+        for key in ("grounding_reason", "reason"):
+            text = " ".join(str(validation.get(key) or "").strip().split())
+            if text:
+                return text
+    errors = validation.get("errors") if isinstance(validation, dict) else []
+    if isinstance(errors, list):
+        for item in errors:
+            text = " ".join(str(item or "").strip().split())
+            if text:
+                return text
+    return "strict grounding validation failed"
+
+
+def _record_grounding_attempt(
+    *,
+    validation: dict[str, Any] | None,
+    attempt_number: int,
+) -> dict[str, Any]:
+    payload = dict(validation) if isinstance(validation, dict) else {}
+    return {
+        "attempt_number": int(attempt_number),
+        "reason": _grounding_compact_reason(payload),
+        "validation": payload,
+    }
+
+
+def _build_grounding_skipped_record(
+    *,
+    entry: MultipassStepEntry,
+    attempts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    first = attempts[0] if attempts else {}
+    validation = first.get("validation") if isinstance(first, dict) else None
+    validation = validation if isinstance(validation, dict) else None
+    return {
+        "step_index": int(entry.index),
+        "step_id": entry.step_id,
+        "step_title": entry.step_title,
+        "reason": _grounding_compact_reason(validation),
+    }
+
+
+def _persist_grounding_summary(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+) -> list[str]:
+    mp = meta.setdefault("multipass", {})
+    current_skipped_records = _grounding_skipped_step_records(meta)
+    skipped_by_id = {
+        str(item.get("step_id") or "").strip(): dict(item)
+        for item in current_skipped_records
+        if str(item.get("step_id") or "").strip()
+    }
+    synth_outputs: list[str] = []
+    for entry in step_entries:
+        if entry.step_id not in skipped_by_id:
+            synth_outputs.append(str(entry.output_path))
+    skipped_records = [
+        skipped_by_id[entry.step_id]
+        for entry in step_entries
+        if entry.step_id in skipped_by_id
+    ]
+    artifacts = mp.setdefault("artifacts", {})
+    artifacts["step_outputs"] = [str(entry.output_path) for entry in step_entries]
+    artifacts["synth_step_outputs"] = list(synth_outputs)
+    mp["grounding_skipped_steps"] = skipped_records
+    mp["grounding_skipped_step_count"] = len(skipped_records)
+    mp["grounding_partial_synthesis"] = bool(skipped_records) and bool(synth_outputs)
+    mp["grounding_valid_step_count"] = len(synth_outputs)
+    return synth_outputs
+
+
+def _grounding_skipped_prompt_text(skipped_records: list[dict[str, Any]]) -> str:
+    if not skipped_records:
+        return "- None."
+    lines = []
+    for item in skipped_records:
+        step_id = str(item.get("step_id") or "").strip()
+        title = str(item.get("step_title") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        label = step_id
+        if title:
+            label = f"{label} — {title}" if label else title
+        detail = f" ({reason})" if reason else ""
+        lines.append(f"- {label}{detail}")
+    return "\n".join(lines)
+
+
+def _resolve_resume_grounding_skip_choice(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+    ui_enabled: bool,
+) -> str:
+    prior_skipped_by_id = {
+        str(item.get("step_id") or "").strip(): dict(item)
+        for item in _grounding_skipped_step_records(meta, prefer_persisted=True)
+        if str(item.get("step_id") or "").strip()
+    }
+    if not prior_skipped_by_id:
+        return ""
+    skipped_records = []
+    for entry in step_entries:
+        if entry.step_id not in prior_skipped_by_id:
+            continue
+        persisted = prior_skipped_by_id[entry.step_id]
+        skipped_records.append(
+            {
+                "step_id": entry.step_id,
+                "step_title": entry.step_title,
+                "reason": str(persisted.get("reason") or "").strip(),
+            }
+        )
+    if not skipped_records:
+        return ""
+    if ui_enabled:
+        choice = prompt_resume_grounding_skipped_steps(skipped_records=skipped_records)
+        if choice in {"rerun", "keep"}:
+            return choice
+    return "rerun"
+
+
 def _update_multipass_step_progress(meta: dict[str, Any]) -> None:
     mp = meta.setdefault("multipass", {})
     states = mp.get("step_states")
@@ -5306,13 +5478,13 @@ def _update_multipass_step_progress(meta: dict[str, Any]) -> None:
         title = str(item.get("step_title") or "").strip()
         if status == "queued":
             queued += 1
-        elif status in {"running", "awaiting_validation"}:
+        elif status in {"running", "awaiting_validation", "retrying_grounding"}:
             running += 1
             if title:
                 active_titles.append(title)
         elif status in {"completed", "reused"}:
             completed += 1
-        elif status in {"failed", "canceled"}:
+        elif status in {"failed", "canceled", "grounding_skipped"}:
             failed += 1
         else:
             queued += 1
@@ -5353,6 +5525,9 @@ def _set_multipass_step_state(
     finished_at: str | None = None,
     duration_seconds: float | None = None,
     error: str | None = None,
+    grounding_reason: str | None = None,
+    grounding_attempts: list[dict[str, Any]] | None = None,
+    grounding_retried: bool | None = None,
 ) -> None:
     mp = meta.setdefault("multipass", {})
     states = mp.setdefault("step_states", [])
@@ -5382,8 +5557,16 @@ def _set_multipass_step_state(
         state["duration_seconds"] = float(duration_seconds)
     if error is not None:
         state["error"] = error
-    elif status not in {"failed", "canceled"}:
+    elif status not in {"failed", "canceled", "grounding_skipped"}:
         state.pop("error", None)
+    if grounding_reason is not None:
+        state["grounding_reason"] = grounding_reason
+    elif status not in {"retrying_grounding", "grounding_skipped"}:
+        state.pop("grounding_reason", None)
+    if grounding_attempts is not None:
+        state["grounding_attempts"] = list(grounding_attempts)
+    if grounding_retried is not None:
+        state["grounding_retried"] = bool(grounding_retried)
     _update_multipass_step_progress(meta)
 
 
@@ -5683,6 +5866,18 @@ def _ensure_multipass_run_entry(
     return run_entry
 
 
+def _find_multipass_step_run_entry(meta: dict[str, Any], *, step_index: int) -> dict[str, Any] | None:
+    for item in meta.setdefault("multipass", {}).setdefault("runs", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip() != "step":
+            continue
+        if int(item.get("step_index") or 0) != int(step_index):
+            continue
+        return item
+    return None
+
+
 def _run_multipass_step_llm(
     *,
     entry: MultipassStepEntry,
@@ -5830,8 +6025,9 @@ def _finalize_multipass_step_result(
                 validation=step_validation,
                 resume_from="steps",
             )
-            raise ReviewflowError(
-                f"Multipass step grounding validation failed for {entry.output_path.name}."
+            raise StepGroundingValidationError(
+                f"Multipass step grounding validation failed for {entry.output_path.name}.",
+                step_validation=step_validation,
             )
         _set_multipass_step_state(
             progress.meta,
@@ -5862,13 +6058,16 @@ def _execute_multipass_step_stage(
     templates: dict[str, str],
     codex_meta: dict[str, Any] | None,
     quiet: bool,
+    ui_enabled: bool = False,
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
-) -> str | None:
+) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
     effective_workers = min(max(1, step_worker_count), len(runnable_entries)) if runnable_entries else 0
     success_resume_command: str | None = None
+    skipped_ids = _grounding_skipped_step_ids(progress.meta)
+    skipped_records: list[dict[str, Any]] = []
 
     with progress.mutate():
         mp = progress.meta.setdefault("multipass", {})
@@ -5884,15 +6083,19 @@ def _execute_multipass_step_stage(
                     "step_title": entry.step_title,
                     "step_focus": entry.step_focus,
                     "output_path": str(entry.output_path),
-                    "status": ("queued" if entry.should_run else "reused"),
-                    "reusable": bool(not entry.should_run),
+                    "status": (
+                        "queued"
+                        if entry.should_run
+                        else ("grounding_skipped" if entry.step_id in skipped_ids else "reused")
+                    ),
+                    "reusable": bool((not entry.should_run) and (entry.step_id not in skipped_ids)),
                 }
             )
         mp["step_states"] = states
         _update_multipass_step_progress(progress.meta)
 
     if not runnable_entries:
-        return success_resume_command
+        return success_resume_command, skipped_records
 
     worker_stream = stream if effective_workers <= 1 else False
     future_to_entry: dict[Future[MultipassStepRunResult], MultipassStepEntry] = {}
@@ -5944,35 +6147,159 @@ def _execute_multipass_step_stage(
         raw_result = raw_results.get(entry.index)
         if raw_result is None:
             continue
-        try:
-            success_resume_command = _finalize_multipass_step_result(
-                progress=progress,
-                work_dir=work_dir,
-                repo_dir=repo_dir,
-                grounding_mode=grounding_mode,
-                entry=entry,
-                step_result=raw_result.llm_result,
-                duration_seconds=raw_result.duration_seconds,
-                provider=str(llm_resolved.get("provider") or ""),
-                templates=templates,
-                codex_meta=codex_meta,
-                review_stage=review_stage,
-                prompt_template_name=prompt_template_name,
-            ) or success_resume_command
-        except Exception as exc:
-            with progress.mutate():
-                _set_multipass_step_state(
-                    progress.meta,
+        current_result = raw_result
+        grounding_attempts: list[dict[str, Any]] = []
+        while True:
+            try:
+                success_resume_command = _finalize_multipass_step_result(
+                    progress=progress,
+                    work_dir=work_dir,
+                    repo_dir=repo_dir,
+                    grounding_mode=grounding_mode,
                     entry=entry,
-                    status="failed",
-                    reusable=False,
-                    finished_at=_utc_now_iso(),
-                    duration_seconds=raw_result.duration_seconds,
-                    error=str(exc),
+                    step_result=current_result.llm_result,
+                    duration_seconds=current_result.duration_seconds,
+                    provider=str(llm_resolved.get("provider") or ""),
+                    templates=templates,
+                    codex_meta=codex_meta,
+                    review_stage=review_stage,
+                    prompt_template_name=prompt_template_name,
+                ) or success_resume_command
+                with progress.mutate():
+                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                    if grounding_attempts:
+                        if run_entry is None:
+                            raise ReviewflowError(
+                                f"Missing multipass run entry for step {entry.index:02d}."
+                            )
+                        run_entry["grounding_retried"] = True
+                        run_entry["grounding_attempts"] = list(grounding_attempts)
+                        run_entry["first_grounding_failure_validation"] = dict(
+                            grounding_attempts[0].get("validation") or {}
+                        )
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="completed",
+                            reusable=True,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                break
+            except StepGroundingValidationError as exc:
+                attempt = _record_grounding_attempt(
+                    validation=exc.step_validation,
+                    attempt_number=len(grounding_attempts) + 1,
                 )
-                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
-            if first_error is None:
-                first_error = exc
+                grounding_attempts.append(attempt)
+                choice = ""
+                if ui_enabled:
+                    choice = prompt_grounding_retry_skip(
+                        step_id=entry.step_id,
+                        step_title=entry.step_title,
+                        attempt_count=len(grounding_attempts),
+                        validation=exc.step_validation,
+                    )
+                if choice == "retry":
+                    with progress.mutate():
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="retrying_grounding",
+                            reusable=False,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_reason=attempt["reason"],
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                    current_result = _run_multipass_step_llm(
+                        entry=entry,
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        llm_resolved=llm_resolved,
+                        llm_resolution_meta=llm_resolution_meta,
+                        env=env,
+                        stream=worker_stream,
+                        add_dirs=add_dirs,
+                        runtime_policy=runtime_policy,
+                        quiet=quiet,
+                    )
+                    continue
+                if choice != "skip" and len(grounding_attempts) <= _MULTIPASS_STEP_GROUNDING_MAX_RETRIES:
+                    log(
+                        f"Retrying multipass grounding step {entry.step_id or entry.index:>02}: {attempt['reason']}",
+                        quiet=quiet,
+                    )
+                    with progress.mutate():
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="retrying_grounding",
+                            reusable=False,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_reason=attempt["reason"],
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                    current_result = _run_multipass_step_llm(
+                        entry=entry,
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        llm_resolved=llm_resolved,
+                        llm_resolution_meta=llm_resolution_meta,
+                        env=env,
+                        stream=worker_stream,
+                        add_dirs=add_dirs,
+                        runtime_policy=runtime_policy,
+                        quiet=quiet,
+                    )
+                    continue
+                skipped_record = _build_grounding_skipped_record(entry=entry, attempts=grounding_attempts)
+                skipped_records.append(skipped_record)
+                with progress.mutate():
+                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                    if run_entry is None:
+                        raise ReviewflowError(
+                            f"Missing multipass run entry for step {entry.index:02d}."
+                        )
+                    run_entry["grounding_retried"] = bool(len(grounding_attempts) > 1)
+                    run_entry["grounding_attempts"] = list(grounding_attempts)
+                    run_entry["first_grounding_failure_validation"] = dict(
+                        grounding_attempts[0].get("validation") or {}
+                    )
+                    run_entry["grounding_skipped"] = True
+                    _set_multipass_step_state(
+                        progress.meta,
+                        entry=entry,
+                        status="grounding_skipped",
+                        reusable=False,
+                        finished_at=_utc_now_iso(),
+                        duration_seconds=current_result.duration_seconds,
+                        error=skipped_record["reason"],
+                        grounding_reason=skipped_record["reason"],
+                        grounding_attempts=grounding_attempts,
+                        grounding_retried=bool(len(grounding_attempts) > 1),
+                    )
+                break
+            except Exception as exc:
+                with progress.mutate():
+                    _set_multipass_step_state(
+                        progress.meta,
+                        entry=entry,
+                        status="failed",
+                        reusable=False,
+                        finished_at=_utc_now_iso(),
+                        duration_seconds=current_result.duration_seconds,
+                        error=str(exc),
+                    )
+                    progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+                if first_error is None:
+                    first_error = exc
+                break
 
     with progress.mutate():
         if first_error is None:
@@ -5985,7 +6312,7 @@ def _execute_multipass_step_stage(
         if isinstance(first_error, ReviewflowSubprocessError):
             _eprint(f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}")
         raise first_error
-    return success_resume_command
+    return success_resume_command, skipped_records
 
 
 def require_gh_auth(host: str) -> None:
@@ -7998,6 +8325,7 @@ def _pr_flow_impl(
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
+    ui_mode = str(getattr(args, "ui", "auto") or "auto").strip().lower()
     ui_enabled = resolve_ui_enabled(args, verbosity=verbosity)
     stream = (not quiet) and (not no_stream)
 
@@ -8896,7 +9224,7 @@ def _pr_flow_impl(
                         stage_llm_meta=step_llm["meta"],
                     )
                     with phase("codex_steps", progress=progress, quiet=quiet):
-                        success_resume_command = _execute_multipass_step_stage(
+                        step_resume_command, _ = _execute_multipass_step_stage(
                             progress=progress,
                             work_dir=work_dir,
                             repo_dir=repo_dir,
@@ -8917,20 +9245,42 @@ def _pr_flow_impl(
                             templates=templates,
                             codex_meta=codex_meta,
                             quiet=quiet,
-                        ) or success_resume_command
+                            ui_enabled=ui_enabled,
+                        )
+                        success_resume_command = step_resume_command or success_resume_command
 
-                    step_outputs = [str(entry.output_path) for entry in step_entries]
+                    synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
+                    skipped_prompt_text = _grounding_skipped_prompt_text(
+                        progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
+                        if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
+                        else []
+                    )
+                    if not synth_step_outputs:
+                        progress.meta["status"] = "error"
+                        progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+                        _emit_multipass_grounding_failure_playbook(
+                            meta=progress.meta,
+                            session_id=session_id,
+                            session_dir=session_dir,
+                            work_dir=work_dir,
+                            artifact_path=review_md_path,
+                            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
+                            resume_from="steps",
+                        )
+                        raise ReviewflowError(
+                            "All multipass steps were grounding-skipped; review synthesis cannot continue."
+                        )
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
-                        "step_index": int(len(step_outputs)),
-                        "step_count": int(len(step_outputs)),
+                        "step_index": int(len(synth_step_outputs)),
+                        "step_count": int(len(step_entries)),
                         "step_title": "synth",
                     }
                     progress.flush()
 
                     with phase("codex_synth", progress=progress, quiet=quiet):
                         synth_template = load_builtin_prompt_text(templates["synth"])
-                        step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
+                        step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                         synth_prompt = render_prompt(
                             synth_template,
                             base_ref_for_review=base_ref_for_review,
@@ -8949,6 +9299,7 @@ def _pr_flow_impl(
                                 ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
+                                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                             },
                         )
                         synth_run_entry = _ensure_multipass_run_entry(
@@ -9014,7 +9365,7 @@ def _pr_flow_impl(
                             work_dir=work_dir,
                             grounding_mode=grounding_mode,
                             artifact_path=review_md_path,
-                            step_outputs=[Path(item) for item in step_outputs],
+                            step_outputs=[Path(item) for item in synth_step_outputs],
                             repo_dir=repo_dir,
                         )
                         progress.flush()
@@ -9212,6 +9563,7 @@ def _run_incremental_completed_multipass_resume(
     grounding_mode: str,
     codex_meta: dict[str, Any] | None,
     quiet: bool,
+    ui_enabled: bool,
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
 ) -> str | None:
@@ -9441,11 +9793,41 @@ def _run_incremental_completed_multipass_resume(
             )
     progress.flush()
 
+    resume_skip_choice = _resolve_resume_grounding_skip_choice(
+        meta=progress.meta,
+        step_entries=step_entries,
+        ui_enabled=ui_enabled,
+    )
+    prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+    if resume_skip_choice:
+        resume_meta["grounding_skipped_override"] = {
+            "choice": resume_skip_choice,
+            "step_ids": sorted(prior_skipped_ids),
+            "planner_requested_reopen_step_ids": sorted(requested_reopen_step_ids),
+        }
+        updated_entries: list[MultipassStepEntry] = []
+        for entry in step_entries:
+            should_run = entry.should_run
+            if entry.step_id in prior_skipped_ids:
+                should_run = resume_skip_choice == "rerun"
+            updated_entries.append(
+                MultipassStepEntry(
+                    index=entry.index,
+                    step_id=entry.step_id,
+                    step_title=entry.step_title,
+                    step_focus=entry.step_focus,
+                    output_path=entry.output_path,
+                    prompt=entry.prompt,
+                    should_run=should_run,
+                )
+            )
+        step_entries = updated_entries
+
     step_outputs = [str(entry.output_path) for entry in step_entries]
     step_reran = any(entry.should_run for entry in step_entries)
     if step_reran:
         _record_multipass_stage_llm(meta=progress.meta, stage_name="step", stage_llm_meta=step_llm["meta"])
-        success_resume_command = _execute_multipass_step_stage(
+        step_resume_command, _ = _execute_multipass_step_stage(
             progress=progress,
             work_dir=work_dir,
             repo_dir=repo_dir,
@@ -9462,11 +9844,14 @@ def _run_incremental_completed_multipass_resume(
             templates={"step": templates["resume_step"]},
             codex_meta=codex_meta,
             quiet=quiet,
+            ui_enabled=ui_enabled,
             review_stage="multipass_resume_step",
             prompt_template_name=templates["resume_step"],
-        ) or success_resume_command
+        )
+        success_resume_command = step_resume_command or success_resume_command
     else:
         with progress.mutate():
+            skipped_ids = _grounding_skipped_step_ids(progress.meta)
             progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})["step_outputs"] = list(step_outputs)
             progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
             progress.meta.setdefault("multipass", {})["step_states"] = [
@@ -9476,13 +9861,32 @@ def _run_incremental_completed_multipass_resume(
                     "step_title": entry.step_title,
                     "step_focus": entry.step_focus,
                     "output_path": str(entry.output_path),
-                    "status": "reused",
-                    "reusable": True,
+                    "status": ("grounding_skipped" if entry.step_id in skipped_ids else "reused"),
+                    "reusable": bool(entry.step_id not in skipped_ids),
                 }
                 for entry in step_entries
             ]
             progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
             _update_multipass_step_progress(progress.meta)
+    synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
+    skipped_prompt_text = _grounding_skipped_prompt_text(
+        progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
+        if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
+        else []
+    )
+    if not synth_step_outputs:
+        progress.meta["status"] = "error"
+        progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+        _emit_multipass_grounding_failure_playbook(
+            meta=progress.meta,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            artifact_path=review_md_path,
+            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
+            resume_from="steps",
+        )
+        raise ReviewflowError("All multipass steps were grounding-skipped; review synthesis cannot continue.")
 
     progress.meta.setdefault("multipass", {})["current"] = {
         "stage": "resume_synth",
@@ -9492,7 +9896,7 @@ def _run_incremental_completed_multipass_resume(
     }
     progress.flush()
     with phase("codex_resume_synth", progress=progress, quiet=quiet):
-        step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs) if step_outputs else "- None."
+        step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs) if synth_step_outputs else "- None."
         synth_prompt = render_prompt(
             load_builtin_prompt_text(templates["resume_synth"]),
             base_ref_for_review=base_ref_for_review,
@@ -9514,6 +9918,7 @@ def _run_incremental_completed_multipass_resume(
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "STEP_OUTPUT_PATHS": step_paths_text,
+                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
             },
         )
         synth_run_entry = _ensure_multipass_run_entry(
@@ -9569,7 +9974,7 @@ def _run_incremental_completed_multipass_resume(
             work_dir=work_dir,
             grounding_mode=grounding_mode,
             artifact_path=review_md_path,
-            step_outputs=[Path(item) for item in step_outputs],
+            step_outputs=[Path(item) for item in synth_step_outputs],
             repo_dir=repo_dir,
         )
         progress.flush()
@@ -9610,6 +10015,7 @@ def _resume_flow_impl(
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
+    ui_mode = str(getattr(args, "ui", "auto") or "auto").strip().lower()
     ui_enabled = resolve_ui_enabled(args, verbosity=verbosity)
     stream = (not quiet) and (not no_stream)
 
@@ -10046,6 +10452,7 @@ def _resume_flow_impl(
                 ),
                 codex_meta=codex_meta,
                 quiet=quiet,
+                ui_enabled=ui_enabled,
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
             )
@@ -10305,6 +10712,37 @@ def _resume_flow_impl(
                 )
         progress.flush()
 
+        resume_skip_choice = _resolve_resume_grounding_skip_choice(
+            meta=progress.meta,
+            step_entries=step_entries,
+            ui_enabled=ui_enabled,
+        )
+        prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+        if resume_skip_choice:
+            progress.meta.setdefault("multipass", {}).setdefault("resume", {})[
+                "grounding_skipped_override"
+            ] = {
+                "choice": resume_skip_choice,
+                "step_ids": sorted(prior_skipped_ids),
+            }
+            updated_entries: list[MultipassStepEntry] = []
+            for entry in step_entries:
+                should_run = entry.should_run
+                if entry.step_id in prior_skipped_ids:
+                    should_run = resume_skip_choice == "rerun"
+                updated_entries.append(
+                    MultipassStepEntry(
+                        index=entry.index,
+                        step_id=entry.step_id,
+                        step_title=entry.step_title,
+                        step_focus=entry.step_focus,
+                        output_path=entry.output_path,
+                        prompt=entry.prompt,
+                        should_run=should_run,
+                    )
+                )
+            step_entries = updated_entries
+
         step_outputs = [str(entry.output_path) for entry in step_entries]
         step_reran = any(entry.should_run for entry in step_entries)
         if step_reran:
@@ -10315,7 +10753,7 @@ def _resume_flow_impl(
                 stage_llm_meta=step_llm["meta"],
             )
             with phase("codex_steps", progress=progress, quiet=quiet):
-                success_resume_command = _execute_multipass_step_stage(
+                step_resume_command, _ = _execute_multipass_step_stage(
                     progress=progress,
                     work_dir=work_dir,
                     repo_dir=repo_dir,
@@ -10336,9 +10774,12 @@ def _resume_flow_impl(
                     templates=templates,
                     codex_meta=codex_meta,
                     quiet=quiet,
-                ) or success_resume_command
+                    ui_enabled=ui_enabled,
+                )
+                success_resume_command = step_resume_command or success_resume_command
         else:
             with progress.mutate():
+                skipped_ids = _grounding_skipped_step_ids(progress.meta)
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
                     "step_outputs"
                 ] = list(step_outputs)
@@ -10350,13 +10791,33 @@ def _resume_flow_impl(
                         "step_title": entry.step_title,
                         "step_focus": entry.step_focus,
                         "output_path": str(entry.output_path),
-                        "status": "reused",
-                        "reusable": True,
+                        "status": ("grounding_skipped" if entry.step_id in skipped_ids else "reused"),
+                        "reusable": bool(entry.step_id not in skipped_ids),
                     }
                     for entry in step_entries
                 ]
                 progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
                 _update_multipass_step_progress(progress.meta)
+
+        synth_step_outputs = _persist_grounding_summary(meta=progress.meta, step_entries=step_entries)
+        skipped_prompt_text = _grounding_skipped_prompt_text(
+            progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps")
+            if isinstance(progress.meta.setdefault("multipass", {}).get("grounding_skipped_steps"), list)
+            else []
+        )
+        if not synth_step_outputs:
+            progress.meta["status"] = "error"
+            progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+            _emit_multipass_grounding_failure_playbook(
+                meta=progress.meta,
+                session_id=session_id,
+                session_dir=session_dir,
+                work_dir=work_dir,
+                artifact_path=review_md_path,
+                validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
+                resume_from="steps",
+            )
+            raise ReviewflowError("All multipass steps were grounding-skipped; review synthesis cannot continue.")
 
         should_synth = (
             from_phase in {"synth", "plan", "steps"}
@@ -10369,7 +10830,7 @@ def _resume_flow_impl(
                 work_dir=work_dir,
                 grounding_mode=grounding_mode,
                 artifact_path=review_md_path,
-                step_outputs=[Path(item) for item in step_outputs],
+                step_outputs=[Path(item) for item in synth_step_outputs],
                 repo_dir=repo_dir,
             )
             progress.flush()
@@ -10385,7 +10846,7 @@ def _resume_flow_impl(
             with phase("codex_synth", progress=progress, quiet=quiet):
                 did_work = True
                 synth_template = load_builtin_prompt_text(templates["synth"])
-                step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
+                step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                 synth_prompt = render_prompt(
                     synth_template,
                     base_ref_for_review=base_ref_for_review,
@@ -10404,6 +10865,7 @@ def _resume_flow_impl(
                         ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
+                        "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                     },
                 )
                 synth_run_entry = _ensure_multipass_run_entry(
@@ -10465,7 +10927,7 @@ def _resume_flow_impl(
                     work_dir=work_dir,
                     grounding_mode=grounding_mode,
                     artifact_path=review_md_path,
-                    step_outputs=[Path(item) for item in step_outputs],
+                    step_outputs=[Path(item) for item in synth_step_outputs],
                     repo_dir=repo_dir,
                 )
                 progress.flush()

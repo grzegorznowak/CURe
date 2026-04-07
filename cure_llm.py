@@ -95,7 +95,7 @@ class CodexRunResult:
     events_end_offset: int | None = None
 
 
-_LIVE_PROGRESS_TIMELINE_MAX = 8
+_LIVE_PROGRESS_TIMELINE_MAX = 12
 _CURE_CHUNKHOUND_HELPER_ENV = "CURE_CHUNKHOUND_HELPER"
 _CURE_CHUNKHOUND_DRY_RUN_ENV = "CURE_CHUNKHOUND_DRY_RUN"
 _CURE_CHUNKHOUND_ACCESS_MODE = "cli_helper_daemon"
@@ -169,22 +169,64 @@ def _looks_like_pathish_progress_line(text: str) -> bool:
     return False
 
 
-def _summarize_claude_tool_result(tool_result: dict[str, Any] | None) -> str:
+def _summarize_claude_text_block(text: object) -> str:
+    compact = _compact_live_progress_text(text, max_chars=120)
+    if not compact:
+        return ""
+    match = re.search(r"(.+?[.!?])(?:\s|$)", compact)
+    if match:
+        return _compact_live_progress_text(match.group(1), max_chars=120)
+    return compact
+
+
+def _summarize_claude_tool_result(
+    tool_result: dict[str, Any] | None,
+    *,
+    tool_name: str | None = None,
+    tool_input_payload: str | None = None,
+    bash_command: str | None = None,
+) -> str:
     payload = tool_result if isinstance(tool_result, dict) else {}
+    name = str(tool_name or "").strip()
+    raw_input = str(tool_input_payload or "").strip()
+    context = ""
+    parsed_input = None
+    if raw_input:
+        try:
+            parsed_input = json.loads(raw_input)
+        except Exception:
+            parsed_input = None
+    if name == "Bash":
+        command = str(bash_command or "").strip()
+        if not command and isinstance(parsed_input, dict):
+            command = str(parsed_input.get("command") or "").strip()
+        if command:
+            context = command
+    elif name == "Read" and isinstance(parsed_input, dict):
+        file_path = str(parsed_input.get("file_path") or parsed_input.get("path") or "").strip()
+        offset = parsed_input.get("offset")
+        limit = parsed_input.get("limit")
+        if file_path:
+            context = file_path
+            if isinstance(offset, int) and isinstance(limit, int) and limit > 0:
+                context = f"{context}:{offset + 1}-{offset + limit}"
     for key in ("stdout", "stderr"):
         source = str(payload.get(key) or "")
         for raw_line in source.splitlines():
+            raw_line = str(raw_line or "").strip()
+            if not raw_line:
+                continue
+            if _looks_like_json_payload_line(raw_line):
+                continue
             line = _compact_live_progress_text(raw_line)
-            if not line:
-                continue
-            if _looks_like_json_payload_line(line):
-                continue
             if _looks_like_pathish_progress_line(line):
                 continue
             if re.fullmatch(r"[#*_`~=\-]{3,}", line):
                 continue
-            return line
-    return ""
+            if context and line != context:
+                return f"{context} - {line}"
+            return context or line
+    return context
 
 
 def _ensure_text_cli_live_progress(*, progress: Any, provider: str, label: str) -> None:
@@ -409,7 +451,7 @@ def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
     name = str(tool_name or "Tool").strip() or "Tool"
     raw = str(input_payload or "").strip()
     if not raw:
-        return f"Using {name}"
+        return ""
     try:
         parsed = json.loads(raw)
     except Exception:
@@ -423,7 +465,7 @@ def _format_claude_tool_progress(*, tool_name: str, input_payload: str) -> str:
             return f"{name}: {description}"
         if command:
             return f"{name}: {command}"
-    return f"Using {name}"
+    return ""
 
 
 def _is_chunkhound_helper_payload(payload: object) -> bool:
@@ -488,6 +530,31 @@ def _extract_claude_tool_result_blocks(payload: dict[str, Any]) -> list[dict[str
     return results
 
 
+def _extract_claude_tool_use_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    message = payload.get("message")
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    results: list[dict[str, Any]] = []
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() == "tool_use":
+            results.append(item)
+    return results
+
+
+def _extract_claude_tool_use_id(payload: dict[str, Any]) -> str:
+    tool_use_id = str(payload.get("tool_use_id") or "").strip()
+    if tool_use_id:
+        return tool_use_id
+    for block in _extract_claude_tool_result_blocks(payload):
+        tool_use_id = str(block.get("tool_use_id") or "").strip()
+        if tool_use_id:
+            return tool_use_id
+    return ""
+
+
 def _extract_claude_tool_result_text(block: dict[str, Any]) -> str:
     content = block.get("content")
     if isinstance(content, str):
@@ -542,7 +609,10 @@ def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: 
 
 
 def _append_claude_chunkhound_tool_proof_from_output_file(
-    *, state: dict[str, Any], output_file: object, tool_use_id: str | None
+    *,
+    state: dict[str, Any],
+    output_file: object,
+    tool_use_id: str | None,
 ) -> bool:
     output_path_text = str(output_file or "").strip()
     if not output_path_text:
@@ -559,7 +629,11 @@ def _append_claude_chunkhound_tool_proof_from_output_file(
     except OSError:
         return False
     seen_files.add(key)
-    _append_claude_chunkhound_tool_proof(state=state, stdout_text=output_text, tool_use_id=tool_use_id)
+    _append_claude_chunkhound_tool_proof(
+        state=state,
+        stdout_text=output_text,
+        tool_use_id=tool_use_id,
+    )
     return True
 
 
@@ -587,6 +661,40 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     tool_use_id=str(payload.get("tool_use_id") or "").strip() or None,
                 )
             continue
+        if payload_type == "assistant":
+            for tool_use_block in _extract_claude_tool_use_blocks(payload):
+                tool_use_id = str(tool_use_block.get("id") or "").strip()
+                tool_name = str(tool_use_block.get("name") or "Tool").strip() or "Tool"
+                input_payload = tool_use_block.get("input")
+                input_text = json.dumps(input_payload) if isinstance(input_payload, dict) else str(input_payload or "")
+                if not tool_use_id:
+                    continue
+                for key, value in list(state.items()):
+                    if not key.startswith("block_") or not key.endswith("_tool_use_id"):
+                        continue
+                    if str(value or "").strip() != tool_use_id:
+                        continue
+                    block_key = key[: -len("_tool_use_id")]
+                    state[f"{block_key}_name"] = tool_name
+                    state[f"{block_key}_input"] = input_text
+                    break
+                raw_commands = state.setdefault("bash_tool_commands_by_id", {})
+                commands_by_id = raw_commands if isinstance(raw_commands, dict) else {}
+                if raw_commands is not commands_by_id:
+                    state["bash_tool_commands_by_id"] = commands_by_id
+                if tool_name == "Bash":
+                    try:
+                        parsed_input = json.loads(input_text)
+                    except Exception:
+                        parsed_input = None
+                    if isinstance(parsed_input, dict):
+                        command_text = str(parsed_input.get("command") or "").strip()
+                        if command_text:
+                            commands_by_id[tool_use_id] = command_text
+                current = _format_claude_tool_progress(tool_name=tool_name, input_payload=input_text)
+                if current:
+                    _set_text_cli_live_current(progress=progress, provider="claude", text=current)
+            continue
         if payload_type == "user":
             tool_result = payload.get("tool_use_result")
             top_level_stdout = tool_result.get("stdout") if isinstance(tool_result, dict) else None
@@ -607,7 +715,29 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     "Claude tool_result contract mismatch: helper payload was present in tool_use_result stdout "
                     "without a documented message.content tool_result block."
                 )
-            summary = _summarize_claude_tool_result(tool_result if isinstance(tool_result, dict) else None)
+            tool_use_id = _extract_claude_tool_use_id(payload)
+            raw_commands = state.setdefault("bash_tool_commands_by_id", {})
+            commands_by_id = raw_commands if isinstance(raw_commands, dict) else {}
+            if raw_commands is not commands_by_id:
+                state["bash_tool_commands_by_id"] = commands_by_id
+            tool_name = ""
+            tool_input = ""
+            if tool_use_id:
+                for key, value in state.items():
+                    if not key.startswith("block_") or not key.endswith("_tool_use_id"):
+                        continue
+                    if str(value or "").strip() != tool_use_id:
+                        continue
+                    block_key = key[: -len("_tool_use_id")]
+                    tool_name = str(state.get(f"{block_key}_name") or "").strip()
+                    tool_input = str(state.get(f"{block_key}_input") or "")
+                    break
+            summary = _summarize_claude_tool_result(
+                tool_result if isinstance(tool_result, dict) else None,
+                tool_name=tool_name,
+                tool_input_payload=tool_input,
+                bash_command=str(commands_by_id.get(tool_use_id) or "").strip() or None,
+            )
             if summary:
                 _set_text_cli_live_current(
                     progress=progress,
@@ -621,7 +751,8 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
         event = payload.get("event")
         event = event if isinstance(event, dict) else {}
         event_type = str(event.get("type") or "").strip()
-        index = str(event.get("index") or "")
+        raw_index = event.get("index")
+        index = "" if raw_index is None else str(raw_index)
         block_key = f"block_{index}" if index else ""
         if event_type == "content_block_start":
             content_block = event.get("content_block")
@@ -632,13 +763,6 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
             if block_type == "thinking":
                 if block_key:
                     state[f"{block_key}_text"] = ""
-                _set_text_cli_live_current(
-                    progress=progress,
-                    provider="claude",
-                    text="Thinking…",
-                    event_type="provider_status",
-                    add_timeline=True,
-                )
             elif block_type == "tool_use":
                 tool_name = str(content_block.get("name") or "Tool").strip() or "Tool"
                 if block_key:
@@ -651,8 +775,24 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     text=f"Using {tool_name}",
                     add_timeline=True,
                 )
-            elif block_type == "text" and block_key:
-                state[f"{block_key}_text"] = ""
+            elif block_type == "text":
+                state["content"] = ""
+                if block_key:
+                    state[f"{block_key}_text"] = ""
+            continue
+
+        if event_type == "content_block_stop":
+            if block_key and str(state.get(f"{block_key}_type") or "").strip() == "text":
+                completed = str(state.get(f"{block_key}_text") or state.get("content") or "")
+                summary = _summarize_claude_text_block(completed)
+                if summary:
+                    _set_text_cli_live_current(
+                        progress=progress,
+                        provider="claude",
+                        text=summary,
+                        event_type="assistant_text",
+                        add_timeline=True,
+                    )
             continue
 
         if event_type != "content_block_delta":
@@ -665,6 +805,8 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
             if not delta_text:
                 continue
             state["content"] = str(state.get("content") or "") + delta_text
+            if block_key:
+                state[f"{block_key}_text"] = str(state.get(f"{block_key}_text") or "") + delta_text
             _set_text_cli_live_current(progress=progress, provider="claude", text=state["content"])
             continue
         if delta_type == "thinking_delta":
@@ -673,15 +815,6 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                 continue
             if block_key:
                 state[f"{block_key}_text"] = str(state.get(f"{block_key}_text") or "") + delta_text
-                current = str(state.get(f"{block_key}_text") or "").strip()
-            else:
-                current = delta_text
-            if current:
-                _set_text_cli_live_current(
-                    progress=progress,
-                    provider="claude",
-                    text=f"Thinking: {current}",
-                )
             continue
         if delta_type == "input_json_delta":
             partial_json = str(delta.get("partial_json") or "")
@@ -710,7 +843,8 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
                     tool_name=tool_name,
                     input_payload=str(state.get(f"{block_key}_input") or ""),
                 )
-                _set_text_cli_live_current(progress=progress, provider="claude", text=current)
+                if current:
+                    _set_text_cli_live_current(progress=progress, provider="claude", text=current)
 
 
 def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
@@ -723,6 +857,20 @@ def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
     path = (repo_dir.parent / "work" / "logs" / "codex.events.jsonl").resolve()
     if isinstance(meta, dict):
         meta.setdefault("logs", {})["codex_events"] = str(path)
+        _flush_progress(progress)
+    return path
+
+
+def _resolve_claude_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
+    meta = _progress_meta_dict(progress)
+    logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
+    raw_path = str(logs.get("claude_events") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        return ((repo_dir.parent / path).resolve() if not path.is_absolute() else path.resolve())
+    path = (repo_dir.parent / "work" / "logs" / "claude.events.jsonl").resolve()
+    if isinstance(meta, dict):
+        meta.setdefault("logs", {})["claude_events"] = str(path)
         _flush_progress(progress)
     return path
 
@@ -1253,6 +1401,8 @@ def _run_logged_text_command(
     cmd: list[str],
     cwd: Path,
     env: dict[str, str],
+    claude_json_events_path: Path | None = None,
+    claude_event_callback: Callable[[dict[str, Any]], None] | None = None,
     stream_text_callback: Callable[[str], None] | None = None,
 ):
     out = active_output()
@@ -1264,6 +1414,8 @@ def _run_logged_text_command(
             env=env,
             check=True,
             stream_requested=False,
+            claude_json_events_path=claude_json_events_path,
+            claude_event_callback=claude_event_callback,
             stream_text_callback=stream_text_callback,
         )
     return run_cmd(cmd, cwd=cwd, env=env, check=True, stream=False, stream_label="codex")
@@ -1350,6 +1502,7 @@ def run_claude_exec(
     )
     progress.record_cmd(cmd)
     _ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+    claude_events_log_path = _resolve_claude_events_log_path(progress=progress, repo_dir=repo_dir)
     stream_state: dict[str, Any] = {"content": ""}
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     staged_paths = policy.get("staged_paths") if isinstance(policy.get("staged_paths"), dict) else {}
@@ -1363,6 +1516,7 @@ def run_claude_exec(
             cmd=cmd,
             cwd=repo_dir,
             env=env,
+            claude_json_events_path=claude_events_log_path,
             stream_text_callback=lambda chunk: _handle_claude_stream_chunk(
                 progress=progress,
                 state=stream_state,

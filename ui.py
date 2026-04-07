@@ -59,6 +59,11 @@ class UiState:
             self._stop = True
         self.ping()
 
+    def reset_stop(self) -> None:
+        with self._lock:
+            self._stop = False
+        self.ping()
+
     def request_redraw(self) -> None:
         with self._lock:
             self._force_redraw = True
@@ -767,7 +772,7 @@ def _short_live_progress_ts(raw: object) -> str:
     return text[:8] if len(text) >= 8 else text
 
 
-def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[str]:
+def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 12) -> list[str]:
     live = meta.get("live_progress")
     live = live if isinstance(live, dict) else {}
     if not live:
@@ -777,6 +782,7 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
     phase_label = _phase_label(_display_phase_name(meta))
     current = live.get("current")
     current = current if isinstance(current, dict) else {}
+    current_type = str(current.get("type") or "").strip()
     current_text = str(current.get("text") or live.get("last_agent_message") or "").strip()
     if phase_label:
         out.append(_truncate(f"Phase: {phase_label}", width))
@@ -792,6 +798,8 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
         text = str(item.get("text") or "").strip()
         if not text:
             continue
+        if str(item.get("type") or "").strip() == "assistant_text":
+            text = f"Claude: {text}"
         ts = _short_live_progress_ts(item.get("ts"))
         prefix = f"[{ts}] " if ts else ""
         line = prefix + text
@@ -799,13 +807,13 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
             continue
         recent.append(line)
 
-    if current_text:
+    if current_text and current_type != "assistant_text":
         current_recent = [line for line in recent if not line.endswith(current_text)]
     else:
         current_recent = recent
-    for line in current_recent[-max(0, max_lines - len(out)) :]:
+    for line in current_recent[-max(0, max_lines) :]:
         out.append(_truncate(line, width))
-    return out[:max_lines]
+    return out
 
 
 def _primary_panel_content(
@@ -831,18 +839,18 @@ def _primary_panel_content(
         lines.extend(line for line in cleaned if _is_runtime_activity_line(line))
         return ("Failure Detail", _dedupe_preserve_order(lines)[-6:], "(no failure detail yet)")
 
-    live_lines = _live_progress_lines(meta=meta, width=width, max_lines=8)
+    live_lines = _live_progress_lines(meta=meta, width=width, max_lines=12)
     if live_lines:
         return ("Live Progress", live_lines, "(agent is working)")
 
     activity = [line for line in cleaned if _is_runtime_activity_line(line)]
     activity = _dedupe_preserve_order(activity)
     if activity:
-        return ("Activity", activity[-8:], "(agent is working)")
+        return ("Activity", activity[-12:], "(agent is working)")
     if any(_looks_like_markdown_output(line) for line in cleaned):
         return ("Activity", ["Agent is drafting review output."], "(agent is working)")
     if cleaned:
-        return ("Activity", cleaned[-4:], "(agent is working)")
+        return ("Activity", cleaned[-12:], "(agent is working)")
     return ("Activity", [], "(agent is working)")
 
 
@@ -1554,6 +1562,7 @@ class Dashboard:
         self._state.request_stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        self._thread = None
         self._restore_tty()
         # Restore cursor.
         try:
@@ -1561,6 +1570,24 @@ class Dashboard:
             self._stderr.flush()
         except Exception:
             pass
+
+    def pause(self) -> None:
+        if self._thread is None:
+            return
+        self._state.request_stop()
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._restore_tty()
+        self._state.reset_stop()
+        try:
+            self._stderr.write("\x1b[?25h")
+            self._stderr.flush()
+        except Exception:
+            pass
+
+    def resume(self) -> None:
+        self._state.reset_stop()
+        self.start()
 
     def _setup_tty(self) -> None:
         try:

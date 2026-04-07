@@ -160,6 +160,49 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
+    def test_normalize_markdown_artifact_strips_llm_preamble(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_preamble"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "I now have all the context needed. Let me produce the review output.",
+                        "",
+                        "### Step Result: 01 — Safety review",
+                        "**Focus**: Check safety.",
+                        "",
+                        "### Findings",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("### Step Result:"),
+                f"Expected preamble to be stripped, got: {normalized[:80]!r}",
+            )
+            self.assertNotIn("context needed", normalized)
+            self.assertIn("### Findings", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_preserves_text_starting_with_heading(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_no_preamble"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "### Step Result: 01 — Safety review\n**Focus**: Check safety.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
     def test_format_review_artifact_footer_renders_expected_v1_contract(self) -> None:
         version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         footer = cure_output.format_review_artifact_footer(
@@ -5650,7 +5693,10 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             )
             stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
             if grounding_mode == "strict":
-                with self.assertRaisesRegex(rf.ReviewflowError, "grounding validation failed"):
+                with self.assertRaisesRegex(
+                    rf.ReviewflowError,
+                    "grounding validation failed|grounding-skipped; review synthesis cannot continue",
+                ):
                     rf.pr_flow(
                         args,
                         paths=paths,
@@ -5873,18 +5919,15 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             playbook = "\n".join(messages)
-            self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.step-01.md"])
             self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+            self.assertEqual(meta["multipass"]["grounding_valid_step_count"], 0)
             self.assertIn("step-01", report["invalid_artifacts"])
             self.assertFalse(report["artifacts"]["step-01"]["valid"])
             self.assertEqual(meta["multipass"]["validation"]["report_path"], str(session_dir / "work" / "grounding_report.json"))
-            self._assert_grounding_playbook(
-                playbook,
-                session_id=session_dir.name,
-                artifact_name="review.step-01.md",
-                resume_from="steps",
-                error_fragment="Findings bullet #1 is missing a repo citation.",
-            )
+            self.assertIn("All planned steps were grounding-skipped; no synth inputs remain.", playbook)
+            self.assertIn("`review.md`", playbook)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -11974,3 +12017,400 @@ class ExtractionOwnershipTests(unittest.TestCase):
         self.assertEqual(rc, 7)
         self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
+
+
+class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
+    def test_step_grounding_validation_error_carries_payload(self) -> None:
+        err = rf.StepGroundingValidationError(
+            "bad grounding",
+            step_validation={"valid": False, "errors": ["missing citation"]},
+        )
+
+        self.assertEqual(str(err), "bad grounding")
+        self.assertEqual(err.step_validation, {"valid": False, "errors": ["missing citation"]})
+
+    def test_execute_multipass_step_stage_retries_grounding_once_in_non_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result]) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ) as finalize_mock,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=False,
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(skipped, [])
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 2)
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "completed")
+            self.assertTrue(state["grounding_retried"])
+            self.assertEqual(len(state["grounding_attempts"]), 1)
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(run_entry["first_grounding_failure_validation"]["errors"], ["missing citation"])
+
+    def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            first = rf.StepGroundingValidationError(
+                "bad grounding",
+                step_validation={"valid": False, "errors": ["missing citation"]},
+            )
+            second = rf.StepGroundingValidationError(
+                "bad grounding again",
+                step_validation={"valid": False, "errors": ["wrong line ref"]},
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result]) as run_mock,
+                mock.patch.object(rf, "_finalize_multipass_step_result", side_effect=[first, second]),
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=False,
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(progress.meta["multipass"]["status"], "steps_ready")
+            self.assertEqual(state["status"], "grounding_skipped")
+            self.assertEqual(state["grounding_reason"], "missing citation")
+            self.assertTrue(run_entry["grounding_skipped"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_execute_multipass_step_stage_uses_prompt_when_ui_auto_resolves_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(sys, "stderr") as stderr_mock,
+                mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+                mock.patch.object(stderr_mock, "isatty", return_value=True),
+                mock.patch.object(rf, "_run_multipass_step_llm", return_value=raw_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="skip") as prompt_mock,
+            ):
+                ui_enabled = rf.resolve_ui_enabled(
+                    argparse.Namespace(ui="auto", quiet=False),
+                    verbosity=rf.Verbosity.normal,
+                )
+                _, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=ui_enabled,
+                )
+
+            self.assertTrue(ui_enabled)
+            prompt_mock.assert_called_once()
+            self.assertEqual(run_mock.call_count, 1)
+            self.assertEqual(skipped[0]["reason"], "missing citation")
+
+    def test_grounding_prompt_helper_repompts_until_valid_choice(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("nope\nretry\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            choice = cure_output.prompt_grounding_retry_skip(
+                step_id="01",
+                step_title="API review",
+                attempt_count=2,
+                validation={"errors": ["missing citation", "bad line reference"]},
+            )
+
+        rendered = writer.getvalue()
+        self.assertEqual(choice, "retry")
+        self.assertIn("Strict grounding failed for a multipass step.", rendered)
+        self.assertIn("Invalid choice. Enter one of: retry, skip.", rendered)
+
+    def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:
+        root = Path("/tmp/session-grounding-summary")
+        entries = [
+            rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Skipped",
+                step_focus="focus",
+                output_path=root / "review.step-01.md",
+                prompt="a",
+                should_run=False,
+            ),
+            rf.MultipassStepEntry(
+                index=2,
+                step_id="02",
+                step_title="Kept",
+                step_focus="focus",
+                output_path=root / "review.step-02.md",
+                prompt="b",
+                should_run=False,
+            ),
+        ]
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {"step_id": "01", "step_title": "Skipped", "status": "grounding_skipped", "grounding_reason": "bad cite"},
+                    {"step_id": "02", "step_title": "Kept", "status": "completed"},
+                ]
+            }
+        }
+
+        synth_outputs = rf._persist_grounding_summary(meta=meta, step_entries=entries)
+
+        self.assertEqual(synth_outputs, [str(root / "review.step-02.md")])
+        self.assertEqual(
+            meta["multipass"]["artifacts"]["step_outputs"],
+            [str(root / "review.step-01.md"), str(root / "review.step-02.md")],
+        )
+        self.assertEqual(meta["multipass"]["artifacts"]["synth_step_outputs"], [str(root / "review.step-02.md")])
+        self.assertTrue(meta["multipass"]["grounding_partial_synthesis"])
+        self.assertEqual(meta["multipass"]["grounding_skipped_steps"][0]["reason"], "bad cite")
+
+    def test_resume_grounding_skip_choice_is_prompted_only_when_ui_enabled(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Skipped",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Skipped", "reason": "bad cite"}
+                ]
+            }
+        }
+
+        self.assertEqual(
+            rf._resolve_resume_grounding_skip_choice(meta=meta, step_entries=[entry], ui_enabled=False),
+            "rerun",
+        )
+        with mock.patch.object(rf, "prompt_resume_grounding_skipped_steps", return_value="keep"):
+            self.assertEqual(
+                rf._resolve_resume_grounding_skip_choice(meta=meta, step_entries=[entry], ui_enabled=True),
+                "keep",
+            )
+
+    def test_resume_grounding_skip_choice_uses_prompt_when_ui_auto_resolves_enabled(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Skipped",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Skipped", "reason": "bad cite"}
+                ]
+            }
+        }
+
+        with (
+            mock.patch.object(sys, "stderr") as stderr_mock,
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+            mock.patch.object(stderr_mock, "isatty", return_value=True),
+            mock.patch.object(rf, "prompt_resume_grounding_skipped_steps", return_value="keep") as prompt_mock,
+        ):
+            ui_enabled = rf.resolve_ui_enabled(
+                argparse.Namespace(ui="auto", quiet=False),
+                verbosity=rf.Verbosity.normal,
+            )
+            choice = rf._resolve_resume_grounding_skip_choice(
+                meta=meta,
+                step_entries=[entry],
+                ui_enabled=ui_enabled,
+            )
+
+        self.assertTrue(ui_enabled)
+        prompt_mock.assert_called_once()
+        self.assertEqual(choice, "keep")
+
+    def test_persist_grounding_summary_prefers_current_step_state_over_stale_persisted_skip(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Recovered",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {"step_id": "01", "step_title": "Recovered", "status": "completed"},
+                ],
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Recovered", "reason": "old failure"},
+                ],
+            }
+        }
+
+        synth_outputs = rf._persist_grounding_summary(meta=meta, step_entries=[entry])
+
+        self.assertEqual(synth_outputs, ["/tmp/review.step-01.md"])
+        self.assertEqual(meta["multipass"]["grounding_skipped_steps"], [])
