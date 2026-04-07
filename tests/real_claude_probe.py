@@ -21,6 +21,7 @@ _ABSOLUTE_PATH_RE = re.compile(
 _CHUNKHOUND_QUERY_RE = re.compile(r'("?\$CURE_CHUNKHOUND_HELPER"?\s+(?:search|research)\s+")([^"]+)(")')
 _BACKGROUND_TASK_ID_RE = re.compile(r"\bID: [A-Za-z0-9]+\b")
 _BACKGROUND_OUTPUT_RE = re.compile(r"(Output is being written to: )/[^ ]+")
+_NO_RELEVANT_CODE_CONTEXT_RE = re.compile(r"(No relevant code context found for: )'[^']+'")
 
 
 def ensure(condition: bool, message: str) -> None:
@@ -146,6 +147,7 @@ def _sanitize_text_value(
     if key == "prompt" and text:
         return "<PROMPT>"
     text = _CHUNKHOUND_QUERY_RE.sub(r"\1<QUERY>\3", text)
+    text = _NO_RELEVANT_CODE_CONTEXT_RE.sub(r"\1'<QUERY>'", text)
     text = _BACKGROUND_TASK_ID_RE.sub("ID: <BACKGROUND_TASK_ID>", text)
     text = _BACKGROUND_OUTPUT_RE.sub(r"\1<ABS_PATH>", text)
     text = _ABSOLUTE_PATH_RE.sub("<ABS_PATH>", text)

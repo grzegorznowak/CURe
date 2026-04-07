@@ -1,4 +1,6 @@
 # ruff: noqa: F403, F405
+from typing import Any
+
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
@@ -2514,7 +2516,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             if tool_use_id:
                 break
         self.assertTrue(tool_use_id)
-        state = {
+        state: dict[str, Any] = {
             "content": "",
             "bash_tool_commands_by_id": {tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'},
         }
@@ -2533,9 +2535,61 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
         self.assertEqual(entries[0]["command"], '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
 
+    def test_handle_claude_stream_chunk_extracts_helper_proof_from_completed_task_output_file(self) -> None:
+        progress = self._StubProgress()
+        state: dict[str, Any] = {
+            "content": "",
+            "bash_tool_commands_by_id": {
+                "toolu_1": 'bash -lc \'"$CURE_CHUNKHOUND_HELPER" research "<QUERY>"; sleep 75\''
+            },
+        }
+        output_path = ROOT / ".tmp_claude_task_output_fixture.txt"
+        try:
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "<QUERY>",
+                        "helper_path": "<CURE_CHUNKHOUND_HELPER>",
+                        "result": {"summary": "grounded answer"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk=json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "task_notification",
+                        "status": "completed",
+                        "output_file": str(output_path),
+                        "tool_use_id": "toolu_1",
+                        "task_id": "task_123",
+                    }
+                ),
+            )
+        finally:
+            if output_path.exists():
+                output_path.unlink()
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "code_research")
+        self.assertEqual(entries[0]["tool_use_id"], "toolu_1")
+        self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
+        self.assertIn("CURE_CHUNKHOUND_HELPER", entries[0]["command"])
+        self.assertIn('"ok": true', entries[0]["stdout_excerpt"])
+
     def test_handle_claude_stream_chunk_ignores_real_backgrounded_research_fixture_without_helper_payload(self) -> None:
         progress = self._StubProgress()
-        state = {"content": ""}
+        state: dict[str, Any] = {"content": ""}
         fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
 
         cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
@@ -2546,8 +2600,69 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         )
 
         self.assertNotIn("chunkhound_tool_proof_entries", state)
-        live = progress.meta["live_progress"]
+        live = progress.meta.get("live_progress")
+        self.assertIsInstance(live, dict)
+        assert isinstance(live, dict)
         self.assertIn("background task completed successfully", live["current"]["text"].lower())
+
+    def test_handle_claude_stream_chunk_extracts_helper_proof_from_real_background_task_success_fixture(self) -> None:
+        progress = self._StubProgress()
+        stream_fixture_path = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.ndjson"
+        )
+        output_fixture_path = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.output.json"
+        )
+        output_path = ROOT / ".tmp_claude_background_task_success_output.json"
+        try:
+            output_path.write_text(output_fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
+            rewritten_lines: list[str] = []
+            tool_use_id = ""
+            command_text = ""
+            for raw in stream_fixture_path.read_text(encoding="utf-8").splitlines():
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and str(payload.get("type") or "") == "assistant":
+                    message = payload.get("message")
+                    if isinstance(message, dict):
+                        for block in message.get("content") or []:
+                            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
+                                continue
+                            if str(block.get("id") or "").strip():
+                                tool_use_id = str(block.get("id") or "").strip()
+                            tool_input = block.get("input")
+                            if isinstance(tool_input, dict):
+                                command_text = str(tool_input.get("command") or "").strip()
+                if (
+                    isinstance(payload, dict)
+                    and str(payload.get("type") or "") == "system"
+                    and str(payload.get("subtype") or "") == "task_notification"
+                    and str(payload.get("status") or "") == "completed"
+                ):
+                    payload["output_file"] = str(output_path)
+                    tool_use_id = str(payload.get("tool_use_id") or "").strip()
+                rewritten_lines.append(json.dumps(payload))
+            self.assertTrue(tool_use_id)
+            self.assertTrue(command_text)
+            state: dict[str, Any] = {"content": "", "bash_tool_commands_by_id": {tool_use_id: command_text}}
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(rewritten_lines),
+            )
+        finally:
+            if output_path.exists():
+                output_path.unlink()
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "code_research")
+        self.assertEqual(entries[0]["tool_use_id"], tool_use_id)
+        self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
+        self.assertIn("CURE_CHUNKHOUND_HELPER", entries[0]["command"])
+        self.assertEqual(entries[0]["payload"]["execution_stage"], "tools/call")
+        self.assertIn('"command": "research"', entries[0]["stdout_excerpt"])
 
     def test_real_claude_fixtures_are_shape_preserving_redacted(self) -> None:
         search_fixture = (ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson").read_text(
@@ -2556,11 +2671,18 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         research_fixture = (
             ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
         ).read_text(encoding="utf-8")
+        background_success_fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.ndjson"
+        ).read_text(encoding="utf-8")
+        background_success_output = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.output.json"
+        ).read_text(encoding="utf-8")
 
-        for body in (search_fixture, research_fixture):
+        for body in (search_fixture, research_fixture, background_success_fixture, background_success_output):
             self.assertNotRegex(body, r"/(?:tmp|home|workspaces|opt|usr)/")
-            self.assertIn("<QUERY>", body)
             self.assertIn("<ABS_PATH>", body)
+        for body in (search_fixture, research_fixture, background_success_fixture, background_success_output):
+            self.assertIn("<QUERY>", body)
         self.assertIn("tools/call", search_fixture)
         self.assertIn("notifications/initialized", search_fixture)
         self.assertIn("projects/CURe/cure.py", search_fixture)
@@ -2568,6 +2690,15 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertNotIn("notifications<ABS_PATH>", search_fixture)
         self.assertNotIn("projects<ABS_PATH>", search_fixture)
         self.assertIn("<BACKGROUND_TASK_ID>", research_fixture)
+        self.assertIn("task_started", background_success_fixture)
+        self.assertIn("<BACKGROUND_TASK_ID>", background_success_fixture)
+        self.assertIn('"output_file": "<ABS_PATH>"', background_success_fixture)
+        self.assertIn('"tool_name": "code_research"', background_success_output)
+        self.assertIn('"execution_stage": "tools/call"', background_success_output)
+        self.assertNotIn(
+            "Explain in depth the end-to-end Claude stream parsing and ChunkHound proof validation flow",
+            background_success_output,
+        )
 
     def test_real_claude_probe_absolute_path_redaction_preserves_relative_slash_values(self) -> None:
         import real_claude_probe

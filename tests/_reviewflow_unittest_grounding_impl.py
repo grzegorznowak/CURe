@@ -1,4 +1,6 @@
 # ruff: noqa: F403, F405
+from typing import Any
+
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
@@ -7185,6 +7187,113 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 f"claude tool_use_result via {helper_path}",
             ],
         )
+
+    def test_validate_and_record_chunkhound_tool_proof_accepts_real_claude_background_task_success_fixture(self) -> None:
+        root = ROOT / ".tmp_test_real_claude_background_task_success_report"
+
+        class _StubProgress:
+            def __init__(self) -> None:
+                self.meta: dict[str, object] = {}
+
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            progress = _StubProgress()
+            state: dict[str, Any] = {"content": ""}
+
+            search_fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+            search_fixture_text = search_fixture_path.read_text(encoding="utf-8")
+            search_tool_use_id = ""
+            for raw in search_fixture_text.splitlines():
+                payload = json.loads(raw)
+                if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                    continue
+                message = payload.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                        continue
+                    search_tool_use_id = str(block.get("tool_use_id") or "").strip()
+                    if search_tool_use_id:
+                        break
+                if search_tool_use_id:
+                    break
+            self.assertTrue(search_tool_use_id)
+            state["bash_tool_commands_by_id"] = {search_tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'}
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(progress=progress, state=state, chunk=search_fixture_text)
+
+            stream_fixture_path = (
+                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.ndjson"
+            )
+            output_fixture_path = (
+                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.output.json"
+            )
+            output_path = root / "background_task_output.json"
+            output_path.write_text(output_fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
+            rewritten_lines: list[str] = []
+            research_tool_use_id = ""
+            research_command_text = ""
+            for raw in stream_fixture_path.read_text(encoding="utf-8").splitlines():
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and str(payload.get("type") or "") == "assistant":
+                    message = payload.get("message")
+                    if isinstance(message, dict):
+                        for block in message.get("content") or []:
+                            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
+                                continue
+                            research_tool_use_id = str(block.get("id") or "").strip() or research_tool_use_id
+                            tool_input = block.get("input")
+                            if isinstance(tool_input, dict):
+                                research_command_text = str(tool_input.get("command") or "").strip() or research_command_text
+                if (
+                    isinstance(payload, dict)
+                    and str(payload.get("type") or "") == "system"
+                    and str(payload.get("subtype") or "") == "task_notification"
+                    and str(payload.get("status") or "") == "completed"
+                ):
+                    payload["output_file"] = str(output_path)
+                    research_tool_use_id = str(payload.get("tool_use_id") or "").strip() or research_tool_use_id
+                rewritten_lines.append(json.dumps(payload))
+            self.assertTrue(research_tool_use_id)
+            self.assertTrue(research_command_text)
+            state["bash_tool_commands_by_id"][research_tool_use_id] = research_command_text
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(rewritten_lines),
+            )
+
+            report = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="claude",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta={
+                    "provider": "claude",
+                    "chunkhound_helper_path": "<CURE_CHUNKHOUND_HELPER>",
+                    "chunkhound_tool_proof_entries": list(state["chunkhound_tool_proof_entries"]),
+                },
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["provider"], "claude")
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertTrue(persisted["valid"])
+            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_plan")
+            self.assertEqual(persisted["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_validate_chunkhound_tool_proof_rejects_forged_claude_stdout_without_helper_command(self) -> None:
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"

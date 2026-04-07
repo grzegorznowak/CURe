@@ -541,6 +541,28 @@ def _append_claude_chunkhound_tool_proof(*, state: dict[str, Any], stdout_text: 
         )
 
 
+def _append_claude_chunkhound_tool_proof_from_output_file(
+    *, state: dict[str, Any], output_file: object, tool_use_id: str | None
+) -> bool:
+    output_path_text = str(output_file or "").strip()
+    if not output_path_text:
+        return False
+    seen_files = state.setdefault("claude_task_output_files_seen", set())
+    if not isinstance(seen_files, set):
+        seen_files = set()
+        state["claude_task_output_files_seen"] = seen_files
+    key = (output_path_text, str(tool_use_id or "").strip())
+    if key in seen_files:
+        return False
+    try:
+        output_text = Path(output_path_text).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    seen_files.add(key)
+    _append_claude_chunkhound_tool_proof(state=state, stdout_text=output_text, tool_use_id=tool_use_id)
+    return True
+
+
 def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: str) -> None:
     for raw_line in str(chunk or "").splitlines():
         raw = str(raw_line or "").strip()
@@ -554,6 +576,17 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
         if not isinstance(payload, dict):
             continue
         payload_type = str(payload.get("type") or "").strip()
+        if payload_type == "system":
+            if (
+                str(payload.get("subtype") or "").strip() == "task_notification"
+                and str(payload.get("status") or "").strip() == "completed"
+            ):
+                _append_claude_chunkhound_tool_proof_from_output_file(
+                    state=state,
+                    output_file=payload.get("output_file"),
+                    tool_use_id=str(payload.get("tool_use_id") or "").strip() or None,
+                )
+            continue
         if payload_type == "user":
             tool_result = payload.get("tool_use_result")
             top_level_stdout = tool_result.get("stdout") if isinstance(tool_result, dict) else None
