@@ -1716,6 +1716,7 @@ def write_chunkhound_helper(
     chunkhound_config_path: Path | None,
     chunkhound_db_path: Path | None,
     chunkhound_cwd: Path | None,
+    provider: str = "claude",
 ) -> Path:
     repo_root = repo_dir.resolve(strict=False)
     helper_cwd = (chunkhound_cwd or repo_root).resolve(strict=False)
@@ -1747,6 +1748,7 @@ HELPER_PATH = Path(__file__).resolve()
 CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
 _STDERR_TAIL_MAX = 16000
 _HEARTBEAT_INTERVAL_SECONDS = 10.0
+_REVIEW_PROVIDER = {json.dumps(provider)}
 _PREFLIGHT_STAGE_TIMEOUTS = {{
     "spawn": 3.0,
     "initialize": 10.0,
@@ -2195,8 +2197,12 @@ class JsonRpcSession:
                 if now - last_heartbeat_at >= _HEARTBEAT_INTERVAL_SECONDS:
                     elapsed = max(0.0, float(timeout_seconds) - max(0.0, float(deadline) - now))
                     try:
-                        sys.stdout.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
-                        sys.stdout.flush()
+                        if _REVIEW_PROVIDER == "codex":
+                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
+                            sys.stdout.flush()
+                        else:
+                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
+                            sys.stderr.flush()
                     except Exception:
                         pass
                     last_heartbeat_at = now
@@ -3068,6 +3074,7 @@ def prepare_review_agent_runtime(
                 chunkhound_config_path=chunkhound_config_path,
                 chunkhound_db_path=chunkhound_db_path,
                 chunkhound_cwd=chunkhound_cwd,
+                provider="codex",
             )
             env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
             runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
@@ -3091,6 +3098,7 @@ def prepare_review_agent_runtime(
         )
     elif provider == "claude":
         claude_dir = work_dir / "claude"
+        env["BASH_DEFAULT_TIMEOUT_MS"] = "600000"
         if enable_mcp:
             env["PYTHONSAFEPATH"] = "1"
             chunkhound_helper = write_chunkhound_helper(
@@ -3099,6 +3107,7 @@ def prepare_review_agent_runtime(
                 chunkhound_config_path=chunkhound_config_path,
                 chunkhound_db_path=chunkhound_db_path,
                 chunkhound_cwd=chunkhound_cwd,
+                provider="claude",
             )
             env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
             runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
