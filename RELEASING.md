@@ -6,7 +6,7 @@ This repo publishes the public CURe package as `cureview`, while the installed c
 
 - `project.version` in `pyproject.toml` is the source of truth for the package version.
 - The release tag must be `v<version>` and must match `project.version` exactly.
-- Final tags such as `v0.2.0` publish to PyPI.
+- Final tags such as `v0.3.0` publish to PyPI.
 - Pre-release package publication is not configured in this repository.
 - The publish workflow is [`.github/workflows/publish-package.yml`](.github/workflows/publish-package.yml).
 - The public package page is: https://pypi.org/p/cureview
@@ -30,7 +30,7 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
 1. Update `project.version` in `pyproject.toml`.
 2. Commit the version bump.
 3. Create and push the matching tag.
-   - Production example: `git tag v0.2.0 && git push origin v0.2.0`
+   - Production example: `git tag v0.3.0 && git push origin v0.3.0`
 4. Wait for `Publish Package` to finish.
 5. Verify the package page and install smoke:
    - `uvx --from cureview cure --help`
@@ -112,8 +112,8 @@ For the standalone follow-on channel, verify all of the following before closing
 
 Store every prove-out log in `public_release_evidence/` with a dated filename such as:
 
-- `public_release_evidence/2026-04-04-v0.2.0-local-artifact-smoke.md`
-- `public_release_evidence/2026-04-04-v0.2.0-pypi.md`
+- `public_release_evidence/2026-04-08-v0.3.0-local-artifact-smoke.md`
+- `public_release_evidence/2026-04-08-v0.3.0-pypi.md`
 
 Each evidence log should capture:
 

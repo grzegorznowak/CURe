@@ -8,7 +8,6 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
-import io
 import importlib.util
 import json
 import os
@@ -71,7 +70,8 @@ from paths import (
     safe_ref_slug,
     seed_dir,
 )
-from run import ReviewflowSubprocessError, merged_env, run_cmd
+from run import CommandResult, ReviewflowSubprocessError, merged_env, run_cmd
+from cure_runtime import _normalize_optional_reasoning_effort
 
 from ui import UiSnapshot, Verbosity, build_dashboard_lines
 
@@ -2278,7 +2278,7 @@ def _run_logged_text_command(
     cmd: list[str],
     cwd: Path,
     env: dict[str, str],
-) -> "CommandResult":
+) -> CommandResult:
     out = active_output()
     if out is not None:
         return out.run_logged_cmd(
@@ -8365,7 +8365,6 @@ def _pr_flow_impl(
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
-    ui_mode = str(getattr(args, "ui", "auto") or "auto").strip().lower()
     ui_enabled = resolve_ui_enabled(args, verbosity=verbosity)
     stream = (not quiet) and (not no_stream)
 
@@ -10031,7 +10030,6 @@ def _resume_flow_impl(
     verbosity = resolve_verbosity(args)
     quiet = verbosity is Verbosity.quiet
     no_stream = bool(getattr(args, "no_stream", False))
-    ui_mode = str(getattr(args, "ui", "auto") or "auto").strip().lower()
     ui_enabled = resolve_ui_enabled(args, verbosity=verbosity)
     stream = (not quiet) and (not no_stream)
 
@@ -14298,7 +14296,7 @@ def _doctor_runtime_checks(
     checks.append(_doctor_gh_auth_check())
     return checks
 
-
+# Re-export the split module surface so `import cure as rf` remains the canonical API.
 from cure_sessions import (
     CleanupSession,
     HistoricalReviewSession,

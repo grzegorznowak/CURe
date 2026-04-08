@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cureview"
-version = "0.2.0"
+version = "0.3.0"
 description = "CURe PR review sandboxes powered by ChunkHound and configurable LLM presets"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,3 +20,30 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 prompts = ["*.md"]
+
+[tool.ruff]
+exclude = [
+    "build",
+    "dist",
+    "dist-public-proveout",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+
+[tool.ruff.lint.per-file-ignores]
+"cure.py" = ["E402", "F401", "F811"]
+
+[tool.mypy]
+python_version = "3.11"
+exclude = '(^build/|^dist/|^dist-public-proveout/|^[^/]+\\.egg-info/|^\\.tmp_|^tests/|^cure_llm\.py$|^cure_runtime\.py$)'
+files = [
+    "chunkhound_summary.py",
+    "cure_errors.py",
+    "cure_output.py",
+    "cure_sessions.py",
+    "meta.py",
+    "paths.py",
+    "run.py",
+    "ui.py",
+]
