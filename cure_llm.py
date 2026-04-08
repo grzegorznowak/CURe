@@ -1794,6 +1794,28 @@ def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
     return exit_code
 
 
+def _emit_sentinel(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    if _REVIEW_PROVIDER == "codex":
+        return
+    command = getattr(args, "command", "unknown")
+    ok = payload.get("ok", False)
+    stage_trace = payload.get("stage_trace") or []
+    tools_call_entry = next(
+        (e for e in stage_trace if e.get("stage") == "tools/call"), {{}},
+    )
+    elapsed = tools_call_entry.get("elapsed_seconds", 0.0)
+    if ok:
+        line = f"cure-chunkhound: {{command}} completed ({{elapsed:.1f}}s)"
+    else:
+        detail = payload.get("execution_stage_status", "error")
+        line = f"cure-chunkhound: {{command}} failed ({{elapsed:.1f}}s, {{detail}})"
+    try:
+        sys.stderr.write(line + "\\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _read_lock(path_text: str) -> dict[str, Any]:
     raw = str(path_text or "").strip()
     if not raw:
@@ -2907,10 +2929,9 @@ def main() -> int:
         return _emit(payload, exit_code=0 if payload.get("ok") else 1)
     try:
         payload = _run_tool(args)
-        return _emit(payload, exit_code=0 if payload.get("ok") else 1)
     except Exception as exc:
         daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-        return _emit({{
+        payload = {{
             "ok": False,
             "command": args.command,
             "tool_name": "code_research" if args.command == "research" else "search",
@@ -2928,7 +2949,10 @@ def main() -> int:
             "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
             "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
             "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
-        }}, exit_code=1)
+        }}
+    exit_code = _emit(payload, exit_code=0 if payload.get("ok") else 1)
+    _emit_sentinel(args, payload)
+    return exit_code
 
 
 if __name__ == "__main__":
