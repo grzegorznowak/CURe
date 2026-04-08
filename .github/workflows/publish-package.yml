@@ -135,7 +135,7 @@ jobs:
         include:
           - runner: ubuntu-latest
             target_id: linux-x86_64
-          - runner: macos-13
+          - runner: macos-15-intel
             target_id: macos-x86_64
           - runner: macos-14
             target_id: macos-arm64
