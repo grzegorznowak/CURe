@@ -10,6 +10,8 @@ This is the **final synthesis** step of a multipass review.
 - Plan JSON path: `$PLAN_JSON_PATH`
 - Step output files (read them all):
 $STEP_OUTPUT_PATHS
+- Grounding-skipped step outputs excluded from synth:
+$GROUNDING_SKIPPED_STEPS
 
 Read the plan JSON and all step outputs, then produce the final review.
 
@@ -45,6 +47,7 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
   - repo or test files under the sandbox checkout, e.g. `src/module.py:12` or `tests/test_module.py:44`
   - stable CURe session artifacts under `work/`, e.g. `work/pr-context.md:7`
 - `review.step-XX.md:line` may be included as extra traceability, but it does not count as the required primary evidence by itself.
+- Do not use any excluded grounding-skipped step artifact, even if that file still exists in the session directory.
 
 # Output Format
 Output ONLY the final review (no plan, no step outputs appended):

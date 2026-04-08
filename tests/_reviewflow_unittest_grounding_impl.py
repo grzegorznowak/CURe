@@ -1,4 +1,6 @@
 # ruff: noqa: F403, F405
+from typing import Any
+
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
@@ -155,6 +157,118 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
             normalized = md.read_text(encoding="utf-8")
             self.assertNotIn("\n## Technical Assessment\n####\n```text", "\n" + normalized)
             self.assertIn("```text\n####\nliteral sample\n```", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_strips_llm_preamble(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_preamble"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "I now have all the context needed. Let me produce the review output.",
+                        "",
+                        "### Step Result: 01 — Safety review",
+                        "**Focus**: Check safety.",
+                        "",
+                        "### Findings",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("### Step Result:"),
+                f"Expected preamble to be stripped, got: {normalized[:80]!r}",
+            )
+            self.assertNotIn("context needed", normalized)
+            self.assertIn("### Findings", normalized)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_preserves_text_starting_with_heading(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_no_preamble"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "### Step Result: 01 — Safety review\n**Focus**: Check safety.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_unchanged_when_no_heading_present(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_no_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "Just plain text with no heading.\nAnother line.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_unchanged_for_deeper_heading_at_line_zero(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_deep_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            original = "#### Deep Heading At Line Zero\nSome content here.\n"
+            md.write_text(original, encoding="utf-8")
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            self.assertEqual(md.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_strips_blank_lines_before_heading(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_blank_before_heading"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_text(
+                "\n".join(
+                    [
+                        "",
+                        "",
+                        "## Review Findings",
+                        "- Something important.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("## Review Findings"),
+                f"Expected blank preamble to be stripped, got: {normalized[:80]!r}",
+            )
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def test_normalize_markdown_artifact_crlf_input_structurally_correct(self) -> None:
+        session_dir = ROOT / ".tmp_test_norm_crlf"
+        md = session_dir / "review.step-01.md"
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            md.write_bytes(
+                b"Let me produce the output.\r\n\r\n## Step Result\r\nContent here.\r\n"
+            )
+            rf.normalize_markdown_artifact(markdown_path=md, session_dir=session_dir)
+            normalized = md.read_text(encoding="utf-8")
+            self.assertTrue(
+                normalized.startswith("## Step Result"),
+                f"Expected CRLF preamble stripped, got: {normalized[:80]!r}",
+            )
+            self.assertNotIn("produce the output", normalized)
+            self.assertIn("Content here.", normalized)
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
 
@@ -346,6 +460,7 @@ class CodexResumeTests(unittest.TestCase):
             env={
                 "GH_CONFIG_DIR": str(session_dir / "work" / "gh_config"),
                 "CURE_WORK_DIR": str(session_dir / "work"),
+                "CURE_CHUNKHOUND_DRY_RUN": "1",
             },
             codex_flags=["-m", "gpt-5.2", "--search", "--sandbox", "danger-full-access"],
             codex_config_overrides=['mcp_servers.chunkhound.command="chunkhound"'],
@@ -355,6 +470,7 @@ class CodexResumeTests(unittest.TestCase):
         self.assertIn(f"cd {repo_dir}", cmd)
         self.assertIn("env GH_CONFIG_DIR=", cmd)
         self.assertIn("CURE_WORK_DIR=", cmd)
+        self.assertIn("CURE_CHUNKHOUND_DRY_RUN=", cmd)
         self.assertIn("codex resume", cmd)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertIn("--add-dir /tmp", cmd)
@@ -5646,7 +5762,10 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             )
             stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
             if grounding_mode == "strict":
-                with self.assertRaisesRegex(rf.ReviewflowError, "grounding validation failed"):
+                with self.assertRaisesRegex(
+                    rf.ReviewflowError,
+                    "grounding validation failed|grounding-skipped; review synthesis cannot continue",
+                ):
                     rf.pr_flow(
                         args,
                         paths=paths,
@@ -5869,18 +5988,15 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             playbook = "\n".join(messages)
-            self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
+            self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.step-01.md"])
             self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+            self.assertEqual(meta["multipass"]["grounding_valid_step_count"], 0)
             self.assertIn("step-01", report["invalid_artifacts"])
             self.assertFalse(report["artifacts"]["step-01"]["valid"])
             self.assertEqual(meta["multipass"]["validation"]["report_path"], str(session_dir / "work" / "grounding_report.json"))
-            self._assert_grounding_playbook(
-                playbook,
-                session_id=session_dir.name,
-                artifact_name="review.step-01.md",
-                resume_from="steps",
-                error_fragment="Findings bullet #1 is missing a repo citation.",
-            )
+            self.assertIn("All planned steps were grounding-skipped; no synth inputs remain.", playbook)
+            self.assertIn("`review.md`", playbook)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -6309,6 +6425,34 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             )
         return self._write_event_payloads(root=root, payloads=payloads)
 
+    def _claude_helper_adapter_meta(
+        self,
+        *,
+        payloads: list[dict[str, object]],
+        helper_path: str = "/tmp/cure/work/bin/cure-chunkhound",
+        command: str | None = None,
+    ) -> dict[str, object]:
+        entries = []
+        for payload in payloads:
+            payload_command = str((payload if isinstance(payload, dict) else {}).get("command") or "").strip().lower()
+            default_command = (
+                '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle"\''
+                if payload_command == "search"
+                else '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" research "cross-file question"\''
+            )
+            entries.append(
+                {
+                    "payload": payload,
+                    "stdout_excerpt": json.dumps(payload, sort_keys=True),
+                    "command": command or default_command,
+                }
+            )
+        return {
+            "provider": "claude",
+            "chunkhound_helper_path": helper_path,
+            "chunkhound_tool_proof_entries": entries,
+        }
+
     def test_validate_and_record_chunkhound_tool_proof_persists_report_and_meta(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_tool_proof_validation"
         try:
@@ -6318,7 +6462,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6356,7 +6500,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            first = rf.validate_and_record_codex_chunkhound_tool_proof(
+            first = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6367,7 +6511,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                     tool_names=["list_mcp_resources"],
                 ),
             )
-            second = rf.validate_and_record_codex_chunkhound_tool_proof(
+            second = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6404,7 +6548,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6448,7 +6592,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            report = rf.validate_and_record_codex_chunkhound_tool_proof(
+            report = rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6483,7 +6627,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
 
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6494,7 +6638,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                     commands=["search", "research"],
                 ),
             )
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -6530,7 +6674,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6557,7 +6701,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -6584,7 +6728,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6618,7 +6762,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6667,7 +6811,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6718,7 +6862,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 "execution_stage": "tools/call",
                 "execution_stage_status": "ok",
             }
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6759,7 +6903,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6785,7 +6929,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6832,7 +6976,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6873,7 +7017,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6918,7 +7062,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -6964,7 +7108,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -7018,7 +7162,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7042,7 +7186,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="multipass_plan",
                 prompt_template_name="mrereview_gh_local_big_plan.md",
@@ -7066,7 +7210,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7090,7 +7234,7 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
-            report = rf.validate_codex_chunkhound_tool_proof(
+            report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
                 review_stage="singlepass_review",
                 prompt_template_name="mrereview_gh_local.md",
@@ -7106,6 +7250,403 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertFalse(report["valid"])
             self.assertEqual(report["observed_successful_calls"], [])
             self.assertEqual(report["observed_evidence_sources"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_accepts_claude_helper_entries(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["provider"], "claude")
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+        self.assertEqual(
+            [detail["command_excerpt"] for detail in report["observed_successful_call_details"]],
+            [
+                f"claude tool_use_result via {helper_path}",
+                f"claude tool_use_result via {helper_path}",
+            ],
+        )
+
+    def test_validate_and_record_chunkhound_tool_proof_accepts_real_claude_background_task_success_fixture(self) -> None:
+        root = ROOT / ".tmp_test_real_claude_background_task_success_report"
+
+        class _StubProgress:
+            def __init__(self) -> None:
+                self.meta: dict[str, object] = {}
+
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            progress = _StubProgress()
+            state: dict[str, Any] = {"content": ""}
+
+            search_fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+            search_fixture_text = search_fixture_path.read_text(encoding="utf-8")
+            search_tool_use_id = ""
+            for raw in search_fixture_text.splitlines():
+                payload = json.loads(raw)
+                if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                    continue
+                message = payload.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                        continue
+                    search_tool_use_id = str(block.get("tool_use_id") or "").strip()
+                    if search_tool_use_id:
+                        break
+                if search_tool_use_id:
+                    break
+            self.assertTrue(search_tool_use_id)
+            state["bash_tool_commands_by_id"] = {search_tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'}
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(progress=progress, state=state, chunk=search_fixture_text)
+
+            stream_fixture_path = (
+                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.ndjson"
+            )
+            output_fixture_path = (
+                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.output.json"
+            )
+            output_path = root / "background_task_output.json"
+            output_path.write_text(output_fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
+            rewritten_lines: list[str] = []
+            research_tool_use_id = ""
+            research_command_text = ""
+            for raw in stream_fixture_path.read_text(encoding="utf-8").splitlines():
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and str(payload.get("type") or "") == "assistant":
+                    message = payload.get("message")
+                    if isinstance(message, dict):
+                        for block in message.get("content") or []:
+                            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
+                                continue
+                            research_tool_use_id = str(block.get("id") or "").strip() or research_tool_use_id
+                            tool_input = block.get("input")
+                            if isinstance(tool_input, dict):
+                                research_command_text = str(tool_input.get("command") or "").strip() or research_command_text
+                if (
+                    isinstance(payload, dict)
+                    and str(payload.get("type") or "") == "system"
+                    and str(payload.get("subtype") or "") == "task_notification"
+                    and str(payload.get("status") or "") == "completed"
+                ):
+                    payload["output_file"] = str(output_path)
+                    research_tool_use_id = str(payload.get("tool_use_id") or "").strip() or research_tool_use_id
+                rewritten_lines.append(json.dumps(payload))
+            self.assertTrue(research_tool_use_id)
+            self.assertTrue(research_command_text)
+            state["bash_tool_commands_by_id"][research_tool_use_id] = research_command_text
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(rewritten_lines),
+            )
+
+            report = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="claude",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta={
+                    "provider": "claude",
+                    "chunkhound_helper_path": "<CURE_CHUNKHOUND_HELPER>",
+                    "chunkhound_tool_proof_entries": list(state["chunkhound_tool_proof_entries"]),
+                },
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["provider"], "claude")
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertTrue(persisted["valid"])
+            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_plan")
+            self.assertEqual(persisted["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_rejects_forged_claude_stdout_without_helper_command(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                command='/bin/bash -lc \'printf "$CURE_CHUNKHOUND_HELPER"; printf "{\\"ok\\": true}"\'',
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("search", str(report["failure_reason"]))
+        self.assertTrue(
+            any("did not invoke staged helper for the claimed tool" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
+        )
+
+    def test_validate_chunkhound_tool_proof_accepts_batched_claude_helper_entries(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_helper_path": helper_path,
+                "chunkhound_tool_proof_entries": [
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "stdout_excerpt": "batched helper stdout",
+                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
+                    },
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "stdout_excerpt": "batched helper stdout",
+                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+
+    def test_validate_chunkhound_tool_proof_claude_missing_helper_path_fails_closed(self) -> None:
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_tool_proof_entries": [
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        },
+                        "stdout_excerpt": "helper payload",
+                    },
+                    {
+                        "payload": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
+                            "result": {"summary": "grounded answer"},
+                        },
+                        "stdout_excerpt": "helper payload",
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("missing staged helper path", str(report["failure_reason"]))
+
+    def test_validate_chunkhound_tool_proof_rejected_claude_entries_remain_visible_when_valid(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": "/tmp/other/cure-chunkhound",
+                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        self.assertTrue(
+            any(detail["tool_name"] == "search" for detail in report["observed_failed_call_details"])
+        )
+        self.assertTrue(
+            any("path mismatch" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
+        )
+
+    def test_validate_and_record_chunkhound_tool_proof_mixed_provider_report_uses_latest_provider(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_tool_proof_mixed_provider_report"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+
+            first = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_codex_events(root=root, tool_names=["search", "code_research"]),
+            )
+            second = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="claude",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._claude_helper_adapter_meta(
+                    helper_path=helper_path,
+                    payloads=[
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                    ],
+                ),
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertEqual(persisted["schema_version"], 2)
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertEqual([run["provider"] for run in persisted["runs"]], ["codex", "claude"])
+            self.assertEqual(meta["chunkhound"]["tool_validation"]["provider"], "claude")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -7275,6 +7816,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         llm_resolved_override: dict[str, object] | None = None,
         llm_resolution_meta_override: dict[str, object] | None = None,
         runtime_policy_override: dict[str, object] | None = None,
+        extra_cli_args: list[str] | None = None,
     ) -> tuple[Path, list[str]]:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
@@ -7294,18 +7836,19 @@ class CodexToolProofFlowTests(unittest.TestCase):
             encoding="utf-8",
         )
         paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
-        args = rf.build_parser().parse_args(
-            [
-                "pr",
-                "https://github.com/acme/repo/pull/14",
-                "--if-reviewed",
-                "new",
-                "--ui",
-                "off",
-                "--quiet",
-                "--no-stream",
-            ]
-        )
+        cli_args = [
+            "pr",
+            "https://github.com/acme/repo/pull/14",
+            "--if-reviewed",
+            "new",
+            "--ui",
+            "off",
+            "--quiet",
+            "--no-stream",
+        ]
+        if extra_cli_args:
+            cli_args.extend(extra_cli_args)
+        args = rf.build_parser().parse_args(cli_args)
         calls: list[str] = []
         llm_param_count = len(inspect.signature(llm_side_effect).parameters)
         multipass_defaults = (
@@ -8368,6 +8911,56 @@ class CodexToolProofFlowTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_pr_flow_dry_run_chunkhound_marks_session_metadata_and_keeps_tool_proof(self) -> None:
+        root = ROOT / ".tmp_test_codex_tool_proof_dry_run"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        runtime_policy = self._codex_runtime_policy()
+        runtime_policy["env"] = {
+            "CURE_CHUNKHOUND_HELPER": "/tmp/cure/work/bin/cure-chunkhound",
+            "CURE_CHUNKHOUND_DRY_RUN": "1",
+        }
+        runtime_policy["metadata"] = {
+            "provider": "codex",
+            "chunkhound_access_mode": "cli_helper_daemon",
+            "chunkhound_dry_run": True,
+        }
+        runtime_policy["staged_paths"] = {
+            "chunkhound_helper": "/tmp/cure/work/bin/cure-chunkhound",
+        }
+
+        root, calls = self._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+            runtime_policy_override=runtime_policy,
+            extra_cli_args=["--dry-run-chunkhound"],
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertTrue(meta["notes"]["dry_run_chunkhound"])
+            self.assertTrue(meta["options"]["dry_run_chunkhound"])
+            self.assertTrue(meta["chunkhound"]["dry_run"])
+            self.assertTrue(meta["agent_runtime"]["chunkhound_dry_run"])
+            self.assertEqual(meta["codex"]["env"]["CURE_CHUNKHOUND_DRY_RUN"], "1")
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_pr_flow_helper_preflight_timeout_persists_access_metadata(self) -> None:
         root = ROOT / ".tmp_test_codex_helper_preflight_timeout"
 
@@ -8798,7 +9391,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     "grounding_mode": "strict",
                 },
             }
-            rf.validate_and_record_codex_chunkhound_tool_proof(
+            rf.validate_and_record_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider="codex",
@@ -11493,3 +12086,498 @@ class ExtractionOwnershipTests(unittest.TestCase):
         self.assertEqual(rc, 7)
         self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands", "--json"], prog="cure")
+
+
+class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
+    def test_step_grounding_validation_error_carries_payload(self) -> None:
+        err = rf.StepGroundingValidationError(
+            "bad grounding",
+            step_validation={"valid": False, "errors": ["missing citation"]},
+        )
+
+        self.assertEqual(str(err), "bad grounding")
+        self.assertEqual(err.step_validation, {"valid": False, "errors": ["missing citation"]})
+
+    def test_execute_multipass_step_stage_retries_grounding_once_in_non_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result]) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ) as finalize_mock,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=False,
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(skipped, [])
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 2)
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "completed")
+            self.assertTrue(state["grounding_retried"])
+            self.assertEqual(len(state["grounding_attempts"]), 1)
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(run_entry["first_grounding_failure_validation"]["errors"], ["missing citation"])
+
+    def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            first = rf.StepGroundingValidationError(
+                "bad grounding",
+                step_validation={"valid": False, "errors": ["missing citation"]},
+            )
+            second = rf.StepGroundingValidationError(
+                "bad grounding again",
+                step_validation={"valid": False, "errors": ["wrong line ref"]},
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result]) as run_mock,
+                mock.patch.object(rf, "_finalize_multipass_step_result", side_effect=[first, second]),
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=False,
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(progress.meta["multipass"]["status"], "steps_ready")
+            self.assertEqual(state["status"], "grounding_skipped")
+            self.assertEqual(state["grounding_reason"], "missing citation")
+            self.assertTrue(run_entry["grounding_skipped"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_execute_multipass_step_stage_uses_prompt_when_ui_auto_resolves_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(sys, "stderr") as stderr_mock,
+                mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+                mock.patch.object(stderr_mock, "isatty", return_value=True),
+                mock.patch.object(rf, "_run_multipass_step_llm", return_value=raw_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="skip") as prompt_mock,
+            ):
+                ui_enabled = rf.resolve_ui_enabled(
+                    argparse.Namespace(ui="auto", quiet=False),
+                    verbosity=rf.Verbosity.normal,
+                )
+                _, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=ui_enabled,
+                )
+
+            self.assertTrue(ui_enabled)
+            prompt_mock.assert_called_once()
+            self.assertEqual(run_mock.call_count, 1)
+            self.assertEqual(skipped[0]["reason"], "missing citation")
+
+    def test_grounding_prompt_helper_repompts_until_valid_choice(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("nope\nretry\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            choice = cure_output.prompt_grounding_retry_skip(
+                step_id="01",
+                step_title="API review",
+                attempt_count=2,
+                validation={"errors": ["missing citation", "bad line reference"]},
+            )
+
+        rendered = writer.getvalue()
+        self.assertEqual(choice, "retry")
+        self.assertIn("Strict grounding failed for a multipass step.", rendered)
+        self.assertIn("Invalid choice. Enter one of: retry, skip.", rendered)
+
+    def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:
+        root = Path("/tmp/session-grounding-summary")
+        entries = [
+            rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Skipped",
+                step_focus="focus",
+                output_path=root / "review.step-01.md",
+                prompt="a",
+                should_run=False,
+            ),
+            rf.MultipassStepEntry(
+                index=2,
+                step_id="02",
+                step_title="Kept",
+                step_focus="focus",
+                output_path=root / "review.step-02.md",
+                prompt="b",
+                should_run=False,
+            ),
+        ]
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {"step_id": "01", "step_title": "Skipped", "status": "grounding_skipped", "grounding_reason": "bad cite"},
+                    {"step_id": "02", "step_title": "Kept", "status": "completed"},
+                ]
+            }
+        }
+
+        synth_outputs = rf._persist_grounding_summary(meta=meta, step_entries=entries)
+
+        self.assertEqual(synth_outputs, [str(root / "review.step-02.md")])
+        self.assertEqual(
+            meta["multipass"]["artifacts"]["step_outputs"],
+            [str(root / "review.step-01.md"), str(root / "review.step-02.md")],
+        )
+        self.assertEqual(meta["multipass"]["artifacts"]["synth_step_outputs"], [str(root / "review.step-02.md")])
+        self.assertTrue(meta["multipass"]["grounding_partial_synthesis"])
+        self.assertEqual(meta["multipass"]["grounding_skipped_steps"][0]["reason"], "bad cite")
+
+    def test_resume_grounding_skip_choice_is_prompted_only_when_ui_enabled(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Skipped",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Skipped", "reason": "bad cite"}
+                ]
+            }
+        }
+
+        self.assertEqual(
+            rf._resolve_resume_grounding_skip_choice(meta=meta, step_entries=[entry], ui_enabled=False),
+            "rerun",
+        )
+        with mock.patch.object(rf, "prompt_resume_grounding_skipped_steps", return_value="keep"):
+            self.assertEqual(
+                rf._resolve_resume_grounding_skip_choice(meta=meta, step_entries=[entry], ui_enabled=True),
+                "keep",
+            )
+
+    def test_resume_grounding_skip_choice_uses_prompt_when_ui_auto_resolves_enabled(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Skipped",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Skipped", "reason": "bad cite"}
+                ]
+            }
+        }
+
+        with (
+            mock.patch.object(sys, "stderr") as stderr_mock,
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+            mock.patch.object(stderr_mock, "isatty", return_value=True),
+            mock.patch.object(rf, "prompt_resume_grounding_skipped_steps", return_value="keep") as prompt_mock,
+        ):
+            ui_enabled = rf.resolve_ui_enabled(
+                argparse.Namespace(ui="auto", quiet=False),
+                verbosity=rf.Verbosity.normal,
+            )
+            choice = rf._resolve_resume_grounding_skip_choice(
+                meta=meta,
+                step_entries=[entry],
+                ui_enabled=ui_enabled,
+            )
+
+        self.assertTrue(ui_enabled)
+        prompt_mock.assert_called_once()
+        self.assertEqual(choice, "keep")
+
+    def test_prepare_synth_inputs_returns_outputs_and_skipped_text_when_valid_steps_remain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            entries = [
+                rf.MultipassStepEntry(
+                    index=1,
+                    step_id="01",
+                    step_title="Safety",
+                    step_focus="f",
+                    output_path=root / "review.step-01.md",
+                    prompt="p",
+                    should_run=True,
+                ),
+                rf.MultipassStepEntry(
+                    index=2,
+                    step_id="02",
+                    step_title="Perf",
+                    step_focus="f",
+                    output_path=root / "review.step-02.md",
+                    prompt="p",
+                    should_run=True,
+                ),
+            ]
+            meta: dict[str, Any] = {
+                "session_id": "test-session",
+                "multipass": {
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "Safety", "reason": "no cite"}
+                    ],
+                },
+            }
+
+            synth_outputs, skipped_text = rf._prepare_synth_inputs(
+                meta=meta,
+                step_entries=entries,
+                session_id="test-session",
+                session_dir=session_dir,
+                work_dir=work_dir,
+                review_md_path=review_md_path,
+            )
+
+            self.assertEqual(synth_outputs, [str(root / "review.step-02.md")])
+            self.assertIn("01", skipped_text)
+            self.assertIn("Safety", skipped_text)
+            self.assertIn("no cite", skipped_text)
+
+    def test_prepare_synth_inputs_raises_and_emits_playbook_when_all_steps_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Safety",
+                step_focus="f",
+                output_path=root / "review.step-01.md",
+                prompt="p",
+                should_run=True,
+            )
+            meta: dict[str, Any] = {
+                "session_id": "test-session",
+                "multipass": {
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "Safety", "reason": "no cite"}
+                    ],
+                },
+            }
+            emitted_playbook: list[str] = []
+
+            def capture_playbook(**kwargs: Any) -> None:
+                emitted_playbook.append(str(kwargs.get("validation") or ""))
+
+            with (
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook", side_effect=capture_playbook),
+                self.assertRaises(rf.ReviewflowError),
+            ):
+                rf._prepare_synth_inputs(
+                    meta=meta,
+                    step_entries=[entry],
+                    session_id="test-session",
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    review_md_path=review_md_path,
+                )
+
+            self.assertTrue(emitted_playbook, "Expected grounding failure playbook to be emitted")
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+
+    def test_persist_grounding_summary_prefers_current_step_state_over_stale_persisted_skip(self) -> None:
+        entry = rf.MultipassStepEntry(
+            index=1,
+            step_id="01",
+            step_title="Recovered",
+            step_focus="focus",
+            output_path=Path("/tmp/review.step-01.md"),
+            prompt="a",
+            should_run=False,
+        )
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {"step_id": "01", "step_title": "Recovered", "status": "completed"},
+                ],
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "Recovered", "reason": "old failure"},
+                ],
+            }
+        }
+
+        synth_outputs = rf._persist_grounding_summary(meta=meta, step_entries=[entry])
+
+        self.assertEqual(synth_outputs, ["/tmp/review.step-01.md"])
+        self.assertEqual(meta["multipass"]["grounding_skipped_steps"], [])

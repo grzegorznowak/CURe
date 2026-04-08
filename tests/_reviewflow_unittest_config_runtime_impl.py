@@ -1651,8 +1651,16 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             "runtime_overrides": {},
         }
 
-    def _runtime_args(self, *, profile: str | None = None) -> argparse.Namespace:
-        return argparse.Namespace(agent_runtime_profile=profile)
+    def _runtime_args(
+        self,
+        *,
+        profile: str | None = None,
+        dry_run_chunkhound: bool = False,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            agent_runtime_profile=profile,
+            dry_run_chunkhound=dry_run_chunkhound,
+        )
 
     def test_prepare_review_agent_runtime_uses_permissive_codex_profile(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex"
@@ -1769,8 +1777,15 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertEqual(runtime["env"]["CLAUDE_HOME"], "/tmp/claude-home")
             self.assertNotIn("CODEX_THREAD_ID", runtime["env"])
             self.assertIn("CLAUDE_CODE_SESSION", runtime["metadata"]["env_keys"])
+            helper_path = Path(str(runtime["staged_paths"]["chunkhound_helper"]))
+            self.assertTrue(helper_path.is_file())
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+            self.assertEqual(runtime["env"]["PYTHONSAFEPATH"], "1")
+            self.assertEqual(runtime["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
             self.assertTrue(Path(runtime["staged_paths"]["claude_settings"]).is_file())
-            self.assertTrue(Path(runtime["staged_paths"]["claude_mcp_config"]).is_file())
+            self.assertNotIn("claude_mcp_config", runtime["staged_paths"])
+            settings_payload = json.loads(Path(runtime["staged_paths"]["claude_settings"]).read_text(encoding="utf-8"))
+            self.assertEqual(settings_payload["permissions"]["allow"], ["Bash"])
             cmd = rf.build_claude_exec_cmd(
                 command="claude",
                 model="claude-sonnet-4-6",
@@ -1784,10 +1799,46 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertIn("--setting-sources", cmd)
             self.assertIn("user", cmd)
             self.assertIn("--settings", cmd)
-            self.assertIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--mcp-config", cmd)
             self.assertIn("--dangerously-skip-permissions", cmd)
             self.assertNotIn("--permission-mode", cmd)
             self.assertIn("--add-dir", cmd)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_marks_chunkhound_dry_run_in_env_and_metadata(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_chunkhound_dry_run"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive", dry_run_chunkhound=True),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_DRY_RUN"], "1")
+            self.assertTrue(runtime["metadata"]["chunkhound_dry_run"])
+            self.assertTrue(runtime["config"]["chunkhound_dry_run"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1905,6 +1956,9 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         def flush(self) -> None:
             return None
 
+        def record_cmd(self, _cmd: object) -> None:
+            return None
+
     def test_record_text_cli_live_output_updates_claude_progress(self) -> None:
         progress = self._StubProgress()
 
@@ -1974,6 +2028,50 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(payload["result"], "hello world")
         self.assertEqual(payload["usage"]["total_tokens"], 6)
 
+    def test_parse_claude_stream_payload_prefers_higher_turn_count_non_error_result(self) -> None:
+        main_review = "Main review\n" + ("detailed finding\n" * 20)
+        short_follow_up = "The ChunkHound helper research query also completed successfully."
+        error_blob = "Error summary\n" + ("stack frame\n" * 40)
+
+        payload = cure_llm._parse_claude_stream_payload(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": main_review,
+                            "num_turns": 46,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": short_follow_up,
+                            "num_turns": 1,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": error_blob,
+                            "num_turns": 99,
+                            "is_error": True,
+                        }
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(payload["session_id"], "claude-session")
+        self.assertEqual(payload["result"], main_review)
+        self.assertNotEqual(payload["result"], short_follow_up)
+        self.assertNotEqual(payload["result"], error_blob)
+        self.assertNotEqual(payload.get("is_error"), True)
+
     def test_handle_claude_stream_chunk_updates_current_text_from_deltas(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
@@ -2009,7 +2107,87 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         live = progress.meta["live_progress"]
         self.assertEqual(live["current"]["text"], "Drafting review")
 
-    def test_handle_claude_stream_chunk_surfaces_thinking_and_tool_use_progress(self) -> None:
+    def test_handle_claude_stream_chunk_records_completed_text_blocks_and_resets_content(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "text"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "text_delta", "text": "Drafting review summary."},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {"type": "content_block_stop", "index": 0},
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Drafting review summary.")
+        self.assertIn(
+            "Drafting review summary.",
+            [item["text"] for item in live["timeline"]],
+        )
+
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "text"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "text_delta", "text": "Fresh block"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Fresh block")
+        self.assertEqual(state["content"], "Fresh block")
+
+    def test_handle_claude_stream_chunk_hides_thinking_and_surfaces_tool_use_progress(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
 
@@ -2074,7 +2252,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         live = progress.meta["live_progress"]
         self.assertEqual(live["current"]["text"], "Bash: ls")
         timeline_texts = [item["text"] for item in live["timeline"]]
-        self.assertIn("Thinking…", timeline_texts)
+        self.assertNotIn("Thinking…", timeline_texts)
         self.assertIn("Using Bash", timeline_texts)
 
     def test_handle_claude_stream_chunk_suppresses_low_signal_tool_results(self) -> None:
@@ -2133,3 +2311,784 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         timeline_texts = [item["text"] for item in live["timeline"]]
         self.assertIn("Using Bash", timeline_texts)
         self.assertNotIn("Tool result: {\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}", timeline_texts)
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+
+    def test_handle_claude_stream_chunk_tool_result_summary_includes_bash_command(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"ls README.md\",\"description\":\"Inspect README\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "tool_use_id": "toolu_1",
+                            "tool_use_result": {
+                                "stdout": "listed file successfully\n",
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertIn("ls README.md", live["current"]["text"])
+        self.assertIn("listed file successfully", live["current"]["text"])
+
+    def test_handle_claude_stream_chunk_extracts_chunkhound_helper_proof_entries(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": stdout_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["payload"]["helper_path"], helper_path)
+        self.assertEqual(entries[0]["tool_use_id"], "toolu_1")
+        self.assertIn("cure-chunkhound: tools/call waiting", entries[0]["stdout_excerpt"])
+        self.assertIn("CURE_CHUNKHOUND_HELPER", entries[0]["command"])
+        self.assertNotIn("chunkhound_helper_path", state)
+
+    def test_handle_claude_stream_chunk_extracts_multiple_helper_payloads_from_one_stdout(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle && \\\"$CURE_CHUNKHOUND_HELPER\\\" research question\",\"description\":\"Run staged helper twice\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": stdout_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual([entry["payload"]["tool_name"] for entry in entries], ["search", "code_research"])
+        self.assertTrue(all("CURE_CHUNKHOUND_HELPER" in entry["command"] for entry in entries))
+        self.assertEqual([entry["tool_use_id"] for entry in entries], ["toolu_1", "toolu_1"])
+
+    def test_handle_claude_stream_chunk_raises_when_helper_payload_has_no_documented_tool_result_block(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = json.dumps(
+            {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+            }
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        with self.assertRaisesRegex(rf.ReviewflowError, "tool_result contract mismatch"):
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": "toolu_1",
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "tool_use_result": {
+                                    "stdout": stdout_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+    def test_handle_claude_stream_chunk_extracts_helper_proof_entries_from_real_search_fixture(self) -> None:
+        progress = self._StubProgress()
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+        fixture_text = fixture_path.read_text(encoding="utf-8")
+        tool_use_id = ""
+        for raw in fixture_text.splitlines():
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                continue
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            for block in message.get("content") or []:
+                if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                    continue
+                tool_use_id = str(block.get("tool_use_id") or "").strip()
+                if tool_use_id:
+                    break
+            if tool_use_id:
+                break
+        self.assertTrue(tool_use_id)
+        state = {
+            "content": "",
+            "bash_tool_commands_by_id": {tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'},
+        }
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_text,
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        live = progress.meta["live_progress"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["tool_use_id"], tool_use_id)
+        self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
+        self.assertEqual(entries[0]["command"], '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
+        self.assertTrue(
+            any('search "<QUERY>"' in str(item["text"]) for item in live.get("timeline", []))
+        )
+
+    def test_handle_claude_stream_chunk_ignores_real_backgrounded_research_fixture_without_helper_payload(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_path.read_text(encoding="utf-8"),
+        )
+
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+        live = progress.meta["live_progress"]
+        self.assertIn("background task completed successfully", live["current"]["text"].lower())
+        self.assertFalse(any("Thinking" in str(item["text"]) for item in live.get("timeline", [])))
+
+    def test_real_claude_fixtures_are_shape_preserving_redacted(self) -> None:
+        search_fixture = (ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson").read_text(
+            encoding="utf-8"
+        )
+        research_fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+        ).read_text(encoding="utf-8")
+
+        for body in (search_fixture, research_fixture):
+            self.assertNotRegex(body, r"/(?:tmp|home|workspaces|opt|usr)/")
+            self.assertIn("<QUERY>", body)
+            self.assertIn("<ABS_PATH>", body)
+        self.assertIn("tools/call", search_fixture)
+        self.assertIn("notifications/initialized", search_fixture)
+        self.assertIn("projects/CURe/cure.py", search_fixture)
+        self.assertNotIn("tools<ABS_PATH>", search_fixture)
+        self.assertNotIn("notifications<ABS_PATH>", search_fixture)
+        self.assertNotIn("projects<ABS_PATH>", search_fixture)
+        self.assertIn("<BACKGROUND_TASK_ID>", research_fixture)
+
+    def test_real_claude_probe_absolute_path_redaction_preserves_relative_slash_values(self) -> None:
+        import real_claude_probe
+
+        replacements = {str(real_claude_probe.REPO_ROOT): "<CURE_REPO_ROOT>"}
+
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "tools/call",
+                key="execution_stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "tools/call",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "notifications/initialized",
+                key="stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "notifications/initialized",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "projects/CURe/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "<CURE_REPO_ROOT>/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<CURE_REPO_ROOT>/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "/workspaces/cure_workspace/projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<ABS_PATH>",
+        )
+
+    def test_handle_claude_stream_chunk_keeps_non_tool_blocks_safe_after_bash_usage(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"echo hi\",\"description\":\"Say hi\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "thinking_delta", "thinking": "considering"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 2,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 2,
+                                "delta": {"type": "text_delta", "text": "Final review text"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Final review text")
+
+    def test_build_claude_resume_command_includes_chunkhound_helper_env(self) -> None:
+        command = cure_llm.build_claude_resume_command(
+            repo_dir=Path("/tmp/repo"),
+            session_id="claude-session-123",
+            env={
+                "ANTHROPIC_API_KEY": "test-key",  # pragma: allowlist secret
+                "CURE_CHUNKHOUND_HELPER": "/tmp/work/bin/cure-chunkhound",
+                "CURE_CHUNKHOUND_DRY_RUN": "1",
+                "PYTHONSAFEPATH": "1",
+            },
+            command="claude",
+            runtime_policy={"provider_args": ["--settings", "/tmp/settings.json"]},
+        )
+
+        self.assertIn("CURE_CHUNKHOUND_HELPER=", command)
+        self.assertIn("CURE_CHUNKHOUND_DRY_RUN=", command)
+        self.assertIn("PYTHONSAFEPATH=", command)
+        self.assertIn("--resume claude-session-123", command)
+
+    def test_run_claude_exec_records_staged_helper_path_not_streamed_helper_path(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_output.md"
+        try:
+            streamed_helper_path = "/tmp/other/cure-chunkhound"
+            staged_helper_path = "/tmp/work/bin/cure-chunkhound"
+
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": json.dumps(
+                                            {
+                                                "ok": True,
+                                                "command": "search",
+                                                "tool_name": "search",
+                                                "helper_path": streamed_helper_path,
+                                                "result": {
+                                                    "results": [],
+                                                    "pagination": {"offset": 0, "total_results": 0},
+                                                },
+                                            }
+                                        ),
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": json.dumps(
+                                    {
+                                        "ok": True,
+                                        "command": "search",
+                                        "tool_name": "search",
+                                        "helper_path": streamed_helper_path,
+                                        "result": {
+                                            "results": [],
+                                            "pagination": {"offset": 0, "total_results": 0},
+                                        },
+                                    }
+                                ),
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "# Review",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"CURE_CHUNKHOUND_HELPER": staged_helper_path, "PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                        "staged_paths": {"chunkhound_helper": staged_helper_path},
+                    },
+                )
+
+            self.assertEqual(result.adapter_meta["chunkhound_helper_path"], staged_helper_path)
+            entries = result.adapter_meta["chunkhound_tool_proof_entries"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["payload"]["helper_path"], streamed_helper_path)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_uses_streamed_text_when_selected_result_is_empty(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_stream_fallback.md"
+        streamed_text = "# Review\n\nGrounded streamed review text."
+        try:
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "delta": {"type": "text_delta", "text": streamed_text},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "",
+                            "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                    },
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), streamed_text + "\n")
+            self.assertIsNotNone(result.resume)
+            self.assertEqual(result.resume.session_id, "claude-session")
+            self.assertEqual(result.adapter_meta["usage"]["total_tokens"], 8)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_passes_claude_events_log_path_to_logged_command(self) -> None:
+        progress = self._StubProgress()
+        progress.meta = {"logs": {}}
+        output_path = ROOT / ".tmp_test_run_claude_exec_events_log.md"
+        captured: dict[str, object] = {}
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "session_id": "claude-session",
+                "result": "# Review",
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        )
+        try:
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                captured.update(kwargs)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                    },
+                )
+
+            expected = (ROOT.parent / "work" / "logs" / "claude.events.jsonl").resolve()
+            self.assertEqual(captured["claude_json_events_path"], expected)
+            self.assertEqual(progress.meta["logs"]["claude_events"], str(expected))
+        finally:
+            output_path.unlink(missing_ok=True)

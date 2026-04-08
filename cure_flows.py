@@ -576,6 +576,38 @@ def _command_uses_staged_chunkhound_helper(*, command: object, helper_path: obje
     return any(pattern.search(text) is not None for pattern in helper_patterns)
 
 
+def _command_invokes_staged_chunkhound_helper_tool(
+    *,
+    command: object,
+    helper_path: object,
+    tool_name: str,
+) -> bool:
+    text = " ".join(str(command or "").split())
+    if not text:
+        return False
+    normalized_tool = _normalize_chunkhound_tool_name(tool_name)
+    if normalized_tool == "search":
+        helper_subcommand = "search"
+    elif normalized_tool == "code_research":
+        helper_subcommand = "research"
+    else:
+        return False
+
+    env_helper = r'(?:"\$\{?CURE_CHUNKHOUND_HELPER\}?"|\'\$\{?CURE_CHUNKHOUND_HELPER\}?\'|\$\{?CURE_CHUNKHOUND_HELPER\}?)'
+    patterns = [
+        re.compile(rf"(?<![\w./-]){env_helper}\s+{re.escape(helper_subcommand)}(?![\w./-])"),
+    ]
+
+    helper = str(helper_path or "").strip()
+    if helper:
+        path_token = re.escape(helper)
+        patterns.append(
+            re.compile(rf"(?<![\w./-])(?:{path_token}|\"{path_token}\"|'{path_token}')\s+{re.escape(helper_subcommand)}(?![\w./-])")
+        )
+
+    return any(pattern.search(text) is not None for pattern in patterns)
+
+
 def _chunkhound_helper_command_excerpt(command: object) -> str | None:
     text = " ".join(str(command or "").split())
     if not text:
@@ -780,18 +812,35 @@ def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset
     return payload.decode("utf-8", errors="replace")
 
 
-def validate_codex_chunkhound_tool_proof(
+def _chunkhound_helper_detail_for_report(
+    *,
+    payload: dict[str, Any],
+    item_id: str | None,
+    command_excerpt: str | None,
+    detail_override: str | None = None,
+) -> dict[str, Any]:
+    detail = _chunkhound_helper_failure_detail(
+        payload=payload,
+        item_id=item_id,
+        command=command_excerpt,
+    )
+    detail["command_excerpt"] = command_excerpt
+    if detail_override:
+        detail["detail"] = detail_override
+    return detail
+
+
+def validate_chunkhound_tool_proof(
     *,
     provider: str,
     review_stage: str,
     prompt_template_name: str,
     adapter_meta: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if str(provider or "").strip().lower() != "codex":
-        return None
     contract = chunkhound_prompt_contract_for_template(prompt_template_name)
     if contract is None:
         return None
+    normalized_provider = str(provider or "").strip().lower()
 
     required_tools: list[str] = []
     if contract.search_requirement == "required":
@@ -807,7 +856,7 @@ def validate_codex_chunkhound_tool_proof(
     end_offset = int(raw_end) if isinstance(raw_end, int) else None
 
     report: dict[str, Any] = {
-        "provider": "codex",
+        "provider": normalized_provider or "unknown",
         "review_stage": str(review_stage or "").strip(),
         "prompt_template_name": str(prompt_template_name or "").strip(),
         "required_tools": required_tools,
@@ -823,111 +872,190 @@ def validate_codex_chunkhound_tool_proof(
         "codex_events_end_offset": end_offset,
     }
 
-    if not raw_events_path:
-        report["failure_reason"] = "missing Codex events path"
-        return report
-
-    events_path = Path(raw_events_path).resolve()
-    if not events_path.is_file():
-        report["failure_reason"] = f"Codex events log not found: {events_path}"
-        return report
-
-    try:
-        events_text = _read_codex_events_slice(
-            path=events_path,
-            start_offset=start_offset,
-            end_offset=end_offset,
-        )
-    except OSError as e:
-        report["failure_reason"] = f"failed to read Codex events log: {e}"
-        return report
-
     observed_successful_calls: list[str] = []
     observed_successful_call_details: list[dict[str, Any]] = []
     observed_failed_call_details: list[dict[str, Any]] = []
     ignored_discovery_calls: list[str] = []
     observed_evidence_sources: set[str] = set()
     latest_failed_helper_calls: dict[str, dict[str, Any]] = {}
-    for event_type, item in _iter_codex_tool_call_events(events_text):
-        raw_tool_name = _extract_tool_name(item)
-        normalized_tool_name = _normalize_chunkhound_tool_name(raw_tool_name)
-        if not normalized_tool_name:
-            continue
-        if not _chunkhound_tool_targets_expected_server(item=item, raw_tool_name=raw_tool_name):
-            continue
-        if normalized_tool_name in _CHUNKHOUND_PROOF_DISCOVERY_TOOLS or normalized_tool_name.startswith(
-            "list_mcp_"
-        ):
-            if normalized_tool_name not in ignored_discovery_calls:
-                ignored_discovery_calls.append(normalized_tool_name)
-            continue
-        if normalized_tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
-            continue
-        if _extract_tool_status(event_type, item) is True:
-            if normalized_tool_name not in observed_successful_calls:
-                observed_successful_calls.append(normalized_tool_name)
-            detail = {
-                "tool_name": normalized_tool_name,
-                "evidence_source": "mcp_tool_call",
-                "item_id": _first_nonempty_string(item.get("id")) or None,
-                "server": _first_nonempty_string(
-                    item.get("server"),
-                    item.get("server_name"),
-                    item.get("mcp_server"),
+    if normalized_provider == "codex":
+        if not raw_events_path:
+            report["failure_reason"] = "missing Codex events path"
+            return report
+
+        events_path = Path(raw_events_path).resolve()
+        if not events_path.is_file():
+            report["failure_reason"] = f"Codex events log not found: {events_path}"
+            return report
+
+        try:
+            events_text = _read_codex_events_slice(
+                path=events_path,
+                start_offset=start_offset,
+                end_offset=end_offset,
+            )
+        except OSError as e:
+            report["failure_reason"] = f"failed to read Codex events log: {e}"
+            return report
+
+        for event_type, item in _iter_codex_tool_call_events(events_text):
+            raw_tool_name = _extract_tool_name(item)
+            normalized_tool_name = _normalize_chunkhound_tool_name(raw_tool_name)
+            if not normalized_tool_name:
+                continue
+            if not _chunkhound_tool_targets_expected_server(item=item, raw_tool_name=raw_tool_name):
+                continue
+            if normalized_tool_name in _CHUNKHOUND_PROOF_DISCOVERY_TOOLS or normalized_tool_name.startswith(
+                "list_mcp_"
+            ):
+                if normalized_tool_name not in ignored_discovery_calls:
+                    ignored_discovery_calls.append(normalized_tool_name)
+                continue
+            if normalized_tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                continue
+            if _extract_tool_status(event_type, item) is True:
+                if normalized_tool_name not in observed_successful_calls:
+                    observed_successful_calls.append(normalized_tool_name)
+                detail = {
+                    "tool_name": normalized_tool_name,
+                    "evidence_source": "mcp_tool_call",
+                    "item_id": _first_nonempty_string(item.get("id")) or None,
+                    "server": _first_nonempty_string(
+                        item.get("server"),
+                        item.get("server_name"),
+                        item.get("mcp_server"),
+                    )
+                    or None,
+                    "command_excerpt": None,
+                }
+                if detail not in observed_successful_call_details:
+                    observed_successful_call_details.append(detail)
+                observed_evidence_sources.add("mcp_tool_call")
+
+        for event_type, item in _iter_codex_command_execution_events(events_text):
+            command = _first_nonempty_string(item.get("command"))
+            payload = _parse_chunkhound_helper_output(item.get("aggregated_output"))
+            if payload is None:
+                continue
+            if not _command_uses_staged_chunkhound_helper(
+                command=command,
+                helper_path=payload.get("helper_path"),
+            ):
+                continue
+            tool_name = _chunkhound_helper_tool_name(payload)
+            if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                declared_tool = _chunkhound_helper_declared_tool_name(payload)
+                if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                    continue
+                failure_detail = _chunkhound_helper_failure_detail(
+                    payload=payload,
+                    item_id=_first_nonempty_string(item.get("id")) or None,
+                    command=command,
                 )
-                or None,
-                "command_excerpt": None,
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                latest_failed_helper_calls[declared_tool] = failure_detail
+                continue
+            if not _command_execution_succeeded(event_type, item):
+                failure_detail = _chunkhound_helper_failure_detail(
+                    payload=payload,
+                    item_id=_first_nonempty_string(item.get("id")) or None,
+                    command=command,
+                )
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                latest_failed_helper_calls[tool_name] = failure_detail
+                continue
+            if tool_name not in observed_successful_calls:
+                observed_successful_calls.append(tool_name)
+            detail = {
+                "tool_name": tool_name,
+                "evidence_source": "cli_helper_command_execution",
+                "item_id": _first_nonempty_string(item.get("id")) or None,
+                "server": None,
+                "command_excerpt": _chunkhound_helper_command_excerpt(command),
             }
             if detail not in observed_successful_call_details:
                 observed_successful_call_details.append(detail)
-            observed_evidence_sources.add("mcp_tool_call")
-
-    for event_type, item in _iter_codex_command_execution_events(events_text):
-        command = _first_nonempty_string(item.get("command"))
-        payload = _parse_chunkhound_helper_output(item.get("aggregated_output"))
-        if payload is None:
-            continue
-        if not _command_uses_staged_chunkhound_helper(
-            command=command,
-            helper_path=payload.get("helper_path"),
-        ):
-            continue
-        tool_name = _chunkhound_helper_tool_name(payload)
-        if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
-            declared_tool = _chunkhound_helper_declared_tool_name(payload)
-            if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+            observed_evidence_sources.add("cli_helper_command_execution")
+    elif normalized_provider == "claude":
+        helper_path = str(meta.get("chunkhound_helper_path") or "").strip()
+        if not helper_path:
+            report["failure_reason"] = "missing staged helper path for Claude ChunkHound tool proof"
+            return report
+        entries = meta.get("chunkhound_tool_proof_entries")
+        if not isinstance(entries, list):
+            entries = []
+        command_excerpt = f"claude tool_use_result via {helper_path}"
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
                 continue
-            failure_detail = _chunkhound_helper_failure_detail(
-                payload=payload,
-                item_id=_first_nonempty_string(item.get("id")) or None,
+            payload = entry.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            item_id = _first_nonempty_string(entry.get("item_id")) or f"claude-tool-use-{idx}"
+            command = _first_nonempty_string(entry.get("command"))
+            declared_tool = _chunkhound_helper_declared_tool_name(payload)
+            expected_tool = declared_tool or _normalize_chunkhound_tool_name(payload.get("tool_name"))
+            payload_helper_path = str(payload.get("helper_path") or "").strip()
+            if not _command_invokes_staged_chunkhound_helper_tool(
                 command=command,
-            )
-            if failure_detail not in observed_failed_call_details:
-                observed_failed_call_details.append(failure_detail)
-            latest_failed_helper_calls[declared_tool] = failure_detail
-            continue
-        if not _command_execution_succeeded(event_type, item):
-            failure_detail = _chunkhound_helper_failure_detail(
-                payload=payload,
-                item_id=_first_nonempty_string(item.get("id")) or None,
-                command=command,
-            )
-            if failure_detail not in observed_failed_call_details:
-                observed_failed_call_details.append(failure_detail)
-            latest_failed_helper_calls[tool_name] = failure_detail
-            continue
-        if tool_name not in observed_successful_calls:
-            observed_successful_calls.append(tool_name)
-        detail = {
-            "tool_name": tool_name,
-            "evidence_source": "cli_helper_command_execution",
-            "item_id": _first_nonempty_string(item.get("id")) or None,
-            "server": None,
-            "command_excerpt": _chunkhound_helper_command_excerpt(command),
-        }
-        if detail not in observed_successful_call_details:
-            observed_successful_call_details.append(detail)
-        observed_evidence_sources.add("cli_helper_command_execution")
+                helper_path=helper_path,
+                tool_name=expected_tool,
+            ):
+                failure_detail = _chunkhound_helper_detail_for_report(
+                    payload=payload,
+                    item_id=item_id,
+                    command_excerpt=command_excerpt,
+                    detail_override="Claude Bash command did not invoke staged helper for the claimed tool",
+                )
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                if declared_tool:
+                    latest_failed_helper_calls[declared_tool] = failure_detail
+                continue
+            if payload_helper_path != helper_path:
+                failure_detail = _chunkhound_helper_detail_for_report(
+                    payload=payload,
+                    item_id=item_id,
+                    command_excerpt=command_excerpt,
+                    detail_override=(
+                        f"staged helper path mismatch: expected {helper_path}, observed {payload_helper_path or '<missing>'}"
+                    ),
+                )
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                if declared_tool:
+                    latest_failed_helper_calls[declared_tool] = failure_detail
+                continue
+            tool_name = _chunkhound_helper_tool_name(payload)
+            if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                declared_tool = _chunkhound_helper_declared_tool_name(payload)
+                if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                    continue
+                failure_detail = _chunkhound_helper_detail_for_report(
+                    payload=payload,
+                    item_id=item_id,
+                    command_excerpt=command_excerpt,
+                )
+                if failure_detail not in observed_failed_call_details:
+                    observed_failed_call_details.append(failure_detail)
+                latest_failed_helper_calls[declared_tool] = failure_detail
+                continue
+            if tool_name not in observed_successful_calls:
+                observed_successful_calls.append(tool_name)
+            detail = {
+                "tool_name": tool_name,
+                "evidence_source": "cli_helper_command_execution",
+                "item_id": item_id,
+                "server": None,
+                "command_excerpt": command_excerpt,
+            }
+            if detail not in observed_successful_call_details:
+                observed_successful_call_details.append(detail)
+            observed_evidence_sources.add("cli_helper_command_execution")
+    else:
+        return None
 
     report["observed_successful_calls"] = observed_successful_calls
     report["observed_successful_call_details"] = observed_successful_call_details
@@ -964,7 +1092,7 @@ def validate_codex_chunkhound_tool_proof(
     return report
 
 
-def validate_and_record_codex_chunkhound_tool_proof(
+def validate_and_record_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
     work_dir: Path,
@@ -973,7 +1101,7 @@ def validate_and_record_codex_chunkhound_tool_proof(
     prompt_template_name: str,
     adapter_meta: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    run_report = validate_codex_chunkhound_tool_proof(
+    run_report = validate_chunkhound_tool_proof(
         provider=provider,
         review_stage=review_stage,
         prompt_template_name=prompt_template_name,
@@ -1011,7 +1139,7 @@ def validate_and_record_codex_chunkhound_tool_proof(
     report_payload = {
         "schema_version": 2,
         "updated_at": _utc_now_iso(),
-        "provider": "codex",
+        "provider": str(run_report.get("provider") or provider or "").strip() or "unknown",
         "valid": bool(run_report.get("valid")),
         "latest_evidence_sources": latest_evidence_sources,
         "evidence_sources": evidence_sources,
@@ -1024,7 +1152,7 @@ def validate_and_record_codex_chunkhound_tool_proof(
         chunkhound_meta = {}
         meta["chunkhound"] = chunkhound_meta
     chunkhound_meta["tool_validation"] = {
-        "provider": "codex",
+        "provider": str(report_payload["provider"]),
         "path": str(report_path),
         "valid": bool(report_payload["valid"]),
         "run_count": len(runs),
@@ -3021,7 +3149,7 @@ __all__ = [
     'chunkhound_env',
     'same_device',
     'validate_operator_chunkhound_seed_source',
-    'validate_and_record_codex_chunkhound_tool_proof',
-    'validate_codex_chunkhound_tool_proof',
+    'validate_and_record_chunkhound_tool_proof',
+    'validate_chunkhound_tool_proof',
     'write_pr_context_file',
 ]

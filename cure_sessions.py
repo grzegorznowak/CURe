@@ -510,7 +510,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
         path = Path(raw)
         return ((session_dir / path).resolve() if not path.is_absolute() else path.resolve())
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is not None:
             return candidate.parent
@@ -520,10 +520,15 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
 def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
     logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
     payload: dict[str, str] = {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
-            suffix = "codex.events.jsonl" if key == "codex_events" else f"{key}.log"
+            if key == "codex_events":
+                suffix = "codex.events.jsonl"
+            elif key == "claude_events":
+                suffix = "claude.events.jsonl"
+            else:
+                suffix = f"{key}.log"
             fallback = logs_dir / suffix
             candidate = fallback if fallback.exists() else None
         if candidate is not None:
