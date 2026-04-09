@@ -701,7 +701,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
         "provider": "codex",
         "model": model,
         "reasoning_effort": effort,
-        "plan_reasoning_effort": plan_effort,
         "resume": resume,
         "capabilities": {"supports_resume": bool(resume.get("command"))},
     }
@@ -771,14 +770,12 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
-    plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
-    thinking = effort or plan_effort
-    if model and thinking:
-        return f"llm={preset}/{model}/{thinking}"
+    if model and effort:
+        return f"llm={preset}/{model}/{effort}"
     if model:
         return f"llm={preset}/{model}/?"
-    if thinking:
-        return f"llm={preset}/?/{thinking}"
+    if effort:
+        return f"llm={preset}/?/{effort}"
     return f"llm={preset}/?"
 
 
