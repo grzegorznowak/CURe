@@ -595,7 +595,7 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_codex_defaults_parses_toml(self) -> None:
+    def test_load_reviewflow_codex_defaults_rejects_legacy_plan_mode_reasoning_effort(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_codex.toml"
         try:
             cfg.write_text(
@@ -610,11 +610,11 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            defaults, meta = rf.load_reviewflow_codex_defaults(config_path=cfg)
-            self.assertTrue(meta.get("loaded"))
-            self.assertEqual(defaults["model"], "gpt-5.3-codex-spark")
-            self.assertEqual(defaults["model_reasoning_effort"], "low")
-            self.assertEqual(defaults["plan_mode_reasoning_effort"], "medium")
+            with self.assertRaisesRegex(
+                rf.ReviewflowError,
+                r"\[codex\]\.plan_mode_reasoning_effort is no longer supported",
+            ):
+                rf.load_reviewflow_codex_defaults(config_path=cfg)
         finally:
             cfg.unlink(missing_ok=True)
 
