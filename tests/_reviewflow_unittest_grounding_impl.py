@@ -10104,21 +10104,21 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["multipass_step", "multipass_synth"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
             self.assertEqual(refreshed["llm"]["reasoning_effort"], "medium")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(
                 refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
             self.assertIn("review generated with [CURe]", review_md_text)
             self.assertIn("multi-stage - stages: 1", review_md_text)
-            self.assertIn("model gpt-5.4/xhigh", review_md_text)
+            self.assertIn("model gpt-5.4/medium", review_md_text)
             self.assertIn("session session-1", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -10355,14 +10355,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -11672,8 +11670,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "max_steps": 20,
                                 "step_workers": 1,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
@@ -11681,8 +11677,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                     "max_steps": 20,
                                     "step_workers": 1,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -11711,9 +11705,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 [str(session_dir / "review.step-01.md"), str(session_dir / "review.step-02.md")],
             )
             self.assertEqual([item["status"] for item in refreshed["multipass"]["step_states"]], ["completed", "completed"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-02.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-02.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)

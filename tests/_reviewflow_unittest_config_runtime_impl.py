@@ -951,7 +951,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'sandbox_mode = "danger-full-access"',
                         'web_search = "live"',
                         'model_reasoning_effort = "high"',
-                        'plan_mode_reasoning_effort = "xhigh"',
                         "",
                     ]
                 ),
@@ -972,7 +971,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         "[codex]",
                         'model = "legacy-model"',
                         'model_reasoning_effort = "low"',
-                        'plan_mode_reasoning_effort = "medium"',
                         "",
                     ]
                 ),
@@ -1004,6 +1002,50 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(resolved["headers"]["X-Test"], "2")
             self.assertEqual(meta["resolved"]["model_source"], "cli")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "cli")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_legacy_codex_plan_mode_reasoning_effort(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_invalid_plan.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_invalid_plan.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "my_codex"',
+                        "",
+                        "[llm_presets.my_codex]",
+                        'preset = "codex-cli"',
+                        "",
+                        "[codex]",
+                        'plan_mode_reasoning_effort = "medium"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                rf.ReviewflowError,
+                r"\[codex\]\.plan_mode_reasoning_effort is no longer supported",
+            ):
+                rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)

@@ -786,8 +786,18 @@ def load_reviewflow_codex_defaults(
     source_table = "codex"
     codex = raw.get("codex", {}) if isinstance(raw, dict) else {}
     codex = codex if isinstance(codex, dict) else {}
+    if codex.get("plan_mode_reasoning_effort") not in (None, "", [], {}):
+        _raise_effort_migration_error(
+            field_name="[codex].plan_mode_reasoning_effort",
+            replacement="llm.reasoning_effort",
+        )
     if not any(isinstance(codex.get(key), str) and codex.get(key).strip() for key in wanted_keys):
         root_defaults = raw if isinstance(raw, dict) else {}
+        if root_defaults.get("plan_mode_reasoning_effort") not in (None, "", [], {}):
+            _raise_effort_migration_error(
+                field_name="[root].plan_mode_reasoning_effort",
+                replacement="llm.reasoning_effort",
+            )
         if any(isinstance(root_defaults.get(key), str) and root_defaults.get(key).strip() for key in wanted_keys):
             codex = root_defaults
             source_table = "root"
