@@ -2705,7 +2705,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("--llm-preset", doctor_help)
         self.assertIn("--llm-model", doctor_help)
         self.assertIn("--llm-effort", doctor_help)
-        self.assertIn("--llm-plan-effort", doctor_help)
+        self.assertNotIn("--llm-plan-effort", doctor_help)
         self.assertIn("--llm-verbosity", doctor_help)
         self.assertIn("--llm-max-output-tokens", doctor_help)
         self.assertIn("--llm-set", doctor_help)
