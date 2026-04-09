@@ -8566,6 +8566,9 @@ def _pr_flow_impl(
     success_resume_command: str | None = None
     codex_meta: dict[str, Any] | None = None
     runtime_policy: dict[str, Any] | None = None
+    llm_resolved: dict[str, Any] | None = None
+    llm_resolution_meta: dict[str, Any] | None = None
+    picker_completed = bool(args.no_review)
 
     base_cache_meta: dict[str, Any] | None = None
     seed_source_db_path: Path | None = None
@@ -8632,6 +8635,18 @@ def _pr_flow_impl(
     }
     progress.flush()
     try:
+        if not bool(args.no_review):
+            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+                args,
+                reviewflow_config_path=effective_config_path,
+                base_codex_config_path=effective_codex_base_config_path,
+            )
+            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+            picker_completed = True
+
         if not args.no_index:
             with phase("ensure_base_cache", progress=progress, quiet=quiet):
                 base_cache_meta = ensure_base_cache(
@@ -8933,15 +8948,8 @@ def _pr_flow_impl(
                 progress.meta.setdefault("multipass", {})["mode"] = "singlepass"
                 progress.flush()
 
-            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
-                args,
-                reviewflow_config_path=effective_config_path,
-                base_codex_config_path=effective_codex_base_config_path,
-            )
-            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
-                llm_resolved=llm_resolved,
-                llm_resolution_meta=llm_resolution_meta,
-            )
+            if llm_resolved is None or llm_resolution_meta is None:
+                raise ReviewflowError("LLM configuration was not resolved before review execution.")
             runtime_policy = prepare_review_agent_runtime(
                 args=args,
                 resolved=llm_resolved,
@@ -9560,6 +9568,8 @@ def _pr_flow_impl(
                 "message": str(e),
             }
         )
+        if (not picker_completed) and session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
         raise
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))

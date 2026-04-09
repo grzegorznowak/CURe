@@ -3321,6 +3321,314 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
 
 
 class BaselineSelectionTests(unittest.TestCase):
+    def _make_pr_flow_root(self, name: str) -> tuple[Path, Path, Path, Path]:
+        root = Path(tempfile.mkdtemp(prefix=name, dir=str(ROOT)))
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        sandbox_root = root / "sandboxes"
+        cache_root = root / "cache"
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        base_cfg = root / "chunkhound-base.json"
+        base_cfg.write_text("{}", encoding="utf-8")
+        config_path = root / "reviewflow.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[chunkhound]",
+                    f'base_config_path = "{base_cfg}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return root, sandbox_root, cache_root, config_path
+
+    def _patch_pr_flow_early_setup(
+        self,
+        stack: contextlib.ExitStack,
+        *,
+        rf_module: object,
+        base_cfg: Path,
+        root: Path,
+    ) -> None:
+        stack.enter_context(
+            mock.patch.object(
+                rf_module,
+                "load_chunkhound_runtime_config",
+                return_value=(
+                    rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                    {"chunkhound": {"base_config_path": str(base_cfg)}},
+                    {"indexing": {"exclude": []}},
+                ),
+            )
+        )
+        stack.enter_context(mock.patch.object(rf_module, "materialize_chunkhound_env_config"))
+        stack.enter_context(
+            mock.patch.object(
+                rf_module,
+                "write_pr_context_file",
+                side_effect=lambda *, work_dir, pr, pr_meta: work_dir / "pr-context.md",
+            )
+        )
+        stack.enter_context(mock.patch.object(rf_module, "clear_active_output"))
+        stack.enter_context(mock.patch.object(rf.ReviewflowOutput, "start"))
+        stack.enter_context(mock.patch.object(rf.ReviewflowOutput, "stop"))
+        stack.enter_context(mock.patch.object(rf_module, "maybe_print_markdown_after_tui"))
+        stack.enter_context(mock.patch.object(rf_module, "maybe_print_codex_resume_command"))
+
+    def test_pr_flow_runs_picker_before_ensure_base_cache(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_picker_before_base_cache_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            events: list[str] = []
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                                "head": {"sha": "1" * 40},
+                                "title": "Picker ordering PR",
+                            }
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        side_effect=lambda *a, **k: (
+                            events.append("resolve")
+                            or (
+                                {
+                                    "provider": "claude",
+                                    "preset": "claude-cli",
+                                    "model": "claude-sonnet-4-6",
+                                    "reasoning_effort": "high",
+                                },
+                                {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                            )
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_maybe_apply_pr_llm_picker",
+                        side_effect=lambda **kwargs: (
+                            events.append("picker") or (kwargs["llm_resolved"], kwargs["llm_resolution_meta"])
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "ensure_base_cache",
+                        side_effect=lambda **kwargs: (events.append("ensure_base_cache"), (_ for _ in ()).throw(RuntimeError("stop after ensure")))[1],
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "stop after ensure"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            self.assertEqual(events[:3], ["resolve", "picker", "ensure_base_cache"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_picker_abort_leaves_no_created_session(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_picker_abort_cleanup_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Picker abort PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "claude",
+                                "preset": "claude-cli",
+                                "model": "claude-sonnet-4-6",
+                                "reasoning_effort": "high",
+                            },
+                            {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_maybe_apply_pr_llm_picker",
+                        side_effect=rf.ReviewflowError("picker aborted"),
+                    )
+                )
+                ensure_base_cache = stack.enter_context(mock.patch.object(rf, "ensure_base_cache"))
+                with self.assertRaisesRegex(rf.ReviewflowError, "picker aborted"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            ensure_base_cache.assert_not_called()
+            self.assertEqual(list(sandbox_root.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_prior_review_latest_happens_before_picker(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_prior_review_before_picker_"
+        )
+        try:
+            review_md = root / "prior-review.md"
+            review_md.write_text("prior review\n", encoding="utf-8")
+            completed = mock.Mock(review_md_path=review_md)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "latest",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Prior review PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]))
+                stack.enter_context(mock.patch.object(rf, "_maybe_apply_pr_llm_picker", side_effect=AssertionError("picker should not run")))
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            self.assertEqual(rc, 0)
+            self.assertEqual(stdout.getvalue(), "prior review\n")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_non_tty_picker_skip_still_reaches_ensure_base_cache(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_non_tty_picker_skip_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Non tty picker PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "claude",
+                                "preset": "claude-cli",
+                                "model": "claude-sonnet-4-6",
+                                "reasoning_effort": "high",
+                            },
+                            {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                        ),
+                    )
+                )
+                prompt_picker = stack.enter_context(
+                    mock.patch.object(rf, "prompt_pr_model_and_effort_picker", return_value=None)
+                )
+                ensure_base_cache = stack.enter_context(
+                    mock.patch.object(rf, "ensure_base_cache", side_effect=RuntimeError("stop after ensure"))
+                )
+                with self.assertRaisesRegex(RuntimeError, "stop after ensure"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            prompt_picker.assert_called_once()
+            ensure_base_cache.assert_called_once()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_resolve_pr_review_baseline_selection_prefers_default_branch_within_threshold(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
         pr_meta = {
