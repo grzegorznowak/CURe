@@ -12703,6 +12703,59 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         values = [value for _, value in rf._provider_model_options("codex")]
         self.assertIn("gpt-5.4", values)
 
+    def test_pr_picker_skips_explicit_preset_overrides(self) -> None:
+        llm_resolved = {
+            "provider": "claude",
+            "model": "claude-opus-4-6",
+            "reasoning_effort": "high",
+        }
+        llm_resolution_meta = {
+            "resolved": {
+                "model_source": "preset",
+                "model_source_detail": "preset_explicit",
+                "reasoning_effort_source": "preset",
+                "reasoning_effort_source_detail": "preset_explicit",
+            }
+        }
+
+        with mock.patch.object(rf, "prompt_pr_model_and_effort_picker", side_effect=AssertionError("picker should not run")):
+            resolved, meta = rf._maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+
+        self.assertEqual(resolved, llm_resolved)
+        self.assertEqual(meta, llm_resolution_meta)
+
+    def test_pr_picker_still_prompts_for_builtin_preset_defaults(self) -> None:
+        llm_resolved = {
+            "provider": "claude",
+            "model": "claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        }
+        llm_resolution_meta = {
+            "resolved": {
+                "model_source": "preset",
+                "model_source_detail": "preset_builtin",
+                "reasoning_effort_source": "preset",
+                "reasoning_effort_source_detail": "preset_builtin",
+            }
+        }
+
+        with mock.patch.object(
+            rf,
+            "prompt_pr_model_and_effort_picker",
+            return_value={"model": "claude-opus-4-6"},
+        ) as picker:
+            resolved, meta = rf._maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+
+        picker.assert_called_once()
+        self.assertEqual(resolved["model"], "claude-opus-4-6")
+        self.assertEqual(meta["resolved"]["model_source"], "tty_prompt")
+
     def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:
         root = Path("/tmp/session-grounding-summary")
         entries = [

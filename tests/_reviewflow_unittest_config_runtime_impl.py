@@ -1072,6 +1072,69 @@ class LlmPresetConfigTests(unittest.TestCase):
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
 
+    def test_resolve_llm_config_marks_builtin_defaults_as_promptable_but_explicit_overrides_as_configured(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_promptable.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_promptable.toml"
+        try:
+            base.write_text("", encoding="utf-8")
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "claude_named"',
+                        "",
+                        "[llm_presets.claude_named]",
+                        'preset = "claude-cli"',
+                        'model = "claude-opus-4-6"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            resolved, meta = rf.resolve_llm_config(
+                base_codex_config_path=base,
+                reviewflow_config_path=rf_cfg,
+                cli_preset=None,
+                cli_model=None,
+                cli_effort=None,
+                cli_plan_effort=None,
+                cli_verbosity=None,
+                cli_max_output_tokens=None,
+                cli_request_overrides={},
+                cli_header_overrides={},
+                deprecated_codex_model=None,
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
+            )
+            self.assertEqual(resolved["model"], "claude-opus-4-6")
+            self.assertEqual(meta["resolved"]["model_source"], "preset")
+            self.assertEqual(meta["resolved"]["model_source_detail"], "preset_explicit")
+            self.assertEqual(meta["resolved"]["reasoning_effort"], "high")
+            self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
+            self.assertEqual(meta["resolved"]["reasoning_effort_source_detail"], "preset_builtin")
+
+            direct_resolved, direct_meta = rf.resolve_llm_config(
+                base_codex_config_path=base,
+                reviewflow_config_path=rf_cfg,
+                cli_preset="claude-cli",
+                cli_model=None,
+                cli_effort=None,
+                cli_plan_effort=None,
+                cli_verbosity=None,
+                cli_max_output_tokens=None,
+                cli_request_overrides={},
+                cli_header_overrides={},
+                deprecated_codex_model=None,
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
+            )
+            self.assertEqual(direct_resolved["model"], "claude-sonnet-4-6")
+            self.assertEqual(direct_meta["resolved"]["model_source_detail"], "preset_builtin")
+            self.assertEqual(direct_meta["resolved"]["reasoning_effort_source_detail"], "preset_builtin")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
     def test_resolve_llm_config_autodetects_claude_from_env_when_no_explicit_selection_exists(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_detect_claude.toml"
         rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_claude.toml"
@@ -2996,6 +3059,63 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             self.assertIsNotNone(result.resume)
             self.assertEqual(result.resume.session_id, "claude-session")
             self.assertEqual(result.adapter_meta["usage"]["total_tokens"], 8)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_prefers_ranked_primary_result_payload(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_ranked_result.md"
+        main_review = "# Review\n\nPrimary review body.\n" + ("Finding line.\n" * 10)
+        trailing_helper = "Helper follow-up completed."
+        try:
+            stdout = "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": main_review,
+                            "num_turns": 23,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": trailing_helper,
+                            "num_turns": 1,
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = rf.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    progress=progress,
+                    runtime_policy={"dangerously_skip_permissions": True, "provider_args": []},
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8").strip(), main_review.strip())
+            self.assertIsNotNone(result.resume)
+            self.assertEqual(result.resume.session_id, "claude-session")
         finally:
             output_path.unlink(missing_ok=True)
 

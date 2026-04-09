@@ -537,7 +537,11 @@ def build_llm_meta(
         "model": resolved.get("model"),
         "reasoning_effort": resolved.get("reasoning_effort"),
         "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),
+        "model_source_detail": ((resolution_meta.get("resolved") or {}).get("model_source_detail")),
         "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+        "reasoning_effort_source_detail": (
+            (resolution_meta.get("resolved") or {}).get("reasoning_effort_source_detail")
+        ),
         "text_verbosity": resolved.get("text_verbosity"),
         "max_output_tokens": resolved.get("max_output_tokens"),
         "runtime_overrides": resolution_meta.get("runtime_overrides"),
@@ -975,6 +979,9 @@ def _merge_builtin_preset(*, preset_id: str, raw_preset: dict[str, Any], source_
             merged[key] = value
     merged["preset"] = preset_id
     merged["_source_mode"] = source_mode
+    merged["_explicit_overrides"] = sorted(
+        key for key, value in overrides.items() if value not in (None, "", [], {})
+    )
     return merged
 
 
@@ -1129,12 +1136,19 @@ def _synthetic_legacy_codex_preset(
 ) -> dict[str, Any]:
     legacy_defaults, _ = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
     preset = dict(builtin_llm_presets()[DEFAULT_IMPLICIT_CODEX_PRESET])
+    explicit_overrides: list[str] = []
+    if legacy_defaults.get("model") not in (None, ""):
+        explicit_overrides.append("model")
+    if legacy_defaults.get("model_reasoning_effort") not in (None, ""):
+        explicit_overrides.append("reasoning_effort")
     preset.update(
         {
             "model": legacy_defaults.get("model"),
             "reasoning_effort": (
                 legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
             ),
+            "_source_mode": "synthetic_legacy_codex",
+            "_explicit_overrides": explicit_overrides,
         }
     )
     return preset
@@ -1470,14 +1484,36 @@ def resolve_llm_config(
     legacy_defaults, legacy_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
     base_codex_meta = _base_codex_runtime_defaults(base_codex_config_path)
 
-    def _pick(*, field: str, generic_value: Any, deprecated_value: Any = None, allow_deprecated: bool = False, base_value: Any = None) -> tuple[Any, str]:
+    explicit_preset_fields = {
+        str(item).strip()
+        for item in (
+            base_preset.get("_explicit_overrides")
+            if isinstance(base_preset.get("_explicit_overrides"), list)
+            else []
+        )
+        if str(item).strip()
+    }
+    preset_source_mode = str(base_preset.get("_source_mode") or "").strip()
+
+    def _preset_source_detail(field: str) -> str:
+        if field in explicit_preset_fields:
+            return "preset_explicit"
+        if preset_source_mode in {"builtin", "builtin_direct", "deprecated_explicit"}:
+            return "preset_builtin"
+        if preset_source_mode == "synthetic_legacy_codex":
+            return "preset_explicit"
+        return "preset"
+
+    def _pick(
+        *, field: str, generic_value: Any, deprecated_value: Any = None, allow_deprecated: bool = False, base_value: Any = None
+    ) -> tuple[Any, str, str]:
         if generic_value not in (None, ""):
-            return generic_value, "cli"
+            return generic_value, "cli", "cli"
         if allow_deprecated and provider == "codex" and deprecated_value not in (None, ""):
-            return deprecated_value, "deprecated_codex_cli"
+            return deprecated_value, "deprecated_codex_cli", "deprecated_codex_cli"
         preset_value = base_preset.get(field)
         if preset_value not in (None, "", [], {}):
-            return preset_value, "preset"
+            return preset_value, "preset", _preset_source_detail(field)
         if provider == "codex":
             legacy_key = {
                 "reasoning_effort": "model_reasoning_effort",
@@ -1485,28 +1521,28 @@ def resolve_llm_config(
             }.get(field, field)
             legacy_value = legacy_defaults.get(legacy_key)
             if legacy_value not in (None, ""):
-                return legacy_value, "reviewflow_defaults"
+                return legacy_value, "reviewflow_defaults", "reviewflow_defaults"
             if base_value not in (None, ""):
-                return base_value, "base_codex_config"
-        return None, "unset"
+                return base_value, "base_codex_config", "base_codex_config"
+        return None, "unset", "unset"
 
-    model, model_source = _pick(
+    model, model_source, model_source_detail = _pick(
         field="model",
         generic_value=(str(cli_model).strip() if cli_model else None),
         deprecated_value=(str(deprecated_codex_model).strip() if deprecated_codex_model else None),
         allow_deprecated=True,
         base_value=base_codex_meta.get("model"),
     )
-    reasoning_effort, reasoning_effort_source = _pick(
+    reasoning_effort, reasoning_effort_source, reasoning_effort_source_detail = _pick(
         field="reasoning_effort",
         generic_value=(str(cli_effort).strip() if cli_effort else None),
         base_value=base_codex_meta.get("reasoning_effort"),
     )
-    text_verbosity, text_verbosity_source = _pick(
+    text_verbosity, text_verbosity_source, _ = _pick(
         field="text_verbosity",
         generic_value=(str(cli_verbosity).strip() if cli_verbosity else None),
     )
-    max_output_tokens, max_output_tokens_source = _pick(
+    max_output_tokens, max_output_tokens_source, _ = _pick(
         field="max_output_tokens",
         generic_value=cli_max_output_tokens,
     )
@@ -1556,8 +1592,10 @@ def resolve_llm_config(
         "resolved": {
             "model": model,
             "model_source": model_source,
+            "model_source_detail": model_source_detail,
             "reasoning_effort": reasoning_effort,
             "reasoning_effort_source": reasoning_effort_source,
+            "reasoning_effort_source_detail": reasoning_effort_source_detail,
             "text_verbosity": text_verbosity,
             "text_verbosity_source": text_verbosity_source,
             "max_output_tokens": resolved["max_output_tokens"],
