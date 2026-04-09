@@ -1020,6 +1020,93 @@ def _run_tty_prompt(*, lines: list[str], choices: dict[str, str]) -> str | None:
             dashboard.resume()
 
 
+def prompt_pr_model_and_effort_picker(
+    *,
+    provider: str,
+    default_model: str | None,
+    default_effort: str | None,
+    model_options: list[tuple[str, str]],
+    effort_options: list[str],
+    prompt_for_model: bool,
+    prompt_for_effort: bool,
+    fixed_model: str | None = None,
+    fixed_effort: str | None = None,
+) -> dict[str, str] | None:
+    tty_streams = _open_prompt_tty()
+    if tty_streams is None:
+        return None
+    reader, writer = tty_streams
+    output = active_output()
+    dashboard = output.dashboard if output is not None else None
+    if dashboard is not None:
+        dashboard.pause()
+    try:
+        selected_model = default_model
+        selected_effort = default_effort
+        provider_name = str(provider or "").strip() or "unknown"
+        writer.write(f"CURe review settings for {provider_name}\n")
+        if fixed_model:
+            writer.write(f"Model: {fixed_model} (configured)\n")
+        if fixed_effort:
+            writer.write(f"Effort: {fixed_effort} (configured)\n")
+        if prompt_for_model:
+            writer.write(f"Press Enter to keep model: {default_model or '(unset)'}\n")
+            if model_options:
+                for idx, (label, value) in enumerate(model_options, start=1):
+                    writer.write(f"  {idx}) {label} [{value}]\n")
+                writer.write("Select model number: ")
+            else:
+                writer.write("Type a model id, or press Enter to keep the default: ")
+            writer.flush()
+            response = reader.readline()
+            if not response:
+                raise ReviewflowError("PR model/effort picker aborted: /dev/tty closed before model selection.")
+            choice = str(response).strip()
+            if choice:
+                if model_options:
+                    if not choice.isdigit() or not (1 <= int(choice) <= len(model_options)):
+                        raise ReviewflowError(f"PR model/effort picker received an invalid model selection: {choice!r}")
+                    selected_model = model_options[int(choice) - 1][1]
+                else:
+                    selected_model = choice
+        if prompt_for_effort:
+            writer.write(f"Press Enter to keep effort: {default_effort or '(unset)'}\n")
+            for idx, value in enumerate(effort_options, start=1):
+                writer.write(f"  {idx}) {value}\n")
+            writer.write("Select effort number: ")
+            writer.flush()
+            response = reader.readline()
+            if not response:
+                raise ReviewflowError("PR model/effort picker aborted: /dev/tty closed before effort selection.")
+            choice = str(response).strip()
+            if choice:
+                if not choice.isdigit() or not (1 <= int(choice) <= len(effort_options)):
+                    raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
+                selected_effort = effort_options[int(choice) - 1]
+        result: dict[str, str] = {}
+        if prompt_for_model and selected_model:
+            result["model"] = selected_model
+        if prompt_for_effort and selected_effort:
+            result["reasoning_effort"] = selected_effort
+        if result:
+            writer.write(
+                f"Selected: model={selected_model or fixed_model or '(unset)'} effort={selected_effort or fixed_effort or '(unset)'}\n"
+            )
+            writer.flush()
+        return result
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass
+        try:
+            writer.close()
+        except Exception:
+            pass
+        if dashboard is not None:
+            dashboard.resume()
+
+
 def prompt_grounding_retry_skip(
     *,
     step_id: str,

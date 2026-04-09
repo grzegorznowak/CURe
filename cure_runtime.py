@@ -29,6 +29,9 @@ from ui import Verbosity
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
+CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
+CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
+CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude")
@@ -83,7 +86,6 @@ MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
-DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
@@ -534,7 +536,8 @@ def build_llm_meta(
         "command": resolved.get("command"),
         "model": resolved.get("model"),
         "reasoning_effort": resolved.get("reasoning_effort"),
-        "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+        "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),
+        "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
         "text_verbosity": resolved.get("text_verbosity"),
         "max_output_tokens": resolved.get("max_output_tokens"),
         "runtime_overrides": resolution_meta.get("runtime_overrides"),
@@ -546,26 +549,27 @@ def build_llm_meta(
     }
 
 
-_MULTIPASS_REASONING_STAGE_KEYS = {
-    "plan": "plan_reasoning_effort",
-    "step": "step_reasoning_effort",
-    "synth": "synth_reasoning_effort",
-}
+def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
+    name = str(provider or "").strip().lower()
+    if name == "claude":
+        return CLAUDE_REASONING_EFFORT_CHOICES
+    return CODEX_REASONING_EFFORT_CHOICES
 
 
-def _normalize_optional_reasoning_effort(*, raw: object, field_name: str) -> str | None:
+def _normalize_optional_reasoning_effort(*, raw: object, field_name: str, provider: object = "codex") -> str | None:
     if raw is None:
         return None
+    allowed_choices = _reasoning_effort_choices_for_provider(provider)
     if not isinstance(raw, str):
-        allowed = ", ".join(CODEX_REASONING_EFFORT_CHOICES)
+        allowed = ", ".join(allowed_choices)
         raise ReviewflowError(
             f"Invalid {field_name} in reviewflow config. Expected one of: {allowed}."
         )
     value = raw.strip().lower()
     if not value:
         return None
-    if value not in CODEX_REASONING_EFFORT_CHOICES:
-        allowed = ", ".join(CODEX_REASONING_EFFORT_CHOICES)
+    if value not in allowed_choices:
+        allowed = ", ".join(allowed_choices)
         raise ReviewflowError(
             f"Invalid {field_name} in reviewflow config. Expected one of: {allowed}."
         )
@@ -580,37 +584,17 @@ def resolve_multipass_stage_llm_config(
     multipass_cfg: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     stage_name = str(stage or "").strip().lower()
-    if stage_name not in _MULTIPASS_REASONING_STAGE_KEYS:
+    if stage_name not in {"plan", "step", "synth"}:
         raise ReviewflowError(f"Unsupported multipass llm stage: {stage!r}")
-
-    provider = str(resolved.get("provider") or "").strip().lower()
     resolved_meta = (
         dict(resolution_meta.get("resolved"))
         if isinstance(resolution_meta.get("resolved"), dict)
         else {}
     )
-    stage_override_key = _MULTIPASS_REASONING_STAGE_KEYS[stage_name]
-    override_value = _normalize_optional_reasoning_effort(
-        raw=multipass_cfg.get(stage_override_key),
-        field_name=f"[multipass].{stage_override_key}",
-    )
-
     generic_value = str(resolved.get("reasoning_effort") or "").strip() or None
     generic_source = str(resolved_meta.get("reasoning_effort_source") or "").strip() or "unset"
-    plan_value = str(resolved.get("plan_reasoning_effort") or "").strip() or None
-    plan_source = str(resolved_meta.get("plan_reasoning_effort_source") or "").strip() or "unset"
-
-    applied_field = "reasoning_effort"
     base_value = generic_value
     base_source = f"reasoning_effort:{generic_source}"
-    if stage_name == "plan" and provider == "codex":
-        applied_field = "plan_reasoning_effort"
-        if plan_value is not None:
-            base_value = plan_value
-            base_source = f"plan_reasoning_effort:{plan_source}"
-
-    effective_value = override_value if override_value is not None else base_value
-    effective_source = "multipass_config" if override_value is not None else "inherited"
 
     stage_resolved = dict(resolved)
     stage_resolution_meta = dict(resolution_meta)
@@ -618,29 +602,35 @@ def resolve_multipass_stage_llm_config(
     stage_meta = {
         "stage": stage_name,
         "model": str(stage_resolved.get("model") or "").strip() or None,
-        "applied_reasoning_effort_field": applied_field,
+        "applied_reasoning_effort_field": "reasoning_effort",
         "base_reasoning_effort": base_value,
         "base_reasoning_effort_source": base_source,
-        "override_reasoning_effort": override_value,
-        "override_reasoning_effort_source": ("cure.toml" if override_value is not None else "unset"),
-        "effective_reasoning_effort": effective_value,
-        "effective_reasoning_effort_source": effective_source,
+        "override_reasoning_effort": None,
+        "override_reasoning_effort_source": "unset",
+        "effective_reasoning_effort": base_value,
+        "effective_reasoning_effort_source": "inherited",
     }
-    if applied_field == "plan_reasoning_effort":
-        stage_resolved["plan_reasoning_effort"] = effective_value
-        stage_resolved_meta["plan_reasoning_effort"] = effective_value
-        stage_resolved_meta["plan_reasoning_effort_source"] = (
-            "multipass_config" if override_value is not None else base_source
-        )
-    else:
-        stage_resolved["reasoning_effort"] = effective_value
-        stage_resolved_meta["reasoning_effort"] = effective_value
-        stage_resolved_meta["reasoning_effort_source"] = (
-            "multipass_config" if override_value is not None else base_source
-        )
+    stage_resolved["reasoning_effort"] = base_value
+    stage_resolved_meta["reasoning_effort"] = base_value
+    stage_resolved_meta["reasoning_effort_source"] = base_source
     stage_resolution_meta["resolved"] = stage_resolved_meta
     stage_resolution_meta["multipass_stage_reasoning"] = dict(stage_meta)
     return stage_resolved, stage_resolution_meta, stage_meta
+
+
+def _raise_effort_migration_error(*, field_name: str, replacement: str) -> None:
+    raise ReviewflowError(f"{field_name} is no longer supported. Migrate to `{replacement}`.")
+
+
+def _validate_no_legacy_effort_controls(*, raw: dict[str, Any], field_scope: str) -> None:
+    deprecated_fields = (
+        "plan_reasoning_effort",
+        "step_reasoning_effort",
+        "synth_reasoning_effort",
+    )
+    for name in deprecated_fields:
+        if raw.get(name) not in (None, "", [], {}):
+            _raise_effort_migration_error(field_name=f"{field_scope}.{name}", replacement="llm.reasoning_effort")
 
 
 def _reviewflow_defaults_meta(resolution_meta: dict[str, Any]) -> dict[str, Any]:
@@ -742,20 +732,7 @@ def load_reviewflow_multipass_defaults(
     if isinstance(step_workers, bool) or not isinstance(step_workers, int):
         step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
 
-    plan_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("plan_reasoning_effort"),
-        field_name="[multipass].plan_reasoning_effort",
-    )
-    step_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("step_reasoning_effort"),
-        field_name="[multipass].step_reasoning_effort",
-    )
-    if step_reasoning_effort is None:
-        step_reasoning_effort = DEFAULT_MULTIPASS_STEP_REASONING_EFFORT
-    synth_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("synth_reasoning_effort"),
-        field_name="[multipass].synth_reasoning_effort",
-    )
+    _validate_no_legacy_effort_controls(raw=mp, field_scope="[multipass]")
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -786,9 +763,6 @@ def load_reviewflow_multipass_defaults(
         "max_steps": int(max_steps),
         "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
-        "plan_reasoning_effort": plan_reasoning_effort,
-        "step_reasoning_effort": step_reasoning_effort,
-        "synth_reasoning_effort": synth_reasoning_effort,
     }
     meta: dict[str, Any] = {
         "config_path": str(path),
@@ -882,7 +856,7 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
-            "reasoning_effort": "xhigh",
+            "reasoning_effort": "high",
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -899,6 +873,8 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
+            "model": CLAUDE_CLI_DEFAULT_MODEL,
+            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -960,10 +936,10 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
 
 def _normalized_preset_overrides(raw_preset: dict[str, Any]) -> dict[str, Any]:
+    _validate_no_legacy_effort_controls(raw=raw_preset, field_scope="[llm_presets]")
     return {
         "model": str(raw_preset.get("model") or "").strip() or None,
         "reasoning_effort": str(raw_preset.get("reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw_preset.get("plan_reasoning_effort") or "").strip() or None,
         "text_verbosity": str(raw_preset.get("text_verbosity") or "").strip() or None,
         "max_output_tokens": (
             int(raw_preset.get("max_output_tokens"))
@@ -1009,6 +985,7 @@ def load_reviewflow_llm_config(
     raw = load_toml(path)
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
+    _validate_no_legacy_effort_controls(raw=llm, field_scope="[llm]")
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
@@ -1144,7 +1121,6 @@ def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
         "sandbox_mode": str(raw.get("sandbox_mode") or "").strip() or None,
         "web_search": str(raw.get("web_search") or "").strip() or None,
         "reasoning_effort": str(raw.get("model_reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw.get("plan_mode_reasoning_effort") or "").strip() or None,
     }
 
 
@@ -1159,7 +1135,6 @@ def _synthetic_legacy_codex_preset(
             "reasoning_effort": (
                 legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
             ),
-            "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
         }
     )
     return preset
@@ -1438,6 +1413,12 @@ def resolve_llm_config(
     deprecated_codex_effort: str | None,
     deprecated_codex_plan_effort: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    if deprecated_codex_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-effort", replacement="--llm-effort")
+    if deprecated_codex_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-plan-effort", replacement="--llm-effort")
     llm_cfg, llm_meta = load_reviewflow_llm_config(config_path=reviewflow_config_path)
     presets = llm_cfg.get("presets", {})
     presets = presets if isinstance(presets, dict) else {}
@@ -1519,16 +1500,7 @@ def resolve_llm_config(
     reasoning_effort, reasoning_effort_source = _pick(
         field="reasoning_effort",
         generic_value=(str(cli_effort).strip() if cli_effort else None),
-        deprecated_value=(str(deprecated_codex_effort).strip() if deprecated_codex_effort else None),
-        allow_deprecated=True,
         base_value=base_codex_meta.get("reasoning_effort"),
-    )
-    plan_reasoning_effort, plan_reasoning_effort_source = _pick(
-        field="plan_reasoning_effort",
-        generic_value=(str(cli_plan_effort).strip() if cli_plan_effort else None),
-        deprecated_value=(str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None),
-        allow_deprecated=True,
-        base_value=base_codex_meta.get("plan_reasoning_effort"),
     )
     text_verbosity, text_verbosity_source = _pick(
         field="text_verbosity",
@@ -1539,13 +1511,11 @@ def resolve_llm_config(
         generic_value=cli_max_output_tokens,
     )
 
-    for key, val in (("reasoning_effort", reasoning_effort), ("plan_reasoning_effort", plan_reasoning_effort)):
-        if val is None:
-            continue
-        if str(val) not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=reasoning_effort,
+        field_name="reasoning_effort",
+        provider=provider,
+    )
 
     request = dict(_plain_dict(base_preset.get("request")))
     if cli_request_overrides:
@@ -1565,7 +1535,6 @@ def resolve_llm_config(
         "api_key": str(base_preset.get("api_key") or "").strip() or None,
         "model": model,
         "reasoning_effort": reasoning_effort,
-        "plan_reasoning_effort": plan_reasoning_effort,
         "text_verbosity": text_verbosity,
         "max_output_tokens": int(max_output_tokens) if isinstance(max_output_tokens, int) else None,
         "store": base_preset.get("store") if isinstance(base_preset.get("store"), bool) else None,
@@ -1589,8 +1558,6 @@ def resolve_llm_config(
             "model_source": model_source,
             "reasoning_effort": reasoning_effort,
             "reasoning_effort_source": reasoning_effort_source,
-            "plan_reasoning_effort": plan_reasoning_effort,
-            "plan_reasoning_effort_source": plan_reasoning_effort_source,
             "text_verbosity": text_verbosity,
             "text_verbosity_source": text_verbosity_source,
             "max_output_tokens": resolved["max_output_tokens"],
@@ -1602,16 +1569,11 @@ def resolve_llm_config(
             "preset": (str(cli_preset).strip() if cli_preset else None),
             "model": (str(cli_model).strip() if cli_model else None),
             "reasoning_effort": (str(cli_effort).strip() if cli_effort else None),
-            "plan_reasoning_effort": (str(cli_plan_effort).strip() if cli_plan_effort else None),
             "text_verbosity": (str(cli_verbosity).strip() if cli_verbosity else None),
             "max_output_tokens": cli_max_output_tokens if isinstance(cli_max_output_tokens, int) else None,
             "request": dict(cli_request_overrides or {}),
             "headers": dict(cli_header_overrides or {}),
             "deprecated_codex_model": (str(deprecated_codex_model).strip() if deprecated_codex_model else None),
-            "deprecated_codex_effort": (str(deprecated_codex_effort).strip() if deprecated_codex_effort else None),
-            "deprecated_codex_plan_effort": (
-                str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None
-            ),
         },
     }
     return resolved, meta
@@ -1682,12 +1644,6 @@ def resolve_codex_flags(
         if isinstance(base_cfg.get("model_reasoning_effort"), str)
         else None
     )
-    base_plan_effort = (
-        base_cfg.get("plan_mode_reasoning_effort")
-        if isinstance(base_cfg.get("plan_mode_reasoning_effort"), str)
-        else None
-    )
-
     rf_defaults, rf_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
 
     def _pick(key: str, base: str | None, cli: str | None) -> tuple[str | None, str]:
@@ -1702,15 +1658,13 @@ def resolve_codex_flags(
 
     model, model_src = _pick("model", base_model, cli_model)
     effort, effort_src = _pick("model_reasoning_effort", base_effort, cli_effort)
-    plan_effort, plan_effort_src = _pick("plan_mode_reasoning_effort", base_plan_effort, cli_plan_effort)
-
-    for key, val in (("model_reasoning_effort", effort), ("plan_mode_reasoning_effort", plan_effort)):
-        if val is None:
-            continue
-        if val not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    effort = _normalize_optional_reasoning_effort(
+        raw=effort,
+        field_name="model_reasoning_effort",
+        provider="codex",
+    )
 
     flags: list[str] = []
     if model:
@@ -1721,8 +1675,6 @@ def resolve_codex_flags(
         flags.append("--search")
     if effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(effort)}"])
-    if plan_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_effort)}"])
 
     meta: dict[str, Any] = {
         "base": base_meta,
@@ -1732,8 +1684,6 @@ def resolve_codex_flags(
             "model_source": model_src,
             "model_reasoning_effort": effort,
             "model_reasoning_effort_source": effort_src,
-            "plan_mode_reasoning_effort": plan_effort,
-            "plan_mode_reasoning_effort_source": plan_effort_src,
             "sandbox_mode": base_sandbox_mode,
             "web_search": base_web_search,
         },

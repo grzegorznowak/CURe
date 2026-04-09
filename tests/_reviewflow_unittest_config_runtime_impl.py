@@ -646,22 +646,15 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            flags, meta = rf.resolve_codex_flags(
-                base_config_path=base,
-                reviewflow_config_path=rf_cfg,
-                cli_model="cli-model",
-                cli_effort=None,
-                cli_plan_effort="medium",
-            )
-            self.assertIn("-m", flags)
-            self.assertIn("cli-model", flags)
-            # model_reasoning_effort should come from cure.toml if CLI is unset.
-            self.assertIn('model_reasoning_effort="low"', flags)
-            # plan_mode_reasoning_effort should come from CLI.
-            self.assertIn('plan_mode_reasoning_effort="medium"', flags)
-            self.assertEqual(meta["resolved"]["model_source"], "cli")
-            self.assertEqual(meta["resolved"]["model_reasoning_effort_source"], "cure.toml")
-            self.assertEqual(meta["resolved"]["plan_mode_reasoning_effort_source"], "cli")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.resolve_codex_flags(
+                    base_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_model="cli-model",
+                    cli_effort=None,
+                    cli_plan_effort="medium",
+                )
+            self.assertIn("--llm-plan-effort", str(ctx.exception))
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
@@ -717,19 +710,19 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_multipass_defaults_defaults_step_effort_to_medium(self) -> None:
+    def test_load_reviewflow_multipass_defaults_no_longer_emits_stage_efforts(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_default_step_effort.toml"
         try:
             cfg.write_text("[multipass]\nmax_steps = 5\n", encoding="utf-8")
             mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
-            self.assertEqual(mp["step_reasoning_effort"], "medium")
-            self.assertEqual(meta["multipass"]["step_reasoning_effort"], "medium")
-            self.assertIsNone(mp["plan_reasoning_effort"])
-            self.assertIsNone(mp["synth_reasoning_effort"])
+            self.assertNotIn("step_reasoning_effort", mp)
+            self.assertNotIn("step_reasoning_effort", meta["multipass"])
+            self.assertNotIn("plan_reasoning_effort", mp)
+            self.assertNotIn("synth_reasoning_effort", mp)
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_multipass_defaults_parses_stage_reasoning_efforts(self) -> None:
+    def test_load_reviewflow_multipass_defaults_rejects_stage_reasoning_efforts(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_stage_efforts.toml"
         try:
             cfg.write_text(
@@ -744,13 +737,9 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
-            self.assertEqual(mp["plan_reasoning_effort"], "high")
-            self.assertEqual(mp["step_reasoning_effort"], "low")
-            self.assertEqual(mp["synth_reasoning_effort"], "xhigh")
-            self.assertEqual(meta["multipass"]["plan_reasoning_effort"], "high")
-            self.assertEqual(meta["multipass"]["step_reasoning_effort"], "low")
-            self.assertEqual(meta["multipass"]["synth_reasoning_effort"], "xhigh")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertIn("[multipass].plan_reasoning_effort", str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -778,24 +767,14 @@ class LlmPresetConfigTests(unittest.TestCase):
     def test_resolve_multipass_stage_llm_config_defaults_step_to_medium_while_synth_stays_xhigh(
         self,
     ) -> None:
-        resolved = {
-            "provider": "codex",
-            "model": "gpt-5.4",
-            "reasoning_effort": "xhigh",
-            "plan_reasoning_effort": None,
-        }
+        resolved = {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "xhigh"}
         resolution_meta = {
             "resolved": {
                 "model_source": "preset",
                 "reasoning_effort_source": "preset",
-                "plan_reasoning_effort_source": "unset",
             }
         }
-        multipass_cfg = {
-            "step_reasoning_effort": "medium",
-            "plan_reasoning_effort": None,
-            "synth_reasoning_effort": None,
-        }
+        multipass_cfg = {}
 
         plan_resolved, _, plan_meta = rf.resolve_multipass_stage_llm_config(
             stage="plan",
@@ -817,25 +796,19 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_meta["effective_reasoning_effort"], "xhigh")
-        self.assertEqual(step_resolved["reasoning_effort"], "medium")
-        self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
-        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(step_resolved["reasoning_effort"], "xhigh")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "xhigh")
+        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
         self.assertEqual(synth_resolved["reasoning_effort"], "xhigh")
         self.assertEqual(synth_meta["effective_reasoning_effort"], "xhigh")
         self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
 
-    def test_resolve_multipass_stage_llm_config_preserves_codex_plan_and_generic_step_synth_inheritance(self) -> None:
-        resolved = {
-            "provider": "codex",
-            "model": "gpt-5.4",
-            "reasoning_effort": "medium",
-            "plan_reasoning_effort": "high",
-        }
+    def test_resolve_multipass_stage_llm_config_preserves_single_effort_across_codex_stages(self) -> None:
+        resolved = {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"}
         resolution_meta = {
             "resolved": {
                 "model_source": "cli",
                 "reasoning_effort_source": "cli",
-                "plan_reasoning_effort_source": "preset",
             }
         }
         multipass_cfg = {}
@@ -860,38 +833,19 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_resolved["reasoning_effort"], "medium")
-        self.assertEqual(plan_resolved["plan_reasoning_effort"], "high")
-        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "plan_reasoning_effort")
-        self.assertEqual(plan_meta["effective_reasoning_effort"], "high")
-        self.assertEqual(plan_meta["base_reasoning_effort_source"], "plan_reasoning_effort:preset")
-        self.assertEqual(
-            plan_resolution_meta["resolved"]["plan_reasoning_effort_source"],
-            "plan_reasoning_effort:preset",
-        )
+        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "reasoning_effort")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(plan_meta["base_reasoning_effort_source"], "reasoning_effort:cli")
         self.assertEqual(step_resolved["reasoning_effort"], "medium")
         self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
         self.assertEqual(step_meta["base_reasoning_effort_source"], "reasoning_effort:cli")
         self.assertEqual(synth_resolved["reasoning_effort"], "medium")
         self.assertEqual(synth_meta["effective_reasoning_effort"], "medium")
 
-    def test_resolve_multipass_stage_llm_config_applies_stage_overrides_and_non_codex_plan_carrier(self) -> None:
-        resolved = {
-            "provider": "openai",
-            "model": "gpt-5.4",
-            "reasoning_effort": "medium",
-            "plan_reasoning_effort": "high",
-        }
-        resolution_meta = {
-            "resolved": {
-                "reasoning_effort_source": "preset",
-                "plan_reasoning_effort_source": "reviewflow_defaults",
-            }
-        }
-        multipass_cfg = {
-            "plan_reasoning_effort": "minimal",
-            "step_reasoning_effort": "low",
-            "synth_reasoning_effort": "xhigh",
-        }
+    def test_resolve_multipass_stage_llm_config_uses_single_effort_for_non_codex_stages(self) -> None:
+        resolved = {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "medium"}
+        resolution_meta = {"resolved": {"reasoning_effort_source": "preset"}}
+        multipass_cfg = {}
 
         plan_resolved, plan_resolution_meta, plan_meta = rf.resolve_multipass_stage_llm_config(
             stage="plan",
@@ -913,16 +867,16 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_meta["applied_reasoning_effort_field"], "reasoning_effort")
-        self.assertEqual(plan_meta["effective_reasoning_effort"], "minimal")
-        self.assertEqual(plan_meta["effective_reasoning_effort_source"], "multipass_config")
-        self.assertEqual(plan_resolved["reasoning_effort"], "minimal")
-        self.assertEqual(plan_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
-        self.assertEqual(step_meta["effective_reasoning_effort"], "low")
-        self.assertEqual(step_resolved["reasoning_effort"], "low")
-        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
-        self.assertEqual(synth_meta["effective_reasoning_effort"], "xhigh")
-        self.assertEqual(synth_resolved["reasoning_effort"], "xhigh")
-        self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(plan_meta["effective_reasoning_effort_source"], "inherited")
+        self.assertEqual(plan_resolved["reasoning_effort"], "medium")
+        self.assertEqual(plan_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(step_resolved["reasoning_effort"], "medium")
+        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
+        self.assertEqual(synth_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(synth_resolved["reasoning_effort"], "medium")
+        self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
 
     def test_load_reviewflow_llm_config_parses_builtin_named_overrides(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_llm.toml"
@@ -938,7 +892,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'api_key = "test-openrouter-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
-                        'plan_reasoning_effort = "xhigh"',
                         "max_output_tokens = 9000",
                         'headers = { "X-Test" = "1" }',
                         'request = { "service_tier" = "flex" }',
@@ -1014,7 +967,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "preset-model"',
                         'reasoning_effort = "medium"',
-                        'plan_reasoning_effort = "high"',
                         'request = { "temperature" = 0.1 }',
                         "",
                         "[codex]",
@@ -1038,22 +990,20 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_request_overrides={"temperature": 0.3, "top_p": 0.9},
                 cli_header_overrides={"X-Test": "2"},
                 deprecated_codex_model="deprecated-model",
-                deprecated_codex_effort="minimal",
-                deprecated_codex_plan_effort="low",
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
             )
             self.assertEqual(resolved["preset"], "codex-cli")
             self.assertEqual(resolved["selected_name"], "my_codex")
             self.assertEqual(resolved["provider"], "codex")
             self.assertEqual(resolved["model"], "cli-model")
             self.assertEqual(resolved["reasoning_effort"], "xhigh")
-            self.assertEqual(resolved["plan_reasoning_effort"], "low")
             self.assertEqual(resolved["text_verbosity"], "low")
             self.assertEqual(resolved["request"]["temperature"], 0.3)
             self.assertEqual(resolved["request"]["top_p"], 0.9)
             self.assertEqual(resolved["headers"]["X-Test"], "2")
             self.assertEqual(meta["resolved"]["model_source"], "cli")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "cli")
-            self.assertEqual(meta["resolved"]["plan_reasoning_effort_source"], "deprecated_codex_cli")
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
@@ -1319,7 +1269,7 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             base.unlink(missing_ok=True)
 
-    def test_resolve_llm_config_codex_cli_builtin_default_effort_is_xhigh(self) -> None:
+    def test_resolve_llm_config_codex_cli_builtin_default_effort_is_high(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin_default.toml"
         rf_cfg = ROOT / ".tmp_test_reviewflow_llm_builtin_default.toml"
         try:
@@ -1342,7 +1292,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             )
             self.assertEqual(resolved["preset"], "codex-cli")
             self.assertEqual(resolved["model"], "base-codex-model")
-            self.assertEqual(resolved["reasoning_effort"], "xhigh")
+            self.assertEqual(resolved["reasoning_effort"], "high")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
         finally:
             base.unlink(missing_ok=True)
@@ -1367,7 +1317,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_preset="claude-cli",
                 cli_model="claude-sonnet-4-6",
                 cli_effort="high",
-                cli_plan_effort="high",
+                cli_plan_effort=None,
                 cli_verbosity=None,
                 cli_max_output_tokens=None,
                 cli_request_overrides={},

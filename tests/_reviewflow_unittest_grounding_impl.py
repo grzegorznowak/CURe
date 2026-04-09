@@ -8551,23 +8551,18 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "max_steps": 20,
                 "step_workers": 1,
                 "grounding_mode": "off",
-                "plan_reasoning_effort": "minimal",
-                "step_reasoning_effort": "low",
-                "synth_reasoning_effort": "xhigh",
             },
             llm_resolved_override={
                 "provider": "codex",
                 "preset": "test-codex",
                 "model": "gpt-5.4",
                 "reasoning_effort": "medium",
-                "plan_reasoning_effort": "high",
                 "capabilities": {"supports_resume": True},
             },
             llm_resolution_meta_override={
                 "resolved": {
                     "model_source": "cli",
                     "reasoning_effort_source": "cli",
-                    "plan_reasoning_effort_source": "preset",
                 }
             },
             runtime_policy_override={
@@ -8588,28 +8583,27 @@ class CodexToolProofFlowTests(unittest.TestCase):
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
             self.assertEqual(stage_invocations["review.plan.md"]["reasoning_effort"], "medium")
-            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort"], "minimal")
-            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort_source"], "multipass_config")
-            self.assertIn('plan_mode_reasoning_effort="minimal"', stage_invocations["review.plan.md"]["codex_flags"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertIn('model_reasoning_effort="low"', stage_invocations["review.step-01.md"]["codex_flags"])
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertIn('model_reasoning_effort="xhigh"', stage_invocations["review.md"]["codex_flags"])
+            self.assertIsNone(stage_invocations["review.plan.md"]["plan_reasoning_effort"])
+            self.assertEqual(stage_invocations["review.plan.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertIn('model_reasoning_effort="medium"', stage_invocations["review.step-01.md"]["codex_flags"])
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertIn('model_reasoning_effort="medium"', stage_invocations["review.md"]["codex_flags"])
             self.assertEqual(meta["llm"]["reasoning_effort"], "medium")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "minimal")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(meta["multipass"]["llm"]["review_artifact_stage"], "synth")
             self.assertEqual(
                 meta["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
-            self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "minimal")
+            self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "medium")
             self.assertIn("review generated with [CURe]", review_md)
             self.assertIn("multi-stage - stages: 1", review_md)
-            self.assertIn("model gpt-5.4/xhigh", review_md)
+            self.assertIn("model gpt-5.4/medium", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -9460,14 +9454,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -9489,16 +9481,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "enabled": True,
                                 "max_steps": 20,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
                                     "enabled": True,
                                     "max_steps": 20,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -9757,14 +9745,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -9786,16 +9772,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "enabled": True,
                                 "max_steps": 20,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
                                     "enabled": True,
                                     "max_steps": 20,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -10412,17 +10394,17 @@ class CodexToolProofFlowTests(unittest.TestCase):
             review_md_text = review_md.read_text(encoding="utf-8")
             self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.md"])
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
             self.assertEqual(refreshed["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "high")
             self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(refreshed["multipass"]["llm"]["review_artifact_stage"], "synth")
             self.assertEqual(
                 refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
-            self.assertIn("model gpt-5.4/xhigh", review_md_text)
+            self.assertIn("model gpt-5.4/medium", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -12349,6 +12331,69 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         self.assertEqual(choice, "retry")
         self.assertIn("Strict grounding failed for a multipass step.", rendered)
         self.assertIn("Invalid choice. Enter one of: retry, skip.", rendered)
+
+    def test_pr_picker_rejects_invalid_numbered_model_selection(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("99\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                cure_output.prompt_pr_model_and_effort_picker(
+                    provider="claude",
+                    default_model="claude-sonnet-4-6",
+                    default_effort="high",
+                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
+                    effort_options=["low", "medium", "high", "max"],
+                    prompt_for_model=True,
+                    prompt_for_effort=False,
+                )
+        self.assertIn("invalid model selection", str(ctx.exception).lower())
+
+    def test_pr_picker_aborts_on_eof_during_effort_selection(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                cure_output.prompt_pr_model_and_effort_picker(
+                    provider="claude",
+                    default_model="claude-sonnet-4-6",
+                    default_effort="high",
+                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
+                    effort_options=["low", "medium", "high", "max"],
+                    prompt_for_model=False,
+                    prompt_for_effort=True,
+                )
+        self.assertIn("closed before effort selection", str(ctx.exception))
+
+    def test_pr_picker_accepts_codex_freeform_model_and_effort(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("gpt-5.4\n4\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_pr_model_and_effort_picker(
+                provider="codex",
+                default_model="gpt-5.3-codex",
+                default_effort="high",
+                model_options=[],
+                effort_options=["minimal", "low", "medium", "high", "xhigh"],
+                prompt_for_model=True,
+                prompt_for_effort=True,
+            )
+        self.assertEqual(result, {"model": "gpt-5.4", "reasoning_effort": "high"})
+
+    def test_provider_model_options_include_codex_models(self) -> None:
+        values = [value for _, value in rf._provider_model_options("codex")]
+        self.assertIn("gpt-5.4", values)
 
     def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:
         root = Path("/tmp/session-grounding-summary")

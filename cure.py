@@ -50,6 +50,7 @@ from cure_output import (
     normalize_markdown_artifact,
     normalize_markdown_local_refs,
     prompt_grounding_retry_skip,
+    prompt_pr_model_and_effort_picker,
     prompt_resume_grounding_skipped_steps,
     safe_cmd_for_meta,
     set_active_output,
@@ -161,6 +162,9 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
+CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
+CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
+CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude")
@@ -208,7 +212,6 @@ DEFAULT_MULTIPASS_STEP_WORKERS = 4
 _MULTIPASS_STEP_GROUNDING_MAX_RETRIES = 1
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
-DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
@@ -492,16 +495,14 @@ def add_llm_override_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-effort",
         dest="llm_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
         help="Override the resolved review-agent reasoning effort",
     )
     parser.add_argument(
         "--llm-plan-effort",
         dest="llm_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override the resolved review-agent plan reasoning effort",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--llm-verbosity",
@@ -573,7 +574,8 @@ def build_llm_meta(
         "command": resolved.get("command"),
         "model": resolved.get("model"),
         "reasoning_effort": resolved.get("reasoning_effort"),
-        "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+        "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),
+        "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
         "text_verbosity": resolved.get("text_verbosity"),
         "max_output_tokens": resolved.get("max_output_tokens"),
         "runtime_overrides": resolution_meta.get("runtime_overrides"),
@@ -583,6 +585,22 @@ def build_llm_meta(
         "env_keys": sorted(_string_dict(resolved.get("env")).keys()),
         "capabilities": dict(resolved.get("capabilities") or {}),
     }
+
+
+def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
+    if str(provider or "").strip().lower() == "claude":
+        return CLAUDE_REASONING_EFFORT_CHOICES
+    return CODEX_REASONING_EFFORT_CHOICES
+
+
+def _raise_effort_migration_error(*, field_name: str, replacement: str) -> None:
+    raise ReviewflowError(f"{field_name} is no longer supported. Migrate to `{replacement}`.")
+
+
+def _validate_no_legacy_effort_controls(*, raw: dict[str, Any], field_scope: str) -> None:
+    for name in ("plan_reasoning_effort", "step_reasoning_effort", "synth_reasoning_effort"):
+        if raw.get(name) not in (None, "", [], {}):
+            _raise_effort_migration_error(field_name=f"{field_scope}.{name}", replacement="llm.reasoning_effort")
 
 
 def _normalize_llm_usage(raw: object) -> dict[str, int] | None:
@@ -920,20 +938,7 @@ def load_reviewflow_multipass_defaults(
     if isinstance(step_workers, bool) or not isinstance(step_workers, int):
         step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
 
-    plan_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("plan_reasoning_effort"),
-        field_name="[multipass].plan_reasoning_effort",
-    )
-    step_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("step_reasoning_effort"),
-        field_name="[multipass].step_reasoning_effort",
-    )
-    if step_reasoning_effort is None:
-        step_reasoning_effort = DEFAULT_MULTIPASS_STEP_REASONING_EFFORT
-    synth_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("synth_reasoning_effort"),
-        field_name="[multipass].synth_reasoning_effort",
-    )
+    _validate_no_legacy_effort_controls(raw=mp, field_scope="[multipass]")
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -965,9 +970,6 @@ def load_reviewflow_multipass_defaults(
         "max_steps": int(max_steps),
         "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
-        "plan_reasoning_effort": plan_reasoning_effort,
-        "step_reasoning_effort": step_reasoning_effort,
-        "synth_reasoning_effort": synth_reasoning_effort,
     }
     meta: dict[str, Any] = {
         "config_path": str(path),
@@ -1073,7 +1075,7 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
-            "reasoning_effort": "xhigh",
+            "reasoning_effort": "high",
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1090,6 +1092,8 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
+            "model": CLAUDE_CLI_DEFAULT_MODEL,
+            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1151,10 +1155,10 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
 
 def _normalized_preset_overrides(raw_preset: dict[str, Any]) -> dict[str, Any]:
+    _validate_no_legacy_effort_controls(raw=raw_preset, field_scope="[llm_presets]")
     return {
         "model": str(raw_preset.get("model") or "").strip() or None,
         "reasoning_effort": str(raw_preset.get("reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw_preset.get("plan_reasoning_effort") or "").strip() or None,
         "text_verbosity": str(raw_preset.get("text_verbosity") or "").strip() or None,
         "max_output_tokens": (
             int(raw_preset.get("max_output_tokens"))
@@ -1202,6 +1206,7 @@ def load_reviewflow_llm_config(
     raw = load_toml(path)
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
+    _validate_no_legacy_effort_controls(raw=llm, field_scope="[llm]")
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
@@ -1339,7 +1344,6 @@ def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
         "sandbox_mode": str(raw.get("sandbox_mode") or "").strip() or None,
         "web_search": str(raw.get("web_search") or "").strip() or None,
         "reasoning_effort": str(raw.get("model_reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw.get("plan_mode_reasoning_effort") or "").strip() or None,
     }
 
 
@@ -1354,7 +1358,6 @@ def _synthetic_legacy_codex_preset(
             "reasoning_effort": (
                 legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
             ),
-            "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
         }
     )
     return preset
@@ -1457,6 +1460,12 @@ def resolve_llm_config(
     deprecated_codex_effort: str | None,
     deprecated_codex_plan_effort: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    if deprecated_codex_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-effort", replacement="--llm-effort")
+    if deprecated_codex_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-plan-effort", replacement="--llm-effort")
     llm_cfg, llm_meta = load_reviewflow_llm_config(config_path=reviewflow_config_path)
     presets = llm_cfg.get("presets", {})
     presets = presets if isinstance(presets, dict) else {}
@@ -1524,10 +1533,7 @@ def resolve_llm_config(
         if preset_value not in (None, "", [], {}):
             return preset_value, "preset"
         if provider == "codex":
-            legacy_key = {
-                "reasoning_effort": "model_reasoning_effort",
-                "plan_reasoning_effort": "plan_mode_reasoning_effort",
-            }.get(field, field)
+            legacy_key = {"reasoning_effort": "model_reasoning_effort"}.get(field, field)
             legacy_value = legacy_defaults.get(legacy_key)
             if legacy_value not in (None, ""):
                 return legacy_value, "reviewflow_defaults"
@@ -1545,18 +1551,7 @@ def resolve_llm_config(
     reasoning_effort, reasoning_effort_source = _pick(
         field="reasoning_effort",
         generic_value=(str(cli_effort).strip() if cli_effort else None),
-        deprecated_value=(str(deprecated_codex_effort).strip() if deprecated_codex_effort else None),
-        allow_deprecated=True,
         base_value=base_codex_meta.get("reasoning_effort"),
-    )
-    plan_reasoning_effort, plan_reasoning_effort_source = _pick(
-        field="plan_reasoning_effort",
-        generic_value=(str(cli_plan_effort).strip() if cli_plan_effort else None),
-        deprecated_value=(
-            str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None
-        ),
-        allow_deprecated=True,
-        base_value=base_codex_meta.get("plan_reasoning_effort"),
     )
     text_verbosity, text_verbosity_source = _pick(
         field="text_verbosity",
@@ -1567,16 +1562,11 @@ def resolve_llm_config(
         generic_value=cli_max_output_tokens,
     )
 
-    for key, val in (
-        ("reasoning_effort", reasoning_effort),
-        ("plan_reasoning_effort", plan_reasoning_effort),
-    ):
-        if val is None:
-            continue
-        if str(val) not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    allowed_efforts = _reasoning_effort_choices_for_provider(provider)
+    if reasoning_effort is not None and str(reasoning_effort) not in allowed_efforts:
+        raise ReviewflowError(
+            f"Invalid reasoning_effort: {reasoning_effort!r}. Expected one of: {', '.join(allowed_efforts)}"
+        )
 
     request = dict(_plain_dict(base_preset.get("request")))
     if cli_request_overrides:
@@ -1596,7 +1586,6 @@ def resolve_llm_config(
         "api_key": str(base_preset.get("api_key") or "").strip() or None,
         "model": model,
         "reasoning_effort": reasoning_effort,
-        "plan_reasoning_effort": plan_reasoning_effort,
         "text_verbosity": text_verbosity,
         "max_output_tokens": int(max_output_tokens) if isinstance(max_output_tokens, int) else None,
         "store": base_preset.get("store") if isinstance(base_preset.get("store"), bool) else None,
@@ -1620,8 +1609,6 @@ def resolve_llm_config(
             "model_source": model_source,
             "reasoning_effort": reasoning_effort,
             "reasoning_effort_source": reasoning_effort_source,
-            "plan_reasoning_effort": plan_reasoning_effort,
-            "plan_reasoning_effort_source": plan_reasoning_effort_source,
             "text_verbosity": text_verbosity,
             "text_verbosity_source": text_verbosity_source,
             "max_output_tokens": resolved["max_output_tokens"],
@@ -1633,19 +1620,12 @@ def resolve_llm_config(
             "preset": (str(cli_preset).strip() if cli_preset else None),
             "model": (str(cli_model).strip() if cli_model else None),
             "reasoning_effort": (str(cli_effort).strip() if cli_effort else None),
-            "plan_reasoning_effort": (str(cli_plan_effort).strip() if cli_plan_effort else None),
             "text_verbosity": (str(cli_verbosity).strip() if cli_verbosity else None),
             "max_output_tokens": cli_max_output_tokens if isinstance(cli_max_output_tokens, int) else None,
             "request": dict(cli_request_overrides or {}),
             "headers": dict(cli_header_overrides or {}),
             "deprecated_codex_model": (
                 str(deprecated_codex_model).strip() if deprecated_codex_model else None
-            ),
-            "deprecated_codex_effort": (
-                str(deprecated_codex_effort).strip() if deprecated_codex_effort else None
-            ),
-            "deprecated_codex_plan_effort": (
-                str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None
             ),
         },
     }
@@ -1729,12 +1709,6 @@ def resolve_codex_flags(
         if isinstance(base_cfg.get("model_reasoning_effort"), str)
         else None
     )
-    base_plan_effort = (
-        base_cfg.get("plan_mode_reasoning_effort")
-        if isinstance(base_cfg.get("plan_mode_reasoning_effort"), str)
-        else None
-    )
-
     rf_defaults, rf_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
 
     def _pick(key: str, base: str | None, cli: str | None) -> tuple[str | None, str]:
@@ -1749,20 +1723,12 @@ def resolve_codex_flags(
 
     model, model_src = _pick("model", base_model, cli_model)
     effort, effort_src = _pick("model_reasoning_effort", base_effort, cli_effort)
-    plan_effort, plan_effort_src = _pick(
-        "plan_mode_reasoning_effort", base_plan_effort, cli_plan_effort
-    )
-
-    for key, val in (
-        ("model_reasoning_effort", effort),
-        ("plan_mode_reasoning_effort", plan_effort),
-    ):
-        if val is None:
-            continue
-        if val not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    if effort is not None and effort not in CODEX_REASONING_EFFORT_CHOICES:
+        raise ReviewflowError(
+            f"Invalid model_reasoning_effort: {effort!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
+        )
 
     flags: list[str] = []
     if model:
@@ -1779,8 +1745,6 @@ def resolve_codex_flags(
 
     if effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(effort)}"])
-    if plan_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_effort)}"])
 
     meta: dict[str, Any] = {
         "base": base_meta,
@@ -1790,8 +1754,6 @@ def resolve_codex_flags(
             "model_source": model_src,
             "model_reasoning_effort": effort,
             "model_reasoning_effort_source": effort_src,
-            "plan_mode_reasoning_effort": plan_effort,
-            "plan_mode_reasoning_effort_source": plan_effort_src,
             "sandbox_mode": base_sandbox_mode,
             "web_search": base_web_search,
         },
@@ -2192,9 +2154,6 @@ def build_codex_flags_from_llm_config(
     reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
     if reasoning_effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(reasoning_effort)}"])
-    plan_reasoning_effort = str(resolved.get("plan_reasoning_effort") or "").strip()
-    if plan_reasoning_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_reasoning_effort)}"])
 
     meta = {
         "base": base_meta,
@@ -2205,10 +2164,6 @@ def build_codex_flags_from_llm_config(
             "model_reasoning_effort": resolved.get("reasoning_effort"),
             "model_reasoning_effort_source": (
                 (resolution_meta.get("resolved") or {}).get("reasoning_effort_source")
-            ),
-            "plan_mode_reasoning_effort": resolved.get("plan_reasoning_effort"),
-            "plan_mode_reasoning_effort_source": (
-                (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
             ),
             "sandbox_mode": base_meta.get("sandbox_mode"),
             "web_search": base_meta.get("web_search"),
@@ -2296,10 +2251,11 @@ def build_claude_exec_cmd(
     *,
     command: str,
     model: str | None,
+    effort: str | None = None,
     prompt: str,
     runtime_policy: dict[str, Any] | None = None,
 ) -> list[str]:
-    cmd = [command, "--print", "--output-format", "json"]
+    cmd = [command, "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     provider_args = policy.get("provider_args")
     if isinstance(provider_args, list):
@@ -2310,7 +2266,9 @@ def build_claude_exec_cmd(
         cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
-    cmd.append(prompt)
+    if effort:
+        cmd.extend(["--effort", effort])
+    cmd.extend(["--", prompt])
     return cmd
 
 
@@ -2361,6 +2319,7 @@ def run_claude_exec(
     cmd = build_claude_exec_cmd(
         command=str(resolved.get("command") or "claude"),
         model=str(resolved.get("model") or "").strip() or None,
+        effort=str(resolved.get("reasoning_effort") or "").strip() or None,
         prompt=prompt,
         runtime_policy=runtime_policy,
     )
@@ -4414,7 +4373,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
 
     model = str(resolved.get("model") or "").strip() or None
     effort = str(resolved.get("model_reasoning_effort") or "").strip() or None
-    plan_effort = str(resolved.get("plan_mode_reasoning_effort") or "").strip() or None
 
     flags = codex.get("flags")
     if isinstance(flags, list):
@@ -4429,10 +4387,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
             assignment = flag_items[idx + 1]
             if effort is None:
                 effort = _parse_codex_flag_assignment(assignment, key="model_reasoning_effort")
-            if plan_effort is None:
-                plan_effort = _parse_codex_flag_assignment(
-                    assignment, key="plan_mode_reasoning_effort"
-                )
 
     resume = codex.get("resume") if isinstance(codex.get("resume"), dict) else {}
     return {
@@ -4441,7 +4395,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
         "provider": "codex",
         "model": model,
         "reasoning_effort": effort,
-        "plan_reasoning_effort": plan_effort,
         "resume": resume,
         "capabilities": {"supports_resume": bool(resume.get("command"))},
     }
@@ -4534,14 +4487,12 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
-    plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
-    thinking = effort or plan_effort
-    if model and thinking:
-        return f"llm={preset}/{model}/{thinking}"
+    if model and effort:
+        return f"llm={preset}/{model}/{effort}"
     if model:
         return f"llm={preset}/{model}/?"
-    if thinking:
-        return f"llm={preset}/?/{thinking}"
+    if effort:
+        return f"llm={preset}/?/{effort}"
     return f"llm={preset}/?"
 
 
@@ -5763,7 +5714,6 @@ def _prepare_multipass_stage_llm_configs(
 ) -> dict[str, dict[str, Any]]:
     mp = meta.setdefault("multipass", {})
     mp_llm = mp.setdefault("llm", {})
-    declared_overrides: dict[str, dict[str, Any]] = {}
     stage_configs: dict[str, dict[str, Any]] = {}
     existing_stage_meta = (
         {str(k): dict(v) for k, v in mp_llm.get("stages", {}).items() if isinstance(v, dict)}
@@ -5773,16 +5723,7 @@ def _prepare_multipass_stage_llm_configs(
     stage_meta_payload: dict[str, dict[str, Any]] = (
         dict(existing_stage_meta) if preserve_existing_stage_meta else {}
     )
-    for stage_name, key in (
-        ("plan", "plan_reasoning_effort"),
-        ("step", "step_reasoning_effort"),
-        ("synth", "synth_reasoning_effort"),
-    ):
-        override_value = str(multipass_cfg.get(key) or "").strip() or None
-        declared_overrides[key] = {
-            "value": override_value,
-            "source": ("cure.toml" if override_value is not None else "unset"),
-        }
+    for stage_name in ("plan", "step", "synth"):
         stage_resolved, stage_resolution_meta, stage_meta = resolve_multipass_stage_llm_config(
             stage=stage_name,
             resolved=llm_resolved,
@@ -5796,12 +5737,79 @@ def _prepare_multipass_stage_llm_configs(
         }
         if not preserve_existing_stage_meta:
             stage_meta_payload[stage_name] = dict(stage_meta)
-    mp_llm["declared_overrides"] = declared_overrides
+    mp_llm["declared_overrides"] = {}
     if stage_meta_payload:
         mp_llm["stages"] = stage_meta_payload
     if "review_artifact_stage" not in mp_llm:
         mp_llm["review_artifact_stage"] = None
     return stage_configs
+
+
+def _provider_effort_choices(provider: str) -> tuple[str, ...]:
+    if str(provider or "").strip().lower() == "claude":
+        return ("low", "medium", "high", "max")
+    return CODEX_REASONING_EFFORT_CHOICES
+
+
+def _provider_model_options(provider: str) -> list[tuple[str, str]]:
+    if str(provider or "").strip().lower() == "claude":
+        return [
+            ("Opus 4.6", "claude-opus-4-6"),
+            ("Sonnet 4.6", "claude-sonnet-4-6"),
+            ("Haiku 4.5-20251001", "claude-haiku-4-5-20251001"),
+        ]
+    if str(provider or "").strip().lower() == "codex":
+        return [
+            ("GPT-5.4", "gpt-5.4"),
+            ("GPT-5.3 Codex", "gpt-5.3-codex"),
+            ("GPT-5.3 Codex Spark", "gpt-5.3-codex-spark"),
+        ]
+    return []
+
+
+def _maybe_apply_pr_llm_picker(
+    *,
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    resolved_meta = (
+        dict(llm_resolution_meta.get("resolved"))
+        if isinstance(llm_resolution_meta.get("resolved"), dict)
+        else {}
+    )
+    model_source = str(resolved_meta.get("model_source") or "").strip()
+    effort_source = str(resolved_meta.get("reasoning_effort_source") or "").strip()
+    prompt_for_model = model_source in {"", "preset"}
+    prompt_for_effort = effort_source in {"", "preset"}
+    if not prompt_for_model and not prompt_for_effort:
+        return llm_resolved, llm_resolution_meta
+    provider = str(llm_resolved.get("provider") or "").strip().lower()
+    picker_updates = prompt_pr_model_and_effort_picker(
+        provider=provider,
+        default_model=str(llm_resolved.get("model") or "").strip() or None,
+        default_effort=str(llm_resolved.get("reasoning_effort") or "").strip() or None,
+        model_options=_provider_model_options(provider),
+        effort_options=list(_provider_effort_choices(provider)),
+        prompt_for_model=prompt_for_model,
+        prompt_for_effort=prompt_for_effort,
+        fixed_model=None if prompt_for_model else (str(llm_resolved.get("model") or "").strip() or None),
+        fixed_effort=None if prompt_for_effort else (str(llm_resolved.get("reasoning_effort") or "").strip() or None),
+    )
+    if not picker_updates:
+        return llm_resolved, llm_resolution_meta
+    updated_resolved = dict(llm_resolved)
+    updated_resolution_meta = dict(llm_resolution_meta)
+    updated_resolved_meta = dict(resolved_meta)
+    if "model" in picker_updates:
+        updated_resolved["model"] = picker_updates["model"]
+        updated_resolved_meta["model"] = picker_updates["model"]
+        updated_resolved_meta["model_source"] = "tty_prompt"
+    if "reasoning_effort" in picker_updates:
+        updated_resolved["reasoning_effort"] = picker_updates["reasoning_effort"]
+        updated_resolved_meta["reasoning_effort"] = picker_updates["reasoning_effort"]
+        updated_resolved_meta["reasoning_effort_source"] = "tty_prompt"
+    updated_resolution_meta["resolved"] = updated_resolved_meta
+    return updated_resolved, updated_resolution_meta
 
 
 def _record_multipass_stage_llm(*, meta: dict[str, Any], stage_name: str, stage_llm_meta: dict[str, Any]) -> None:
@@ -8930,6 +8938,10 @@ def _pr_flow_impl(
                 reviewflow_config_path=effective_config_path,
                 base_codex_config_path=effective_codex_base_config_path,
             )
+            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
             runtime_policy = prepare_review_agent_runtime(
                 args=args,
                 resolved=llm_resolved,
@@ -11352,7 +11364,6 @@ def _followup_flow_impl(
                 "provider": llm_resolved.get("provider"),
                 "model": llm_resolved.get("model"),
                 "reasoning_effort": llm_resolved.get("reasoning_effort"),
-                "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
             "helpers": _chunkhound_helper_refs(runtime_policy),
@@ -11877,7 +11888,6 @@ def _zip_flow_impl(
                 "provider": llm_resolved.get("provider"),
                 "model": llm_resolved.get("model"),
                 "reasoning_effort": llm_resolved.get("reasoning_effort"),
-                "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
         }
@@ -12830,7 +12840,7 @@ def build_interactive_resume_command(
             cli_preset=saved_preset_name,
             cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
             cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
-            cli_plan_effort=(str(saved_llm_meta.get("plan_reasoning_effort") or "").strip() or None),
+            cli_plan_effort=None,
             cli_verbosity=(str(saved_llm_meta.get("text_verbosity") or "").strip() or None),
             cli_max_output_tokens=(
                 int(saved_llm_meta.get("max_output_tokens"))
@@ -12846,6 +12856,13 @@ def build_interactive_resume_command(
     except ReviewflowError:
         llm_meta = dict(saved_llm_meta)
         llm_resolution_meta = dict(saved_resolution_meta)
+    resolved_saved = llm_resolution_meta.get("resolved") if isinstance(llm_resolution_meta.get("resolved"), dict) else None
+    if isinstance(resolved_saved, dict):
+        if str(saved_llm_meta.get("model") or "").strip():
+            resolved_saved["model_source"] = "session_reuse"
+        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
+            resolved_saved["reasoning_effort_source"] = "session_reuse"
+        llm_resolution_meta["resolved"] = resolved_saved
 
     saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
     runtime_policy = prepare_review_agent_runtime(
@@ -14557,16 +14574,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     prp.add_argument(
         "--codex-effort",
         dest="codex_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     prp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     mpg = prp.add_mutually_exclusive_group()
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
@@ -14635,13 +14650,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(rp)
     add_agent_runtime_args(rp)
     rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    rp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    rp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     rp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     rp.add_argument("--no-index", action="store_true", help=argparse.SUPPRESS)
@@ -14656,13 +14670,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(fup)
     add_agent_runtime_args(fup)
     fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    fup.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    fup.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     fup.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
     fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
@@ -14674,13 +14687,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(zp)
     add_agent_runtime_args(zp)
     zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    zp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    zp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     zp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     zp.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
