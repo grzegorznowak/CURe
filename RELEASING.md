@@ -6,10 +6,22 @@ This repo publishes the public CURe package as `cureview`, while the installed c
 
 - `project.version` in `pyproject.toml` is the source of truth for the package version.
 - The release tag must be `v<version>` and must match `project.version` exactly.
+- Release from `origin/main` only.
 - Final tags such as `v0.3.0` publish to PyPI.
 - Pre-release package publication is not configured in this repository.
 - The publish workflow is [`.github/workflows/publish-package.yml`](.github/workflows/publish-package.yml).
 - The public package page is: https://pypi.org/p/cureview
+
+## Repo-Owned Release Command Surfaces
+
+Use the repo-owned command surface when running a release with an agent:
+
+- canonical command: [`operations/commands/cure_release.md`](operations/commands/cure_release.md)
+- Claude adapter: [`.claude/skills/cure_release/SKILL.md`](.claude/skills/cure_release/SKILL.md)
+- Codex adapter: [`.codex/prompts/cure_release.md`](.codex/prompts/cure_release.md)
+- curated release history: [`CHANGELOG.md`](CHANGELOG.md)
+
+These files are execution aids, not a second policy source. If they conflict with this runbook, `RELEASING.md` is normative.
 
 ## Trusted Publishing Setup
 
@@ -27,12 +39,14 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
 
 ## Normal Release Flow
 
-1. Update `project.version` in `pyproject.toml`.
-2. Commit the version bump.
-3. Create and push the matching tag.
+1. Fetch `origin` and confirm the release commit will be cut from `origin/main`.
+2. Update `CHANGELOG.md` with curated notes from merged PRs since the previous release tag.
+3. Update `project.version` in `pyproject.toml`.
+4. Commit the version bump and changelog update.
+5. Create and push the matching tag.
    - Production example: `git tag v0.3.0 && git push origin v0.3.0`
-4. Wait for `Publish Package` to finish.
-5. Verify the package page and install smoke:
+6. Wait for `Publish Package` to finish.
+7. Verify the package page and install smoke:
    - `uvx --from cureview cure --help`
    - `uv tool install cureview`
 
@@ -118,6 +132,7 @@ Each evidence log should capture:
 - the exact version and tag
 - whether the run targeted local artifact smoke or PyPI
 - the exact commands run
+- the changelog entry that shipped with the release
 - the observed package/install result
 - whether the verified public executable was `cure`
 - any blocker with the literal error text

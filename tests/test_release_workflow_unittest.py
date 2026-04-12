@@ -88,6 +88,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("install-cure.sh", release_doc)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh", release_doc)
 
+    def test_canonical_release_command_documents_working_proveout_and_schema_links(self) -> None:
+        command_doc = (ROOT / "operations" / "commands" / "cure_release.md").read_text(encoding="utf-8")
+
+        self.assertIn("python -m unittest discover -s tests -p 'test_release_workflow_unittest.py'", command_doc)
+        self.assertNotIn("python -m unittest tests/test_release_workflow_unittest.py", command_doc)
+        self.assertIn("public_release_evidence/README.md", command_doc)
+        self.assertIn("CHANGELOG.md", command_doc)
+
     def test_publish_workflow_builds_and_releases_standalone_assets(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 
@@ -178,6 +186,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Status", evidence_readme)
         self.assertIn("Version / tag", evidence_readme)
         self.assertIn("Commands run", evidence_readme)
+        self.assertIn("Changelog entry shipped", evidence_readme)
         self.assertIn("Verified public command surface", evidence_readme)
         self.assertIn("Rollback / hotfix decision", evidence_readme)
         self.assertIn("Exact next operator action", evidence_readme)
