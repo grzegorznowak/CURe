@@ -495,19 +495,6 @@ def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str
     return []
 
 
-def _latest_claude_bash_command(state: dict[str, Any]) -> str | None:
-    raw_queue = state.get("bash_tool_commands")
-    queue = raw_queue if isinstance(raw_queue, list) else []
-    while queue:
-        candidate = queue.pop(0)
-        if isinstance(candidate, str) and candidate.strip():
-            state["bash_tool_commands"] = queue
-            return candidate.strip()
-    state["bash_tool_commands"] = queue
-    return None
-
-
-
 
 def _extract_claude_tool_result_text(block: dict[str, Any]) -> str:
     content = block.get("content")

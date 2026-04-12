@@ -67,7 +67,7 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
             or DEFAULT_IMPLICIT_CODEX_PRESET
         )
         builtin_preset = (
-            {"reasoning_effort": "xhigh"} if resolved_preset_id == DEFAULT_IMPLICIT_CODEX_PRESET else {}
+            {"reasoning_effort": "high"} if resolved_preset_id == DEFAULT_IMPLICIT_CODEX_PRESET else {}
         )
         reviewflow_source_keys = {
             "model_source": ("model",),
