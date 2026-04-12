@@ -5,6 +5,11 @@ dist/
 .chunkhound.json
 .chunkhound/
 .codex/
+!.codex/
+.codex/*
+!.codex/prompts/
+.codex/prompts/*
+!.codex/prompts/cure_release.md
 .tmp*
 .tmp*/
 uv.lock
