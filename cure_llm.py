@@ -1257,9 +1257,6 @@ def build_codex_flags_from_llm_config(
     reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
     if reasoning_effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(reasoning_effort)}"])
-    plan_reasoning_effort = str(resolved.get("plan_reasoning_effort") or "").strip()
-    if plan_reasoning_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_reasoning_effort)}"])
     meta = {
         "base": base_meta,
         "reviewflow_defaults": reviewflow_defaults,
@@ -1269,10 +1266,6 @@ def build_codex_flags_from_llm_config(
             "model_reasoning_effort": resolved.get("reasoning_effort"),
             "model_reasoning_effort_source": (
                 (resolution_meta.get("resolved") or {}).get("reasoning_effort_source")
-            ),
-            "plan_mode_reasoning_effort": resolved.get("plan_reasoning_effort"),
-            "plan_mode_reasoning_effort_source": (
-                (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
             ),
             "sandbox_mode": base_meta.get("sandbox_mode"),
             "web_search": base_meta.get("web_search"),
@@ -1366,6 +1359,7 @@ def build_claude_exec_cmd(
     *,
     command: str,
     model: str | None,
+    effort: str | None = None,
     prompt: str,
     runtime_policy: dict[str, Any] | None = None,
 ) -> list[str]:
@@ -1387,6 +1381,8 @@ def build_claude_exec_cmd(
         cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
+    if effort:
+        cmd.extend(["--effort", effort])
     cmd.extend(["--", prompt])
     return cmd
 
@@ -1438,6 +1434,7 @@ def run_claude_exec(
     cmd = build_claude_exec_cmd(
         command=str(resolved.get("command") or "claude"),
         model=str(resolved.get("model") or "").strip() or None,
+        effort=str(resolved.get("reasoning_effort") or "").strip() or None,
         prompt=prompt,
         runtime_policy=runtime_policy,
     )

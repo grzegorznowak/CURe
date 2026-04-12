@@ -3321,6 +3321,314 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
 
 
 class BaselineSelectionTests(unittest.TestCase):
+    def _make_pr_flow_root(self, name: str) -> tuple[Path, Path, Path, Path]:
+        root = Path(tempfile.mkdtemp(prefix=name, dir=str(ROOT)))
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        sandbox_root = root / "sandboxes"
+        cache_root = root / "cache"
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        base_cfg = root / "chunkhound-base.json"
+        base_cfg.write_text("{}", encoding="utf-8")
+        config_path = root / "reviewflow.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[chunkhound]",
+                    f'base_config_path = "{base_cfg}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return root, sandbox_root, cache_root, config_path
+
+    def _patch_pr_flow_early_setup(
+        self,
+        stack: contextlib.ExitStack,
+        *,
+        rf_module: object,
+        base_cfg: Path,
+        root: Path,
+    ) -> None:
+        stack.enter_context(
+            mock.patch.object(
+                rf_module,
+                "load_chunkhound_runtime_config",
+                return_value=(
+                    rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                    {"chunkhound": {"base_config_path": str(base_cfg)}},
+                    {"indexing": {"exclude": []}},
+                ),
+            )
+        )
+        stack.enter_context(mock.patch.object(rf_module, "materialize_chunkhound_env_config"))
+        stack.enter_context(
+            mock.patch.object(
+                rf_module,
+                "write_pr_context_file",
+                side_effect=lambda *, work_dir, pr, pr_meta: work_dir / "pr-context.md",
+            )
+        )
+        stack.enter_context(mock.patch.object(rf_module, "clear_active_output"))
+        stack.enter_context(mock.patch.object(rf.ReviewflowOutput, "start"))
+        stack.enter_context(mock.patch.object(rf.ReviewflowOutput, "stop"))
+        stack.enter_context(mock.patch.object(rf_module, "maybe_print_markdown_after_tui"))
+        stack.enter_context(mock.patch.object(rf_module, "maybe_print_codex_resume_command"))
+
+    def test_pr_flow_runs_picker_before_ensure_base_cache(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_picker_before_base_cache_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            events: list[str] = []
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                                "head": {"sha": "1" * 40},
+                                "title": "Picker ordering PR",
+                            }
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        side_effect=lambda *a, **k: (
+                            events.append("resolve")
+                            or (
+                                {
+                                    "provider": "claude",
+                                    "preset": "claude-cli",
+                                    "model": "claude-sonnet-4-6",
+                                    "reasoning_effort": "high",
+                                },
+                                {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                            )
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_maybe_apply_pr_llm_picker",
+                        side_effect=lambda **kwargs: (
+                            events.append("picker") or (kwargs["llm_resolved"], kwargs["llm_resolution_meta"])
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "ensure_base_cache",
+                        side_effect=lambda **kwargs: (events.append("ensure_base_cache"), (_ for _ in ()).throw(RuntimeError("stop after ensure")))[1],
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "stop after ensure"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            self.assertEqual(events[:3], ["resolve", "picker", "ensure_base_cache"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_picker_abort_leaves_no_created_session(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_picker_abort_cleanup_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Picker abort PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "claude",
+                                "preset": "claude-cli",
+                                "model": "claude-sonnet-4-6",
+                                "reasoning_effort": "high",
+                            },
+                            {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_maybe_apply_pr_llm_picker",
+                        side_effect=rf.ReviewflowError("picker aborted"),
+                    )
+                )
+                ensure_base_cache = stack.enter_context(mock.patch.object(rf, "ensure_base_cache"))
+                with self.assertRaisesRegex(rf.ReviewflowError, "picker aborted"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            ensure_base_cache.assert_not_called()
+            self.assertEqual(list(sandbox_root.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_prior_review_latest_happens_before_picker(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_prior_review_before_picker_"
+        )
+        try:
+            review_md = root / "prior-review.md"
+            review_md.write_text("prior review\n", encoding="utf-8")
+            completed = mock.Mock(review_md_path=review_md)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "latest",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Prior review PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]))
+                stack.enter_context(mock.patch.object(rf, "_maybe_apply_pr_llm_picker", side_effect=AssertionError("picker should not run")))
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            self.assertEqual(rc, 0)
+            self.assertEqual(stdout.getvalue(), "prior review\n")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_non_tty_picker_skip_still_reaches_ensure_base_cache(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_non_tty_picker_skip_"
+        )
+        try:
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--prompt",
+                    "review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={
+                            "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                            "head": {"sha": "1" * 40},
+                            "title": "Non tty picker PR",
+                        },
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                self._patch_pr_flow_early_setup(stack, rf_module=rf, base_cfg=root / "chunkhound-base.json", root=root)
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "claude",
+                                "preset": "claude-cli",
+                                "model": "claude-sonnet-4-6",
+                                "reasoning_effort": "high",
+                            },
+                            {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
+                        ),
+                    )
+                )
+                prompt_picker = stack.enter_context(
+                    mock.patch.object(rf, "prompt_pr_model_and_effort_picker", return_value=None)
+                )
+                ensure_base_cache = stack.enter_context(
+                    mock.patch.object(rf, "ensure_base_cache", side_effect=RuntimeError("stop after ensure"))
+                )
+                with self.assertRaisesRegex(RuntimeError, "stop after ensure"):
+                    rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
+            prompt_picker.assert_called_once()
+            ensure_base_cache.assert_called_once()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_resolve_pr_review_baseline_selection_prefers_default_branch_within_threshold(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=7)
         pr_meta = {
@@ -8551,23 +8859,18 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "max_steps": 20,
                 "step_workers": 1,
                 "grounding_mode": "off",
-                "plan_reasoning_effort": "minimal",
-                "step_reasoning_effort": "low",
-                "synth_reasoning_effort": "xhigh",
             },
             llm_resolved_override={
                 "provider": "codex",
                 "preset": "test-codex",
                 "model": "gpt-5.4",
                 "reasoning_effort": "medium",
-                "plan_reasoning_effort": "high",
                 "capabilities": {"supports_resume": True},
             },
             llm_resolution_meta_override={
                 "resolved": {
                     "model_source": "cli",
                     "reasoning_effort_source": "cli",
-                    "plan_reasoning_effort_source": "preset",
                 }
             },
             runtime_policy_override={
@@ -8588,28 +8891,27 @@ class CodexToolProofFlowTests(unittest.TestCase):
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
             self.assertEqual(stage_invocations["review.plan.md"]["reasoning_effort"], "medium")
-            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort"], "minimal")
-            self.assertEqual(stage_invocations["review.plan.md"]["plan_reasoning_effort_source"], "multipass_config")
-            self.assertIn('plan_mode_reasoning_effort="minimal"', stage_invocations["review.plan.md"]["codex_flags"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertIn('model_reasoning_effort="low"', stage_invocations["review.step-01.md"]["codex_flags"])
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertIn('model_reasoning_effort="xhigh"', stage_invocations["review.md"]["codex_flags"])
+            self.assertIsNone(stage_invocations["review.plan.md"]["plan_reasoning_effort"])
+            self.assertEqual(stage_invocations["review.plan.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertIn('model_reasoning_effort="medium"', stage_invocations["review.step-01.md"]["codex_flags"])
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertIn('model_reasoning_effort="medium"', stage_invocations["review.md"]["codex_flags"])
             self.assertEqual(meta["llm"]["reasoning_effort"], "medium")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "minimal")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
-            self.assertEqual(meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(meta["multipass"]["llm"]["review_artifact_stage"], "synth")
             self.assertEqual(
                 meta["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
-            self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "minimal")
+            self.assertEqual(meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "medium")
             self.assertIn("review generated with [CURe]", review_md)
             self.assertIn("multi-stage - stages: 1", review_md)
-            self.assertIn("model gpt-5.4/xhigh", review_md)
+            self.assertIn("model gpt-5.4/medium", review_md)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -9460,14 +9762,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -9489,16 +9789,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "enabled": True,
                                 "max_steps": 20,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
                                     "enabled": True,
                                     "max_steps": 20,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -9757,14 +10053,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -9786,16 +10080,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "enabled": True,
                                 "max_steps": 20,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
                                     "enabled": True,
                                     "max_steps": 20,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -9814,21 +10104,21 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["valid"])
             self.assertEqual(refreshed["chunkhound"]["tool_validation"]["evidence_sources"], ["cli_helper_command_execution"])
             self.assertEqual([run["review_stage"] for run in report["runs"]], ["multipass_step", "multipass_synth"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "multipass_config")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort_source"], "reasoning_effort:cli")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
             self.assertEqual(refreshed["llm"]["reasoning_effort"], "medium")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "low")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(
                 refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
             self.assertIn("review generated with [CURe]", review_md_text)
             self.assertIn("multi-stage - stages: 1", review_md_text)
-            self.assertIn("model gpt-5.4/xhigh", review_md_text)
+            self.assertIn("model gpt-5.4/medium", review_md_text)
             self.assertIn("session session-1", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -10065,14 +10355,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "preset": "test-codex",
                                 "model": "gpt-5.4",
                                 "reasoning_effort": "medium",
-                                "plan_reasoning_effort": "high",
                                 "capabilities": {"supports_resume": True},
                             },
                             {
                                 "resolved": {
                                     "model_source": "cli",
                                     "reasoning_effort_source": "cli",
-                                    "plan_reasoning_effort_source": "preset",
                                 }
                             },
                         ),
@@ -10412,17 +10700,17 @@ class CodexToolProofFlowTests(unittest.TestCase):
             review_md_text = review_md.read_text(encoding="utf-8")
             self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.md"])
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "multipass_config")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort_source"], "reasoning_effort:cli")
             self.assertEqual(refreshed["multipass"]["llm"]["stages"]["plan"]["effective_reasoning_effort"], "high")
             self.assertEqual(refreshed["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"], "medium")
-            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "xhigh")
+            self.assertEqual(refreshed["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"], "medium")
             self.assertEqual(refreshed["multipass"]["llm"]["review_artifact_stage"], "synth")
             self.assertEqual(
                 refreshed["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
-                "xhigh",
+                "medium",
             )
-            self.assertIn("model gpt-5.4/xhigh", review_md_text)
+            self.assertIn("model gpt-5.4/medium", review_md_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -11382,8 +11670,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "max_steps": 20,
                                 "step_workers": 1,
                                 "grounding_mode": "strict",
-                                "step_reasoning_effort": "low",
-                                "synth_reasoning_effort": "xhigh",
                             },
                             {
                                 "multipass": {
@@ -11391,8 +11677,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                     "max_steps": 20,
                                     "step_workers": 1,
                                     "grounding_mode": "strict",
-                                    "step_reasoning_effort": "low",
-                                    "synth_reasoning_effort": "xhigh",
                                 }
                             },
                         ),
@@ -11421,9 +11705,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 [str(session_dir / "review.step-01.md"), str(session_dir / "review.step-02.md")],
             )
             self.assertEqual([item["status"] for item in refreshed["multipass"]["step_states"]], ["completed", "completed"])
-            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.step-02.md"]["reasoning_effort"], "low")
-            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "xhigh")
+            self.assertEqual(stage_invocations["review.step-01.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.step-02.md"]["reasoning_effort"], "medium")
+            self.assertEqual(stage_invocations["review.md"]["reasoning_effort"], "medium")
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -12349,6 +12633,122 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         self.assertEqual(choice, "retry")
         self.assertIn("Strict grounding failed for a multipass step.", rendered)
         self.assertIn("Invalid choice. Enter one of: retry, skip.", rendered)
+
+    def test_pr_picker_rejects_invalid_numbered_model_selection(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("99\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                cure_output.prompt_pr_model_and_effort_picker(
+                    provider="claude",
+                    default_model="claude-sonnet-4-6",
+                    default_effort="high",
+                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
+                    effort_options=["low", "medium", "high", "max"],
+                    prompt_for_model=True,
+                    prompt_for_effort=False,
+                )
+        self.assertIn("invalid model selection", str(ctx.exception).lower())
+
+    def test_pr_picker_aborts_on_eof_during_effort_selection(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                cure_output.prompt_pr_model_and_effort_picker(
+                    provider="claude",
+                    default_model="claude-sonnet-4-6",
+                    default_effort="high",
+                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
+                    effort_options=["low", "medium", "high", "max"],
+                    prompt_for_model=False,
+                    prompt_for_effort=True,
+                )
+        self.assertIn("closed before effort selection", str(ctx.exception))
+
+    def test_pr_picker_accepts_codex_freeform_model_and_effort(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("gpt-5.4\n4\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_pr_model_and_effort_picker(
+                provider="codex",
+                default_model="gpt-5.3-codex",
+                default_effort="high",
+                model_options=[],
+                effort_options=["minimal", "low", "medium", "high", "xhigh"],
+                prompt_for_model=True,
+                prompt_for_effort=True,
+            )
+        self.assertEqual(result, {"model": "gpt-5.4", "reasoning_effort": "high"})
+
+    def test_provider_model_options_include_codex_models(self) -> None:
+        values = [value for _, value in rf._provider_model_options("codex")]
+        self.assertIn("gpt-5.4", values)
+
+    def test_pr_picker_skips_explicit_preset_overrides(self) -> None:
+        llm_resolved = {
+            "provider": "claude",
+            "model": "claude-opus-4-6",
+            "reasoning_effort": "high",
+        }
+        llm_resolution_meta = {
+            "resolved": {
+                "model_source": "preset",
+                "model_source_detail": "preset_explicit",
+                "reasoning_effort_source": "preset",
+                "reasoning_effort_source_detail": "preset_explicit",
+            }
+        }
+
+        with mock.patch.object(rf, "prompt_pr_model_and_effort_picker", side_effect=AssertionError("picker should not run")):
+            resolved, meta = rf._maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+
+        self.assertEqual(resolved, llm_resolved)
+        self.assertEqual(meta, llm_resolution_meta)
+
+    def test_pr_picker_still_prompts_for_builtin_preset_defaults(self) -> None:
+        llm_resolved = {
+            "provider": "claude",
+            "model": "claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        }
+        llm_resolution_meta = {
+            "resolved": {
+                "model_source": "preset",
+                "model_source_detail": "preset_builtin",
+                "reasoning_effort_source": "preset",
+                "reasoning_effort_source_detail": "preset_builtin",
+            }
+        }
+
+        with mock.patch.object(
+            rf,
+            "prompt_pr_model_and_effort_picker",
+            return_value={"model": "claude-opus-4-6"},
+        ) as picker:
+            resolved, meta = rf._maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+
+        picker.assert_called_once()
+        self.assertEqual(resolved["model"], "claude-opus-4-6")
+        self.assertEqual(meta["resolved"]["model_source"], "tty_prompt")
 
     def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:
         root = Path("/tmp/session-grounding-summary")
