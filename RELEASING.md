@@ -131,7 +131,7 @@ Each evidence log should capture:
 
 - the exact version and tag
 - whether the run targeted local artifact smoke or PyPI
-- the exact commands run
+- the commands run, written portably with placeholders for machine-local temp paths when needed
 - the changelog entry that shipped with the release
 - the observed package/install result
 - whether the verified public executable was `cure`

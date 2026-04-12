@@ -112,7 +112,7 @@ Then run the isolated wheel smoke:
 5. Run `cure setup`.
 6. Run `cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json`.
 
-Write the local prove-out result to `public_release_evidence/YYYY-MM-DD-vX.Y.Z-local-artifact-smoke.md` using the schema from [public_release_evidence/README.md](../../public_release_evidence/README.md), including the changelog entry that shipped with the release.
+Write the local prove-out result to `public_release_evidence/YYYY-MM-DD-vX.Y.Z-local-artifact-smoke.md` using the schema from [public_release_evidence/README.md](../../public_release_evidence/README.md), including the changelog entry that shipped with the release. Normalize machine-local temp paths with placeholders such as `<temp-root>` unless the literal path is itself part of a blocker.
 
 ### 7. Explicit Checkpoint Before Commit, Tag, And Push
 

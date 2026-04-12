@@ -6,13 +6,13 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
-### Added
+No entries yet.
 
-- A repo-owned `cure_release` workflow now documents the maintained release path for Claude and Codex sessions.
+## [0.3.4] - 2026-04-12
 
 ### Changed
 
-- Releases now update this changelog before the release commit and carry forward curated notes derived from merged PRs.
+- Unified the bootstrap flow around `cure setup` and cleaned up the related setup follow-up behavior.
 
 ## [0.3.3] - 2026-04-09
 
