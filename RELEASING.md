@@ -68,8 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cur
 After install, the verified runtime flow is still:
 
 ```bash
-cure init
-cure install
+cure setup
 cure doctor --pr-url <public github PR> --json
 ```
 
@@ -85,13 +84,12 @@ Run the first public prove-out as an explicit evidence-gathering exercise, not a
    - verify `cure --help`
    - verify there is no installed `reviewflow` executable
    - verify `python -c "import reviewflow"` fails
-   - run `cure init`
-   - run `cure install`
+   - run `cure setup`
    - run `cure doctor --pr-url <public github PR> --json`
 3. Push the matching tag and let `publish-package.yml` publish to PyPI.
 4. Run the published-package smoke with the public commands:
    - `uvx --from cureview cure --help`
-   - `uvx --from cureview cure init`
+   - `uvx --from cureview cure setup`
    - `uv tool install cureview`
    - `cure doctor --pr-url <public github PR> --json`
 5. Record what actually happened in `public_release_evidence/` before closing the release.
@@ -106,7 +104,7 @@ For the standalone follow-on channel, verify all of the following before closing
 2. each archive extracts a working `cure` binary and `cure --help` exits 0
 3. `install-cure.sh --version v<version>` installs the expected binary on a supported platform
 4. the docs still present `uv tool install cureview` / `uvx --from cureview cure ...` as the primary path and the standalone installer as secondary
-5. the post-install bootstrap path remains `cure init`, `cure install`, then `cure doctor --pr-url <public github PR> --json`
+5. the post-install bootstrap path remains `cure setup`, then `cure doctor --pr-url <public github PR> --json`
 
 ## Evidence Capture
 

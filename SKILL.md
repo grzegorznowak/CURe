@@ -98,7 +98,7 @@ Version-pinned standalone fallback:
 curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8
 ```
 
-The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure setup`, `cure install`, and `cure doctor` flow as the package path.
+The standalone path is a secondary fallback for Linux x86_64, macOS x86_64, and macOS arm64 only. After install, use the same `cure setup` and `cure doctor` flow as the package path.
 
 5. Prefer disposable XDG roots or explicit path overrides when the session should not touch the operator's default config tree.
 
@@ -120,9 +120,7 @@ cure setup \
   --cache-root /tmp/cure-public/cache
 ```
 
-6. Run `cure setup` before `cure install` or `cure doctor`.
-
-Compatibility note: `cure init` still works because it is an alias to `cure setup`, but `setup` is the canonical public command.
+6. Run `cure setup` before `cure doctor`.
 
 Human persistent flow:
 
@@ -136,9 +134,7 @@ Agent ephemeral flow:
 uvx --from cureview cure setup
 ```
 
-Compatibility alias: `uvx --from cureview cure init` still enters the same setup flow.
-
-`cure setup` writes the default local non-secret config files if they are missing, and `cure init` remains a compatibility alias:
+`cure setup` writes the default local non-secret config files if they are missing:
 
 ```text
 ~/.config/cure/cure.toml
@@ -173,7 +169,7 @@ That structured `review_intelligence` registry is also the source for capability
 
 7. Auto-wire embeddings from the current environment when possible.
 
-If `VOYAGE_API_KEY` exists, `cure setup` writes. `cure init` reaches the same behavior because it is an alias:
+If `VOYAGE_API_KEY` exists, `cure setup` writes:
 
 ```json
 {
@@ -184,7 +180,7 @@ If `VOYAGE_API_KEY` exists, `cure setup` writes. `cure init` reaches the same be
 }
 ```
 
-If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes. `cure init` reaches the same behavior because it is an alias:
+If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes:
 
 ```json
 {
@@ -197,14 +193,13 @@ If `VOYAGE_API_KEY` is missing but `OPENAI_API_KEY` exists, `cure setup` writes.
 
 If the file already exists and you want to rewrite it, rerun `cure setup --force`.
 
-8. Provision ChunkHound:
+8. Provision ChunkHound and persist the local agent choice in one step:
 
 ```bash
-cure install
+cure setup
 ```
 
-`cure install` still provisions ChunkHound, but it also repairs missing non-secret bootstrap files and persists a deterministic local-agent choice when it can.
-It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly. Use `--agent codex|claude` on `cure setup` or `cure install` when both executables are installed and you want a non-interactive choice, and use `cure set-agent codex|claude` to change the sticky selection later.
+`cure setup` provisions ChunkHound, repairs missing non-secret bootstrap files, and persists a deterministic local-agent choice when it can. It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when you want CURe to install or replace that binary explicitly. Use `--skip-install` when `chunkhound` is already available and must not be reinstalled. Use `--agent codex|claude` on `cure setup` when both executables are installed and you want a non-interactive choice, and use `cure set-agent codex|claude` to change the sticky selection later.
 
 9. Confirm readiness:
 
@@ -332,7 +327,7 @@ If the operator prefers OpenAI instead, switch the snippet to the OpenAI embeddi
 export OPENAI_API_KEY=<your-openai-api-key>
 ```
 
-4. If the existing JSON became stale, tell the operator to rerun `cure setup --force` (`cure init --force` still works as the compatibility alias).
+4. If the existing JSON became stale, tell the operator to rerun `cure setup --force`.
 
 5. End with the rerun command:
 
@@ -353,11 +348,11 @@ Required behavior:
 - If CURe config already exists, inspect the active `cure.toml` and the JSON resolved from `[chunkhound].base_config_path` before creating new config files.
 - Look for repo-root `chunkhound.json` and `.chunkhound.json` as ask-first setup hints and ask the operator before reusing them.
 - Use a temp XDG root or explicit `--config` / `--sandbox-root` / `--cache-root` overrides when the session should not touch the default `~/.config/cure` layout.
-- Use `cure setup` as the primary bootstrap and repair entry point. `cure init` remains a compatibility alias.
+- Use `cure setup` as the primary bootstrap and repair entry point.
 - On a TTY, expect `cure setup` to act as an interactive setup wizard that can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config.
 - If `VOYAGE_API_KEY` is present, let `cure setup` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure setup` configure OpenAI embeddings automatically.
-- If `chunkhound` is still missing on `PATH`, the wizard may offer to run `cure install`; otherwise run `cure install` after bootstrap or repair.
+- If `chunkhound` is still missing on `PATH`, let `cure setup` or the setup wizard install it, or rerun `cure setup --chunkhound-source release|git-main`.
 - Commands that require bootstrap readiness (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
 - If autodetect picks the wrong CLI provider, rerun `cure doctor` and `cure pr` with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
