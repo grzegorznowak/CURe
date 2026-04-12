@@ -4,7 +4,6 @@ import json
 import os
 import re
 import select
-import sys
 import termios
 import threading
 import time
@@ -13,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from shutil import get_terminal_size
-from typing import Callable, TextIO
+from typing import Any, Callable, TextIO
 
 from chunkhound_summary import parse_chunkhound_index_summary, render_chunkhound_index_context_lines
 
@@ -57,6 +56,11 @@ class UiState:
     def request_stop(self) -> None:
         with self._lock:
             self._stop = True
+        self.ping()
+
+    def reset_stop(self) -> None:
+        with self._lock:
+            self._stop = False
         self.ping()
 
     def request_redraw(self) -> None:
@@ -467,7 +471,7 @@ def _format_phase_lines(
 
     # If extremely tight, always show the current phase line (preferable to summary).
     if max_lines == 1:
-        current = next((l for l in formatted if l.lstrip().startswith("▶")), None)
+        current = next((line for line in formatted if line.lstrip().startswith("▶")), None)
         return [_truncate(current or (formatted[-1] if formatted else ""), width)]
 
     if len(formatted) > remaining:
@@ -548,20 +552,16 @@ def _looks_like_email(text: str) -> bool:
 
 def _chunkhound_index_summary(*, meta: dict, chunkhound_tail: list[str]) -> dict | None:
     cleaned = _clean_tail_lines(chunkhound_tail)
-    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
-    last_index = (
-        dict(chunkhound_meta.get("last_index"))
-        if isinstance(chunkhound_meta.get("last_index"), dict)
-        else None
-    )
+    raw_chunkhound_meta = meta.get("chunkhound")
+    chunkhound_meta: dict[str, Any] = raw_chunkhound_meta if isinstance(raw_chunkhound_meta, dict) else {}
+    raw_last_index = chunkhound_meta.get("last_index")
+    last_index = dict(raw_last_index) if isinstance(raw_last_index, dict) else None
     if last_index is not None:
         return last_index
-    base_cache = meta.get("base_cache") if isinstance(meta.get("base_cache"), dict) else {}
-    cache_index = (
-        dict(base_cache.get("index_summary"))
-        if isinstance(base_cache.get("index_summary"), dict)
-        else None
-    )
+    raw_base_cache = meta.get("base_cache")
+    base_cache: dict[str, Any] = raw_base_cache if isinstance(raw_base_cache, dict) else {}
+    raw_cache_index = base_cache.get("index_summary")
+    cache_index = dict(raw_cache_index) if isinstance(raw_cache_index, dict) else None
     if cache_index is not None:
         return cache_index
     return parse_chunkhound_index_summary(cleaned)
@@ -580,10 +580,10 @@ def _support_summary_items(*, meta: dict, chunkhound_tail: list[str]) -> list[tu
     error_meta = meta.get("error")
     if isinstance(error_meta, dict):
         failure_message = str(error_meta.get("message") or "").strip()
-    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
-    chunkhound_access = (
-        chunkhound_meta.get("access") if isinstance(chunkhound_meta.get("access"), dict) else {}
-    )
+    raw_chunkhound_meta = meta.get("chunkhound")
+    chunkhound_meta: dict[str, Any] = raw_chunkhound_meta if isinstance(raw_chunkhound_meta, dict) else {}
+    raw_chunkhound_access = chunkhound_meta.get("access")
+    chunkhound_access = raw_chunkhound_access if isinstance(raw_chunkhound_access, dict) else {}
     access_stage = str(chunkhound_access.get("preflight_stage") or "").strip()
     access_status = str(chunkhound_access.get("preflight_stage_status") or "").strip()
     access_error = str(chunkhound_access.get("error") or "").strip()
@@ -767,7 +767,7 @@ def _short_live_progress_ts(raw: object) -> str:
     return text[:8] if len(text) >= 8 else text
 
 
-def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[str]:
+def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 12) -> list[str]:
     live = meta.get("live_progress")
     live = live if isinstance(live, dict) else {}
     if not live:
@@ -777,6 +777,7 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
     phase_label = _phase_label(_display_phase_name(meta))
     current = live.get("current")
     current = current if isinstance(current, dict) else {}
+    current_type = str(current.get("type") or "").strip()
     current_text = str(current.get("text") or live.get("last_agent_message") or "").strip()
     if phase_label:
         out.append(_truncate(f"Phase: {phase_label}", width))
@@ -792,6 +793,8 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
         text = str(item.get("text") or "").strip()
         if not text:
             continue
+        if str(item.get("type") or "").strip() == "assistant_text":
+            text = f"Claude: {text}"
         ts = _short_live_progress_ts(item.get("ts"))
         prefix = f"[{ts}] " if ts else ""
         line = prefix + text
@@ -799,13 +802,13 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 8) -> list[
             continue
         recent.append(line)
 
-    if current_text:
+    if current_text and current_type != "assistant_text":
         current_recent = [line for line in recent if not line.endswith(current_text)]
     else:
         current_recent = recent
-    for line in current_recent[-max(0, max_lines - len(out)) :]:
+    for line in current_recent[-max(0, max_lines) :]:
         out.append(_truncate(line, width))
-    return out[:max_lines]
+    return out
 
 
 def _primary_panel_content(
@@ -831,18 +834,18 @@ def _primary_panel_content(
         lines.extend(line for line in cleaned if _is_runtime_activity_line(line))
         return ("Failure Detail", _dedupe_preserve_order(lines)[-6:], "(no failure detail yet)")
 
-    live_lines = _live_progress_lines(meta=meta, width=width, max_lines=8)
+    live_lines = _live_progress_lines(meta=meta, width=width, max_lines=12)
     if live_lines:
         return ("Live Progress", live_lines, "(agent is working)")
 
     activity = [line for line in cleaned if _is_runtime_activity_line(line)]
     activity = _dedupe_preserve_order(activity)
     if activity:
-        return ("Activity", activity[-8:], "(agent is working)")
+        return ("Activity", activity[-12:], "(agent is working)")
     if any(_looks_like_markdown_output(line) for line in cleaned):
         return ("Activity", ["Agent is drafting review output."], "(agent is working)")
     if cleaned:
-        return ("Activity", cleaned[-4:], "(agent is working)")
+        return ("Activity", cleaned[-12:], "(agent is working)")
     return ("Activity", [], "(agent is working)")
 
 
@@ -1012,19 +1015,19 @@ def build_dashboard_lines(
         model = str(llm.get("model") or "").strip()
         eff = str(llm.get("reasoning_effort") or "").strip()
         peff = str(llm.get("plan_reasoning_effort") or "").strip()
-        bits = []
+        llm_bits: list[str] = []
         if preset:
-            bits.append(preset)
+            llm_bits.append(preset)
         if provider:
-            bits.append(f"[{provider}]")
+            llm_bits.append(f"[{provider}]")
         if model:
-            bits.append(model)
+            llm_bits.append(model)
         if eff:
-            bits.append(f"eff={eff}")
+            llm_bits.append(f"eff={eff}")
         if peff:
-            bits.append(f"plan={peff}")
-        if bits:
-            dials.append(("LLM", " ".join(bits)))
+            llm_bits.append(f"plan={peff}")
+        if llm_bits:
+            dials.append(("LLM", " ".join(llm_bits)))
     else:
         codex = meta.get("codex")
         codex = codex if isinstance(codex, dict) else {}
@@ -1036,14 +1039,14 @@ def build_dashboard_lines(
         eff = str(resolved.get("model_reasoning_effort") or "").strip()
         peff = str(resolved.get("plan_mode_reasoning_effort") or "").strip()
         if model or eff or peff:
-            bits = []
+            codex_bits: list[str] = []
             if model:
-                bits.append(model)
+                codex_bits.append(model)
             if eff:
-                bits.append(f"eff={eff}")
+                codex_bits.append(f"eff={eff}")
             if peff:
-                bits.append(f"plan={peff}")
-            dials.append(("Codex", " ".join(bits)))
+                codex_bits.append(f"plan={peff}")
+            dials.append(("Codex", " ".join(codex_bits)))
 
     kind = str(meta.get("kind") or "").strip()
     zip_meta = meta.get("zip")
@@ -1208,17 +1211,17 @@ def build_dashboard_lines(
                 review_md=review_md,
                 width=width,
             )
-            out = [_divider_segment(label=label, width=width)]
+            panel_lines: list[str] = [_divider_segment(label=label, width=width)]
             if budget == 1:
-                return out
+                return panel_lines
             if no_stream:
-                out.append("stream hidden (--no-stream); see session logs under <session>/work/logs/")
-                return out[:budget]
+                panel_lines.append("stream hidden (--no-stream); see session logs under <session>/work/logs/")
+                return panel_lines[:budget]
             if primary_lines:
-                out.extend(primary_lines[-max(0, budget - 1) :])
+                panel_lines.extend(primary_lines[-max(0, budget - 1) :])
             else:
-                out.append(empty_text)
-            return out[:budget]
+                panel_lines.append(empty_text)
+            return panel_lines[:budget]
 
         out: list[str] = []
         out.append(_divider_segment(label="Logs", width=width))
@@ -1408,7 +1411,7 @@ def build_dashboard_lines(
     lines.extend(footer_lines)
 
     # Ensure no line exceeds width and fit height.
-    lines = [_truncate(l, width) for l in lines]
+    lines = [_truncate(line, width) for line in lines]
     out = lines[:height]
     if not color:
         return out
@@ -1475,8 +1478,6 @@ def build_dashboard_lines(
     if wide:
         # body rows start after header + divider.
         body_start = len(header_lines) + 1
-        # body_height rows were appended after divider.
-        body_end = body_start
         for idx in range(body_start, len(out)):
             line = out[idx]
             if col_sep not in line:
@@ -1542,7 +1543,7 @@ class Dashboard:
 
         self._thread: threading.Thread | None = None
         self._tty_fd: int | None = None
-        self._tty_old: list[int] | None = None
+        self._tty_old: Any = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -1554,6 +1555,7 @@ class Dashboard:
         self._state.request_stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        self._thread = None
         self._restore_tty()
         # Restore cursor.
         try:
@@ -1561,6 +1563,24 @@ class Dashboard:
             self._stderr.flush()
         except Exception:
             pass
+
+    def pause(self) -> None:
+        if self._thread is None:
+            return
+        self._state.request_stop()
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._restore_tty()
+        self._state.reset_stop()
+        try:
+            self._stderr.write("\x1b[?25h")
+            self._stderr.flush()
+        except Exception:
+            pass
+
+    def resume(self) -> None:
+        self._state.reset_stop()
+        self.start()
 
     def _setup_tty(self) -> None:
         try:

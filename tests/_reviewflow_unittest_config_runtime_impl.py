@@ -595,7 +595,7 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_codex_defaults_parses_toml(self) -> None:
+    def test_load_reviewflow_codex_defaults_rejects_legacy_plan_mode_reasoning_effort(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_codex.toml"
         try:
             cfg.write_text(
@@ -610,11 +610,11 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            defaults, meta = rf.load_reviewflow_codex_defaults(config_path=cfg)
-            self.assertTrue(meta.get("loaded"))
-            self.assertEqual(defaults["model"], "gpt-5.3-codex-spark")
-            self.assertEqual(defaults["model_reasoning_effort"], "low")
-            self.assertEqual(defaults["plan_mode_reasoning_effort"], "medium")
+            with self.assertRaisesRegex(
+                rf.ReviewflowError,
+                r"\[codex\]\.plan_mode_reasoning_effort is no longer supported",
+            ):
+                rf.load_reviewflow_codex_defaults(config_path=cfg)
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -646,22 +646,15 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            flags, meta = rf.resolve_codex_flags(
-                base_config_path=base,
-                reviewflow_config_path=rf_cfg,
-                cli_model="cli-model",
-                cli_effort=None,
-                cli_plan_effort="medium",
-            )
-            self.assertIn("-m", flags)
-            self.assertIn("cli-model", flags)
-            # model_reasoning_effort should come from cure.toml if CLI is unset.
-            self.assertIn('model_reasoning_effort="low"', flags)
-            # plan_mode_reasoning_effort should come from CLI.
-            self.assertIn('plan_mode_reasoning_effort="medium"', flags)
-            self.assertEqual(meta["resolved"]["model_source"], "cli")
-            self.assertEqual(meta["resolved"]["model_reasoning_effort_source"], "cure.toml")
-            self.assertEqual(meta["resolved"]["plan_mode_reasoning_effort_source"], "cli")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.resolve_codex_flags(
+                    base_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_model="cli-model",
+                    cli_effort=None,
+                    cli_plan_effort="medium",
+                )
+            self.assertIn("--llm-plan-effort", str(ctx.exception))
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
@@ -717,19 +710,19 @@ class CodexConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_multipass_defaults_defaults_step_effort_to_medium(self) -> None:
+    def test_load_reviewflow_multipass_defaults_no_longer_emits_stage_efforts(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_default_step_effort.toml"
         try:
             cfg.write_text("[multipass]\nmax_steps = 5\n", encoding="utf-8")
             mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
-            self.assertEqual(mp["step_reasoning_effort"], "medium")
-            self.assertEqual(meta["multipass"]["step_reasoning_effort"], "medium")
-            self.assertIsNone(mp["plan_reasoning_effort"])
-            self.assertIsNone(mp["synth_reasoning_effort"])
+            self.assertNotIn("step_reasoning_effort", mp)
+            self.assertNotIn("step_reasoning_effort", meta["multipass"])
+            self.assertNotIn("plan_reasoning_effort", mp)
+            self.assertNotIn("synth_reasoning_effort", mp)
         finally:
             cfg.unlink(missing_ok=True)
 
-    def test_load_reviewflow_multipass_defaults_parses_stage_reasoning_efforts(self) -> None:
+    def test_load_reviewflow_multipass_defaults_rejects_stage_reasoning_efforts(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_multipass_stage_efforts.toml"
         try:
             cfg.write_text(
@@ -744,13 +737,9 @@ class CodexConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            mp, meta = rf.load_reviewflow_multipass_defaults(config_path=cfg)
-            self.assertEqual(mp["plan_reasoning_effort"], "high")
-            self.assertEqual(mp["step_reasoning_effort"], "low")
-            self.assertEqual(mp["synth_reasoning_effort"], "xhigh")
-            self.assertEqual(meta["multipass"]["plan_reasoning_effort"], "high")
-            self.assertEqual(meta["multipass"]["step_reasoning_effort"], "low")
-            self.assertEqual(meta["multipass"]["synth_reasoning_effort"], "xhigh")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_multipass_defaults(config_path=cfg)
+            self.assertIn("[multipass].plan_reasoning_effort", str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
 
@@ -778,24 +767,14 @@ class LlmPresetConfigTests(unittest.TestCase):
     def test_resolve_multipass_stage_llm_config_defaults_step_to_medium_while_synth_stays_xhigh(
         self,
     ) -> None:
-        resolved = {
-            "provider": "codex",
-            "model": "gpt-5.4",
-            "reasoning_effort": "xhigh",
-            "plan_reasoning_effort": None,
-        }
+        resolved = {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "xhigh"}
         resolution_meta = {
             "resolved": {
                 "model_source": "preset",
                 "reasoning_effort_source": "preset",
-                "plan_reasoning_effort_source": "unset",
             }
         }
-        multipass_cfg = {
-            "step_reasoning_effort": "medium",
-            "plan_reasoning_effort": None,
-            "synth_reasoning_effort": None,
-        }
+        multipass_cfg = {}
 
         plan_resolved, _, plan_meta = rf.resolve_multipass_stage_llm_config(
             stage="plan",
@@ -817,25 +796,19 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_meta["effective_reasoning_effort"], "xhigh")
-        self.assertEqual(step_resolved["reasoning_effort"], "medium")
-        self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
-        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(step_resolved["reasoning_effort"], "xhigh")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "xhigh")
+        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
         self.assertEqual(synth_resolved["reasoning_effort"], "xhigh")
         self.assertEqual(synth_meta["effective_reasoning_effort"], "xhigh")
         self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
 
-    def test_resolve_multipass_stage_llm_config_preserves_codex_plan_and_generic_step_synth_inheritance(self) -> None:
-        resolved = {
-            "provider": "codex",
-            "model": "gpt-5.4",
-            "reasoning_effort": "medium",
-            "plan_reasoning_effort": "high",
-        }
+    def test_resolve_multipass_stage_llm_config_preserves_single_effort_across_codex_stages(self) -> None:
+        resolved = {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"}
         resolution_meta = {
             "resolved": {
                 "model_source": "cli",
                 "reasoning_effort_source": "cli",
-                "plan_reasoning_effort_source": "preset",
             }
         }
         multipass_cfg = {}
@@ -860,38 +833,19 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_resolved["reasoning_effort"], "medium")
-        self.assertEqual(plan_resolved["plan_reasoning_effort"], "high")
-        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "plan_reasoning_effort")
-        self.assertEqual(plan_meta["effective_reasoning_effort"], "high")
-        self.assertEqual(plan_meta["base_reasoning_effort_source"], "plan_reasoning_effort:preset")
-        self.assertEqual(
-            plan_resolution_meta["resolved"]["plan_reasoning_effort_source"],
-            "plan_reasoning_effort:preset",
-        )
+        self.assertEqual(plan_meta["applied_reasoning_effort_field"], "reasoning_effort")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(plan_meta["base_reasoning_effort_source"], "reasoning_effort:cli")
         self.assertEqual(step_resolved["reasoning_effort"], "medium")
         self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
         self.assertEqual(step_meta["base_reasoning_effort_source"], "reasoning_effort:cli")
         self.assertEqual(synth_resolved["reasoning_effort"], "medium")
         self.assertEqual(synth_meta["effective_reasoning_effort"], "medium")
 
-    def test_resolve_multipass_stage_llm_config_applies_stage_overrides_and_non_codex_plan_carrier(self) -> None:
-        resolved = {
-            "provider": "openai",
-            "model": "gpt-5.4",
-            "reasoning_effort": "medium",
-            "plan_reasoning_effort": "high",
-        }
-        resolution_meta = {
-            "resolved": {
-                "reasoning_effort_source": "preset",
-                "plan_reasoning_effort_source": "reviewflow_defaults",
-            }
-        }
-        multipass_cfg = {
-            "plan_reasoning_effort": "minimal",
-            "step_reasoning_effort": "low",
-            "synth_reasoning_effort": "xhigh",
-        }
+    def test_resolve_multipass_stage_llm_config_uses_single_effort_for_non_codex_stages(self) -> None:
+        resolved = {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "medium"}
+        resolution_meta = {"resolved": {"reasoning_effort_source": "preset"}}
+        multipass_cfg = {}
 
         plan_resolved, plan_resolution_meta, plan_meta = rf.resolve_multipass_stage_llm_config(
             stage="plan",
@@ -913,16 +867,16 @@ class LlmPresetConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_meta["applied_reasoning_effort_field"], "reasoning_effort")
-        self.assertEqual(plan_meta["effective_reasoning_effort"], "minimal")
-        self.assertEqual(plan_meta["effective_reasoning_effort_source"], "multipass_config")
-        self.assertEqual(plan_resolved["reasoning_effort"], "minimal")
-        self.assertEqual(plan_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
-        self.assertEqual(step_meta["effective_reasoning_effort"], "low")
-        self.assertEqual(step_resolved["reasoning_effort"], "low")
-        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
-        self.assertEqual(synth_meta["effective_reasoning_effort"], "xhigh")
-        self.assertEqual(synth_resolved["reasoning_effort"], "xhigh")
-        self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "multipass_config")
+        self.assertEqual(plan_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(plan_meta["effective_reasoning_effort_source"], "inherited")
+        self.assertEqual(plan_resolved["reasoning_effort"], "medium")
+        self.assertEqual(plan_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
+        self.assertEqual(step_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(step_resolved["reasoning_effort"], "medium")
+        self.assertEqual(step_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
+        self.assertEqual(synth_meta["effective_reasoning_effort"], "medium")
+        self.assertEqual(synth_resolved["reasoning_effort"], "medium")
+        self.assertEqual(synth_resolution_meta["resolved"]["reasoning_effort_source"], "reasoning_effort:preset")
 
     def test_load_reviewflow_llm_config_parses_builtin_named_overrides(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_llm.toml"
@@ -938,7 +892,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'api_key = "test-openrouter-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
-                        'plan_reasoning_effort = "xhigh"',
                         "max_output_tokens = 9000",
                         'headers = { "X-Test" = "1" }',
                         'request = { "service_tier" = "flex" }',
@@ -998,7 +951,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'sandbox_mode = "danger-full-access"',
                         'web_search = "live"',
                         'model_reasoning_effort = "high"',
-                        'plan_mode_reasoning_effort = "xhigh"',
                         "",
                     ]
                 ),
@@ -1014,13 +966,11 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "preset-model"',
                         'reasoning_effort = "medium"',
-                        'plan_reasoning_effort = "high"',
                         'request = { "temperature" = 0.1 }',
                         "",
                         "[codex]",
                         'model = "legacy-model"',
                         'model_reasoning_effort = "low"',
-                        'plan_mode_reasoning_effort = "medium"',
                         "",
                     ]
                 ),
@@ -1038,22 +988,64 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_request_overrides={"temperature": 0.3, "top_p": 0.9},
                 cli_header_overrides={"X-Test": "2"},
                 deprecated_codex_model="deprecated-model",
-                deprecated_codex_effort="minimal",
-                deprecated_codex_plan_effort="low",
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
             )
             self.assertEqual(resolved["preset"], "codex-cli")
             self.assertEqual(resolved["selected_name"], "my_codex")
             self.assertEqual(resolved["provider"], "codex")
             self.assertEqual(resolved["model"], "cli-model")
             self.assertEqual(resolved["reasoning_effort"], "xhigh")
-            self.assertEqual(resolved["plan_reasoning_effort"], "low")
             self.assertEqual(resolved["text_verbosity"], "low")
             self.assertEqual(resolved["request"]["temperature"], 0.3)
             self.assertEqual(resolved["request"]["top_p"], 0.9)
             self.assertEqual(resolved["headers"]["X-Test"], "2")
             self.assertEqual(meta["resolved"]["model_source"], "cli")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "cli")
-            self.assertEqual(meta["resolved"]["plan_reasoning_effort_source"], "deprecated_codex_cli")
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_legacy_codex_plan_mode_reasoning_effort(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_invalid_plan.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_invalid_plan.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "my_codex"',
+                        "",
+                        "[llm_presets.my_codex]",
+                        'preset = "codex-cli"',
+                        "",
+                        "[codex]",
+                        'plan_mode_reasoning_effort = "medium"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                rf.ReviewflowError,
+                r"\[codex\]\.plan_mode_reasoning_effort is no longer supported",
+            ):
+                rf.resolve_llm_config(
+                    base_codex_config_path=base,
+                    reviewflow_config_path=rf_cfg,
+                    cli_preset=None,
+                    cli_model=None,
+                    cli_effort=None,
+                    cli_plan_effort=None,
+                    cli_verbosity=None,
+                    cli_max_output_tokens=None,
+                    cli_request_overrides={},
+                    cli_header_overrides={},
+                    deprecated_codex_model=None,
+                    deprecated_codex_effort=None,
+                    deprecated_codex_plan_effort=None,
+                )
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
@@ -1118,6 +1110,69 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
             self.assertIn("reviewflow_defaults", meta)
             self.assertNotIn("legacy_codex_defaults", meta)
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_marks_builtin_defaults_as_promptable_but_explicit_overrides_as_configured(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_promptable.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_promptable.toml"
+        try:
+            base.write_text("", encoding="utf-8")
+            rf_cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "claude_named"',
+                        "",
+                        "[llm_presets.claude_named]",
+                        'preset = "claude-cli"',
+                        'model = "claude-opus-4-6"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            resolved, meta = rf.resolve_llm_config(
+                base_codex_config_path=base,
+                reviewflow_config_path=rf_cfg,
+                cli_preset=None,
+                cli_model=None,
+                cli_effort=None,
+                cli_plan_effort=None,
+                cli_verbosity=None,
+                cli_max_output_tokens=None,
+                cli_request_overrides={},
+                cli_header_overrides={},
+                deprecated_codex_model=None,
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
+            )
+            self.assertEqual(resolved["model"], "claude-opus-4-6")
+            self.assertEqual(meta["resolved"]["model_source"], "preset")
+            self.assertEqual(meta["resolved"]["model_source_detail"], "preset_explicit")
+            self.assertEqual(meta["resolved"]["reasoning_effort"], "high")
+            self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
+            self.assertEqual(meta["resolved"]["reasoning_effort_source_detail"], "preset_builtin")
+
+            direct_resolved, direct_meta = rf.resolve_llm_config(
+                base_codex_config_path=base,
+                reviewflow_config_path=rf_cfg,
+                cli_preset="claude-cli",
+                cli_model=None,
+                cli_effort=None,
+                cli_plan_effort=None,
+                cli_verbosity=None,
+                cli_max_output_tokens=None,
+                cli_request_overrides={},
+                cli_header_overrides={},
+                deprecated_codex_model=None,
+                deprecated_codex_effort=None,
+                deprecated_codex_plan_effort=None,
+            )
+            self.assertEqual(direct_resolved["model"], "claude-sonnet-4-6")
+            self.assertEqual(direct_meta["resolved"]["model_source_detail"], "preset_builtin")
+            self.assertEqual(direct_meta["resolved"]["reasoning_effort_source_detail"], "preset_builtin")
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
@@ -1319,7 +1374,7 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             base.unlink(missing_ok=True)
 
-    def test_resolve_llm_config_codex_cli_builtin_default_effort_is_xhigh(self) -> None:
+    def test_resolve_llm_config_codex_cli_builtin_default_effort_is_high(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin_default.toml"
         rf_cfg = ROOT / ".tmp_test_reviewflow_llm_builtin_default.toml"
         try:
@@ -1342,7 +1397,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             )
             self.assertEqual(resolved["preset"], "codex-cli")
             self.assertEqual(resolved["model"], "base-codex-model")
-            self.assertEqual(resolved["reasoning_effort"], "xhigh")
+            self.assertEqual(resolved["reasoning_effort"], "high")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "preset")
         finally:
             base.unlink(missing_ok=True)
@@ -1367,7 +1422,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_preset="claude-cli",
                 cli_model="claude-sonnet-4-6",
                 cli_effort="high",
-                cli_plan_effort="high",
+                cli_plan_effort=None,
                 cli_verbosity=None,
                 cli_max_output_tokens=None,
                 cli_request_overrides={},
@@ -1651,8 +1706,16 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             "runtime_overrides": {},
         }
 
-    def _runtime_args(self, *, profile: str | None = None) -> argparse.Namespace:
-        return argparse.Namespace(agent_runtime_profile=profile)
+    def _runtime_args(
+        self,
+        *,
+        profile: str | None = None,
+        dry_run_chunkhound: bool = False,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            agent_runtime_profile=profile,
+            dry_run_chunkhound=dry_run_chunkhound,
+        )
 
     def test_prepare_review_agent_runtime_uses_permissive_codex_profile(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex"
@@ -1769,8 +1832,15 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertEqual(runtime["env"]["CLAUDE_HOME"], "/tmp/claude-home")
             self.assertNotIn("CODEX_THREAD_ID", runtime["env"])
             self.assertIn("CLAUDE_CODE_SESSION", runtime["metadata"]["env_keys"])
+            helper_path = Path(str(runtime["staged_paths"]["chunkhound_helper"]))
+            self.assertTrue(helper_path.is_file())
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_HELPER"], str(helper_path))
+            self.assertEqual(runtime["env"]["PYTHONSAFEPATH"], "1")
+            self.assertEqual(runtime["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
             self.assertTrue(Path(runtime["staged_paths"]["claude_settings"]).is_file())
-            self.assertTrue(Path(runtime["staged_paths"]["claude_mcp_config"]).is_file())
+            self.assertNotIn("claude_mcp_config", runtime["staged_paths"])
+            settings_payload = json.loads(Path(runtime["staged_paths"]["claude_settings"]).read_text(encoding="utf-8"))
+            self.assertEqual(settings_payload["permissions"]["allow"], ["Bash"])
             cmd = rf.build_claude_exec_cmd(
                 command="claude",
                 model="claude-sonnet-4-6",
@@ -1784,10 +1854,46 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             self.assertIn("--setting-sources", cmd)
             self.assertIn("user", cmd)
             self.assertIn("--settings", cmd)
-            self.assertIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--strict-mcp-config", cmd)
+            self.assertNotIn("--mcp-config", cmd)
             self.assertIn("--dangerously-skip-permissions", cmd)
             self.assertNotIn("--permission-mode", cmd)
             self.assertIn("--add-dir", cmd)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_marks_chunkhound_dry_run_in_env_and_metadata(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_chunkhound_dry_run"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive", dry_run_chunkhound=True),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+            self.assertEqual(runtime["env"]["CURE_CHUNKHOUND_DRY_RUN"], "1")
+            self.assertTrue(runtime["metadata"]["chunkhound_dry_run"])
+            self.assertTrue(runtime["config"]["chunkhound_dry_run"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1905,6 +2011,9 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         def flush(self) -> None:
             return None
 
+        def record_cmd(self, _cmd: object) -> None:
+            return None
+
     def test_record_text_cli_live_output_updates_claude_progress(self) -> None:
         progress = self._StubProgress()
 
@@ -1974,6 +2083,50 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         self.assertEqual(payload["result"], "hello world")
         self.assertEqual(payload["usage"]["total_tokens"], 6)
 
+    def test_parse_claude_stream_payload_prefers_higher_turn_count_non_error_result(self) -> None:
+        main_review = "Main review\n" + ("detailed finding\n" * 20)
+        short_follow_up = "The ChunkHound helper research query also completed successfully."
+        error_blob = "Error summary\n" + ("stack frame\n" * 40)
+
+        payload = cure_llm._parse_claude_stream_payload(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": main_review,
+                            "num_turns": 46,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": short_follow_up,
+                            "num_turns": 1,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": error_blob,
+                            "num_turns": 99,
+                            "is_error": True,
+                        }
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(payload["session_id"], "claude-session")
+        self.assertEqual(payload["result"], main_review)
+        self.assertNotEqual(payload["result"], short_follow_up)
+        self.assertNotEqual(payload["result"], error_blob)
+        self.assertNotEqual(payload.get("is_error"), True)
+
     def test_handle_claude_stream_chunk_updates_current_text_from_deltas(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
@@ -2009,7 +2162,87 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         live = progress.meta["live_progress"]
         self.assertEqual(live["current"]["text"], "Drafting review")
 
-    def test_handle_claude_stream_chunk_surfaces_thinking_and_tool_use_progress(self) -> None:
+    def test_handle_claude_stream_chunk_records_completed_text_blocks_and_resets_content(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "text"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "text_delta", "text": "Drafting review summary."},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {"type": "content_block_stop", "index": 0},
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Drafting review summary.")
+        self.assertIn(
+            "Drafting review summary.",
+            [item["text"] for item in live["timeline"]],
+        )
+
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "text"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "text_delta", "text": "Fresh block"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Fresh block")
+        self.assertEqual(state["content"], "Fresh block")
+
+    def test_handle_claude_stream_chunk_hides_thinking_and_surfaces_tool_use_progress(self) -> None:
         progress = self._StubProgress()
         state = {"content": ""}
 
@@ -2074,7 +2307,7 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         live = progress.meta["live_progress"]
         self.assertEqual(live["current"]["text"], "Bash: ls")
         timeline_texts = [item["text"] for item in live["timeline"]]
-        self.assertIn("Thinking…", timeline_texts)
+        self.assertNotIn("Thinking…", timeline_texts)
         self.assertIn("Using Bash", timeline_texts)
 
     def test_handle_claude_stream_chunk_suppresses_low_signal_tool_results(self) -> None:
@@ -2133,3 +2366,841 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         timeline_texts = [item["text"] for item in live["timeline"]]
         self.assertIn("Using Bash", timeline_texts)
         self.assertNotIn("Tool result: {\"ticket\":\"ABAU-1026\",\"summary\":\"Unrelated payload blob\"}", timeline_texts)
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+
+    def test_handle_claude_stream_chunk_tool_result_summary_includes_bash_command(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"ls README.md\",\"description\":\"Inspect README\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "tool_use_id": "toolu_1",
+                            "tool_use_result": {
+                                "stdout": "listed file successfully\n",
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertIn("ls README.md", live["current"]["text"])
+        self.assertIn("listed file successfully", live["current"]["text"])
+
+    def test_handle_claude_stream_chunk_extracts_chunkhound_helper_proof_entries(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": stdout_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["payload"]["helper_path"], helper_path)
+        self.assertEqual(entries[0]["tool_use_id"], "toolu_1")
+        self.assertIn("cure-chunkhound: tools/call waiting", entries[0]["stdout_excerpt"])
+        self.assertIn("CURE_CHUNKHOUND_HELPER", entries[0]["command"])
+        self.assertNotIn("chunkhound_helper_path", state)
+
+    def test_handle_claude_stream_chunk_extracts_multiple_helper_payloads_from_one_stdout(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": {
+                                "results": [],
+                                "pagination": {"offset": 0, "total_results": 0},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle && \\\"$CURE_CHUNKHOUND_HELPER\\\" research question\",\"description\":\"Run staged helper twice\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": stdout_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": stdout_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual([entry["payload"]["tool_name"] for entry in entries], ["search", "code_research"])
+        self.assertTrue(all("CURE_CHUNKHOUND_HELPER" in entry["command"] for entry in entries))
+        self.assertEqual([entry["tool_use_id"] for entry in entries], ["toolu_1", "toolu_1"])
+
+    def test_handle_claude_stream_chunk_raises_when_helper_payload_has_no_documented_tool_result_block(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = json.dumps(
+            {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+            }
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        with self.assertRaisesRegex(rf.ReviewflowError, "tool_result contract mismatch"):
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": "toolu_1",
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "tool_use_result": {
+                                    "stdout": stdout_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+    def test_handle_claude_stream_chunk_extracts_helper_proof_entries_from_real_search_fixture(self) -> None:
+        progress = self._StubProgress()
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+        fixture_text = fixture_path.read_text(encoding="utf-8")
+        tool_use_id = ""
+        for raw in fixture_text.splitlines():
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                continue
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            for block in message.get("content") or []:
+                if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                    continue
+                tool_use_id = str(block.get("tool_use_id") or "").strip()
+                if tool_use_id:
+                    break
+            if tool_use_id:
+                break
+        self.assertTrue(tool_use_id)
+        state = {
+            "content": "",
+            "bash_tool_commands_by_id": {tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'},
+        }
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_text,
+        )
+
+        entries = state["chunkhound_tool_proof_entries"]
+        live = progress.meta["live_progress"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["payload"]["tool_name"], "search")
+        self.assertEqual(entries[0]["tool_use_id"], tool_use_id)
+        self.assertEqual(entries[0]["payload"]["helper_path"], "<CURE_CHUNKHOUND_HELPER>")
+        self.assertEqual(entries[0]["command"], '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
+        self.assertTrue(
+            any('search "<QUERY>"' in str(item["text"]) for item in live.get("timeline", []))
+        )
+
+    def test_handle_claude_stream_chunk_ignores_real_backgrounded_research_fixture_without_helper_payload(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk=fixture_path.read_text(encoding="utf-8"),
+        )
+
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+        live = progress.meta["live_progress"]
+        self.assertIn("background task completed successfully", live["current"]["text"].lower())
+        self.assertFalse(any("Thinking" in str(item["text"]) for item in live.get("timeline", [])))
+
+    def test_real_claude_fixtures_are_shape_preserving_redacted(self) -> None:
+        search_fixture = (ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson").read_text(
+            encoding="utf-8"
+        )
+        research_fixture = (
+            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
+        ).read_text(encoding="utf-8")
+
+        for body in (search_fixture, research_fixture):
+            self.assertNotRegex(body, r"/(?:tmp|home|workspaces|opt|usr)/")
+            self.assertIn("<QUERY>", body)
+            self.assertIn("<ABS_PATH>", body)
+        self.assertIn("tools/call", search_fixture)
+        self.assertIn("notifications/initialized", search_fixture)
+        self.assertIn("projects/CURe/cure.py", search_fixture)
+        self.assertNotIn("tools<ABS_PATH>", search_fixture)
+        self.assertNotIn("notifications<ABS_PATH>", search_fixture)
+        self.assertNotIn("projects<ABS_PATH>", search_fixture)
+        self.assertIn("<BACKGROUND_TASK_ID>", research_fixture)
+
+    def test_real_claude_probe_absolute_path_redaction_preserves_relative_slash_values(self) -> None:
+        import real_claude_probe
+
+        replacements = {str(real_claude_probe.REPO_ROOT): "<CURE_REPO_ROOT>"}
+
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "tools/call",
+                key="execution_stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "tools/call",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "notifications/initialized",
+                key="stage",
+                path=(),
+                replacements=replacements,
+            ),
+            "notifications/initialized",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "projects/CURe/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "<CURE_REPO_ROOT>/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<CURE_REPO_ROOT>/cure.py",
+        )
+        self.assertEqual(
+            real_claude_probe._sanitize_text_value(
+                "/workspaces/cure_workspace/projects/CURe/cure.py",
+                key="file_path",
+                path=(),
+                replacements=replacements,
+            ),
+            "<ABS_PATH>",
+        )
+
+    def test_handle_claude_stream_chunk_keeps_non_tool_blocks_safe_after_bash_usage(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"echo hi\",\"description\":\"Say hi\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "thinking_delta", "thinking": "considering"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 2,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 2,
+                                "delta": {"type": "text_delta", "text": "Final review text"},
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        live = progress.meta["live_progress"]
+        self.assertEqual(live["current"]["text"], "Final review text")
+
+    def test_build_claude_resume_command_includes_chunkhound_helper_env(self) -> None:
+        command = cure_llm.build_claude_resume_command(
+            repo_dir=Path("/tmp/repo"),
+            session_id="claude-session-123",
+            env={
+                "ANTHROPIC_API_KEY": "test-key",  # pragma: allowlist secret
+                "CURE_CHUNKHOUND_HELPER": "/tmp/work/bin/cure-chunkhound",
+                "CURE_CHUNKHOUND_DRY_RUN": "1",
+                "PYTHONSAFEPATH": "1",
+            },
+            command="claude",
+            runtime_policy={"provider_args": ["--settings", "/tmp/settings.json"]},
+        )
+
+        self.assertIn("CURE_CHUNKHOUND_HELPER=", command)
+        self.assertIn("CURE_CHUNKHOUND_DRY_RUN=", command)
+        self.assertIn("PYTHONSAFEPATH=", command)
+        self.assertIn("--resume claude-session-123", command)
+
+    def test_run_claude_exec_records_staged_helper_path_not_streamed_helper_path(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_output.md"
+        try:
+            streamed_helper_path = "/tmp/other/cure-chunkhound"
+            staged_helper_path = "/tmp/work/bin/cure-chunkhound"
+
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": "{\"command\":\"\\\"$CURE_CHUNKHOUND_HELPER\\\" search needle\",\"description\":\"Run staged helper\"}",
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": json.dumps(
+                                            {
+                                                "ok": True,
+                                                "command": "search",
+                                                "tool_name": "search",
+                                                "helper_path": streamed_helper_path,
+                                                "result": {
+                                                    "results": [],
+                                                    "pagination": {"offset": 0, "total_results": 0},
+                                                },
+                                            }
+                                        ),
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": json.dumps(
+                                    {
+                                        "ok": True,
+                                        "command": "search",
+                                        "tool_name": "search",
+                                        "helper_path": streamed_helper_path,
+                                        "result": {
+                                            "results": [],
+                                            "pagination": {"offset": 0, "total_results": 0},
+                                        },
+                                    }
+                                ),
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "# Review",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"CURE_CHUNKHOUND_HELPER": staged_helper_path, "PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                        "staged_paths": {"chunkhound_helper": staged_helper_path},
+                    },
+                )
+
+            self.assertEqual(result.adapter_meta["chunkhound_helper_path"], staged_helper_path)
+            entries = result.adapter_meta["chunkhound_tool_proof_entries"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["payload"]["helper_path"], streamed_helper_path)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_uses_streamed_text_when_selected_result_is_empty(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_stream_fallback.md"
+        streamed_text = "# Review\n\nGrounded streamed review text."
+        try:
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "delta": {"type": "text_delta", "text": streamed_text},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": "",
+                            "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                    },
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), streamed_text + "\n")
+            self.assertIsNotNone(result.resume)
+            self.assertEqual(result.resume.session_id, "claude-session")
+            self.assertEqual(result.adapter_meta["usage"]["total_tokens"], 8)
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_prefers_ranked_primary_result_payload(self) -> None:
+        progress = self._StubProgress()
+        output_path = ROOT / ".tmp_test_run_claude_exec_ranked_result.md"
+        main_review = "# Review\n\nPrimary review body.\n" + ("Finding line.\n" * 10)
+        trailing_helper = "Helper follow-up completed."
+        try:
+            stdout = "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": main_review,
+                            "num_turns": 23,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "session_id": "claude-session",
+                            "result": trailing_helper,
+                            "num_turns": 1,
+                        }
+                    ),
+                ]
+            )
+
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                callback = kwargs.get("stream_text_callback")
+                if callable(callback):
+                    callback(stdout)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                result = rf.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    progress=progress,
+                    runtime_policy={"dangerously_skip_permissions": True, "provider_args": []},
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8").strip(), main_review.strip())
+            self.assertIsNotNone(result.resume)
+            self.assertEqual(result.resume.session_id, "claude-session")
+        finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_run_claude_exec_passes_claude_events_log_path_to_logged_command(self) -> None:
+        progress = self._StubProgress()
+        progress.meta = {"logs": {}}
+        output_path = ROOT / ".tmp_test_run_claude_exec_events_log.md"
+        captured: dict[str, object] = {}
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "session_id": "claude-session",
+                "result": "# Review",
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        )
+        try:
+            def _fake_run_logged_text_command(**kwargs: object) -> object:
+                captured.update(kwargs)
+
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.stdout = stdout
+                return result
+
+            with mock.patch.object(cure_llm, "_run_logged_text_command", side_effect=_fake_run_logged_text_command):
+                cure_llm.run_claude_exec(
+                    repo_dir=ROOT,
+                    resolved={"command": "claude", "model": "claude-sonnet-4-6"},
+                    output_path=output_path,
+                    prompt="hello",
+                    env={"PYTHONSAFEPATH": "1"},
+                    progress=progress,
+                    runtime_policy={
+                        "dangerously_skip_permissions": True,
+                        "provider_args": [],
+                    },
+                )
+
+            expected = (ROOT.parent / "work" / "logs" / "claude.events.jsonl").resolve()
+            self.assertEqual(captured["claude_json_events_path"], expected)
+            self.assertEqual(progress.meta["logs"]["claude_events"], str(expected))
+        finally:
+            output_path.unlink(missing_ok=True)

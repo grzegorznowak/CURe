@@ -78,13 +78,13 @@ def _watch_line_for_payload(payload: dict[str, object]) -> str:
                 status = str(item.get("status") or "").strip().lower()
                 if status == "queued":
                     queued += 1
-                elif status in {"running", "awaiting_validation"}:
+                elif status in {"running", "awaiting_validation", "retrying_grounding"}:
                     running += 1
                 elif status == "completed":
                     completed += 1
                 elif status == "reused":
                     reused += 1
-                elif status in {"failed", "canceled"}:
+                elif status in {"failed", "canceled", "grounding_skipped"}:
                     failed += 1
             state_bits: list[str] = []
             if running:

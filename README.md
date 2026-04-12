@@ -333,15 +333,12 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 grounding_mode = "strict"
 step_workers = 4
 
-# Optional multipass-only reasoning-effort overrides.
-# If unset:
-# - plan and synth keep using the generic resolved reasoning effort
-#   (the built-in `codex-cli` preset defaults that generic effort to `xhigh`)
-# - step defaults to `medium` for built-in big multipass reviews
-plan_reasoning_effort = "xhigh"
-step_reasoning_effort = "medium"
-synth_reasoning_effort = "xhigh"
+[llm]
+# One execution effort now applies to plan, step, and synth.
+reasoning_effort = "high"
 ```
+
+On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in defaults are now explicit: `claude-cli` uses `claude-sonnet-4-6` with effort `high`, and `codex-cli` defaults to effort `high`.
 
 When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 

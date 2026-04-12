@@ -54,7 +54,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertIn("`project.version` in `pyproject.toml`", release_doc)
         self.assertIn("`v<version>`", release_doc)
-        self.assertIn("`v0.2.0`", release_doc)
+        self.assertIn("`v0.3.0`", release_doc)
         self.assertIn("`publish-package.yml`", release_doc)
         self.assertIn("Trusted Publishing", release_doc)
         self.assertIn("`pypi` environment", release_doc)

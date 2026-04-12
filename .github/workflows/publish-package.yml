@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing git tag to publish, for example v0.2.0
+        description: Existing git tag to publish, for example v0.3.0
         required: true
         type: string
 
@@ -124,6 +124,8 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: ${{ github.event_name == 'workflow_dispatch' }}
 
   build-standalone-assets:
     name: Build standalone asset (${{ matrix.target_id }})
@@ -135,7 +137,7 @@ jobs:
         include:
           - runner: ubuntu-latest
             target_id: linux-x86_64
-          - runner: macos-13
+          - runner: macos-15-intel
             target_id: macos-x86_64
           - runner: macos-14
             target_id: macos-arm64

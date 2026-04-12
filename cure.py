@@ -8,7 +8,6 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
-import io
 import importlib.util
 import json
 import os
@@ -36,7 +35,7 @@ from typing import Any, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
-from cure_errors import ReviewflowError
+from cure_errors import ReviewflowError, StepGroundingValidationError
 from cure_output import (
     ChunkhoundLiveProgressReporter,
     ReviewflowOutput,
@@ -50,6 +49,9 @@ from cure_output import (
     format_review_artifact_footer,
     normalize_markdown_artifact,
     normalize_markdown_local_refs,
+    prompt_grounding_retry_skip,
+    prompt_pr_model_and_effort_picker,
+    prompt_resume_grounding_skipped_steps,
     safe_cmd_for_meta,
     set_active_output,
     sha256_text,
@@ -69,7 +71,8 @@ from paths import (
     safe_ref_slug,
     seed_dir,
 )
-from run import ReviewflowSubprocessError, merged_env, run_cmd
+from run import CommandResult, ReviewflowSubprocessError, merged_env, run_cmd
+from cure_runtime import _normalize_optional_reasoning_effort
 
 from ui import UiSnapshot, Verbosity, build_dashboard_lines
 
@@ -159,6 +162,9 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
+CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
+CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
+CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex", "claude")
@@ -203,9 +209,9 @@ DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
+_MULTIPASS_STEP_GROUNDING_MAX_RETRIES = 1
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
-DEFAULT_MULTIPASS_STEP_REASONING_EFFORT = "medium"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
 GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
@@ -489,16 +495,14 @@ def add_llm_override_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-effort",
         dest="llm_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
         help="Override the resolved review-agent reasoning effort",
     )
     parser.add_argument(
         "--llm-plan-effort",
         dest="llm_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help="Override the resolved review-agent plan reasoning effort",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--llm-verbosity",
@@ -570,7 +574,12 @@ def build_llm_meta(
         "command": resolved.get("command"),
         "model": resolved.get("model"),
         "reasoning_effort": resolved.get("reasoning_effort"),
-        "plan_reasoning_effort": resolved.get("plan_reasoning_effort"),
+        "model_source": ((resolution_meta.get("resolved") or {}).get("model_source")),
+        "model_source_detail": ((resolution_meta.get("resolved") or {}).get("model_source_detail")),
+        "reasoning_effort_source": ((resolution_meta.get("resolved") or {}).get("reasoning_effort_source")),
+        "reasoning_effort_source_detail": (
+            (resolution_meta.get("resolved") or {}).get("reasoning_effort_source_detail")
+        ),
         "text_verbosity": resolved.get("text_verbosity"),
         "max_output_tokens": resolved.get("max_output_tokens"),
         "runtime_overrides": resolution_meta.get("runtime_overrides"),
@@ -580,6 +589,22 @@ def build_llm_meta(
         "env_keys": sorted(_string_dict(resolved.get("env")).keys()),
         "capabilities": dict(resolved.get("capabilities") or {}),
     }
+
+
+def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
+    if str(provider or "").strip().lower() == "claude":
+        return CLAUDE_REASONING_EFFORT_CHOICES
+    return CODEX_REASONING_EFFORT_CHOICES
+
+
+def _raise_effort_migration_error(*, field_name: str, replacement: str) -> None:
+    raise ReviewflowError(f"{field_name} is no longer supported. Migrate to `{replacement}`.")
+
+
+def _validate_no_legacy_effort_controls(*, raw: dict[str, Any], field_scope: str) -> None:
+    for name in ("plan_reasoning_effort", "step_reasoning_effort", "synth_reasoning_effort"):
+        if raw.get(name) not in (None, "", [], {}):
+            _raise_effort_migration_error(field_name=f"{field_scope}.{name}", replacement="llm.reasoning_effort")
 
 
 def _normalize_llm_usage(raw: object) -> dict[str, int] | None:
@@ -917,20 +942,7 @@ def load_reviewflow_multipass_defaults(
     if isinstance(step_workers, bool) or not isinstance(step_workers, int):
         step_workers = DEFAULT_MULTIPASS_STEP_WORKERS
 
-    plan_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("plan_reasoning_effort"),
-        field_name="[multipass].plan_reasoning_effort",
-    )
-    step_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("step_reasoning_effort"),
-        field_name="[multipass].step_reasoning_effort",
-    )
-    if step_reasoning_effort is None:
-        step_reasoning_effort = DEFAULT_MULTIPASS_STEP_REASONING_EFFORT
-    synth_reasoning_effort = _normalize_optional_reasoning_effort(
-        raw=mp.get("synth_reasoning_effort"),
-        field_name="[multipass].synth_reasoning_effort",
-    )
+    _validate_no_legacy_effort_controls(raw=mp, field_scope="[multipass]")
 
     grounding_mode_raw = mp.get("grounding_mode")
     if grounding_mode_raw is None:
@@ -962,9 +974,6 @@ def load_reviewflow_multipass_defaults(
         "max_steps": int(max_steps),
         "step_workers": int(step_workers),
         "grounding_mode": grounding_mode,
-        "plan_reasoning_effort": plan_reasoning_effort,
-        "step_reasoning_effort": step_reasoning_effort,
-        "synth_reasoning_effort": synth_reasoning_effort,
     }
     meta: dict[str, Any] = {
         "config_path": str(path),
@@ -993,8 +1002,18 @@ def load_reviewflow_codex_defaults(
     source_table = "codex"
     codex = raw.get("codex", {}) if isinstance(raw, dict) else {}
     codex = codex if isinstance(codex, dict) else {}
+    if codex.get("plan_mode_reasoning_effort") not in (None, "", [], {}):
+        _raise_effort_migration_error(
+            field_name="[codex].plan_mode_reasoning_effort",
+            replacement="llm.reasoning_effort",
+        )
     if not any(isinstance(codex.get(key), str) and codex.get(key).strip() for key in wanted_keys):
         root_defaults = raw if isinstance(raw, dict) else {}
+        if root_defaults.get("plan_mode_reasoning_effort") not in (None, "", [], {}):
+            _raise_effort_migration_error(
+                field_name="[root].plan_mode_reasoning_effort",
+                replacement="llm.reasoning_effort",
+            )
         if any(
             isinstance(root_defaults.get(key), str) and root_defaults.get(key).strip()
             for key in wanted_keys
@@ -1070,7 +1089,7 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
-            "reasoning_effort": "xhigh",
+            "reasoning_effort": "high",
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1087,6 +1106,8 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "headers": {},
             "request": {},
             "env": {},
+            "model": CLAUDE_CLI_DEFAULT_MODEL,
+            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
             "text_verbosity": None,
             "max_output_tokens": None,
         },
@@ -1148,10 +1169,10 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
 
 def _normalized_preset_overrides(raw_preset: dict[str, Any]) -> dict[str, Any]:
+    _validate_no_legacy_effort_controls(raw=raw_preset, field_scope="[llm_presets]")
     return {
         "model": str(raw_preset.get("model") or "").strip() or None,
         "reasoning_effort": str(raw_preset.get("reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw_preset.get("plan_reasoning_effort") or "").strip() or None,
         "text_verbosity": str(raw_preset.get("text_verbosity") or "").strip() or None,
         "max_output_tokens": (
             int(raw_preset.get("max_output_tokens"))
@@ -1189,6 +1210,9 @@ def _merge_builtin_preset(
             merged[key] = value
     merged["preset"] = preset_id
     merged["_source_mode"] = source_mode
+    merged["_explicit_overrides"] = sorted(
+        key for key, value in overrides.items() if value not in (None, "", [], {})
+    )
     return merged
 
 
@@ -1199,6 +1223,7 @@ def load_reviewflow_llm_config(
     raw = load_toml(path)
     llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
     llm = llm if isinstance(llm, dict) else {}
+    _validate_no_legacy_effort_controls(raw=llm, field_scope="[llm]")
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
@@ -1336,7 +1361,6 @@ def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
         "sandbox_mode": str(raw.get("sandbox_mode") or "").strip() or None,
         "web_search": str(raw.get("web_search") or "").strip() or None,
         "reasoning_effort": str(raw.get("model_reasoning_effort") or "").strip() or None,
-        "plan_reasoning_effort": str(raw.get("plan_mode_reasoning_effort") or "").strip() or None,
     }
 
 
@@ -1345,13 +1369,19 @@ def _synthetic_legacy_codex_preset(
 ) -> dict[str, Any]:
     legacy_defaults, _ = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
     preset = dict(builtin_llm_presets()[DEFAULT_IMPLICIT_CODEX_PRESET])
+    explicit_overrides: list[str] = []
+    if legacy_defaults.get("model") not in (None, ""):
+        explicit_overrides.append("model")
+    if legacy_defaults.get("model_reasoning_effort") not in (None, ""):
+        explicit_overrides.append("reasoning_effort")
     preset.update(
         {
             "model": legacy_defaults.get("model"),
             "reasoning_effort": (
                 legacy_defaults.get("model_reasoning_effort") or preset.get("reasoning_effort")
             ),
-            "plan_reasoning_effort": legacy_defaults.get("plan_mode_reasoning_effort"),
+            "_source_mode": "synthetic_legacy_codex",
+            "_explicit_overrides": explicit_overrides,
         }
     )
     return preset
@@ -1454,6 +1484,12 @@ def resolve_llm_config(
     deprecated_codex_effort: str | None,
     deprecated_codex_plan_effort: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    if deprecated_codex_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-effort", replacement="--llm-effort")
+    if deprecated_codex_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--codex-plan-effort", replacement="--llm-effort")
     llm_cfg, llm_meta = load_reviewflow_llm_config(config_path=reviewflow_config_path)
     presets = llm_cfg.get("presets", {})
     presets = presets if isinstance(presets, dict) else {}
@@ -1505,6 +1541,26 @@ def resolve_llm_config(
     legacy_defaults, legacy_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
     base_codex_meta = _base_codex_runtime_defaults(base_codex_config_path)
 
+    explicit_preset_fields = {
+        str(item).strip()
+        for item in (
+            base_preset.get("_explicit_overrides")
+            if isinstance(base_preset.get("_explicit_overrides"), list)
+            else []
+        )
+        if str(item).strip()
+    }
+    preset_source_mode = str(base_preset.get("_source_mode") or "").strip()
+
+    def _preset_source_detail(field: str) -> str:
+        if field in explicit_preset_fields:
+            return "preset_explicit"
+        if preset_source_mode in {"builtin", "builtin_direct", "deprecated_explicit"}:
+            return "preset_builtin"
+        if preset_source_mode == "synthetic_legacy_codex":
+            return "preset_explicit"
+        return "preset"
+
     def _pick(
         *,
         field: str,
@@ -1512,68 +1568,49 @@ def resolve_llm_config(
         deprecated_value: Any = None,
         allow_deprecated: bool = False,
         base_value: Any = None,
-    ) -> tuple[Any, str]:
+    ) -> tuple[Any, str, str]:
         if generic_value not in (None, ""):
-            return generic_value, "cli"
+            return generic_value, "cli", "cli"
         if allow_deprecated and provider == "codex" and deprecated_value not in (None, ""):
-            return deprecated_value, "deprecated_codex_cli"
+            return deprecated_value, "deprecated_codex_cli", "deprecated_codex_cli"
         preset_value = base_preset.get(field)
         if preset_value not in (None, "", [], {}):
-            return preset_value, "preset"
+            return preset_value, "preset", _preset_source_detail(field)
         if provider == "codex":
-            legacy_key = {
-                "reasoning_effort": "model_reasoning_effort",
-                "plan_reasoning_effort": "plan_mode_reasoning_effort",
-            }.get(field, field)
+            legacy_key = {"reasoning_effort": "model_reasoning_effort"}.get(field, field)
             legacy_value = legacy_defaults.get(legacy_key)
             if legacy_value not in (None, ""):
-                return legacy_value, "reviewflow_defaults"
+                return legacy_value, "reviewflow_defaults", "reviewflow_defaults"
             if base_value not in (None, ""):
-                return base_value, "base_codex_config"
-        return None, "unset"
+                return base_value, "base_codex_config", "base_codex_config"
+        return None, "unset", "unset"
 
-    model, model_source = _pick(
+    model, model_source, model_source_detail = _pick(
         field="model",
         generic_value=(str(cli_model).strip() if cli_model else None),
         deprecated_value=(str(deprecated_codex_model).strip() if deprecated_codex_model else None),
         allow_deprecated=True,
         base_value=base_codex_meta.get("model"),
     )
-    reasoning_effort, reasoning_effort_source = _pick(
+    reasoning_effort, reasoning_effort_source, reasoning_effort_source_detail = _pick(
         field="reasoning_effort",
         generic_value=(str(cli_effort).strip() if cli_effort else None),
-        deprecated_value=(str(deprecated_codex_effort).strip() if deprecated_codex_effort else None),
-        allow_deprecated=True,
         base_value=base_codex_meta.get("reasoning_effort"),
     )
-    plan_reasoning_effort, plan_reasoning_effort_source = _pick(
-        field="plan_reasoning_effort",
-        generic_value=(str(cli_plan_effort).strip() if cli_plan_effort else None),
-        deprecated_value=(
-            str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None
-        ),
-        allow_deprecated=True,
-        base_value=base_codex_meta.get("plan_reasoning_effort"),
-    )
-    text_verbosity, text_verbosity_source = _pick(
+    text_verbosity, text_verbosity_source, _ = _pick(
         field="text_verbosity",
         generic_value=(str(cli_verbosity).strip() if cli_verbosity else None),
     )
-    max_output_tokens, max_output_tokens_source = _pick(
+    max_output_tokens, max_output_tokens_source, _ = _pick(
         field="max_output_tokens",
         generic_value=cli_max_output_tokens,
     )
 
-    for key, val in (
-        ("reasoning_effort", reasoning_effort),
-        ("plan_reasoning_effort", plan_reasoning_effort),
-    ):
-        if val is None:
-            continue
-        if str(val) not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    allowed_efforts = _reasoning_effort_choices_for_provider(provider)
+    if reasoning_effort is not None and str(reasoning_effort) not in allowed_efforts:
+        raise ReviewflowError(
+            f"Invalid reasoning_effort: {reasoning_effort!r}. Expected one of: {', '.join(allowed_efforts)}"
+        )
 
     request = dict(_plain_dict(base_preset.get("request")))
     if cli_request_overrides:
@@ -1593,7 +1630,6 @@ def resolve_llm_config(
         "api_key": str(base_preset.get("api_key") or "").strip() or None,
         "model": model,
         "reasoning_effort": reasoning_effort,
-        "plan_reasoning_effort": plan_reasoning_effort,
         "text_verbosity": text_verbosity,
         "max_output_tokens": int(max_output_tokens) if isinstance(max_output_tokens, int) else None,
         "store": base_preset.get("store") if isinstance(base_preset.get("store"), bool) else None,
@@ -1615,10 +1651,10 @@ def resolve_llm_config(
         "resolved": {
             "model": model,
             "model_source": model_source,
+            "model_source_detail": model_source_detail,
             "reasoning_effort": reasoning_effort,
             "reasoning_effort_source": reasoning_effort_source,
-            "plan_reasoning_effort": plan_reasoning_effort,
-            "plan_reasoning_effort_source": plan_reasoning_effort_source,
+            "reasoning_effort_source_detail": reasoning_effort_source_detail,
             "text_verbosity": text_verbosity,
             "text_verbosity_source": text_verbosity_source,
             "max_output_tokens": resolved["max_output_tokens"],
@@ -1630,19 +1666,12 @@ def resolve_llm_config(
             "preset": (str(cli_preset).strip() if cli_preset else None),
             "model": (str(cli_model).strip() if cli_model else None),
             "reasoning_effort": (str(cli_effort).strip() if cli_effort else None),
-            "plan_reasoning_effort": (str(cli_plan_effort).strip() if cli_plan_effort else None),
             "text_verbosity": (str(cli_verbosity).strip() if cli_verbosity else None),
             "max_output_tokens": cli_max_output_tokens if isinstance(cli_max_output_tokens, int) else None,
             "request": dict(cli_request_overrides or {}),
             "headers": dict(cli_header_overrides or {}),
             "deprecated_codex_model": (
                 str(deprecated_codex_model).strip() if deprecated_codex_model else None
-            ),
-            "deprecated_codex_effort": (
-                str(deprecated_codex_effort).strip() if deprecated_codex_effort else None
-            ),
-            "deprecated_codex_plan_effort": (
-                str(deprecated_codex_plan_effort).strip() if deprecated_codex_plan_effort else None
             ),
         },
     }
@@ -1726,12 +1755,6 @@ def resolve_codex_flags(
         if isinstance(base_cfg.get("model_reasoning_effort"), str)
         else None
     )
-    base_plan_effort = (
-        base_cfg.get("plan_mode_reasoning_effort")
-        if isinstance(base_cfg.get("plan_mode_reasoning_effort"), str)
-        else None
-    )
-
     rf_defaults, rf_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
 
     def _pick(key: str, base: str | None, cli: str | None) -> tuple[str | None, str]:
@@ -1746,20 +1769,12 @@ def resolve_codex_flags(
 
     model, model_src = _pick("model", base_model, cli_model)
     effort, effort_src = _pick("model_reasoning_effort", base_effort, cli_effort)
-    plan_effort, plan_effort_src = _pick(
-        "plan_mode_reasoning_effort", base_plan_effort, cli_plan_effort
-    )
-
-    for key, val in (
-        ("model_reasoning_effort", effort),
-        ("plan_mode_reasoning_effort", plan_effort),
-    ):
-        if val is None:
-            continue
-        if val not in CODEX_REASONING_EFFORT_CHOICES:
-            raise ReviewflowError(
-                f"Invalid {key}: {val!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
-            )
+    if cli_plan_effort not in (None, ""):
+        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
+    if effort is not None and effort not in CODEX_REASONING_EFFORT_CHOICES:
+        raise ReviewflowError(
+            f"Invalid model_reasoning_effort: {effort!r}. Expected one of: {', '.join(CODEX_REASONING_EFFORT_CHOICES)}"
+        )
 
     flags: list[str] = []
     if model:
@@ -1776,8 +1791,6 @@ def resolve_codex_flags(
 
     if effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(effort)}"])
-    if plan_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_effort)}"])
 
     meta: dict[str, Any] = {
         "base": base_meta,
@@ -1787,8 +1800,6 @@ def resolve_codex_flags(
             "model_source": model_src,
             "model_reasoning_effort": effort,
             "model_reasoning_effort_source": effort_src,
-            "plan_mode_reasoning_effort": plan_effort,
-            "plan_mode_reasoning_effort_source": plan_effort_src,
             "sandbox_mode": base_sandbox_mode,
             "web_search": base_web_search,
         },
@@ -2189,9 +2200,6 @@ def build_codex_flags_from_llm_config(
     reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
     if reasoning_effort:
         flags.extend(["-c", f"model_reasoning_effort={toml_string(reasoning_effort)}"])
-    plan_reasoning_effort = str(resolved.get("plan_reasoning_effort") or "").strip()
-    if plan_reasoning_effort:
-        flags.extend(["-c", f"plan_mode_reasoning_effort={toml_string(plan_reasoning_effort)}"])
 
     meta = {
         "base": base_meta,
@@ -2202,10 +2210,6 @@ def build_codex_flags_from_llm_config(
             "model_reasoning_effort": resolved.get("reasoning_effort"),
             "model_reasoning_effort_source": (
                 (resolution_meta.get("resolved") or {}).get("reasoning_effort_source")
-            ),
-            "plan_mode_reasoning_effort": resolved.get("plan_reasoning_effort"),
-            "plan_mode_reasoning_effort_source": (
-                (resolution_meta.get("resolved") or {}).get("plan_reasoning_effort_source")
             ),
             "sandbox_mode": base_meta.get("sandbox_mode"),
             "web_search": base_meta.get("web_search"),
@@ -2275,7 +2279,7 @@ def _run_logged_text_command(
     cmd: list[str],
     cwd: Path,
     env: dict[str, str],
-) -> "CommandResult":
+) -> CommandResult:
     out = active_output()
     if out is not None:
         return out.run_logged_cmd(
@@ -2293,10 +2297,11 @@ def build_claude_exec_cmd(
     *,
     command: str,
     model: str | None,
+    effort: str | None = None,
     prompt: str,
     runtime_policy: dict[str, Any] | None = None,
 ) -> list[str]:
-    cmd = [command, "--print", "--output-format", "json"]
+    cmd = [command, "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
     provider_args = policy.get("provider_args")
     if isinstance(provider_args, list):
@@ -2307,7 +2312,9 @@ def build_claude_exec_cmd(
         cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
-    cmd.append(prompt)
+    if effort:
+        cmd.extend(["--effort", effort])
+    cmd.extend(["--", prompt])
     return cmd
 
 
@@ -2327,6 +2334,9 @@ def build_claude_resume_command(
             "JIRA_CONFIG_FILE",
             "NETRC",
             "CURE_WORK_DIR",
+            "CURE_CHUNKHOUND_HELPER",
+            "CURE_CHUNKHOUND_DRY_RUN",
+            "PYTHONSAFEPATH",
         ),
     )
     policy = runtime_policy if isinstance(runtime_policy, dict) else {}
@@ -2355,17 +2365,22 @@ def run_claude_exec(
     cmd = build_claude_exec_cmd(
         command=str(resolved.get("command") or "claude"),
         model=str(resolved.get("model") or "").strip() or None,
+        effort=str(resolved.get("reasoning_effort") or "").strip() or None,
         prompt=prompt,
         runtime_policy=runtime_policy,
     )
     progress.record_cmd(cmd)
     result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
-    payload = _extract_json_object(result.stdout) or {}
-    text = str(payload.get("result") or result.stdout or "").strip()
+    payload = _parse_claude_stream_payload(result.stdout)
+    text = str(payload.get("result") or "").strip()
+    if not text:
+        assistant_text = _extract_claude_text_from_message(payload.get("message"))
+        text = str(assistant_text or result.stdout or "").strip()
     if not text:
         raise ReviewflowError("Claude did not return any printable review output.")
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
     normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+    usage = _extract_usage_from_payload(payload)
     session_id = str(payload.get("session_id") or "").strip()
     resume = None
     if session_id:
@@ -2383,7 +2398,11 @@ def run_claude_exec(
         )
     return LlmRunResult(
         resume=resume,
-        adapter_meta={"transport": "cli-claude", "command": safe_cmd_for_meta(cmd)},
+        adapter_meta={
+            "transport": "cli-claude",
+            "command": safe_cmd_for_meta(cmd),
+            "usage": usage,
+        },
     )
 
 
@@ -3197,6 +3216,7 @@ def build_codex_resume_command(
         "JIRA_CONFIG_FILE",
         "NETRC",
         "CURE_WORK_DIR",
+        "CURE_CHUNKHOUND_DRY_RUN",
     ):
         value = str(env.get(key) or "").strip()
         if value:
@@ -4407,7 +4427,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
 
     model = str(resolved.get("model") or "").strip() or None
     effort = str(resolved.get("model_reasoning_effort") or "").strip() or None
-    plan_effort = str(resolved.get("plan_mode_reasoning_effort") or "").strip() or None
 
     flags = codex.get("flags")
     if isinstance(flags, list):
@@ -4422,10 +4441,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
             assignment = flag_items[idx + 1]
             if effort is None:
                 effort = _parse_codex_flag_assignment(assignment, key="model_reasoning_effort")
-            if plan_effort is None:
-                plan_effort = _parse_codex_flag_assignment(
-                    assignment, key="plan_mode_reasoning_effort"
-                )
 
     resume = codex.get("resume") if isinstance(codex.get("resume"), dict) else {}
     return {
@@ -4434,7 +4449,6 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
         "provider": "codex",
         "model": model,
         "reasoning_effort": effort,
-        "plan_reasoning_effort": plan_effort,
         "resume": resume,
         "capabilities": {"supports_resume": bool(resume.get("command"))},
     }
@@ -4527,14 +4541,12 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
-    plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
-    thinking = effort or plan_effort
-    if model and thinking:
-        return f"llm={preset}/{model}/{thinking}"
+    if model and effort:
+        return f"llm={preset}/{model}/{effort}"
     if model:
         return f"llm={preset}/{model}/?"
-    if thinking:
-        return f"llm={preset}/?/{thinking}"
+    if effort:
+        return f"llm={preset}/?/{effort}"
     return f"llm={preset}/?"
 
 
@@ -5285,6 +5297,215 @@ def _validate_or_reuse_synth_artifact(
     return bool(result.get("valid")), result
 
 
+def _grounding_skipped_step_records(
+    meta: dict[str, Any],
+    *,
+    prefer_persisted: bool = False,
+) -> list[dict[str, Any]]:
+    mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    step_states = mp.get("step_states") if isinstance(mp.get("step_states"), list) else []
+    state_records: list[dict[str, Any]] = []
+    for item in step_states:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").strip().lower() != "grounding_skipped":
+            continue
+        state_records.append(
+            {
+                "step_index": int(item.get("step_index") or 0),
+                "step_id": str(item.get("step_id") or "").strip(),
+                "step_title": str(item.get("step_title") or "").strip(),
+                "reason": _grounding_compact_reason(item),
+            }
+        )
+    persisted_records = (
+        mp.get("grounding_skipped_steps")
+        if isinstance(mp.get("grounding_skipped_steps"), list)
+        else []
+    )
+    if prefer_persisted and persisted_records:
+        return [dict(item) for item in persisted_records if isinstance(item, dict)]
+    if step_states:
+        return state_records
+    if persisted_records:
+        return [dict(item) for item in persisted_records if isinstance(item, dict)]
+    return []
+
+
+def _grounding_skipped_step_ids(meta: dict[str, Any]) -> set[str]:
+    skipped: set[str] = set()
+    for item in _grounding_skipped_step_records(meta):
+        step_id = str(item.get("step_id") or "").strip()
+        if step_id:
+            skipped.add(step_id)
+    return skipped
+
+
+def _grounding_compact_reason(validation: dict[str, Any] | None) -> str:
+    if isinstance(validation, dict):
+        for key in ("grounding_reason", "reason"):
+            text = " ".join(str(validation.get(key) or "").strip().split())
+            if text:
+                return text
+    errors = validation.get("errors") if isinstance(validation, dict) else []
+    if isinstance(errors, list):
+        for item in errors:
+            text = " ".join(str(item or "").strip().split())
+            if text:
+                return text
+    return "strict grounding validation failed"
+
+
+def _record_grounding_attempt(
+    *,
+    validation: dict[str, Any] | None,
+    attempt_number: int,
+) -> dict[str, Any]:
+    payload = dict(validation) if isinstance(validation, dict) else {}
+    return {
+        "attempt_number": int(attempt_number),
+        "reason": _grounding_compact_reason(payload),
+        "validation": payload,
+    }
+
+
+def _build_grounding_skipped_record(
+    *,
+    entry: MultipassStepEntry,
+    attempts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    first = attempts[0] if attempts else {}
+    validation = first.get("validation") if isinstance(first, dict) else None
+    validation = validation if isinstance(validation, dict) else None
+    return {
+        "step_index": int(entry.index),
+        "step_id": entry.step_id,
+        "step_title": entry.step_title,
+        "reason": _grounding_compact_reason(validation),
+    }
+
+
+def _persist_grounding_summary(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+) -> list[str]:
+    mp = meta.setdefault("multipass", {})
+    current_skipped_records = _grounding_skipped_step_records(meta)
+    skipped_by_id = {
+        str(item.get("step_id") or "").strip(): dict(item)
+        for item in current_skipped_records
+        if str(item.get("step_id") or "").strip()
+    }
+    synth_outputs: list[str] = []
+    for entry in step_entries:
+        if entry.step_id not in skipped_by_id:
+            synth_outputs.append(str(entry.output_path))
+    skipped_records = [
+        skipped_by_id[entry.step_id]
+        for entry in step_entries
+        if entry.step_id in skipped_by_id
+    ]
+    artifacts = mp.setdefault("artifacts", {})
+    artifacts["step_outputs"] = [str(entry.output_path) for entry in step_entries]
+    artifacts["synth_step_outputs"] = list(synth_outputs)
+    mp["grounding_skipped_steps"] = skipped_records
+    mp["grounding_skipped_step_count"] = len(skipped_records)
+    mp["grounding_partial_synthesis"] = bool(skipped_records) and bool(synth_outputs)
+    mp["grounding_valid_step_count"] = len(synth_outputs)
+    return synth_outputs
+
+
+def _grounding_skipped_prompt_text(skipped_records: list[dict[str, Any]]) -> str:
+    if not skipped_records:
+        return "- None."
+    lines = []
+    for item in skipped_records:
+        step_id = str(item.get("step_id") or "").strip()
+        title = str(item.get("step_title") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        label = step_id
+        if title:
+            label = f"{label} — {title}" if label else title
+        detail = f" ({reason})" if reason else ""
+        lines.append(f"- {label}{detail}")
+    return "\n".join(lines)
+
+
+def _prepare_synth_inputs(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+    session_id: str,
+    session_dir: Path,
+    work_dir: Path,
+    review_md_path: Path,
+) -> tuple[list[str], str]:
+    """Persist grounding summary, build skipped-step disclosure text, and enforce
+    the all-skipped terminal guard shared across PR, incremental resume, and main
+    resume flows.  Returns ``(synth_step_outputs, skipped_prompt_text)`` when at
+    least one step survives grounding; raises ``ReviewflowError`` otherwise."""
+    synth_step_outputs = _persist_grounding_summary(meta=meta, step_entries=step_entries)
+    raw_skipped = meta.setdefault("multipass", {}).get("grounding_skipped_steps")
+    skipped_prompt_text = _grounding_skipped_prompt_text(
+        raw_skipped if isinstance(raw_skipped, list) else []
+    )
+    if not synth_step_outputs:
+        meta["status"] = "error"
+        meta.setdefault("multipass", {})["status"] = "step_failed"
+        _emit_multipass_grounding_failure_playbook(
+            meta=meta,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            artifact_path=review_md_path,
+            validation={"errors": ["All planned steps were grounding-skipped; no synth inputs remain."]},
+            resume_from="steps",
+        )
+        raise ReviewflowError(
+            "All multipass steps were grounding-skipped; review synthesis cannot continue."
+        )
+    return synth_step_outputs, skipped_prompt_text
+
+
+# Non-TTY resume returns "rerun" intentionally: Story 35 policy requires that
+# previously skipped grounding steps are automatically rerun when there is no
+# interactive TTY to prompt the user.  Do not change this return value without
+# a deliberate policy decision.
+def _resolve_resume_grounding_skip_choice(
+    *,
+    meta: dict[str, Any],
+    step_entries: list[MultipassStepEntry],
+    ui_enabled: bool,
+) -> str:
+    prior_skipped_by_id = {
+        str(item.get("step_id") or "").strip(): dict(item)
+        for item in _grounding_skipped_step_records(meta, prefer_persisted=True)
+        if str(item.get("step_id") or "").strip()
+    }
+    if not prior_skipped_by_id:
+        return ""
+    skipped_records = []
+    for entry in step_entries:
+        if entry.step_id not in prior_skipped_by_id:
+            continue
+        persisted = prior_skipped_by_id[entry.step_id]
+        skipped_records.append(
+            {
+                "step_id": entry.step_id,
+                "step_title": entry.step_title,
+                "reason": str(persisted.get("reason") or "").strip(),
+            }
+        )
+    if not skipped_records:
+        return ""
+    if ui_enabled:
+        choice = prompt_resume_grounding_skipped_steps(skipped_records=skipped_records)
+        if choice in {"rerun", "keep"}:
+            return choice
+    return "rerun"
+
+
 def _update_multipass_step_progress(meta: dict[str, Any]) -> None:
     mp = meta.setdefault("multipass", {})
     states = mp.get("step_states")
@@ -5302,13 +5523,13 @@ def _update_multipass_step_progress(meta: dict[str, Any]) -> None:
         title = str(item.get("step_title") or "").strip()
         if status == "queued":
             queued += 1
-        elif status in {"running", "awaiting_validation"}:
+        elif status in {"running", "awaiting_validation", "retrying_grounding"}:
             running += 1
             if title:
                 active_titles.append(title)
         elif status in {"completed", "reused"}:
             completed += 1
-        elif status in {"failed", "canceled"}:
+        elif status in {"failed", "canceled", "grounding_skipped"}:
             failed += 1
         else:
             queued += 1
@@ -5349,6 +5570,9 @@ def _set_multipass_step_state(
     finished_at: str | None = None,
     duration_seconds: float | None = None,
     error: str | None = None,
+    grounding_reason: str | None = None,
+    grounding_attempts: list[dict[str, Any]] | None = None,
+    grounding_retried: bool | None = None,
 ) -> None:
     mp = meta.setdefault("multipass", {})
     states = mp.setdefault("step_states", [])
@@ -5378,8 +5602,16 @@ def _set_multipass_step_state(
         state["duration_seconds"] = float(duration_seconds)
     if error is not None:
         state["error"] = error
-    elif status not in {"failed", "canceled"}:
+    elif status not in {"failed", "canceled", "grounding_skipped"}:
         state.pop("error", None)
+    if grounding_reason is not None:
+        state["grounding_reason"] = grounding_reason
+    elif status not in {"retrying_grounding", "grounding_skipped"}:
+        state.pop("grounding_reason", None)
+    if grounding_attempts is not None:
+        state["grounding_attempts"] = list(grounding_attempts)
+    if grounding_retried is not None:
+        state["grounding_retried"] = bool(grounding_retried)
     _update_multipass_step_progress(meta)
 
 
@@ -5536,7 +5768,6 @@ def _prepare_multipass_stage_llm_configs(
 ) -> dict[str, dict[str, Any]]:
     mp = meta.setdefault("multipass", {})
     mp_llm = mp.setdefault("llm", {})
-    declared_overrides: dict[str, dict[str, Any]] = {}
     stage_configs: dict[str, dict[str, Any]] = {}
     existing_stage_meta = (
         {str(k): dict(v) for k, v in mp_llm.get("stages", {}).items() if isinstance(v, dict)}
@@ -5546,16 +5777,7 @@ def _prepare_multipass_stage_llm_configs(
     stage_meta_payload: dict[str, dict[str, Any]] = (
         dict(existing_stage_meta) if preserve_existing_stage_meta else {}
     )
-    for stage_name, key in (
-        ("plan", "plan_reasoning_effort"),
-        ("step", "step_reasoning_effort"),
-        ("synth", "synth_reasoning_effort"),
-    ):
-        override_value = str(multipass_cfg.get(key) or "").strip() or None
-        declared_overrides[key] = {
-            "value": override_value,
-            "source": ("cure.toml" if override_value is not None else "unset"),
-        }
+    for stage_name in ("plan", "step", "synth"):
         stage_resolved, stage_resolution_meta, stage_meta = resolve_multipass_stage_llm_config(
             stage=stage_name,
             resolved=llm_resolved,
@@ -5569,12 +5791,89 @@ def _prepare_multipass_stage_llm_configs(
         }
         if not preserve_existing_stage_meta:
             stage_meta_payload[stage_name] = dict(stage_meta)
-    mp_llm["declared_overrides"] = declared_overrides
+    mp_llm["declared_overrides"] = {}
     if stage_meta_payload:
         mp_llm["stages"] = stage_meta_payload
     if "review_artifact_stage" not in mp_llm:
         mp_llm["review_artifact_stage"] = None
     return stage_configs
+
+
+def _provider_effort_choices(provider: str) -> tuple[str, ...]:
+    if str(provider or "").strip().lower() == "claude":
+        return ("low", "medium", "high", "max")
+    return CODEX_REASONING_EFFORT_CHOICES
+
+
+def _provider_model_options(provider: str) -> list[tuple[str, str]]:
+    if str(provider or "").strip().lower() == "claude":
+        return [
+            ("Opus 4.6", "claude-opus-4-6"),
+            ("Sonnet 4.6", "claude-sonnet-4-6"),
+            ("Haiku 4.5-20251001", "claude-haiku-4-5-20251001"),
+        ]
+    if str(provider or "").strip().lower() == "codex":
+        return [
+            ("GPT-5.4", "gpt-5.4"),
+            ("GPT-5.3 Codex", "gpt-5.3-codex"),
+            ("GPT-5.3 Codex Spark", "gpt-5.3-codex-spark"),
+        ]
+    return []
+
+
+def _maybe_apply_pr_llm_picker(
+    *,
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    resolved_meta = (
+        dict(llm_resolution_meta.get("resolved"))
+        if isinstance(llm_resolution_meta.get("resolved"), dict)
+        else {}
+    )
+    model_source = str(resolved_meta.get("model_source") or "").strip()
+    effort_source = str(resolved_meta.get("reasoning_effort_source") or "").strip()
+    model_source_detail = str(resolved_meta.get("model_source_detail") or "").strip()
+    effort_source_detail = str(resolved_meta.get("reasoning_effort_source_detail") or "").strip()
+
+    def _should_prompt(*, source: str, detail: str) -> bool:
+        if detail:
+            return detail in {"unset", "preset_builtin"}
+        return source in {"", "unset", "preset"}
+
+    prompt_for_model = _should_prompt(source=model_source, detail=model_source_detail)
+    prompt_for_effort = _should_prompt(source=effort_source, detail=effort_source_detail)
+    if not prompt_for_model and not prompt_for_effort:
+        return llm_resolved, llm_resolution_meta
+    provider = str(llm_resolved.get("provider") or "").strip().lower()
+    picker_updates = prompt_pr_model_and_effort_picker(
+        provider=provider,
+        default_model=str(llm_resolved.get("model") or "").strip() or None,
+        default_effort=str(llm_resolved.get("reasoning_effort") or "").strip() or None,
+        model_options=_provider_model_options(provider),
+        effort_options=list(_provider_effort_choices(provider)),
+        prompt_for_model=prompt_for_model,
+        prompt_for_effort=prompt_for_effort,
+        fixed_model=None if prompt_for_model else (str(llm_resolved.get("model") or "").strip() or None),
+        fixed_effort=None if prompt_for_effort else (str(llm_resolved.get("reasoning_effort") or "").strip() or None),
+    )
+    if not picker_updates:
+        return llm_resolved, llm_resolution_meta
+    updated_resolved = dict(llm_resolved)
+    updated_resolution_meta = dict(llm_resolution_meta)
+    updated_resolved_meta = dict(resolved_meta)
+    if "model" in picker_updates:
+        updated_resolved["model"] = picker_updates["model"]
+        updated_resolved_meta["model"] = picker_updates["model"]
+        updated_resolved_meta["model_source"] = "tty_prompt"
+        updated_resolved_meta["model_source_detail"] = "tty_prompt"
+    if "reasoning_effort" in picker_updates:
+        updated_resolved["reasoning_effort"] = picker_updates["reasoning_effort"]
+        updated_resolved_meta["reasoning_effort"] = picker_updates["reasoning_effort"]
+        updated_resolved_meta["reasoning_effort_source"] = "tty_prompt"
+        updated_resolved_meta["reasoning_effort_source_detail"] = "tty_prompt"
+    updated_resolution_meta["resolved"] = updated_resolved_meta
+    return updated_resolved, updated_resolution_meta
 
 
 def _record_multipass_stage_llm(*, meta: dict[str, Any], stage_name: str, stage_llm_meta: dict[str, Any]) -> None:
@@ -5677,6 +5976,18 @@ def _ensure_multipass_run_entry(
             }
         )
     return run_entry
+
+
+def _find_multipass_step_run_entry(meta: dict[str, Any], *, step_index: int) -> dict[str, Any] | None:
+    for item in meta.setdefault("multipass", {}).setdefault("runs", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip() != "step":
+            continue
+        if int(item.get("step_index") or 0) != int(step_index):
+            continue
+        return item
+    return None
 
 
 def _run_multipass_step_llm(
@@ -5796,7 +6107,7 @@ def _finalize_multipass_step_result(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=provider,
@@ -5826,8 +6137,9 @@ def _finalize_multipass_step_result(
                 validation=step_validation,
                 resume_from="steps",
             )
-            raise ReviewflowError(
-                f"Multipass step grounding validation failed for {entry.output_path.name}."
+            raise StepGroundingValidationError(
+                f"Multipass step grounding validation failed for {entry.output_path.name}.",
+                step_validation=step_validation,
             )
         _set_multipass_step_state(
             progress.meta,
@@ -5858,13 +6170,16 @@ def _execute_multipass_step_stage(
     templates: dict[str, str],
     codex_meta: dict[str, Any] | None,
     quiet: bool,
+    ui_enabled: bool = False,
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
-) -> str | None:
+) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
     effective_workers = min(max(1, step_worker_count), len(runnable_entries)) if runnable_entries else 0
     success_resume_command: str | None = None
+    skipped_ids = _grounding_skipped_step_ids(progress.meta)
+    skipped_records: list[dict[str, Any]] = []
 
     with progress.mutate():
         mp = progress.meta.setdefault("multipass", {})
@@ -5880,15 +6195,19 @@ def _execute_multipass_step_stage(
                     "step_title": entry.step_title,
                     "step_focus": entry.step_focus,
                     "output_path": str(entry.output_path),
-                    "status": ("queued" if entry.should_run else "reused"),
-                    "reusable": bool(not entry.should_run),
+                    "status": (
+                        "queued"
+                        if entry.should_run
+                        else ("grounding_skipped" if entry.step_id in skipped_ids else "reused")
+                    ),
+                    "reusable": bool((not entry.should_run) and (entry.step_id not in skipped_ids)),
                 }
             )
         mp["step_states"] = states
         _update_multipass_step_progress(progress.meta)
 
     if not runnable_entries:
-        return success_resume_command
+        return success_resume_command, skipped_records
 
     worker_stream = stream if effective_workers <= 1 else False
     future_to_entry: dict[Future[MultipassStepRunResult], MultipassStepEntry] = {}
@@ -5940,35 +6259,159 @@ def _execute_multipass_step_stage(
         raw_result = raw_results.get(entry.index)
         if raw_result is None:
             continue
-        try:
-            success_resume_command = _finalize_multipass_step_result(
-                progress=progress,
-                work_dir=work_dir,
-                repo_dir=repo_dir,
-                grounding_mode=grounding_mode,
-                entry=entry,
-                step_result=raw_result.llm_result,
-                duration_seconds=raw_result.duration_seconds,
-                provider=str(llm_resolved.get("provider") or ""),
-                templates=templates,
-                codex_meta=codex_meta,
-                review_stage=review_stage,
-                prompt_template_name=prompt_template_name,
-            ) or success_resume_command
-        except Exception as exc:
-            with progress.mutate():
-                _set_multipass_step_state(
-                    progress.meta,
+        current_result = raw_result
+        grounding_attempts: list[dict[str, Any]] = []
+        while True:
+            try:
+                success_resume_command = _finalize_multipass_step_result(
+                    progress=progress,
+                    work_dir=work_dir,
+                    repo_dir=repo_dir,
+                    grounding_mode=grounding_mode,
                     entry=entry,
-                    status="failed",
-                    reusable=False,
-                    finished_at=_utc_now_iso(),
-                    duration_seconds=raw_result.duration_seconds,
-                    error=str(exc),
+                    step_result=current_result.llm_result,
+                    duration_seconds=current_result.duration_seconds,
+                    provider=str(llm_resolved.get("provider") or ""),
+                    templates=templates,
+                    codex_meta=codex_meta,
+                    review_stage=review_stage,
+                    prompt_template_name=prompt_template_name,
+                ) or success_resume_command
+                with progress.mutate():
+                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                    if grounding_attempts:
+                        if run_entry is None:
+                            raise ReviewflowError(
+                                f"Missing multipass run entry for step {entry.index:02d}."
+                            )
+                        run_entry["grounding_retried"] = True
+                        run_entry["grounding_attempts"] = list(grounding_attempts)
+                        run_entry["first_grounding_failure_validation"] = dict(
+                            grounding_attempts[0].get("validation") or {}
+                        )
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="completed",
+                            reusable=True,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                break
+            except StepGroundingValidationError as exc:
+                attempt = _record_grounding_attempt(
+                    validation=exc.step_validation,
+                    attempt_number=len(grounding_attempts) + 1,
                 )
-                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
-            if first_error is None:
-                first_error = exc
+                grounding_attempts.append(attempt)
+                choice = ""
+                if ui_enabled:
+                    choice = prompt_grounding_retry_skip(
+                        step_id=entry.step_id,
+                        step_title=entry.step_title,
+                        attempt_count=len(grounding_attempts),
+                        validation=exc.step_validation,
+                    )
+                if choice == "retry":
+                    with progress.mutate():
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="retrying_grounding",
+                            reusable=False,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_reason=attempt["reason"],
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                    current_result = _run_multipass_step_llm(
+                        entry=entry,
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        llm_resolved=llm_resolved,
+                        llm_resolution_meta=llm_resolution_meta,
+                        env=env,
+                        stream=worker_stream,
+                        add_dirs=add_dirs,
+                        runtime_policy=runtime_policy,
+                        quiet=quiet,
+                    )
+                    continue
+                if choice != "skip" and len(grounding_attempts) <= _MULTIPASS_STEP_GROUNDING_MAX_RETRIES:
+                    log(
+                        f"Retrying multipass grounding step {entry.step_id or entry.index:>02}: {attempt['reason']}",
+                        quiet=quiet,
+                    )
+                    with progress.mutate():
+                        _set_multipass_step_state(
+                            progress.meta,
+                            entry=entry,
+                            status="retrying_grounding",
+                            reusable=False,
+                            finished_at=_utc_now_iso(),
+                            duration_seconds=current_result.duration_seconds,
+                            grounding_reason=attempt["reason"],
+                            grounding_attempts=grounding_attempts,
+                            grounding_retried=True,
+                        )
+                    current_result = _run_multipass_step_llm(
+                        entry=entry,
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        llm_resolved=llm_resolved,
+                        llm_resolution_meta=llm_resolution_meta,
+                        env=env,
+                        stream=worker_stream,
+                        add_dirs=add_dirs,
+                        runtime_policy=runtime_policy,
+                        quiet=quiet,
+                    )
+                    continue
+                skipped_record = _build_grounding_skipped_record(entry=entry, attempts=grounding_attempts)
+                skipped_records.append(skipped_record)
+                with progress.mutate():
+                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                    if run_entry is None:
+                        raise ReviewflowError(
+                            f"Missing multipass run entry for step {entry.index:02d}."
+                        )
+                    run_entry["grounding_retried"] = bool(len(grounding_attempts) > 1)
+                    run_entry["grounding_attempts"] = list(grounding_attempts)
+                    run_entry["first_grounding_failure_validation"] = dict(
+                        grounding_attempts[0].get("validation") or {}
+                    )
+                    run_entry["grounding_skipped"] = True
+                    _set_multipass_step_state(
+                        progress.meta,
+                        entry=entry,
+                        status="grounding_skipped",
+                        reusable=False,
+                        finished_at=_utc_now_iso(),
+                        duration_seconds=current_result.duration_seconds,
+                        error=skipped_record["reason"],
+                        grounding_reason=skipped_record["reason"],
+                        grounding_attempts=grounding_attempts,
+                        grounding_retried=bool(len(grounding_attempts) > 1),
+                    )
+                break
+            except Exception as exc:
+                with progress.mutate():
+                    _set_multipass_step_state(
+                        progress.meta,
+                        entry=entry,
+                        status="failed",
+                        reusable=False,
+                        finished_at=_utc_now_iso(),
+                        duration_seconds=current_result.duration_seconds,
+                        error=str(exc),
+                    )
+                    progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+                if first_error is None:
+                    first_error = exc
+                break
 
     with progress.mutate():
         if first_error is None:
@@ -5981,7 +6424,7 @@ def _execute_multipass_step_stage(
         if isinstance(first_error, ReviewflowSubprocessError):
             _eprint(f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}")
         raise first_error
-    return success_resume_command
+    return success_resume_command, skipped_records
 
 
 def require_gh_auth(host: str) -> None:
@@ -7453,6 +7896,10 @@ def _record_chunkhound_access_meta(
             "mode": str((runtime_policy.get("metadata") or {}).get("chunkhound_access_mode") or ""),
             "helper_env_var": "CURE_CHUNKHOUND_HELPER",
             "helper_path": str(payload.get("helper_path") or env.get("CURE_CHUNKHOUND_HELPER") or ""),
+            "dry_run": bool(
+                (runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")
+                or str(env.get("CURE_CHUNKHOUND_DRY_RUN") or "").strip()
+            ),
             "preflight_ok": bool(payload.get("ok")),
             "updated_at": _utc_now_iso(),
         }
@@ -7751,14 +8198,16 @@ def _run_chunkhound_access_preflight(
     progress: SessionProgress | None = None,
 ) -> dict[str, Any] | None:
     metadata = runtime_policy.get("metadata") if isinstance(runtime_policy, dict) else {}
-    if str((metadata or {}).get("provider") or "").strip() != "codex":
+    provider = str((metadata or {}).get("provider") or "").strip()
+    access_mode = str((metadata or {}).get("chunkhound_access_mode") or "").strip()
+    if access_mode != "cli_helper_daemon":
         return None
     helper_raw = _chunkhound_helper_path(runtime_policy)
     if not helper_raw:
-        if str((metadata or {}).get("chunkhound_access_mode") or "").strip():
+        if access_mode:
             raise ReviewflowError(
                 "ChunkHound helper preflight failed before review generation: "
-                "CURe did not stage a ChunkHound helper for this Codex run."
+                f"CURe did not stage a ChunkHound helper for this {provider or 'review'} run."
             )
         return None
 
@@ -7908,7 +8357,7 @@ def _run_review_intelligence_preflight(
         )
 
 
-def _enforce_codex_chunkhound_tool_proof(
+def _enforce_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
     work_dir: Path,
@@ -7922,7 +8371,7 @@ def _enforce_codex_chunkhound_tool_proof(
         return None
     if chunkhound_prompt_contract_for_template(template_name) is None:
         return None
-    report = validate_and_record_codex_chunkhound_tool_proof(
+    report = validate_and_record_chunkhound_tool_proof(
         meta=meta,
         work_dir=work_dir,
         provider=provider,
@@ -8100,6 +8549,7 @@ def _pr_flow_impl(
     prompt_profile_requested = str(getattr(args, "prompt_profile", "auto"))
     big_if_files = int(getattr(args, "big_if_files", 30))
     big_if_lines = int(getattr(args, "big_if_lines", 1500))
+    chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     progress.init(
         {
             "session_id": session_id,
@@ -8129,6 +8579,7 @@ def _pr_flow_impl(
             "notes": {
                 "no_index": bool(args.no_index),
                 "no_review": bool(args.no_review),
+                "dry_run_chunkhound": chunkhound_dry_run,
             },
             "agent_desc": {
                 "source": agent_desc_source,
@@ -8143,6 +8594,7 @@ def _pr_flow_impl(
                 "prompt_profile": prompt_profile_requested,
                 "big_if_files": big_if_files,
                 "big_if_lines": big_if_lines,
+                "dry_run_chunkhound": chunkhound_dry_run,
             },
         }
     )
@@ -8150,6 +8602,7 @@ def _pr_flow_impl(
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
     progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
+    progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
     progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
     progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
@@ -8177,6 +8630,9 @@ def _pr_flow_impl(
     success_resume_command: str | None = None
     codex_meta: dict[str, Any] | None = None
     runtime_policy: dict[str, Any] | None = None
+    llm_resolved: dict[str, Any] | None = None
+    llm_resolution_meta: dict[str, Any] | None = None
+    picker_completed = bool(args.no_review)
 
     base_cache_meta: dict[str, Any] | None = None
     seed_source_db_path: Path | None = None
@@ -8243,6 +8699,18 @@ def _pr_flow_impl(
     }
     progress.flush()
     try:
+        if not bool(args.no_review):
+            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+                args,
+                reviewflow_config_path=effective_config_path,
+                base_codex_config_path=effective_codex_base_config_path,
+            )
+            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+            picker_completed = True
+
         if not args.no_index:
             with phase("ensure_base_cache", progress=progress, quiet=quiet):
                 base_cache_meta = ensure_base_cache(
@@ -8544,11 +9012,8 @@ def _pr_flow_impl(
                 progress.meta.setdefault("multipass", {})["mode"] = "singlepass"
                 progress.flush()
 
-            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
-                args,
-                reviewflow_config_path=effective_config_path,
-                base_codex_config_path=effective_codex_base_config_path,
-            )
+            if llm_resolved is None or llm_resolution_meta is None:
+                raise ReviewflowError("LLM configuration was not resolved before review execution.")
             runtime_policy = prepare_review_agent_runtime(
                 args=args,
                 resolved=llm_resolved,
@@ -8600,6 +9065,7 @@ def _pr_flow_impl(
                         "NETRC": env.get("NETRC"),
                         "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
                         "CURE_CHUNKHOUND_HELPER": env.get("CURE_CHUNKHOUND_HELPER"),
+                        "CURE_CHUNKHOUND_DRY_RUN": env.get("CURE_CHUNKHOUND_DRY_RUN"),
                     },
                     "helpers": _chunkhound_helper_refs(runtime_policy),
                 }
@@ -8611,6 +9077,9 @@ def _pr_flow_impl(
                 env=env,
                 adapter_meta=adapter_meta,
                 helpers=_chunkhound_helper_refs(runtime_policy),
+            )
+            progress.meta.setdefault("chunkhound", {})["dry_run"] = bool(
+                (runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")
             )
             review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
                 review_intelligence_cfg=review_intelligence_cfg,
@@ -8625,6 +9094,9 @@ def _pr_flow_impl(
                 capability_summary=review_intelligence_capabilities,
             )
             progress.flush()
+
+            if bool((runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")):
+                log("ChunkHound helper: dry-run mode enabled", quiet=quiet)
 
             with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
                 _run_chunkhound_access_preflight(
@@ -8761,7 +9233,7 @@ def _pr_flow_impl(
                         plan_run_entry["llm_provider"] = plan_result.resume.provider
                     plan_run_entry["usage"] = _normalize_llm_usage(plan_result.adapter_meta.get("usage"))
                     progress.flush()
-                    plan_tool_report = _enforce_codex_chunkhound_tool_proof(
+                    plan_tool_report = _enforce_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
                         provider=str(llm_resolved.get("provider") or ""),
@@ -8875,7 +9347,7 @@ def _pr_flow_impl(
                         stage_llm_meta=step_llm["meta"],
                     )
                     with phase("codex_steps", progress=progress, quiet=quiet):
-                        success_resume_command = _execute_multipass_step_stage(
+                        step_resume_command, _ = _execute_multipass_step_stage(
                             progress=progress,
                             work_dir=work_dir,
                             repo_dir=repo_dir,
@@ -8896,20 +9368,29 @@ def _pr_flow_impl(
                             templates=templates,
                             codex_meta=codex_meta,
                             quiet=quiet,
-                        ) or success_resume_command
+                            ui_enabled=ui_enabled,
+                        )
+                        success_resume_command = step_resume_command or success_resume_command
 
-                    step_outputs = [str(entry.output_path) for entry in step_entries]
+                    synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+                        meta=progress.meta,
+                        step_entries=step_entries,
+                        session_id=session_id,
+                        session_dir=session_dir,
+                        work_dir=work_dir,
+                        review_md_path=review_md_path,
+                    )
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
-                        "step_index": int(len(step_outputs)),
-                        "step_count": int(len(step_outputs)),
+                        "step_index": int(len(synth_step_outputs)),
+                        "step_count": int(len(step_entries)),
                         "step_title": "synth",
                     }
                     progress.flush()
 
                     with phase("codex_synth", progress=progress, quiet=quiet):
                         synth_template = load_builtin_prompt_text(templates["synth"])
-                        step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
+                        step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                         synth_prompt = render_prompt(
                             synth_template,
                             base_ref_for_review=base_ref_for_review,
@@ -8928,6 +9409,7 @@ def _pr_flow_impl(
                                 ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
+                                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                             },
                         )
                         synth_run_entry = _ensure_multipass_run_entry(
@@ -8979,7 +9461,7 @@ def _pr_flow_impl(
                                 else None
                             )
                             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                        _enforce_codex_chunkhound_tool_proof(
+                        _enforce_chunkhound_tool_proof(
                             meta=progress.meta,
                             work_dir=work_dir,
                             provider=str(llm_resolved.get("provider") or ""),
@@ -8993,7 +9475,7 @@ def _pr_flow_impl(
                             work_dir=work_dir,
                             grounding_mode=grounding_mode,
                             artifact_path=review_md_path,
-                            step_outputs=[Path(item) for item in step_outputs],
+                            step_outputs=[Path(item) for item in synth_step_outputs],
                             repo_dir=repo_dir,
                         )
                         progress.flush()
@@ -9113,7 +9595,7 @@ def _pr_flow_impl(
                             else None
                         )
                         record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                    _enforce_codex_chunkhound_tool_proof(
+                    _enforce_chunkhound_tool_proof(
                         meta=progress.meta,
                         work_dir=work_dir,
                         provider=str(llm_resolved.get("provider") or ""),
@@ -9150,6 +9632,8 @@ def _pr_flow_impl(
                 "message": str(e),
             }
         )
+        if (not picker_completed) and session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
         raise
     finally:
         cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
@@ -9191,6 +9675,7 @@ def _run_incremental_completed_multipass_resume(
     grounding_mode: str,
     codex_meta: dict[str, Any] | None,
     quiet: bool,
+    ui_enabled: bool,
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
 ) -> str | None:
@@ -9298,7 +9783,7 @@ def _run_incremental_completed_multipass_resume(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=str(plan_llm["resolved"].get("provider") or ""),
@@ -9420,11 +9905,41 @@ def _run_incremental_completed_multipass_resume(
             )
     progress.flush()
 
+    resume_skip_choice = _resolve_resume_grounding_skip_choice(
+        meta=progress.meta,
+        step_entries=step_entries,
+        ui_enabled=ui_enabled,
+    )
+    prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+    if resume_skip_choice:
+        resume_meta["grounding_skipped_override"] = {
+            "choice": resume_skip_choice,
+            "step_ids": sorted(prior_skipped_ids),
+            "planner_requested_reopen_step_ids": sorted(requested_reopen_step_ids),
+        }
+        updated_entries: list[MultipassStepEntry] = []
+        for entry in step_entries:
+            should_run = entry.should_run
+            if entry.step_id in prior_skipped_ids:
+                should_run = resume_skip_choice == "rerun"
+            updated_entries.append(
+                MultipassStepEntry(
+                    index=entry.index,
+                    step_id=entry.step_id,
+                    step_title=entry.step_title,
+                    step_focus=entry.step_focus,
+                    output_path=entry.output_path,
+                    prompt=entry.prompt,
+                    should_run=should_run,
+                )
+            )
+        step_entries = updated_entries
+
     step_outputs = [str(entry.output_path) for entry in step_entries]
     step_reran = any(entry.should_run for entry in step_entries)
     if step_reran:
         _record_multipass_stage_llm(meta=progress.meta, stage_name="step", stage_llm_meta=step_llm["meta"])
-        success_resume_command = _execute_multipass_step_stage(
+        step_resume_command, _ = _execute_multipass_step_stage(
             progress=progress,
             work_dir=work_dir,
             repo_dir=repo_dir,
@@ -9441,11 +9956,14 @@ def _run_incremental_completed_multipass_resume(
             templates={"step": templates["resume_step"]},
             codex_meta=codex_meta,
             quiet=quiet,
+            ui_enabled=ui_enabled,
             review_stage="multipass_resume_step",
             prompt_template_name=templates["resume_step"],
-        ) or success_resume_command
+        )
+        success_resume_command = step_resume_command or success_resume_command
     else:
         with progress.mutate():
+            skipped_ids = _grounding_skipped_step_ids(progress.meta)
             progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})["step_outputs"] = list(step_outputs)
             progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
             progress.meta.setdefault("multipass", {})["step_states"] = [
@@ -9455,13 +9973,21 @@ def _run_incremental_completed_multipass_resume(
                     "step_title": entry.step_title,
                     "step_focus": entry.step_focus,
                     "output_path": str(entry.output_path),
-                    "status": "reused",
-                    "reusable": True,
+                    "status": ("grounding_skipped" if entry.step_id in skipped_ids else "reused"),
+                    "reusable": bool(entry.step_id not in skipped_ids),
                 }
                 for entry in step_entries
             ]
             progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
             _update_multipass_step_progress(progress.meta)
+    synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+        meta=progress.meta,
+        step_entries=step_entries,
+        session_id=session_id,
+        session_dir=session_dir,
+        work_dir=work_dir,
+        review_md_path=review_md_path,
+    )
 
     progress.meta.setdefault("multipass", {})["current"] = {
         "stage": "resume_synth",
@@ -9471,7 +9997,7 @@ def _run_incremental_completed_multipass_resume(
     }
     progress.flush()
     with phase("codex_resume_synth", progress=progress, quiet=quiet):
-        step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs) if step_outputs else "- None."
+        step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs) if synth_step_outputs else "- None."
         synth_prompt = render_prompt(
             load_builtin_prompt_text(templates["resume_synth"]),
             base_ref_for_review=base_ref_for_review,
@@ -9493,6 +10019,7 @@ def _run_incremental_completed_multipass_resume(
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "STEP_OUTPUT_PATHS": step_paths_text,
+                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
             },
         )
         synth_run_entry = _ensure_multipass_run_entry(
@@ -9534,7 +10061,7 @@ def _run_incremental_completed_multipass_resume(
                 else None
             )
             record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_codex_chunkhound_tool_proof(
+        _enforce_chunkhound_tool_proof(
             meta=progress.meta,
             work_dir=work_dir,
             provider=str(synth_llm["resolved"].get("provider") or ""),
@@ -9548,7 +10075,7 @@ def _run_incremental_completed_multipass_resume(
             work_dir=work_dir,
             grounding_mode=grounding_mode,
             artifact_path=review_md_path,
-            step_outputs=[Path(item) for item in step_outputs],
+            step_outputs=[Path(item) for item in synth_step_outputs],
             repo_dir=repo_dir,
         )
         progress.flush()
@@ -10025,6 +10552,7 @@ def _resume_flow_impl(
                 ),
                 codex_meta=codex_meta,
                 quiet=quiet,
+                ui_enabled=ui_enabled,
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
             )
@@ -10154,7 +10682,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                plan_tool_report = _enforce_codex_chunkhound_tool_proof(
+                plan_tool_report = _enforce_chunkhound_tool_proof(
                     meta=progress.meta,
                     work_dir=work_dir,
                     provider=str(llm_resolved.get("provider") or ""),
@@ -10284,6 +10812,37 @@ def _resume_flow_impl(
                 )
         progress.flush()
 
+        resume_skip_choice = _resolve_resume_grounding_skip_choice(
+            meta=progress.meta,
+            step_entries=step_entries,
+            ui_enabled=ui_enabled,
+        )
+        prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+        if resume_skip_choice:
+            progress.meta.setdefault("multipass", {}).setdefault("resume", {})[
+                "grounding_skipped_override"
+            ] = {
+                "choice": resume_skip_choice,
+                "step_ids": sorted(prior_skipped_ids),
+            }
+            updated_entries: list[MultipassStepEntry] = []
+            for entry in step_entries:
+                should_run = entry.should_run
+                if entry.step_id in prior_skipped_ids:
+                    should_run = resume_skip_choice == "rerun"
+                updated_entries.append(
+                    MultipassStepEntry(
+                        index=entry.index,
+                        step_id=entry.step_id,
+                        step_title=entry.step_title,
+                        step_focus=entry.step_focus,
+                        output_path=entry.output_path,
+                        prompt=entry.prompt,
+                        should_run=should_run,
+                    )
+                )
+            step_entries = updated_entries
+
         step_outputs = [str(entry.output_path) for entry in step_entries]
         step_reran = any(entry.should_run for entry in step_entries)
         if step_reran:
@@ -10294,7 +10853,7 @@ def _resume_flow_impl(
                 stage_llm_meta=step_llm["meta"],
             )
             with phase("codex_steps", progress=progress, quiet=quiet):
-                success_resume_command = _execute_multipass_step_stage(
+                step_resume_command, _ = _execute_multipass_step_stage(
                     progress=progress,
                     work_dir=work_dir,
                     repo_dir=repo_dir,
@@ -10315,9 +10874,12 @@ def _resume_flow_impl(
                     templates=templates,
                     codex_meta=codex_meta,
                     quiet=quiet,
-                ) or success_resume_command
+                    ui_enabled=ui_enabled,
+                )
+                success_resume_command = step_resume_command or success_resume_command
         else:
             with progress.mutate():
+                skipped_ids = _grounding_skipped_step_ids(progress.meta)
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
                     "step_outputs"
                 ] = list(step_outputs)
@@ -10329,13 +10891,22 @@ def _resume_flow_impl(
                         "step_title": entry.step_title,
                         "step_focus": entry.step_focus,
                         "output_path": str(entry.output_path),
-                        "status": "reused",
-                        "reusable": True,
+                        "status": ("grounding_skipped" if entry.step_id in skipped_ids else "reused"),
+                        "reusable": bool(entry.step_id not in skipped_ids),
                     }
                     for entry in step_entries
                 ]
                 progress.meta.setdefault("multipass", {})["status"] = "steps_ready"
                 _update_multipass_step_progress(progress.meta)
+
+        synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
+            meta=progress.meta,
+            step_entries=step_entries,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            review_md_path=review_md_path,
+        )
 
         should_synth = (
             from_phase in {"synth", "plan", "steps"}
@@ -10348,7 +10919,7 @@ def _resume_flow_impl(
                 work_dir=work_dir,
                 grounding_mode=grounding_mode,
                 artifact_path=review_md_path,
-                step_outputs=[Path(item) for item in step_outputs],
+                step_outputs=[Path(item) for item in synth_step_outputs],
                 repo_dir=repo_dir,
             )
             progress.flush()
@@ -10364,7 +10935,7 @@ def _resume_flow_impl(
             with phase("codex_synth", progress=progress, quiet=quiet):
                 did_work = True
                 synth_template = load_builtin_prompt_text(templates["synth"])
-                step_paths_text = "\n".join(f"- `{p}`" for p in step_outputs)
+                step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                 synth_prompt = render_prompt(
                     synth_template,
                     base_ref_for_review=base_ref_for_review,
@@ -10383,6 +10954,7 @@ def _resume_flow_impl(
                         ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
+                        "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                     },
                 )
                 synth_run_entry = _ensure_multipass_run_entry(
@@ -10430,7 +11002,7 @@ def _resume_flow_impl(
                         else None
                     )
                     record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                _enforce_codex_chunkhound_tool_proof(
+                _enforce_chunkhound_tool_proof(
                     meta=progress.meta,
                     work_dir=work_dir,
                     provider=str(llm_resolved.get("provider") or ""),
@@ -10444,7 +11016,7 @@ def _resume_flow_impl(
                     work_dir=work_dir,
                     grounding_mode=grounding_mode,
                     artifact_path=review_md_path,
-                    step_outputs=[Path(item) for item in step_outputs],
+                    step_outputs=[Path(item) for item in synth_step_outputs],
                     repo_dir=repo_dir,
                 )
                 progress.flush()
@@ -10839,7 +11411,7 @@ def _followup_flow_impl(
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
         try:
-            _enforce_codex_chunkhound_tool_proof(
+            _enforce_chunkhound_tool_proof(
                 meta=meta,
                 work_dir=work_dir,
                 provider=str(llm_resolved.get("provider") or ""),
@@ -10866,7 +11438,6 @@ def _followup_flow_impl(
                 "provider": llm_resolved.get("provider"),
                 "model": llm_resolved.get("model"),
                 "reasoning_effort": llm_resolved.get("reasoning_effort"),
-                "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
             "helpers": _chunkhound_helper_refs(runtime_policy),
@@ -11391,7 +11962,6 @@ def _zip_flow_impl(
                 "provider": llm_resolved.get("provider"),
                 "model": llm_resolved.get("model"),
                 "reasoning_effort": llm_resolved.get("reasoning_effort"),
-                "plan_reasoning_effort": llm_resolved.get("plan_reasoning_effort"),
                 "capabilities": llm_resolved.get("capabilities"),
             },
         }
@@ -12344,7 +12914,7 @@ def build_interactive_resume_command(
             cli_preset=saved_preset_name,
             cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
             cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
-            cli_plan_effort=(str(saved_llm_meta.get("plan_reasoning_effort") or "").strip() or None),
+            cli_plan_effort=None,
             cli_verbosity=(str(saved_llm_meta.get("text_verbosity") or "").strip() or None),
             cli_max_output_tokens=(
                 int(saved_llm_meta.get("max_output_tokens"))
@@ -12360,6 +12930,13 @@ def build_interactive_resume_command(
     except ReviewflowError:
         llm_meta = dict(saved_llm_meta)
         llm_resolution_meta = dict(saved_resolution_meta)
+    resolved_saved = llm_resolution_meta.get("resolved") if isinstance(llm_resolution_meta.get("resolved"), dict) else None
+    if isinstance(resolved_saved, dict):
+        if str(saved_llm_meta.get("model") or "").strip():
+            resolved_saved["model_source"] = "session_reuse"
+        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
+            resolved_saved["reasoning_effort_source"] = "session_reuse"
+        llm_resolution_meta["resolved"] = resolved_saved
 
     saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
     runtime_policy = prepare_review_agent_runtime(
@@ -13756,7 +14333,7 @@ def _doctor_runtime_checks(
     checks.append(_doctor_gh_auth_check())
     return checks
 
-
+# Re-export the split module surface so `import cure as rf` remains the canonical API.
 from cure_sessions import (
     CleanupSession,
     HistoricalReviewSession,
@@ -13887,14 +14464,17 @@ from cure_flows import (
     restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
     validate_operator_chunkhound_seed_source,
-    validate_and_record_codex_chunkhound_tool_proof,
-    validate_codex_chunkhound_tool_proof,
+    validate_and_record_chunkhound_tool_proof,
+    validate_chunkhound_tool_proof,
 )
 from cure_llm import (
     CodexResumeInfo,
     CodexRunResult,
     LlmResumeInfo,
     LlmRunResult,
+    _extract_claude_text_from_message,
+    _extract_usage_from_payload,
+    _parse_claude_stream_payload,
     build_claude_exec_cmd,
     build_claude_resume_command,
     build_codex_exec_cmd,
@@ -14017,16 +14597,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     prp.add_argument(
         "--codex-effort",
         dest="codex_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     prp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     mpg = prp.add_mutually_exclusive_group()
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
@@ -14036,6 +14614,11 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--no-index",
         action="store_true",
         help="Advanced opt-out for custom prompt flows: skip ChunkHound indexing and built-in prompts (not recommended)",
+    )
+    prp.add_argument(
+        "--dry-run-chunkhound",
+        action="store_true",
+        help="Use deterministic staged-helper ChunkHound stub responses for `cure pr` without real ChunkHound calls",
     )
     prp.add_argument("--no-review", action="store_true", help="Skip running the built-in review agent")
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
@@ -14090,13 +14673,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(rp)
     add_agent_runtime_args(rp)
     rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    rp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    rp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     rp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     rp.add_argument("--no-index", action="store_true", help=argparse.SUPPRESS)
@@ -14111,13 +14693,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(fup)
     add_agent_runtime_args(fup)
     fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    fup.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    fup.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     fup.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
     fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
@@ -14129,13 +14710,12 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     add_llm_override_args(zp)
     add_agent_runtime_args(zp)
     zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    zp.add_argument("--codex-effort", dest="codex_effort", choices=CODEX_REASONING_EFFORT_CHOICES, default=None, help=codex_help)
+    zp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     zp.add_argument(
         "--codex-plan-effort",
         dest="codex_plan_effort",
-        choices=CODEX_REASONING_EFFORT_CHOICES,
         default=None,
-        help=codex_help,
+        help=argparse.SUPPRESS,
     )
     zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     zp.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")

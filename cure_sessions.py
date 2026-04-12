@@ -67,7 +67,7 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
             or DEFAULT_IMPLICIT_CODEX_PRESET
         )
         builtin_preset = (
-            {"reasoning_effort": "xhigh"} if resolved_preset_id == DEFAULT_IMPLICIT_CODEX_PRESET else {}
+            {"reasoning_effort": "high"} if resolved_preset_id == DEFAULT_IMPLICIT_CODEX_PRESET else {}
         )
         reviewflow_source_keys = {
             "model_source": ("model",),
@@ -103,8 +103,10 @@ def _saved_session_supports_resume(meta: dict[str, Any]) -> bool:
 
 
 def _multipass_has_invalid_artifacts(meta: dict[str, Any]) -> bool:
-    multipass = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
-    validation = multipass.get("validation") if isinstance(multipass.get("validation"), dict) else {}
+    raw_multipass = meta.get("multipass")
+    multipass: dict[str, Any] = raw_multipass if isinstance(raw_multipass, dict) else {}
+    raw_validation = multipass.get("validation")
+    validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
     mode = str(validation.get("mode") or multipass.get("grounding_mode") or "").strip().lower()
     if mode == "off":
         return False
@@ -445,9 +447,10 @@ def resolve_observation_target(
     for entry in sandbox_root.iterdir():
         if not entry.is_dir():
             continue
-        meta = _load_session_meta(entry / "meta.json")
-        if not meta or (not _meta_matches_pr(meta=meta, pr=pr)):
+        loaded_meta = _load_session_meta(entry / "meta.json")
+        if not loaded_meta or (not _meta_matches_pr(meta=loaded_meta, pr=pr)):
             continue
+        meta = loaded_meta
         status = str(meta.get("status") or "").strip().lower()
         item = (_observation_activity_dt(meta), entry, meta)
         if status == "running":
@@ -495,7 +498,8 @@ def resolve_observation_target(
 
 
 def _resolve_session_work_dir(*, session_dir: Path, meta: dict[str, Any]) -> Path:
-    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    raw_meta_paths = meta.get("paths")
+    meta_paths: dict[str, Any] = raw_meta_paths if isinstance(raw_meta_paths, dict) else {}
     raw = str((meta_paths or {}).get("work_dir") or "").strip()
     if raw:
         path = Path(raw)
@@ -504,13 +508,15 @@ def _resolve_session_work_dir(*, session_dir: Path, meta: dict[str, Any]) -> Pat
 
 
 def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_dir: Path) -> Path:
-    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    raw_meta_paths = meta.get("paths")
+    meta_paths: dict[str, Any] = raw_meta_paths if isinstance(raw_meta_paths, dict) else {}
     raw = str((meta_paths or {}).get("logs_dir") or "").strip()
     if raw:
         path = Path(raw)
         return ((session_dir / path).resolve() if not path.is_absolute() else path.resolve())
-    logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex"):
+    raw_logs = meta.get("logs")
+    logs: dict[str, Any] = raw_logs if isinstance(raw_logs, dict) else {}
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is not None:
             return candidate.parent
@@ -518,12 +524,18 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
 
 
 def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_dir: Path) -> dict[str, str]:
-    logs = meta.get("logs") if isinstance(meta.get("logs"), dict) else {}
+    raw_logs = meta.get("logs")
+    logs: dict[str, Any] = raw_logs if isinstance(raw_logs, dict) else {}
     payload: dict[str, str] = {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
-            suffix = "codex.events.jsonl" if key == "codex_events" else f"{key}.log"
+            if key == "codex_events":
+                suffix = "codex.events.jsonl"
+            elif key == "claude_events":
+                suffix = "claude.events.jsonl"
+            else:
+                suffix = f"{key}.log"
             fallback = logs_dir / suffix
             candidate = fallback if fallback.exists() else None
         if candidate is not None:
@@ -657,9 +669,12 @@ def _parse_codex_flag_assignment(raw: object, *, key: str) -> str | None:
 
 
 def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
-    codex = meta.get("codex") if isinstance(meta.get("codex"), dict) else {}
-    cfg = codex.get("config") if isinstance(codex.get("config"), dict) else {}
-    resolved = cfg.get("resolved") if isinstance(cfg.get("resolved"), dict) else {}
+    raw_codex = meta.get("codex")
+    codex: dict[str, Any] = raw_codex if isinstance(raw_codex, dict) else {}
+    raw_cfg = codex.get("config")
+    cfg: dict[str, Any] = raw_cfg if isinstance(raw_cfg, dict) else {}
+    raw_resolved = cfg.get("resolved")
+    resolved: dict[str, Any] = raw_resolved if isinstance(raw_resolved, dict) else {}
     model = str(resolved.get("model") or "").strip() or None
     effort = str(resolved.get("model_reasoning_effort") or "").strip() or None
     plan_effort = str(resolved.get("plan_mode_reasoning_effort") or "").strip() or None
@@ -678,14 +693,14 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
                 effort = _parse_codex_flag_assignment(assignment, key="model_reasoning_effort")
             if plan_effort is None:
                 plan_effort = _parse_codex_flag_assignment(assignment, key="plan_mode_reasoning_effort")
-    resume = codex.get("resume") if isinstance(codex.get("resume"), dict) else {}
+    raw_resume = codex.get("resume")
+    resume: dict[str, Any] = raw_resume if isinstance(raw_resume, dict) else {}
     return {
         "preset": DEFAULT_IMPLICIT_CODEX_PRESET,
         "transport": "cli",
         "provider": "codex",
         "model": model,
         "reasoning_effort": effort,
-        "plan_reasoning_effort": plan_effort,
         "resume": resume,
         "capabilities": {"supports_resume": bool(resume.get("command"))},
     }
@@ -731,9 +746,10 @@ def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
         normalized_config = _normalize_llm_config_meta(out.get("config"))
         if normalized_config is not None:
             out["config"] = normalized_config
+        raw_capabilities = out.get("capabilities")
         out["capabilities"] = (
-            dict(out.get("capabilities"))
-            if isinstance(out.get("capabilities"), dict)
+            dict(raw_capabilities)
+            if isinstance(raw_capabilities, dict)
             else {"supports_resume": False}
         )
         runtime_identity = _runtime_llm_identity_from_adapter(out.get("adapter"))
@@ -754,14 +770,12 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
     model = str(llm.get("model") or "").strip() or None
     effort = str(llm.get("reasoning_effort") or "").strip() or None
-    plan_effort = str(llm.get("plan_reasoning_effort") or "").strip() or None
-    thinking = effort or plan_effort
-    if model and thinking:
-        return f"llm={preset}/{model}/{thinking}"
+    if model and effort:
+        return f"llm={preset}/{model}/{effort}"
     if model:
         return f"llm={preset}/{model}/?"
-    if thinking:
-        return f"llm={preset}/?/{thinking}"
+    if effort:
+        return f"llm={preset}/?/{effort}"
     return f"llm={preset}/?"
 
 
@@ -898,7 +912,8 @@ def _resolve_session_review_head_sha(*, meta: dict[str, Any]) -> str | None:
 def _resolve_latest_session_artifact_path(*, session_dir: Path, meta: dict[str, Any], review_md_path: Path) -> Path:
     latest_path = review_md_path
     latest_dt = _parse_iso_dt(str(meta.get("completed_at") or "").strip())
-    followups = meta.get("followups") if isinstance(meta.get("followups"), list) else []
+    raw_followups = meta.get("followups")
+    followups = raw_followups if isinstance(raw_followups, list) else []
     for followup in followups:
         if not isinstance(followup, dict):
             continue
@@ -1187,7 +1202,8 @@ def select_zip_sources_for_pr_head(*, sandbox_root: Path, pr: PullRequestRef, he
                     target_head_sha=review_head_sha,
                 )
 
-        followups = meta.get("followups") if isinstance(meta.get("followups"), list) else []
+        raw_followups = meta.get("followups")
+        followups = raw_followups if isinstance(raw_followups, list) else []
         for followup in followups:
             if not isinstance(followup, dict):
                 continue
@@ -1243,7 +1259,8 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
     if llm_payload is not None:
         llm_payload["summary"] = resolve_codex_summary(meta)
 
-    agent_runtime = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else None
+    raw_agent_runtime = meta.get("agent_runtime")
+    agent_runtime = raw_agent_runtime if isinstance(raw_agent_runtime, dict) else None
     agent_runtime_payload = dict(agent_runtime) if agent_runtime else None
     if agent_runtime_payload is not None:
         profile = str(agent_runtime_payload.get("profile") or "").strip()
@@ -1252,12 +1269,10 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
             agent_runtime_payload["summary"] = "/".join(part for part in (profile, provider) if part)
 
     chunkhound_payload = None
-    chunkhound_meta = meta.get("chunkhound") if isinstance(meta.get("chunkhound"), dict) else {}
-    last_index = (
-        dict(chunkhound_meta.get("last_index"))
-        if isinstance(chunkhound_meta.get("last_index"), dict)
-        else None
-    )
+    raw_chunkhound_meta = meta.get("chunkhound")
+    chunkhound_meta: dict[str, Any] = raw_chunkhound_meta if isinstance(raw_chunkhound_meta, dict) else {}
+    raw_last_index = chunkhound_meta.get("last_index")
+    last_index = dict(raw_last_index) if isinstance(raw_last_index, dict) else None
     if last_index is not None:
         chunkhound_payload = {"last_index": last_index}
     elif isinstance(logs.get("chunkhound"), str):
@@ -1269,14 +1284,16 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
             parsed = None
         if parsed is not None:
             chunkhound_payload = {"last_index": parsed}
-    access = chunkhound_meta.get("access") if isinstance(chunkhound_meta.get("access"), dict) else None
+    raw_access = chunkhound_meta.get("access")
+    access = raw_access if isinstance(raw_access, dict) else None
     if access is not None:
         if chunkhound_payload is None:
             chunkhound_payload = {}
         chunkhound_payload["access"] = dict(access)
 
-    multipass_payload = None
-    multipass_meta = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+    multipass_payload: dict[str, Any] | None = None
+    raw_multipass_meta = meta.get("multipass")
+    multipass_meta: dict[str, Any] = raw_multipass_meta if isinstance(raw_multipass_meta, dict) else {}
     if multipass_meta:
         multipass_payload = {
             "enabled": bool(multipass_meta.get("enabled") is True),
@@ -1301,8 +1318,9 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
             step_outputs = artifacts.get("step_outputs")
             if isinstance(step_outputs, list):
                 multipass_payload["step_outputs"] = [str(item) for item in step_outputs]
-        if isinstance(multipass_meta.get("validation"), dict):
-            multipass_payload["validation"] = dict(multipass_meta.get("validation"))
+        raw_validation = multipass_meta.get("validation")
+        if isinstance(raw_validation, dict):
+            multipass_payload["validation"] = dict(raw_validation)
 
     host = _normalize_pr_identity_value(meta.get("host")) or "github.com"
     owner = _normalize_pr_identity_value(meta.get("owner"))
@@ -1333,8 +1351,9 @@ def build_status_payload(target: str, *, sandbox_root: Path, command_name: str =
         },
         "logs": logs,
     }
-    if isinstance(meta.get("live_progress"), dict):
-        payload["live_progress"] = dict(meta.get("live_progress"))
+    raw_live_progress = meta.get("live_progress")
+    if isinstance(raw_live_progress, dict):
+        payload["live_progress"] = dict(raw_live_progress)
     if latest_artifact is not None:
         payload["latest_artifact"] = latest_artifact
     if llm_payload is not None:

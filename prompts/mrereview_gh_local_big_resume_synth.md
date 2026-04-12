@@ -13,6 +13,8 @@ This is the final synthesis step for an incremental resume.
 - Resume plan JSON path: `$RESUME_PLAN_JSON_PATH`
 - Step output files (read the listed files that exist):
 $STEP_OUTPUT_PATHS
+- Grounding-skipped step outputs excluded from synth:
+$GROUNDING_SKIPPED_STEPS
 
 Read the previous review artifact, the resume plan JSON, and the listed step outputs before deciding.
 
@@ -55,6 +57,7 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
   - repo or test files under the sandbox checkout, e.g. `src/module.py:12` or `tests/test_module.py:44`
   - stable CURe session artifacts under `work/`, e.g. `work/pr-context.md:7`
 - `review.step-XX.md:line` may be included as extra traceability, but it does not count as the required primary evidence by itself.
+- Do not use any excluded grounding-skipped step artifact, even if that file still exists in the session directory.
 
 # Output Format
 Output ONLY the final review:
