@@ -944,16 +944,13 @@ def run_chunkhound_setup_wizard(
             install_choice = str(install_raw or "").strip().lower()
             run_install = install_choice not in {"n", "no"}
             if run_install:
-                if explicit_source:
-                    install_source = str(getattr(install_args, "chunkhound_source")).strip()
-                else:
-                    source_raw = _read_wizard_line(
-                        prompt="Install source [release/git-main] (default: release): ",
-                        stdin=in_stream,
-                        stderr=err_stream,
-                    )
-                    source_text = str(source_raw or "").strip().lower()
-                    install_source = "git-main" if source_text == "git-main" else "release"
+                source_raw = _read_wizard_line(
+                    prompt="Install source [release/git-main] (default: release): ",
+                    stdin=in_stream,
+                    stderr=err_stream,
+                )
+                source_text = str(source_raw or "").strip().lower()
+                install_source = "git-main" if source_text == "git-main" else "release"
 
         for line in _wizard_summary_lines(
             selected_path=selected_path,

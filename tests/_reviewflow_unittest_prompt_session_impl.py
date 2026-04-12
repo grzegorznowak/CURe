@@ -4323,7 +4323,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("interactive", rendered)
 
     def test_reviewflow_reexports_active_extracted_module_surfaces(self) -> None:
-        self.assertIs(rf.init_flow, cure_commands.init_flow)
+        self.assertIs(rf.setup_flow, cure_commands.setup_flow)
         self.assertIs(rf.render_prompt, cure_flows.render_prompt)
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
