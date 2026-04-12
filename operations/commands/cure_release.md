@@ -95,7 +95,7 @@ Do not edit `pyproject.toml` or `CHANGELOG.md` until this checkpoint is approved
 
 Run these commands before any tag push:
 
-- `python -m unittest tests/test_release_workflow_unittest.py`
+- `python -m unittest discover -s tests -p 'test_release_workflow_unittest.py'`
 - `python -m unittest discover -s tests -p 'test_*.py'`
 - `ruff check tests/test_release_workflow_unittest.py`
 - touched-file lint only if the release itself required a code or test fix
@@ -112,7 +112,7 @@ Then run the isolated wheel smoke:
 5. Run `cure setup`.
 6. Run `cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json`.
 
-Write the local prove-out result to `public_release_evidence/YYYY-MM-DD-vX.Y.Z-local-artifact-smoke.md` using the schema from [public_release_evidence/README.md](../../public_release_evidence/README.md).
+Write the local prove-out result to `public_release_evidence/YYYY-MM-DD-vX.Y.Z-local-artifact-smoke.md` using the schema from [public_release_evidence/README.md](../../public_release_evidence/README.md), including the changelog entry that shipped with the release.
 
 ### 7. Explicit Checkpoint Before Commit, Tag, And Push
 

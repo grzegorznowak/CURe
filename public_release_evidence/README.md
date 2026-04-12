@@ -10,6 +10,7 @@ Required fields:
 - Version / tag
 - Target
 - Commands run
+- Changelog entry shipped
 - Verified public command surface
 - What worked
 - Blockers / risks
