@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.3.5] - 2026-04-13
+
+### Fixed
+
+- `cure pr` with the Codex provider no longer aborts the review-intelligence gate with "missing successful code_research" on non-trivial repos. The staged `cure-chunkhound` helper now emits its first `tools/call waiting` heartbeat immediately (rather than after 10s) and repeats every 5s, so codex-cli sees a visibly live output stream during the 2–5 min LLM synthesis step of `research` and no longer surfaces the call to the model as a hang. The prompt templates used by `cure pr` also now explicitly tell the model that `research` legitimately takes 2–5 minutes per call on large repos, that the heartbeat lines are normal progress rather than a hang, and that it must issue one `research` invocation at a time and wait for its final JSON object before issuing another.
+
 ## [0.3.4] - 2026-04-12
 
 ### Changed
