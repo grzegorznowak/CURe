@@ -449,7 +449,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                     )
                     helper_text = (
                         helper_path.read_text(encoding="utf-8")
-                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 10.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
+                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
                         .replace('"code_research": 1200.0', '"code_research": 0.6')
                     )
                     helper_path.write_text(helper_text, encoding="utf-8")
@@ -603,7 +603,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
             helper_text = (
                 helper_path.read_text(encoding="utf-8")
-                .replace("_HEARTBEAT_INTERVAL_SECONDS = 10.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
+                .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
                 .replace('"code_research": 1200.0', '"code_research": 5.0')
             )
             helper_path.write_text(helper_text, encoding="utf-8")
@@ -721,7 +721,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_cwd=helper_cwd,
             )
             helper_text = helper_path.read_text(encoding="utf-8").replace(
-                "_HEARTBEAT_INTERVAL_SECONDS = 10.0",
+                "_HEARTBEAT_INTERVAL_SECONDS = 5.0",
                 "_HEARTBEAT_INTERVAL_SECONDS = 0.2",
             )
             helper_path.write_text(helper_text, encoding="utf-8")
@@ -822,7 +822,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_cwd=helper_cwd,
             )
             helper_text = helper_path.read_text(encoding="utf-8").replace(
-                "_HEARTBEAT_INTERVAL_SECONDS = 10.0",
+                "_HEARTBEAT_INTERVAL_SECONDS = 5.0",
                 "_HEARTBEAT_INTERVAL_SECONDS = 0.01",
             )
             helper_path.write_text(helper_text, encoding="utf-8")
@@ -1021,7 +1021,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         )
                     helper_text = (
                         helper_path.read_text(encoding="utf-8")
-                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 10.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
+                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
                         .replace(
                             heartbeat_fragment,
                             '                            (_ for _ in ()).throw(BrokenPipeError("heartbeat pipe closed"))',

@@ -1731,7 +1731,7 @@ CHUNKHOUND_DB = Path({json.dumps(str(helper_db))})
 HELPER_PATH = Path(__file__).resolve()
 CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
 _STDERR_TAIL_MAX = 16000
-_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_HEARTBEAT_INTERVAL_SECONDS = 5.0
 _REVIEW_PROVIDER = {json.dumps(provider)}
 _PREFLIGHT_STAGE_TIMEOUTS = {{
     "spawn": 3.0,
@@ -2191,7 +2191,11 @@ class JsonRpcSession:
         deadline: float,
         heartbeat_enabled: bool = False,
     ) -> dict[str, Any]:
-        last_heartbeat_at = time.monotonic()
+        # Seed last_heartbeat_at so the first heartbeat fires on the first loop
+        # iteration rather than after _HEARTBEAT_INTERVAL_SECONDS — this makes
+        # the output stream visibly live from t=0, which codex-cli's shell tool
+        # relies on to avoid surfacing the call as a hang to the model.
+        last_heartbeat_at = time.monotonic() - _HEARTBEAT_INTERVAL_SECONDS
         while True:
             message = self._try_extract_message()
             if message is not None:
