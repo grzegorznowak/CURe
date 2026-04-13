@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.3.6] - 2026-04-13
+
+### Fixed
+
+- `cure pr` no longer executes the reviewed repo's test suite on its own initiative. All review prompt templates now forbid running `pytest`, `npm test`, `go test`, `cargo test`, build scripts, linters, or formatters, and instruct the model to review test coverage and quality statically and to rely on `gh pr checks $PR_URL` (plus `gh run view`) for pass/fail status. This keeps `cure pr` focused on review intelligence instead of duplicating CI work and burning the `codex_plan` turn budget on flaky local runs.
+
 ## [0.3.5] - 2026-04-13
 
 ### Fixed
