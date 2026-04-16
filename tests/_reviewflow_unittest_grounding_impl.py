@@ -7791,6 +7791,177 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_and_record_chunkhound_tool_proof_accepts_persisted_output_recovery(self) -> None:
+        """End-to-end: proof recovered from a <persisted-output> wrapper file survives
+        validate_and_record and records observed_successful_calls == ["search", "code_research"]."""
+        import tempfile
+
+        root = ROOT / ".tmp_test_persisted_output_proof_recovery_report"
+
+        class _StubProgress:
+            def __init__(self) -> None:
+                self.meta: dict[str, object] = {}
+
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
+            progress = _StubProgress()
+            state: dict[str, Any] = {"content": ""}
+            helper_path = "<CURE_CHUNKHOUND_HELPER>"
+
+            # --- Phase 1: inline search proof (same as the background-task test) ---
+            search_fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
+            search_fixture_text = search_fixture_path.read_text(encoding="utf-8")
+            search_tool_use_id = ""
+            for raw in search_fixture_text.splitlines():
+                payload = json.loads(raw)
+                if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
+                    continue
+                message = payload.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+                        continue
+                    search_tool_use_id = str(block.get("tool_use_id") or "").strip()
+                    if search_tool_use_id:
+                        break
+                if search_tool_use_id:
+                    break
+            self.assertTrue(search_tool_use_id)
+            state["bash_tool_commands_by_id"] = {search_tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'}
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(progress=progress, state=state, chunk=search_fixture_text)
+
+            # --- Phase 2: research proof via <persisted-output> wrapper ---
+            research_proof_json = json.dumps(
+                {
+                    "ok": True,
+                    "command": "research",
+                    "tool_name": "code_research",
+                    "query": "how does X work",
+                    "helper_path": helper_path,
+                    "result": {"summary": "grounded answer"},
+                    "execution_stage": "tools/call",
+                    "execution_stage_status": "ok",
+                }
+            )
+            full_output = "\n".join(
+                [
+                    "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                    research_proof_json,
+                    "Some additional research text " * 50,
+                ]
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8", dir=str(root)
+            ) as f:
+                f.write(full_output)
+                persisted_path = f.name
+
+            wrapper_text = (
+                "<persisted-output>\n"
+                f"Output too large (33.2KB). Full output saved to: {persisted_path}\n"
+                "\n"
+                "Preview (first 2KB):\n"
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+                "</persisted-output>"
+            )
+            research_tool_use_id = "toolu_research_po"
+            state["bash_tool_commands_by_id"][research_tool_use_id] = (
+                '"$CURE_CHUNKHOUND_HELPER" research "how does X work"'
+            )
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": research_tool_use_id,
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": '{"command":"\\"$CURE_CHUNKHOUND_HELPER\\" research \\"how does X work\\"","description":"Run research"}',
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "tool_result",
+                                            "tool_use_id": research_tool_use_id,
+                                            "content": wrapper_text,
+                                            "is_error": False,
+                                        }
+                                    ],
+                                },
+                                "tool_use_result": {
+                                    "stdout": wrapper_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+            # --- Phase 3: validate and record ---
+            entries = state.get("chunkhound_tool_proof_entries", [])
+            self.assertEqual(len(entries), 2)
+
+            report = rf.validate_and_record_chunkhound_tool_proof(
+                meta=meta,
+                work_dir=work_dir,
+                provider="claude",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta={
+                    "provider": "claude",
+                    "chunkhound_helper_path": helper_path,
+                    "chunkhound_tool_proof_entries": list(entries),
+                },
+            )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["provider"], "claude")
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertTrue(persisted["valid"])
+            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_plan")
+            self.assertEqual(persisted["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_rejects_forged_claude_stdout_without_helper_command(self) -> None:
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
         report = rf.validate_chunkhound_tool_proof(

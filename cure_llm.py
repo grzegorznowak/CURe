@@ -495,6 +495,24 @@ def _parse_chunkhound_helper_output_texts(payload_text: object) -> list[dict[str
     return []
 
 
+_PERSISTED_OUTPUT_PATH_RE = re.compile(r"Full output saved to:\s*(.+)")
+
+
+def _extract_persisted_output_path(text: object) -> str | None:
+    """Extract the file path from a Claude Code ``<persisted-output>`` wrapper.
+
+    Returns the path string if the wrapper is present and contains a
+    ``Full output saved to: <path>`` line, otherwise ``None``.
+    """
+    raw = str(text or "").strip()
+    if "<persisted-output>" not in raw:
+        return None
+    m = _PERSISTED_OUTPUT_PATH_RE.search(raw)
+    if m:
+        path = m.group(1).strip()
+        return path if path else None
+    return None
+
 
 def _extract_claude_tool_result_text(block: dict[str, Any]) -> str:
     content = block.get("content")
@@ -569,6 +587,8 @@ def _append_claude_chunkhound_tool_proof_from_output_file(
         output_text = Path(output_path_text).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    if not _parse_chunkhound_helper_output_texts(output_text):
+        return False
     seen_files.add(key)
     _append_claude_chunkhound_tool_proof(
         state=state,
@@ -640,17 +660,33 @@ def _handle_claude_stream_chunk(*, progress: Any, state: dict[str, Any], chunk: 
             tool_result = payload.get("tool_use_result")
             top_level_stdout = tool_result.get("stdout") if isinstance(tool_result, dict) else None
             top_level_helper_payloads = _parse_chunkhound_helper_output_texts(top_level_stdout)
+            if not top_level_helper_payloads:
+                persisted_path = _extract_persisted_output_path(top_level_stdout)
+                if persisted_path:
+                    try:
+                        persisted_text = Path(persisted_path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        persisted_text = ""
+                    top_level_helper_payloads = _parse_chunkhound_helper_output_texts(persisted_text)
             documented_helper_payloads_seen = False
             for tool_result_block in _extract_claude_message_blocks(payload, block_type="tool_result"):
                 result_text = _extract_claude_tool_result_text(tool_result_block)
-                if not _parse_chunkhound_helper_output_texts(result_text):
+                block_tool_use_id = str(tool_result_block.get("tool_use_id") or "").strip() or None
+                if _parse_chunkhound_helper_output_texts(result_text):
+                    documented_helper_payloads_seen = True
+                    _append_claude_chunkhound_tool_proof(
+                        state=state,
+                        stdout_text=result_text,
+                        tool_use_id=block_tool_use_id,
+                    )
                     continue
-                documented_helper_payloads_seen = True
-                _append_claude_chunkhound_tool_proof(
+                persisted_path = _extract_persisted_output_path(result_text)
+                if persisted_path and _append_claude_chunkhound_tool_proof_from_output_file(
                     state=state,
-                    stdout_text=result_text,
-                    tool_use_id=str(tool_result_block.get("tool_use_id") or "").strip() or None,
-                )
+                    output_file=persisted_path,
+                    tool_use_id=block_tool_use_id,
+                ):
+                    documented_helper_payloads_seen = True
             if top_level_helper_payloads and not documented_helper_payloads_seen:
                 raise ReviewflowError(
                     "Claude tool_result contract mismatch: helper payload was present in tool_use_result stdout "

@@ -2901,6 +2901,475 @@ class ClaudeLiveProgressTests(unittest.TestCase):
         live = progress.meta["live_progress"]
         self.assertEqual(live["current"]["text"], "Final review text")
 
+    def test_extract_persisted_output_path_returns_path_from_wrapper(self) -> None:
+        wrapper = (
+            "<persisted-output>\n"
+            "Output too large (33.2KB). Full output saved to: /tmp/tool-results/brnhen0u7.txt\n"
+            "\n"
+            "Preview (first 2KB):\n"
+            "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+            "</persisted-output>"
+        )
+        self.assertEqual(cure_llm._extract_persisted_output_path(wrapper), "/tmp/tool-results/brnhen0u7.txt")
+
+    def test_extract_persisted_output_path_returns_none_for_plain_text(self) -> None:
+        self.assertIsNone(cure_llm._extract_persisted_output_path("just some regular output"))
+
+    def test_extract_persisted_output_path_returns_none_for_empty(self) -> None:
+        self.assertIsNone(cure_llm._extract_persisted_output_path(""))
+        self.assertIsNone(cure_llm._extract_persisted_output_path(None))
+
+    def test_extract_persisted_output_path_returns_none_when_no_saved_to_line(self) -> None:
+        wrapper = "<persisted-output>\nSome content but no path line\n</persisted-output>"
+        self.assertIsNone(cure_llm._extract_persisted_output_path(wrapper))
+
+    def test_handle_claude_stream_chunk_recovers_proof_from_persisted_output_file(self) -> None:
+        import tempfile
+
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        proof_json = json.dumps(
+            {
+                "ok": True,
+                "command": "research",
+                "tool_name": "code_research",
+                "query": "how does X work",
+                "helper_path": helper_path,
+                "result": {"summary": "grounded answer"},
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+        )
+        full_output = "\n".join(
+            [
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                "cure-chunkhound: tools/call waiting (20.0s elapsed)",
+                proof_json,
+                "Some additional research text " * 100,
+            ]
+        )
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(full_output)
+            persisted_path = f.name
+
+        try:
+            wrapper_text = (
+                "<persisted-output>\n"
+                f"Output too large (33.2KB). Full output saved to: {persisted_path}\n"
+                "\n"
+                "Preview (first 2KB):\n"
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+                "cure-chunkhound: tools/call waiting (20.0s elapsed)\n"
+                "</persisted-output>"
+            )
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": "toolu_po1",
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": '{"command":"\\"$CURE_CHUNKHOUND_HELPER\\" research \\"how does X work\\"","description":"Run research"}',
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "tool_result",
+                                            "tool_use_id": "toolu_po1",
+                                            "content": wrapper_text,
+                                            "is_error": False,
+                                        }
+                                    ],
+                                },
+                                "tool_use_result": {
+                                    "stdout": wrapper_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+            entries = state.get("chunkhound_tool_proof_entries", [])
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["payload"]["tool_name"], "code_research")
+            self.assertEqual(entries[0]["tool_use_id"], "toolu_po1")
+        finally:
+            import os
+
+            os.unlink(persisted_path)
+
+    def test_handle_claude_stream_chunk_persisted_output_missing_file_no_crash(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        wrapper_text = (
+            "<persisted-output>\n"
+            "Output too large (33.2KB). Full output saved to: /tmp/nonexistent_file_abc123.txt\n"
+            "\n"
+            "Preview (first 2KB):\n"
+            "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+            "</persisted-output>"
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        cure_llm._handle_claude_stream_chunk(
+            progress=progress,
+            state=state,
+            chunk="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": "toolu_po2",
+                                    "name": "Bash",
+                                    "input": {},
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": '{"command":"\\"$CURE_CHUNKHOUND_HELPER\\" research query","description":"Run research"}',
+                                },
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_po2",
+                                        "content": wrapper_text,
+                                        "is_error": False,
+                                    }
+                                ],
+                            },
+                            "tool_use_result": {
+                                "stdout": wrapper_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                ]
+            ),
+        )
+
+        self.assertNotIn("chunkhound_tool_proof_entries", state)
+
+    def test_handle_claude_stream_chunk_persisted_output_file_no_proof_no_entry(self) -> None:
+        import tempfile
+
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        heartbeat_only = "\n".join(
+            [
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)",
+                "cure-chunkhound: tools/call waiting (20.0s elapsed)",
+                "Some text but no JSON proof payload here",
+            ]
+        )
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(heartbeat_only)
+            persisted_path = f.name
+
+        try:
+            wrapper_text = (
+                "<persisted-output>\n"
+                f"Output too large (5.0KB). Full output saved to: {persisted_path}\n"
+                "\n"
+                "Preview (first 2KB):\n"
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+                "</persisted-output>"
+            )
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_start",
+                                    "index": 1,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": "toolu_po3",
+                                        "name": "Bash",
+                                        "input": {},
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "stream_event",
+                                "event": {
+                                    "type": "content_block_delta",
+                                    "index": 1,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": '{"command":"\\"$CURE_CHUNKHOUND_HELPER\\" research query","description":"Run research"}',
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "tool_result",
+                                            "tool_use_id": "toolu_po3",
+                                            "content": wrapper_text,
+                                            "is_error": False,
+                                        }
+                                    ],
+                                },
+                                "tool_use_result": {
+                                    "stdout": wrapper_text,
+                                    "stderr": "",
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            )
+
+            self.assertNotIn("chunkhound_tool_proof_entries", state)
+        finally:
+            import os
+
+            os.unlink(persisted_path)
+
+    def test_handle_claude_stream_chunk_persisted_output_top_level_stdout_fallback_triggers_mismatch(self) -> None:
+        """When only tool_use_result.stdout carries a <persisted-output> wrapper with
+        proof in the referenced file, but there is no documented message.content
+        tool_result block, the top-level fallback must detect the proof and fire the
+        mismatch guard.  Without the top-level fallback, this scenario would silently
+        pass with no proof detected at all."""
+        import tempfile
+
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        proof_json = json.dumps(
+            {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+        )
+        full_output = proof_json + "\n"
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(full_output)
+            persisted_path = f.name
+
+        try:
+            wrapper_text = (
+                "<persisted-output>\n"
+                f"Output too large (10.0KB). Full output saved to: {persisted_path}\n"
+                "\n"
+                "Preview (first 2KB):\n"
+                "cure-chunkhound: tools/call waiting\n"
+                "</persisted-output>"
+            )
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            state["bash_tool_commands_by_id"] = {"toolu_po4": '"$CURE_CHUNKHOUND_HELPER" search needle'}
+            # Only tool_use_result.stdout has the wrapper; message.content has no
+            # tool_result blocks.  The top-level fallback should read the persisted
+            # file and find proof, then the mismatch guard fires because no
+            # documented per-block tool_result was seen.
+            with self.assertRaisesRegex(rf.ReviewflowError, "tool_result contract mismatch"):
+                cure_llm._handle_claude_stream_chunk(
+                    progress=progress,
+                    state=state,
+                    chunk=json.dumps(
+                        {
+                            "type": "user",
+                            "tool_use_result": {
+                                "stdout": wrapper_text,
+                                "stderr": "",
+                            },
+                        }
+                    ),
+                )
+        finally:
+            import os
+
+            os.unlink(persisted_path)
+
+    def test_handle_claude_stream_chunk_persisted_output_top_level_stdout_no_proof_no_mismatch(self) -> None:
+        """When tool_use_result.stdout carries a <persisted-output> wrapper but the
+        referenced file contains NO proof, top_level_helper_payloads stays empty and
+        the mismatch guard does not fire — verifying the top-level fallback correctly
+        handles a persisted file without helper payloads."""
+        import tempfile
+
+        progress = self._StubProgress()
+        state = {"content": ""}
+
+        heartbeat_only = "cure-chunkhound: tools/call waiting (10.0s elapsed)\nSome other text\n"
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(heartbeat_only)
+            persisted_path = f.name
+
+        try:
+            wrapper_text = (
+                "<persisted-output>\n"
+                f"Output too large (5.0KB). Full output saved to: {persisted_path}\n"
+                "\n"
+                "Preview (first 2KB):\n"
+                "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
+                "</persisted-output>"
+            )
+
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            # Should NOT raise — no proof in the file means top_level_helper_payloads
+            # is empty, so the mismatch guard is not triggered.
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk=json.dumps(
+                    {
+                        "type": "user",
+                        "tool_use_result": {
+                            "stdout": wrapper_text,
+                            "stderr": "",
+                        },
+                    }
+                ),
+            )
+
+            self.assertNotIn("chunkhound_tool_proof_entries", state)
+        finally:
+            import os
+
+            os.unlink(persisted_path)
+
+    def test_append_claude_chunkhound_tool_proof_from_output_file_allows_retry_after_no_proof_read(self) -> None:
+        """When a file is read but contains no helper proof, the (path, tool_use_id)
+        key must NOT be added to seen_files — so a later retry with the same key
+        (e.g. after the file has been fully written) can still succeed."""
+        import tempfile
+
+        state: dict[str, Any] = {
+            "content": "",
+            "bash_tool_commands_by_id": {"toolu_retry": '"$CURE_CHUNKHOUND_HELPER" research query'},
+        }
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            # First write: only heartbeats, no proof
+            f.write("cure-chunkhound: tools/call waiting (10.0s elapsed)\n")
+            persisted_path = f.name
+
+        try:
+            # First attempt: file has no proof — should return False and not suppress retries
+            result1 = cure_llm._append_claude_chunkhound_tool_proof_from_output_file(
+                state=state,
+                output_file=persisted_path,
+                tool_use_id="toolu_retry",
+            )
+            self.assertFalse(result1)
+            self.assertNotIn("chunkhound_tool_proof_entries", state)
+
+            # Now overwrite the file with valid proof (simulating file fully written)
+            proof_json = json.dumps(
+                {
+                    "ok": True,
+                    "command": "research",
+                    "tool_name": "code_research",
+                    "query": "query",
+                    "helper_path": helper_path,
+                    "result": {"summary": "answer"},
+                    "execution_stage": "tools/call",
+                    "execution_stage_status": "ok",
+                }
+            )
+            Path(persisted_path).write_text(proof_json + "\n", encoding="utf-8")
+
+            # Second attempt: same (path, tool_use_id) — should succeed now
+            result2 = cure_llm._append_claude_chunkhound_tool_proof_from_output_file(
+                state=state,
+                output_file=persisted_path,
+                tool_use_id="toolu_retry",
+            )
+            self.assertTrue(result2)
+            entries = state.get("chunkhound_tool_proof_entries", [])
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["payload"]["tool_name"], "code_research")
+        finally:
+            import os
+
+            os.unlink(persisted_path)
+
     def test_build_claude_resume_command_includes_chunkhound_helper_env(self) -> None:
         command = cure_llm.build_claude_resume_command(
             repo_dir=Path("/tmp/repo"),
