@@ -8,6 +8,16 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.3.7] - 2026-04-16
+
+### Fixed
+
+- The hot-start ChunkHound base-cache prompt no longer hangs silently when stdin is not a TTY. The operator prompt now uses `/dev/tty` consistently with the model/effort picker.
+
+### Added
+
+- `ARCHITECTURE.md` documenting the high-level structure and module responsibilities of the CURe codebase.
+
 ## [0.3.6] - 2026-04-13
 
 ### Fixed
