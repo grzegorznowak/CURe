@@ -1861,6 +1861,28 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
         self.assertIsNone(selected)
 
+    def test_prompt_operator_chunkhound_base_cache_hot_start_pauses_and_resumes_dashboard(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        reader = StringIO("new\n")
+        writer = StringIO()
+        reader.close = lambda: None  # type: ignore[assignment]
+        writer.close = lambda: None  # type: ignore[assignment]
+
+        dashboard = mock.MagicMock()
+        output = mock.MagicMock()
+        output.dashboard = dashboard
+
+        with mock.patch.object(rf, "_open_prompt_tty", return_value=(reader, writer)), \
+             mock.patch.object(rf, "active_output", return_value=output):
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+            )
+
+        self.assertIsNone(selected)
+        dashboard.pause.assert_called_once()
+        dashboard.resume.assert_called_once()
+
     def test_cache_prime_records_hot_start_metadata_and_copies_seed_db(self) -> None:
         root = ROOT / ".tmp_test_cache_prime_hot_start"
         try:

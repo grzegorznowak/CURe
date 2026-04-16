@@ -7204,6 +7204,10 @@ def prompt_operator_chunkhound_base_cache_hot_start(
     if tty_streams is None:
         return None
     reader, writer = tty_streams
+    output = active_output()
+    dashboard = output.dashboard if output is not None else None
+    if dashboard is not None:
+        dashboard.pause()
 
     intro = (
         f"\nNo usable CURe base cache exists for {pr.owner}/{pr.repo}. "
@@ -7274,6 +7278,8 @@ def prompt_operator_chunkhound_base_cache_hot_start(
             writer.close()
         except Exception:
             pass
+        if dashboard is not None:
+            dashboard.resume()
 
 
 def cache_prime(
