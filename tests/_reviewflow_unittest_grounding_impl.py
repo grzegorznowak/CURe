@@ -1726,8 +1726,10 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
     def test_prompt_operator_chunkhound_base_cache_hot_start_retries_until_valid(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
-        stdin = self._FakeTty("/tmp/bad-workspace\n/tmp/bad-workspace/chunkhound.json\n/tmp/good-workspace\n/tmp/good-workspace/chunkhound.json\n")
-        stderr = self._FakeTty()
+        reader = StringIO("/tmp/bad-workspace\n/tmp/bad-workspace/chunkhound.json\n/tmp/good-workspace\n/tmp/good-workspace/chunkhound.json\n")
+        writer = StringIO()
+        reader.close = lambda: None  # type: ignore[assignment]
+        writer.close = lambda: None  # type: ignore[assignment]
         results = iter(
             [
                 {
@@ -1749,29 +1751,37 @@ class EnsureBaseCacheTests(unittest.TestCase):
 
         with mock.patch.object(
             rf,
+            "_open_prompt_tty",
+            return_value=(reader, writer),
+        ), mock.patch.object(
+            rf,
             "validate_operator_chunkhound_seed_source",
             side_effect=lambda **kwargs: next(results),
         ) as validate_seed:
             selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
                 pr=pr,
                 resolved_runtime_config={"indexing": {"exclude": []}},
-                stdin=stdin,
-                stderr=stderr,
             )
 
         self.assertEqual(validate_seed.call_count, 2)
         self.assertEqual(selected["db_path"], "/tmp/good-workspace/.chunkhound")
-        rendered = stderr.getvalue()
+        rendered = writer.getvalue()
         self.assertIn("No usable CURe base cache exists", rendered)
         self.assertIn("candidate_db_missing", rendered)
         self.assertIn("ChunkHound DuckDB files are missing.", rendered)
 
     def test_prompt_operator_chunkhound_base_cache_hot_start_blank_input_retries_until_new(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
-        stdin = self._FakeTty("\n\nnew\n")
-        stderr = self._FakeTty()
+        reader = StringIO("\n\nnew\n")
+        writer = StringIO()
+        reader.close = lambda: None  # type: ignore[assignment]
+        writer.close = lambda: None  # type: ignore[assignment]
 
         with mock.patch.object(
+            rf,
+            "_open_prompt_tty",
+            return_value=(reader, writer),
+        ), mock.patch.object(
             rf,
             "validate_operator_chunkhound_seed_source",
             side_effect=AssertionError("blank input should not validate"),
@@ -1779,20 +1789,20 @@ class EnsureBaseCacheTests(unittest.TestCase):
             selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
                 pr=pr,
                 resolved_runtime_config={"indexing": {"exclude": []}},
-                stdin=stdin,
-                stderr=stderr,
             )
 
         self.assertIsNone(selected)
-        rendered = stderr.getvalue()
+        rendered = writer.getvalue()
         self.assertIn("workspace_required", rendered)
 
     def test_prompt_operator_chunkhound_base_cache_hot_start_non_tty_skips_prompt(self) -> None:
         pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
-        stdin = StringIO("new\n")
-        stderr = StringIO()
 
         with mock.patch.object(
+            rf,
+            "_open_prompt_tty",
+            return_value=None,
+        ), mock.patch.object(
             rf,
             "validate_operator_chunkhound_seed_source",
             side_effect=AssertionError("non-tty prompt should not validate"),
@@ -1800,12 +1810,56 @@ class EnsureBaseCacheTests(unittest.TestCase):
             selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
                 pr=pr,
                 resolved_runtime_config={"indexing": {"exclude": []}},
-                stdin=stdin,
-                stderr=stderr,
             )
 
         self.assertIsNone(selected)
-        self.assertEqual(stderr.getvalue(), "")
+
+    def test_prompt_operator_chunkhound_base_cache_hot_start_closes_tty_handles(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        reader = StringIO("new\n")
+        writer = StringIO()
+        reader_closed = False
+        writer_closed = False
+
+        def _mark_reader_closed() -> None:
+            nonlocal reader_closed
+            reader_closed = True
+
+        def _mark_writer_closed() -> None:
+            nonlocal writer_closed
+            writer_closed = True
+
+        reader.close = _mark_reader_closed  # type: ignore[assignment]
+        writer.close = _mark_writer_closed  # type: ignore[assignment]
+
+        with mock.patch.object(rf, "_open_prompt_tty", return_value=(reader, writer)):
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+            )
+
+        self.assertIsNone(selected)
+        self.assertTrue(reader_closed, "reader handle was not closed by try/finally")
+        self.assertTrue(writer_closed, "writer handle was not closed by try/finally")
+
+    def test_prompt_operator_chunkhound_base_cache_hot_start_swallows_close_exceptions(self) -> None:
+        pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1)
+        reader = StringIO("new\n")
+        writer = StringIO()
+
+        def _exploding_close() -> None:
+            raise OSError("simulated close failure")
+
+        reader.close = _exploding_close  # type: ignore[assignment]
+        writer.close = _exploding_close  # type: ignore[assignment]
+
+        with mock.patch.object(rf, "_open_prompt_tty", return_value=(reader, writer)):
+            selected = rf.prompt_operator_chunkhound_base_cache_hot_start(
+                pr=pr,
+                resolved_runtime_config={"indexing": {"exclude": []}},
+            )
+
+        self.assertIsNone(selected)
 
     def test_cache_prime_records_hot_start_metadata_and_copies_seed_db(self) -> None:
         root = ROOT / ".tmp_test_cache_prime_hot_start"
