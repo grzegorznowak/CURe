@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.3.8] - 2026-04-16
+
+### Fixed
+
+- The hot-start ChunkHound base-cache prompt now pauses the active dashboard before waiting for operator input and resumes it afterward, so the TUI no longer appears stuck on "Base cache (agent is working)" while CURe is actually waiting for a hidden `/dev/tty` prompt.
+
 ## [0.3.7] - 2026-04-16
 
 ### Fixed
