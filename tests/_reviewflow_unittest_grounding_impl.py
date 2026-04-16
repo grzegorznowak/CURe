@@ -12878,7 +12878,10 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
         rendered = writer.getvalue()
         self.assertEqual(choice, "retry")
-        self.assertIn("Strict grounding failed for a multipass step.", rendered)
+        self.assertIn(
+            "Step output generated successfully; strict grounding rejected the format.",
+            rendered,
+        )
         self.assertIn("Invalid choice. Enter one of: retry, skip.", rendered)
 
     def test_pr_picker_rejects_invalid_numbered_model_selection(self) -> None:

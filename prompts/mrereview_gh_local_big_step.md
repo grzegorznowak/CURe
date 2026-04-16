@@ -37,7 +37,16 @@ Safety guardrail:
 3. Think step by step, but keep only a minimal visible draft:
    - Put these under `### Steps taken` (5 words max per line).
 4. Never speculate about code you haven't read — investigate files before commenting.
-5. Every non-empty `### Findings` bullet must end with an `Evidence:` suffix containing one or more real repo citations in `relative/path:line` form.
+5. `### Findings` lists issues, concerns, and open questions observed
+   in this step's scope — not compliments or positive observations.
+   Every finding goes on a single top-level bullet:
+   - One bullet per finding. No nested bullets under a finding.
+     Put supporting detail inline in the bullet body (prose, clauses,
+     or multiple sentences).
+   - Every bullet ends with an `Evidence:` suffix listing one or more
+     real repo citations in `relative/path:line` form.
+   - Do not include positive observations or compliments here — those
+     belong in the final synthesis step's `### Strengths` section.
 6. If there are no findings, write exactly `- None.`.
 
 # Output format
@@ -49,7 +58,8 @@ Safety guardrail:
 - ...
 
 ### Findings
-- [Issue or observation]. Evidence: `path/to/file.py:123`
+- [Issue, concern, or open question]. Brief supporting detail can continue here as prose — e.g. how the code reaches this state, or what the impact is. Evidence: `path/to/file.py:123`, `path/to/other.py:45`
+- [Another issue or concern]. Evidence: `path/to/file.py:10`
 
 ### Suggested actions
 - [Concrete change or test]

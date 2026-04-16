@@ -1116,7 +1116,7 @@ def prompt_grounding_retry_skip(
 ) -> str | None:
     errors = validation.get("errors") if isinstance(validation, dict) else []
     lines = [
-        "Strict grounding failed for a multipass step.",
+        "Step output generated successfully; strict grounding rejected the format.",
         f"Step: {step_id} — {step_title}".rstrip(" — "),
         f"Attempt: {int(attempt_count)}",
         "Errors:",

@@ -9190,7 +9190,7 @@ def _pr_flow_impl(
                 progress.flush()
 
                 plan_tool_report: dict[str, Any] | None = None
-                with phase("codex_plan", progress=progress, quiet=quiet):
+                with phase("multipass_plan", progress=progress, quiet=quiet):
                     plan_template = load_builtin_prompt_text(templates["plan"])
                     plan_prompt = render_prompt(
                         plan_template,
@@ -9357,7 +9357,7 @@ def _pr_flow_impl(
                         stage_name="step",
                         stage_llm_meta=step_llm["meta"],
                     )
-                    with phase("codex_steps", progress=progress, quiet=quiet):
+                    with phase("multipass_steps", progress=progress, quiet=quiet):
                         step_resume_command, _ = _execute_multipass_step_stage(
                             progress=progress,
                             work_dir=work_dir,
@@ -9399,7 +9399,7 @@ def _pr_flow_impl(
                     }
                     progress.flush()
 
-                    with phase("codex_synth", progress=progress, quiet=quiet):
+                    with phase("multipass_synth", progress=progress, quiet=quiet):
                         synth_template = load_builtin_prompt_text(templates["synth"])
                         step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                         synth_prompt = render_prompt(
@@ -9731,7 +9731,7 @@ def _run_incremental_completed_multipass_resume(
     }
     progress.flush()
 
-    with phase("codex_resume_plan", progress=progress, quiet=quiet):
+    with phase("multipass_resume_plan", progress=progress, quiet=quiet):
         plan_prompt = render_prompt(
             load_builtin_prompt_text(templates["resume_plan"]),
             base_ref_for_review=base_ref_for_review,
@@ -10007,7 +10007,7 @@ def _run_incremental_completed_multipass_resume(
         "step_title": "resume synth",
     }
     progress.flush()
-    with phase("codex_resume_synth", progress=progress, quiet=quiet):
+    with phase("multipass_resume_synth", progress=progress, quiet=quiet):
         step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs) if synth_step_outputs else "- None."
         synth_prompt = render_prompt(
             load_builtin_prompt_text(templates["resume_synth"]),
@@ -10627,7 +10627,7 @@ def _resume_flow_impl(
                 "step_title": "plan",
             }
             progress.flush()
-            with phase("codex_plan", progress=progress, quiet=quiet):
+            with phase("multipass_plan", progress=progress, quiet=quiet):
                 did_work = True
                 plan_reran = True
                 plan_template = load_builtin_prompt_text(templates["plan"])
@@ -10863,7 +10863,7 @@ def _resume_flow_impl(
                 stage_name="step",
                 stage_llm_meta=step_llm["meta"],
             )
-            with phase("codex_steps", progress=progress, quiet=quiet):
+            with phase("multipass_steps", progress=progress, quiet=quiet):
                 step_resume_command, _ = _execute_multipass_step_stage(
                     progress=progress,
                     work_dir=work_dir,
@@ -10943,7 +10943,7 @@ def _resume_flow_impl(
                 "step_title": "synth",
             }
             progress.flush()
-            with phase("codex_synth", progress=progress, quiet=quiet):
+            with phase("multipass_synth", progress=progress, quiet=quiet):
                 did_work = True
                 synth_template = load_builtin_prompt_text(templates["synth"])
                 step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)

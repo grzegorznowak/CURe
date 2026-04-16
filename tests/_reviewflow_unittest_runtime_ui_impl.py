@@ -5528,8 +5528,8 @@ class InstallAndDoctorTests(unittest.TestCase):
             "session_id": "acme-repo-pr1-20260304-000000-abcd",
             "created_at": "2026-03-04T00:00:00+00:00",
             "status": "running",
-            "phase": "codex_step_03",
-            "phases": {"codex_step_03": {"status": "running"}},
+            "phase": "multipass_step_03",
+            "phases": {"multipass_step_03": {"status": "running"}},
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
             "multipass": {
                 "enabled": True,

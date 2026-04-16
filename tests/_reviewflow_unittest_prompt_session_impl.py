@@ -4906,7 +4906,7 @@ class WorkflowContractTests(unittest.TestCase):
                 status="running",
                 created_at="2026-03-10T09:00:00+00:00",
                 number=31,
-                phase="codex_steps",
+                phase="multipass_steps",
                 multipass={
                     "enabled": True,
                     "mode": "multipass",
@@ -4972,7 +4972,7 @@ class WorkflowContractTests(unittest.TestCase):
                 status="running",
                 created_at="2026-03-10T09:00:00+00:00",
                 number=32,
-                phase="codex_steps",
+                phase="multipass_steps",
                 multipass={
                     "enabled": True,
                     "mode": "multipass",

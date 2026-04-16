@@ -279,9 +279,9 @@ KNOWN_PHASE_PREFIX = (
     "detect_pr_size",
     "select_prompt_profile",
     "index_topup",
-    "codex_plan",
+    "multipass_plan",
     "codex_review",
-    "codex_synth",
+    "multipass_synth",
 )
 
 
@@ -298,9 +298,12 @@ _PHASE_LABEL_OVERRIDES = {
     "index_topup": "Refresh index",
     "load_prompt": "Load prompt",
     "review_intelligence_preflight": "Context preflight",
-    "codex_plan": "Plan review",
+    "multipass_plan": "Plan review",
+    "multipass_steps": "Generate review",
+    "multipass_synth": "Synthesize review",
+    "multipass_resume_plan": "Resume planning",
+    "multipass_resume_synth": "Resume synth",
     "codex_review": "Generate review",
-    "codex_synth": "Synthesize review",
     "followup_update": "Update follow-up",
     "followup_index": "Refresh index",
     "followup_review": "Generate follow-up",
@@ -312,8 +315,8 @@ _PHASE_LABEL_OVERRIDES = {
 def _phase_label(name: str, *, debug: bool = False) -> str:
     raw = str(name or "").strip() or "?"
     label: str | None
-    if raw.startswith("codex_step_"):
-        suffix = raw.removeprefix("codex_step_")
+    if raw.startswith("multipass_step_"):
+        suffix = raw.removeprefix("multipass_step_")
         label = f"Review step {int(suffix)}" if suffix.isdigit() else "Review step"
     else:
         label = _PHASE_LABEL_OVERRIDES.get(raw)
@@ -331,13 +334,13 @@ def _ordered_phases(meta: dict) -> tuple[str, dict, list[str]]:
     phases = meta.get("phases")
     phases = phases if isinstance(phases, dict) else {}
 
-    # Prefer a stable ordering for known phases; then include codex_step_XX and any extras.
+    # Prefer a stable ordering for known phases; then include multipass_step_XX and any extras.
     ordered: list[str] = []
     for p in KNOWN_PHASE_PREFIX:
         if p in phases or p == phase:
             ordered.append(p)
 
-    step_keys = [k for k in phases.keys() if isinstance(k, str) and k.startswith("codex_step_")]
+    step_keys = [k for k in phases.keys() if isinstance(k, str) and k.startswith("multipass_step_")]
     step_keys.sort()
     for k in step_keys:
         if k not in ordered:
