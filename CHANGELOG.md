@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.3.9] - 2026-04-16
+
+### Fixed
+
+- ChunkHound tool proof recovery now handles Claude Code's persisted-output wrapper, where large Bash tool output is written to disk with only a 2 KB preview inlined. The proof JSON that falls outside the preview window is now read from the persisted file, preventing false "missing successful code_research" gate failures on Claude Code reviews with verbose helper output.
+
 ## [0.3.8] - 2026-04-16
 
 ### Fixed
