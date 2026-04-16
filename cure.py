@@ -40,6 +40,7 @@ from cure_output import (
     ChunkhoundLiveProgressReporter,
     ReviewflowOutput,
     _eprint,
+    _open_prompt_tty,
     _shell_join,
     active_output,
     clear_active_output,
@@ -7198,17 +7199,11 @@ def prompt_operator_chunkhound_base_cache_hot_start(
     *,
     pr: PullRequestRef,
     resolved_runtime_config: dict[str, Any],
-    stdin: TextIO | None = None,
-    stderr: TextIO | None = None,
 ) -> dict[str, Any] | None:
-    in_stream = stdin or sys.stdin
-    err_stream = stderr or sys.stderr
-    try:
-        is_tty = bool(in_stream.isatty()) and bool(err_stream.isatty())
-    except Exception:
-        is_tty = False
-    if not is_tty:
+    tty_streams = _open_prompt_tty()
+    if tty_streams is None:
         return None
+    reader, writer = tty_streams
 
     intro = (
         f"\nNo usable CURe base cache exists for {pr.owner}/{pr.repo}. "
@@ -7217,58 +7212,68 @@ def prompt_operator_chunkhound_base_cache_hot_start(
         "CURe can validate it and hot-start the managed base cache.\n"
         "Enter `new` to skip this and create a new baseline.\n\n"
     )
-    while True:
-        try:
-            err_stream.write(intro)
-            err_stream.write("Workspace path:\n")
-            err_stream.flush()
-            workspace_raw = in_stream.readline()
-        except Exception:
-            return None
-        workspace_text = str(workspace_raw or "").strip()
-        if workspace_text.lower() == "new":
-            return None
-        if not workspace_text:
+    try:
+        while True:
             try:
-                err_stream.write("Rejected (workspace_required): Enter a workspace path or `new`.\n\n")
-                err_stream.flush()
+                writer.write(intro)
+                writer.write("Workspace path:\n")
+                writer.flush()
+                workspace_raw = reader.readline()
             except Exception:
                 return None
-            continue
+            workspace_text = str(workspace_raw or "").strip()
+            if workspace_text.lower() == "new":
+                return None
+            if not workspace_text:
+                try:
+                    writer.write("Rejected (workspace_required): Enter a workspace path or `new`.\n\n")
+                    writer.flush()
+                except Exception:
+                    return None
+                continue
 
-        try:
-            err_stream.write("ChunkHound config path:\n")
-            err_stream.flush()
-            config_raw = in_stream.readline()
-        except Exception:
-            return None
-        config_text = str(config_raw or "").strip()
-        if config_text.lower() == "new":
-            return None
-        if not config_text:
             try:
-                err_stream.write("Rejected (config_required): Enter a config path or `new`.\n\n")
-                err_stream.flush()
+                writer.write("ChunkHound config path:\n")
+                writer.flush()
+                config_raw = reader.readline()
             except Exception:
                 return None
-            continue
+            config_text = str(config_raw or "").strip()
+            if config_text.lower() == "new":
+                return None
+            if not config_text:
+                try:
+                    writer.write("Rejected (config_required): Enter a config path or `new`.\n\n")
+                    writer.flush()
+                except Exception:
+                    return None
+                continue
 
-        candidate = validate_operator_chunkhound_seed_source(
-            workspace_path=Path(workspace_text),
-            config_path=Path(config_text),
-            pr=pr,
-            resolved_runtime_config=resolved_runtime_config,
-        )
-        if str(candidate.get("candidate_state") or "") == "accepted":
-            return candidate
+            candidate = validate_operator_chunkhound_seed_source(
+                workspace_path=Path(workspace_text),
+                config_path=Path(config_text),
+                pr=pr,
+                resolved_runtime_config=resolved_runtime_config,
+            )
+            if str(candidate.get("candidate_state") or "") == "accepted":
+                return candidate
 
-        reason = str(candidate.get("reason") or "unknown")
-        message = str(candidate.get("message") or "ChunkHound seed source validation failed.")
+            reason = str(candidate.get("reason") or "unknown")
+            message = str(candidate.get("message") or "ChunkHound seed source validation failed.")
+            try:
+                writer.write(f"Rejected ({reason}): {message}\n\n")
+                writer.flush()
+            except Exception:
+                return None
+    finally:
         try:
-            err_stream.write(f"Rejected ({reason}): {message}\n\n")
-            err_stream.flush()
+            reader.close()
         except Exception:
-            return None
+            pass
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 
 def cache_prime(
