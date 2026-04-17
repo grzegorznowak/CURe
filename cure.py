@@ -35,6 +35,13 @@ from typing import Any, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
+from cure_citations import (
+    CITATION_LABEL,
+    has_incomplete_sources,
+    has_path_line_citation,
+    has_sources_marker,
+    trailing_sources_suffix,
+)
 from cure_errors import ReviewflowError, StepGroundingValidationError
 from cure_output import (
     ChunkhoundLiveProgressReporter,
@@ -50,9 +57,11 @@ from cure_output import (
     format_review_artifact_footer,
     normalize_markdown_artifact,
     normalize_markdown_local_refs,
+    prompt_grounding_retry_effort,
     prompt_grounding_retry_skip,
     prompt_pr_model_and_effort_picker,
     prompt_resume_grounding_skipped_steps,
+    prompt_synth_grounding_retry_choice,
     safe_cmd_for_meta,
     set_active_output,
     sha256_text,
@@ -4783,16 +4792,6 @@ def _citation_records(text: str) -> list[dict[str, Any]]:
     return citations
 
 
-def _trailing_grounding_suffix_text(text: str, label: str) -> str:
-    marker = f"{label}:"
-    head, sep, tail = text.rpartition(marker)
-    if not sep:
-        return ""
-    if not head.strip() or not tail.strip():
-        return ""
-    return tail.strip()
-
-
 def _resolve_grounding_path(*, root_dir: Path, relative_path: str) -> Path | None:
     rel = str(relative_path or "").strip()
     if not rel:
@@ -4847,14 +4846,48 @@ def _line_exists_in_file(path: Path, line_number: int) -> bool:
 def _markdown_sections(text: str) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
-    for line in text.splitlines():
+    parent_h2: str | None = None
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if line.startswith("## ") and not line.startswith("### "):
+            parent_h2 = line[3:].strip() or None
+            current = None
+            continue
         if line.startswith("### "):
-            current = {"title": line[4:].strip(), "lines": [], "line": len(sections) + 1}
+            current = {
+                "title": line[4:].strip(),
+                "lines": [],
+                "line": line_no,
+                "parent": parent_h2,
+            }
             sections.append(current)
             continue
         if current is not None:
             current.setdefault("lines", []).append(line)
     return sections
+
+
+def _synth_section_label(section: dict[str, Any]) -> str:
+    title = str(section.get("title") or "").strip()
+    parent = str(section.get("parent") or "").strip()
+    line_no = section.get("line")
+    if parent:
+        base = f"'### {title}' under '## {parent}'"
+    else:
+        base = f"'### {title}'"
+    if isinstance(line_no, int) and line_no > 0:
+        return f"{base} (line {line_no})"
+    return base
+
+
+def _synth_section_key(*, parent: str | None, title: str | None, line_no: int | None) -> str:
+    normalized_parent = str(parent or "").strip()
+    normalized_title = str(title or "").strip()
+    normalized_line = int(line_no or 0)
+    return f"{normalized_parent}|{normalized_title}|{normalized_line}"
+
+
+_SYNTH_NON_CRITICAL_SECTIONS = frozenset({"Strengths", "Reusability"})
+_SYNTH_CRITICAL_SECTIONS = frozenset({"In Scope Issues", "Out of Scope Issues"})
 
 
 def _section_bullets(section: dict[str, Any]) -> list[str]:
@@ -4926,10 +4959,19 @@ def validate_multipass_step_grounding(
         body = bullet[2:].strip()
         if body == "None.":
             continue
-        evidence_suffix = _trailing_grounding_suffix_text(body, "Evidence")
-        bullet_citations = _citation_records(evidence_suffix)
+        sources_suffix = trailing_sources_suffix(body)
+        bullet_citations = _citation_records(sources_suffix)
         if not bullet_citations:
-            errors.append(f"Findings bullet #{bullet_index} is missing a repo citation.")
+            if has_sources_marker(body):
+                errors.append(
+                    f"Findings bullet #{bullet_index} has an incomplete `{CITATION_LABEL}:` "
+                    "suffix (file only, needs `path:line`)."
+                )
+            else:
+                errors.append(
+                    f"Findings bullet #{bullet_index} is missing a trailing "
+                    f"`{CITATION_LABEL}:` suffix with a `path:line` repo citation."
+                )
             continue
         valid_citation_found = False
         for citation in bullet_citations:
@@ -4976,9 +5018,10 @@ def validate_multipass_synth_grounding(
 ) -> dict[str, Any]:
     errors: list[str] = []
     citations: list[dict[str, Any]] = []
+    invalid_bullets: list[dict[str, Any]] = []
     text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
     sections = _markdown_sections(text)
-    relevant_titles = {"Strengths", "In Scope Issues", "Out of Scope Issues", "Reusability"}
+    relevant_titles = _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
     required_counts = {
         "Strengths": 2,
         "In Scope Issues": 2,
@@ -4999,18 +5042,50 @@ def validate_multipass_synth_grounding(
         if title not in relevant_titles:
             continue
         title_counts[title] += 1
+        section_label = _synth_section_label(section)
+        section_line = int(section.get("line") or 0)
+        section_key = _synth_section_key(
+            parent=str(section.get("parent") or ""),
+            title=title,
+            line_no=section_line,
+        )
+        is_critical = title in _SYNTH_CRITICAL_SECTIONS
         bullets = _section_bullets(section)
         if not bullets:
-            errors.append(f"Section '### {title}' must include at least one bullet.")
+            errors.append(f"Section {section_label} must include at least one bullet.")
             continue
         for bullet_index, bullet in enumerate(bullets, start=1):
             body = bullet[2:].strip()
             if body == "None.":
                 continue
-            sources_suffix = _trailing_grounding_suffix_text(body, "Sources")
+            sources_suffix = trailing_sources_suffix(body)
             bullet_citations = _citation_records(sources_suffix)
             if not bullet_citations:
-                errors.append(f"Section '### {title}' bullet #{bullet_index} is missing a primary-evidence citation.")
+                if has_sources_marker(body):
+                    reason = (
+                        f"Section {section_label} bullet #{bullet_index} has an "
+                        f"incomplete `{CITATION_LABEL}:` suffix (file only, needs `path:line`)."
+                    )
+                else:
+                    reason = (
+                        f"Section {section_label} bullet #{bullet_index} is missing a "
+                        f"trailing `{CITATION_LABEL}:` suffix with a primary-evidence "
+                        "citation."
+                    )
+                errors.append(reason)
+                invalid_bullets.append(
+                    {
+                        "section": title,
+                        "section_label": section_label,
+                        "section_line": section_line,
+                        "section_key": section_key,
+                        "parent": section.get("parent"),
+                        "bullet_index": bullet_index,
+                        "bullet_text": bullet,
+                        "critical": is_critical,
+                        "reason": reason,
+                    }
+                )
                 continue
             valid_primary_citation_found = False
             for citation in bullet_citations:
@@ -5035,6 +5110,7 @@ def validate_multipass_synth_grounding(
                             source_kind = "repo"
                 entry = {
                     "section": title,
+                    "section_label": section_label,
                     "bullet_index": bullet_index,
                     "path": citation_path,
                     "line": citation["line"],
@@ -5044,13 +5120,13 @@ def validate_multipass_synth_grounding(
                 }
                 if target is None or (not target.is_file()):
                     errors.append(
-                        f"Section '### {title}' bullet #{bullet_index} cites unsupported synth source "
+                        f"Section {section_label} bullet #{bullet_index} cites unsupported synth source "
                         f"{citation_path}:{citation['line']}."
                     )
                     entry["valid"] = False
                 elif not _line_exists_in_file(target, int(citation["line"])):
                     errors.append(
-                        f"Section '### {title}' bullet #{bullet_index} cites missing source line "
+                        f"Section {section_label} bullet #{bullet_index} cites missing source line "
                         f"{citation_path}:{citation['line']}."
                     )
                     entry["valid"] = False
@@ -5061,9 +5137,23 @@ def validate_multipass_synth_grounding(
                         primary_source_shas[str(target.resolve())] = _artifact_sha256(target)
                 citations.append(entry)
             if not valid_primary_citation_found:
-                errors.append(
-                    f"Section '### {title}' bullet #{bullet_index} must cite at least one valid primary-evidence line; "
-                    "step-artifact citations alone are insufficient."
+                reason = (
+                    f"Section {section_label} bullet #{bullet_index} must cite at least one "
+                    "valid primary-evidence line; step-artifact citations alone are insufficient."
+                )
+                errors.append(reason)
+                invalid_bullets.append(
+                    {
+                        "section": title,
+                        "section_label": section_label,
+                        "section_line": section_line,
+                        "section_key": section_key,
+                        "parent": section.get("parent"),
+                        "bullet_index": bullet_index,
+                        "bullet_text": bullet,
+                        "critical": is_critical,
+                        "reason": reason,
+                    }
                 )
 
     for title, required_count in required_counts.items():
@@ -5079,6 +5169,7 @@ def validate_multipass_synth_grounding(
         extra={
             "source_artifact_shas": source_shas,
             "primary_source_shas": primary_source_shas,
+            "invalid_bullets": invalid_bullets,
         },
     )
 
@@ -5132,6 +5223,433 @@ def _validation_entry_for_stage(meta: dict[str, Any], stage_key: str) -> dict[st
     return entry if isinstance(entry, dict) else None
 
 
+_SYNTH_OMISSION_FOOTER_HEADING = "## Grounding omission summary"
+_SYNTH_OMISSION_FOOTER_PREFACE = (
+    "Story 42 severity-aware synth grounding omitted the bullets listed below "
+    "because their `Sources:` citations did not pass strict validation. "
+    "Critical sections (`In Scope Issues`, `Out of Scope Issues`) retain at "
+    "least one grounded bullet; non-critical sections (`Strengths`, `Reusability`) "
+    "may have been left empty with `- None.`."
+)
+
+
+def _format_synth_omission_footer(dropped: list[dict[str, Any]]) -> str:
+    if not dropped:
+        return ""
+    lines = [_SYNTH_OMISSION_FOOTER_HEADING, "", _SYNTH_OMISSION_FOOTER_PREFACE, ""]
+    for item in dropped:
+        section_label = str(item.get("section_label") or item.get("section") or "?")
+        idx = int(item.get("bullet_index") or 0)
+        reason = " ".join(str(item.get("reason") or "").strip().split())
+        critical = "critical" if item.get("critical") else "non-critical"
+        bullet_text = str(item.get("bullet_text") or "").strip()
+        preview = bullet_text[2:].strip() if bullet_text.startswith("- ") else bullet_text
+        if len(preview) > 160:
+            preview = preview[:157] + "..."
+        lines.append(f"- [{critical}] {section_label} bullet #{idx}: {reason}")
+        if preview:
+            lines.append(f"  dropped bullet text: {preview}")
+    return "\n".join(lines) + "\n"
+
+
+def _strip_existing_synth_omission_footer(text: str) -> str:
+    if _SYNTH_OMISSION_FOOTER_HEADING not in text:
+        return text
+    marker = text.find(_SYNTH_OMISSION_FOOTER_HEADING)
+    if marker <= 0:
+        return text
+    trimmed = text[:marker].rstrip() + "\n"
+    return trimmed
+
+
+def _rewrite_review_md_dropping_bullets(
+    *,
+    review_md_path: Path,
+    dropped: list[dict[str, Any]],
+) -> None:
+    if not dropped:
+        return
+    original = review_md_path.read_text(encoding="utf-8") if review_md_path.is_file() else ""
+    original = _strip_existing_synth_omission_footer(original)
+    drop_keys = {
+        (
+            str(item.get("section_key") or "").strip(),
+            int(item.get("bullet_index") or 0),
+        )
+        for item in dropped
+        if str(item.get("section_key") or "").strip() and int(item.get("bullet_index") or 0) > 0
+    }
+    if not drop_keys:
+        return
+    new_lines: list[str] = []
+    current_title: str | None = None
+    current_parent: str | None = None
+    current_section_line: int | None = None
+    current_section_key: str = ""
+    current_bullet_index = 0
+    section_bullets_remaining: int = 0
+    pending_none_placeholder = False
+    for line_no, raw_line in enumerate(original.splitlines(), start=1):
+        stripped_line = raw_line.strip()
+        if stripped_line.startswith("## "):
+            if pending_none_placeholder and section_bullets_remaining == 0:
+                new_lines.append("- None.")
+            pending_none_placeholder = False
+            current_parent = stripped_line[3:].strip()
+            current_title = None
+            current_section_line = None
+            current_section_key = ""
+            current_bullet_index = 0
+            new_lines.append(raw_line)
+            continue
+        if stripped_line.startswith("### "):
+            if pending_none_placeholder and section_bullets_remaining == 0:
+                new_lines.append("- None.")
+            current_title = stripped_line[4:].strip()
+            current_section_line = line_no
+            current_section_key = _synth_section_key(
+                parent=current_parent,
+                title=current_title,
+                line_no=current_section_line,
+            )
+            current_bullet_index = 0
+            section_bullets_remaining = 0
+            pending_none_placeholder = current_title in _SYNTH_NON_CRITICAL_SECTIONS
+            new_lines.append(raw_line)
+            continue
+        if current_title is not None and stripped_line.startswith("- "):
+            current_bullet_index += 1
+            if (current_section_key, current_bullet_index) in drop_keys:
+                continue
+            if stripped_line != "- None.":
+                section_bullets_remaining += 1
+            new_lines.append(raw_line)
+            continue
+        new_lines.append(raw_line)
+    if pending_none_placeholder and section_bullets_remaining == 0:
+        new_lines.append("- None.")
+    rebuilt = "\n".join(new_lines).rstrip() + "\n"
+    footer = _format_synth_omission_footer(dropped)
+    if footer:
+        rebuilt = rebuilt.rstrip() + "\n\n" + footer
+    review_md_path.write_text(rebuilt, encoding="utf-8")
+
+
+def _synth_section_surviving_bullet_counts(
+    *,
+    artifact_path: Path,
+    drop_keys: set[tuple[str, int]],
+) -> dict[str, int]:
+    text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
+    sections = _markdown_sections(text)
+    counts: dict[str, int] = {}
+    for section in sections:
+        title = str(section.get("title") or "")
+        if title not in (_SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS):
+            continue
+        key = _synth_section_key(
+            parent=str(section.get("parent") or ""),
+            title=title,
+            line_no=int(section.get("line") or 0),
+        )
+        bullets = _section_bullets(section)
+        remaining = 0
+        for bullet_index, bullet in enumerate(bullets, start=1):
+            body = bullet[2:].strip()
+            if body == "None.":
+                continue
+            if (key, bullet_index) in drop_keys:
+                continue
+            remaining += 1
+        counts[key] = remaining
+    return counts
+
+
+def _apply_synth_severity_finalization(
+    *,
+    meta: dict[str, Any],
+    work_dir: Path,
+    grounding_mode: str,
+    artifact_path: Path,
+    step_outputs: list[Path],
+    repo_dir: Path,
+    validation: dict[str, Any] | None,
+    ui_enabled: bool,
+    allow_critical_omission: bool,
+) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]]]:
+    """Drop invalid bullets per Story 42 severity rules and revalidate.
+
+    Returns ``(valid, validation, dropped)``. ``dropped`` lists the bullets
+    removed. If no bullets are dropped, the original validation is returned
+    unchanged. Critical sections only drop bullets when ``allow_critical_omission``
+    is true AND the section retains at least one valid grounded bullet.
+    """
+    if not isinstance(validation, dict):
+        return False, validation, []
+    invalid_bullets = validation.get("invalid_bullets") if isinstance(validation.get("invalid_bullets"), list) else []
+    if not invalid_bullets:
+        return bool(validation.get("valid")), validation, []
+    non_critical_drops: list[dict[str, Any]] = []
+    critical_candidates: list[dict[str, Any]] = []
+    for item in invalid_bullets:
+        if not isinstance(item, dict):
+            continue
+        if item.get("critical"):
+            critical_candidates.append(item)
+        else:
+            non_critical_drops.append(item)
+    dropped: list[dict[str, Any]] = list(non_critical_drops)
+    if allow_critical_omission and critical_candidates:
+        drop_keys_preview = {
+            (
+                str(item.get("section_key") or "").strip(),
+                int(item.get("bullet_index") or 0),
+            )
+            for item in dropped
+            if str(item.get("section_key") or "").strip() and int(item.get("bullet_index") or 0) > 0
+        }
+        for item in critical_candidates:
+            key = str(item.get("section_key") or "").strip()
+            bullet_index = int(item.get("bullet_index") or 0)
+            if key and bullet_index > 0:
+                drop_keys_preview.add((key, bullet_index))
+        surviving = _synth_section_surviving_bullet_counts(
+            artifact_path=artifact_path,
+            drop_keys=drop_keys_preview,
+        )
+        for item in critical_candidates:
+            key = str(item.get("section_key") or "").strip()
+            if surviving.get(key, 0) >= 1:
+                dropped.append(item)
+            # else: the section would be emptied by dropping this bullet — keep
+            # the bullet so validation still fails and the operator is told.
+    if not dropped:
+        return False, validation, []
+    _rewrite_review_md_dropping_bullets(review_md_path=artifact_path, dropped=dropped)
+    revalidation = validate_multipass_synth_grounding(
+        artifact_path=artifact_path,
+        step_outputs=step_outputs,
+        repo_dir=repo_dir,
+        work_dir=work_dir,
+    )
+    _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=revalidation)
+    return bool(revalidation.get("valid")), revalidation, dropped
+
+
+def _execute_multipass_synth_stage(
+    *,
+    progress: SessionProgress,
+    repo_dir: Path,
+    work_dir: Path,
+    session_id: str,
+    review_md_path: Path,
+    synth_prompt: str,
+    synth_llm: dict[str, Any],
+    synth_runtime_policy: dict[str, Any],
+    synth_step_outputs: list[str],
+    grounding_mode: str,
+    env: dict[str, str],
+    stream: bool,
+    add_dirs: list[Path],
+    codex_meta: dict[str, Any] | None,
+    ui_enabled: bool,
+    prompt_template_name: str,
+    run_kind: str,
+    review_stage: str,
+    stage_label: str,
+    failure_message: str,
+    multipass_cfg: dict[str, Any] | None = None,
+) -> str | None:
+    synth_run_entry = _ensure_multipass_run_entry(
+        progress.meta,
+        kind=run_kind,
+        output_path=review_md_path,
+        template_id=builtin_prompt_id(prompt_template_name),
+        prompt=synth_prompt,
+        stage_llm_meta=synth_llm["meta"],
+    )
+    synth_effort_options = list(
+        _reasoning_effort_choices_for_provider(synth_llm["resolved"].get("provider"))
+    )
+    synth_retry_count = 0
+    synth_max_auto_retries = 1
+    success_resume_command: str | None = None
+    while True:
+        progress.flush()
+        synth_result = run_llm_exec(
+            repo_dir=repo_dir,
+            resolved=synth_llm["resolved"],
+            resolution_meta=synth_llm["resolution_meta"],
+            output_path=review_md_path,
+            prompt=synth_prompt,
+            env=env,
+            stream=stream,
+            progress=progress,
+            add_dirs=add_dirs,
+            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
+            runtime_policy=synth_runtime_policy,
+        )
+        record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
+        _record_multipass_stage_llm(
+            meta=progress.meta,
+            stage_name="synth",
+            stage_llm_meta=synth_llm["meta"],
+        )
+        if synth_result.resume is not None:
+            synth_run_entry["llm_session_id"] = synth_result.resume.session_id
+            synth_run_entry["llm_provider"] = synth_result.resume.provider
+        synth_run_entry["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
+        progress.flush()
+        success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), synth_result.resume)
+        if codex_meta is not None:
+            codex_resume = (
+                CodexResumeInfo(
+                    session_id=synth_result.resume.session_id,
+                    cwd=synth_result.resume.cwd,
+                    command=synth_result.resume.command,
+                )
+                if synth_result.resume is not None and synth_result.resume.provider == "codex"
+                else None
+            )
+            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
+        _enforce_chunkhound_tool_proof(
+            meta=progress.meta,
+            work_dir=work_dir,
+            provider=str(synth_llm["resolved"].get("provider") or ""),
+            review_stage=review_stage,
+            prompt_template_name=prompt_template_name,
+            adapter_meta=synth_result.adapter_meta,
+        )
+        progress.flush()
+        _, synth_validation = _validate_or_reuse_synth_artifact(
+            meta=progress.meta,
+            work_dir=work_dir,
+            grounding_mode=grounding_mode,
+            artifact_path=review_md_path,
+            step_outputs=[Path(item) for item in synth_step_outputs],
+            repo_dir=repo_dir,
+        )
+        progress.flush()
+        if grounding_mode != "strict" or synth_validation is None or synth_validation.get("valid") is True:
+            break
+        finalized, synth_validation, _ = _apply_synth_severity_finalization(
+            meta=progress.meta,
+            work_dir=work_dir,
+            grounding_mode=grounding_mode,
+            artifact_path=review_md_path,
+            step_outputs=[Path(item) for item in synth_step_outputs],
+            repo_dir=repo_dir,
+            validation=synth_validation,
+            ui_enabled=ui_enabled,
+            allow_critical_omission=False,
+        )
+        if finalized:
+            break
+        if ui_enabled:
+            choice = prompt_synth_grounding_retry_choice(
+                attempt_count=synth_retry_count + 1,
+                validation=synth_validation,
+            )
+            if choice == "retry":
+                override_effort = prompt_grounding_retry_effort(
+                    provider=str(synth_llm["resolved"].get("provider") or ""),
+                    default_effort=str(synth_llm["resolved"].get("reasoning_effort") or "").strip() or None,
+                    effort_options=synth_effort_options,
+                    stage_label=stage_label,
+                )
+                if override_effort:
+                    rebuilt = _rebuild_multipass_retry_stage_state(
+                        stage_name="synth",
+                        llm_resolved=synth_llm["resolved"],
+                        llm_resolution_meta=synth_llm["resolution_meta"],
+                        runtime_policy=synth_runtime_policy,
+                        multipass_cfg=multipass_cfg,
+                        override_effort=override_effort,
+                    )
+                    synth_llm["resolved"] = rebuilt["resolved"]
+                    synth_llm["resolution_meta"] = rebuilt["resolution_meta"]
+                    synth_llm["meta"] = rebuilt["meta"]
+                    synth_runtime_policy = rebuilt["runtime_policy"]
+                    synth_run_entry["llm"] = dict(synth_llm["meta"])
+                    _record_multipass_stage_llm(
+                        meta=progress.meta,
+                        stage_name="synth",
+                        stage_llm_meta=synth_llm["meta"],
+                    )
+                synth_retry_count += 1
+                continue
+            if choice == "finalize":
+                finalized, synth_validation, _ = _apply_synth_severity_finalization(
+                    meta=progress.meta,
+                    work_dir=work_dir,
+                    grounding_mode=grounding_mode,
+                    artifact_path=review_md_path,
+                    step_outputs=[Path(item) for item in synth_step_outputs],
+                    repo_dir=repo_dir,
+                    validation=synth_validation,
+                    ui_enabled=True,
+                    allow_critical_omission=True,
+                )
+                if finalized:
+                    break
+        elif synth_retry_count < synth_max_auto_retries:
+            synth_retry_count += 1
+            continue
+        _emit_multipass_grounding_failure_playbook(
+            meta=progress.meta,
+            session_id=session_id,
+            session_dir=review_md_path.parent,
+            work_dir=work_dir,
+            artifact_path=review_md_path,
+            validation=synth_validation,
+            resume_from="synth",
+        )
+        raise ReviewflowError(failure_message)
+    _record_multipass_review_artifact_llm(
+        meta=progress.meta,
+        stage_name="synth",
+        stage_llm_meta=synth_llm["meta"],
+    )
+    return success_resume_command
+
+
+def _collect_recovered_step_records(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Steps whose grounding initially failed but ultimately completed.
+
+    Story 42: the terminal synth blocker is reported separately from prior
+    step-grounding failures that recovered earlier in the run, so operators
+    can see what actually blocked completion.
+    """
+    mp_raw = meta.get("multipass")
+    mp: dict[str, Any] = mp_raw if isinstance(mp_raw, dict) else {}
+    states_raw = mp.get("step_states")
+    states: list[Any] = states_raw if isinstance(states_raw, list) else []
+    recovered: list[dict[str, Any]] = []
+    for item in states:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in {"completed", "reused"}:
+            continue
+        if not item.get("grounding_retried"):
+            continue
+        attempts_raw = item.get("grounding_attempts")
+        attempts: list[Any] = attempts_raw if isinstance(attempts_raw, list) else []
+        if not attempts:
+            continue
+        first = attempts[0] if isinstance(attempts[0], dict) else {}
+        first_reason = " ".join(str(first.get("reason") or "").split())
+        recovered.append(
+            {
+                "step_id": str(item.get("step_id") or "").strip(),
+                "step_title": str(item.get("step_title") or "").strip(),
+                "attempts": int(len(attempts)),
+                "first_reason": first_reason,
+            }
+        )
+    return recovered
+
+
 def _emit_multipass_grounding_failure_playbook(
     *,
     meta: dict[str, Any],
@@ -5168,12 +5686,24 @@ def _emit_multipass_grounding_failure_playbook(
             lines.append(f"- {key} log: {path}")
 
     if errors:
-        lines.extend(["", "Validation errors:"])
+        terminal_label = "Terminal synth blocker" if str(resume_from or "").strip() == "synth" else "Validation errors"
+        lines.extend(["", f"{terminal_label}:"])
         for error in errors[:max_errors]:
             lines.append(f"- {error}")
         remaining = len(errors) - max_errors
         if remaining > 0:
             lines.append(f"- ... and {remaining} more in {report_path}")
+
+    recovered = _collect_recovered_step_records(meta)
+    if recovered and str(resume_from or "").strip() == "synth":
+        lines.extend(["", "Recovered earlier in run (not the terminal blocker):"])
+        for item in recovered:
+            label = item["step_id"]
+            if item["step_title"]:
+                label = f"{label} — {item['step_title']}" if label else item["step_title"]
+            reason = item["first_reason"]
+            detail = f" (first reason: {reason})" if reason else ""
+            lines.append(f"- {label} recovered after {item['attempts']} attempt(s){detail}")
 
     lines.extend(
         [
@@ -5930,6 +6460,45 @@ def _runtime_policy_for_multipass_stage(
     return stage_policy
 
 
+def _rebuild_multipass_retry_stage_state(
+    *,
+    stage_name: str,
+    llm_resolved: dict[str, Any],
+    llm_resolution_meta: dict[str, Any],
+    runtime_policy: dict[str, Any],
+    multipass_cfg: dict[str, Any] | None,
+    override_effort: str,
+) -> dict[str, dict[str, Any]]:
+    stage_resolved, stage_resolution_meta, stage_meta = resolve_multipass_stage_llm_config(
+        stage=stage_name,
+        resolved=llm_resolved,
+        resolution_meta=llm_resolution_meta,
+        multipass_cfg=multipass_cfg or {},
+    )
+    resolved_payload = stage_resolution_meta.get("resolved")
+    stage_resolved_meta: dict[str, Any] = dict(resolved_payload) if isinstance(resolved_payload, dict) else {}
+    stage_resolved["reasoning_effort"] = override_effort
+    stage_resolved_meta["reasoning_effort"] = override_effort
+    stage_resolved_meta["reasoning_effort_source"] = "tty_prompt"
+    stage_resolved_meta["reasoning_effort_source_detail"] = "tty_prompt"
+    stage_meta["override_reasoning_effort"] = override_effort
+    stage_meta["override_reasoning_effort_source"] = "tty_prompt"
+    stage_meta["effective_reasoning_effort"] = override_effort
+    stage_meta["effective_reasoning_effort_source"] = "tty_prompt"
+    stage_resolution_meta["resolved"] = stage_resolved_meta
+    stage_resolution_meta["multipass_stage_reasoning"] = dict(stage_meta)
+    return {
+        "resolved": stage_resolved,
+        "resolution_meta": stage_resolution_meta,
+        "meta": stage_meta,
+        "runtime_policy": _runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved=stage_resolved,
+            llm_resolution_meta=stage_resolution_meta,
+        ),
+    }
+
+
 def _ensure_multipass_run_entry(
     meta: dict[str, Any],
     *,
@@ -6174,6 +6743,7 @@ def _execute_multipass_step_stage(
     ui_enabled: bool = False,
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
+    multipass_cfg: dict[str, Any] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
@@ -6309,13 +6879,41 @@ def _execute_multipass_step_stage(
                 grounding_attempts.append(attempt)
                 choice = ""
                 if ui_enabled:
-                    choice = prompt_grounding_retry_skip(
+                    prompted_choice = prompt_grounding_retry_skip(
                         step_id=entry.step_id,
                         step_title=entry.step_title,
                         attempt_count=len(grounding_attempts),
                         validation=exc.step_validation,
                     )
+                    if prompted_choice in {"retry", "skip"}:
+                        choice = prompted_choice
                 if choice == "retry":
+                    step_effort_options = list(
+                        _reasoning_effort_choices_for_provider(llm_resolved.get("provider"))
+                    )
+                    override_effort = prompt_grounding_retry_effort(
+                        provider=str(llm_resolved.get("provider") or ""),
+                        default_effort=str(llm_resolved.get("reasoning_effort") or "").strip() or None,
+                        effort_options=step_effort_options,
+                        stage_label=f"multipass step {entry.step_id or entry.index:>02}",
+                    )
+                    retry_resolved = dict(llm_resolved)
+                    retry_resolution_meta = dict(llm_resolution_meta)
+                    retry_runtime_policy = runtime_policy
+                    retry_stage_meta: dict[str, Any] | None = None
+                    if override_effort:
+                        rebuilt = _rebuild_multipass_retry_stage_state(
+                            stage_name="step",
+                            llm_resolved=llm_resolved,
+                            llm_resolution_meta=llm_resolution_meta,
+                            runtime_policy=runtime_policy,
+                            multipass_cfg=multipass_cfg,
+                            override_effort=override_effort,
+                        )
+                        retry_resolved = rebuilt["resolved"]
+                        retry_resolution_meta = rebuilt["resolution_meta"]
+                        retry_runtime_policy = rebuilt["runtime_policy"]
+                        retry_stage_meta = rebuilt["meta"]
                     with progress.mutate():
                         _set_multipass_step_state(
                             progress.meta,
@@ -6328,16 +6926,25 @@ def _execute_multipass_step_stage(
                             grounding_attempts=grounding_attempts,
                             grounding_retried=True,
                         )
+                        if retry_stage_meta is not None:
+                            _record_multipass_stage_llm(
+                                meta=progress.meta,
+                                stage_name="step",
+                                stage_llm_meta=retry_stage_meta,
+                            )
+                            run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                            if run_entry is not None:
+                                run_entry["llm"] = dict(retry_stage_meta)
                     current_result = _run_multipass_step_llm(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
-                        llm_resolved=llm_resolved,
-                        llm_resolution_meta=llm_resolution_meta,
+                        llm_resolved=retry_resolved,
+                        llm_resolution_meta=retry_resolution_meta,
                         env=env,
                         stream=worker_stream,
                         add_dirs=add_dirs,
-                        runtime_policy=runtime_policy,
+                        runtime_policy=retry_runtime_policy,
                         quiet=quiet,
                     )
                     continue
@@ -9380,6 +9987,7 @@ def _pr_flow_impl(
                             codex_meta=codex_meta,
                             quiet=quiet,
                             ui_enabled=ui_enabled,
+                            multipass_cfg=multipass_defaults,
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
@@ -9423,92 +10031,28 @@ def _pr_flow_impl(
                                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                             },
                         )
-                        synth_run_entry = _ensure_multipass_run_entry(
-                            progress.meta,
-                            kind="synth",
-                            output_path=review_md_path,
-                            template_id=builtin_prompt_id(templates["synth"]),
-                            prompt=synth_prompt,
-                            stage_llm_meta=synth_llm["meta"],
-                        )
-                        progress.flush()
-                        synth_result = run_llm_exec(
+                        success_resume_command = _execute_multipass_synth_stage(
+                            progress=progress,
                             repo_dir=repo_dir,
-                            resolved=synth_llm["resolved"],
-                            resolution_meta=synth_llm["resolution_meta"],
-                            output_path=review_md_path,
-                            prompt=synth_prompt,
+                            work_dir=work_dir,
+                            session_id=session_id,
+                            review_md_path=review_md_path,
+                            synth_prompt=synth_prompt,
+                            synth_llm=synth_llm,
+                            synth_runtime_policy=synth_runtime_policy,
+                            synth_step_outputs=synth_step_outputs,
+                            grounding_mode=grounding_mode,
                             env=env,
                             stream=stream,
-                            progress=progress,
                             add_dirs=add_dirs,
-                            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
-                            runtime_policy=synth_runtime_policy,
-                        )
-                        record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
-                        _record_multipass_stage_llm(
-                            meta=progress.meta,
-                            stage_name="synth",
-                            stage_llm_meta=synth_llm["meta"],
-                        )
-                        if synth_result.resume is not None:
-                            synth_run_entry["llm_session_id"] = synth_result.resume.session_id
-                            synth_run_entry["llm_provider"] = synth_result.resume.provider
-                        synth_run_entry["usage"] = _normalize_llm_usage(
-                            synth_result.adapter_meta.get("usage")
-                        )
-                        progress.flush()
-                        success_resume_command = record_llm_resume(
-                            progress.meta.setdefault("llm", {}), synth_result.resume
-                        )
-                        if codex_meta is not None:
-                            codex_resume = (
-                                CodexResumeInfo(
-                                    session_id=synth_result.resume.session_id,
-                                    cwd=synth_result.resume.cwd,
-                                    command=synth_result.resume.command,
-                                )
-                                if synth_result.resume is not None and synth_result.resume.provider == "codex"
-                                else None
-                            )
-                            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                        _enforce_chunkhound_tool_proof(
-                            meta=progress.meta,
-                            work_dir=work_dir,
-                            provider=str(llm_resolved.get("provider") or ""),
-                            review_stage="multipass_synth",
+                            codex_meta=codex_meta,
+                            ui_enabled=ui_enabled,
                             prompt_template_name=templates["synth"],
-                            adapter_meta=synth_result.adapter_meta,
-                        )
-                        progress.flush()
-                        _, synth_validation = _validate_or_reuse_synth_artifact(
-                            meta=progress.meta,
-                            work_dir=work_dir,
-                            grounding_mode=grounding_mode,
-                            artifact_path=review_md_path,
-                            step_outputs=[Path(item) for item in synth_step_outputs],
-                            repo_dir=repo_dir,
-                        )
-                        progress.flush()
-                        if (
-                            grounding_mode == "strict"
-                            and synth_validation is not None
-                            and (synth_validation.get("valid") is False)
-                        ):
-                            _emit_multipass_grounding_failure_playbook(
-                                meta=progress.meta,
-                                session_id=session_id,
-                                session_dir=review_md_path.parent,
-                                work_dir=work_dir,
-                                artifact_path=review_md_path,
-                                validation=synth_validation,
-                                resume_from="synth",
-                            )
-                            raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
-                        _record_multipass_review_artifact_llm(
-                            meta=progress.meta,
-                            stage_name="synth",
-                            stage_llm_meta=synth_llm["meta"],
+                            run_kind="synth",
+                            review_stage="multipass_synth",
+                            stage_label="multipass synth",
+                            failure_message="Multipass synth grounding validation failed for review.md.",
+                            multipass_cfg=multipass_defaults,
                         )
 
                     progress.meta.setdefault("multipass", {})["status"] = "done"
@@ -9680,6 +10224,7 @@ def _run_incremental_completed_multipass_resume(
     plan_runtime_policy: dict[str, Any],
     step_runtime_policy: dict[str, Any],
     synth_runtime_policy: dict[str, Any],
+    multipass_cfg: dict[str, Any],
     env: dict[str, str],
     stream: bool,
     add_dirs: list[Path],
@@ -9970,6 +10515,7 @@ def _run_incremental_completed_multipass_resume(
             ui_enabled=ui_enabled,
             review_stage="multipass_resume_step",
             prompt_template_name=templates["resume_step"],
+            multipass_cfg=multipass_cfg,
         )
         success_resume_command = step_resume_command or success_resume_command
     else:
@@ -10033,78 +10579,28 @@ def _run_incremental_completed_multipass_resume(
                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
             },
         )
-        synth_run_entry = _ensure_multipass_run_entry(
-            progress.meta,
-            kind="resume_synth",
-            output_path=review_md_path,
-            template_id=builtin_prompt_id(templates["resume_synth"]),
-            prompt=synth_prompt,
-            stage_llm_meta=synth_llm["meta"],
-        )
-        synth_result = run_llm_exec(
+        success_resume_command = _execute_multipass_synth_stage(
+            progress=progress,
             repo_dir=repo_dir,
-            resolved=synth_llm["resolved"],
-            resolution_meta=synth_llm["resolution_meta"],
-            output_path=review_md_path,
-            prompt=synth_prompt,
+            work_dir=work_dir,
+            session_id=session_id,
+            review_md_path=review_md_path,
+            synth_prompt=synth_prompt,
+            synth_llm=synth_llm,
+            synth_runtime_policy=synth_runtime_policy,
+            synth_step_outputs=synth_step_outputs,
+            grounding_mode=grounding_mode,
             env=env,
             stream=stream,
-            progress=progress,
             add_dirs=add_dirs,
-            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
-            runtime_policy=synth_runtime_policy,
-        )
-        record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
-        _record_multipass_stage_llm(meta=progress.meta, stage_name="synth", stage_llm_meta=synth_llm["meta"])
-        synth_run_entry["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
-        if synth_result.resume is not None:
-            synth_run_entry["llm_session_id"] = synth_result.resume.session_id
-            synth_run_entry["llm_provider"] = synth_result.resume.provider
-        success_resume_command = record_llm_resume(progress.meta.setdefault("llm", {}), synth_result.resume)
-        if codex_meta is not None:
-            codex_resume = (
-                CodexResumeInfo(
-                    session_id=synth_result.resume.session_id,
-                    cwd=synth_result.resume.cwd,
-                    command=synth_result.resume.command,
-                )
-                if synth_result.resume is not None and synth_result.resume.provider == "codex"
-                else None
-            )
-            record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-        _enforce_chunkhound_tool_proof(
-            meta=progress.meta,
-            work_dir=work_dir,
-            provider=str(synth_llm["resolved"].get("provider") or ""),
-            review_stage="multipass_resume_synth",
+            codex_meta=codex_meta,
+            ui_enabled=ui_enabled,
             prompt_template_name=templates["resume_synth"],
-            adapter_meta=synth_result.adapter_meta,
-        )
-        progress.flush()
-        _, synth_validation = _validate_or_reuse_synth_artifact(
-            meta=progress.meta,
-            work_dir=work_dir,
-            grounding_mode=grounding_mode,
-            artifact_path=review_md_path,
-            step_outputs=[Path(item) for item in synth_step_outputs],
-            repo_dir=repo_dir,
-        )
-        progress.flush()
-        if grounding_mode == "strict" and synth_validation is not None and (synth_validation.get("valid") is False):
-            _emit_multipass_grounding_failure_playbook(
-                meta=progress.meta,
-                session_id=session_id,
-                session_dir=review_md_path.parent,
-                work_dir=work_dir,
-                artifact_path=review_md_path,
-                validation=synth_validation,
-                resume_from="synth",
-            )
-            raise ReviewflowError("Incremental multipass synth grounding validation failed for review.md.")
-        _record_multipass_review_artifact_llm(
-            meta=progress.meta,
-            stage_name="synth",
-            stage_llm_meta=synth_llm["meta"],
+            run_kind="resume_synth",
+            review_stage="multipass_resume_synth",
+            stage_label="multipass resume synth",
+            failure_message="Incremental multipass synth grounding validation failed for review.md.",
+            multipass_cfg=multipass_cfg,
         )
 
     progress.meta["review_head_sha"] = current_review_head_sha
@@ -10553,6 +11049,7 @@ def _resume_flow_impl(
                 plan_runtime_policy=plan_runtime_policy,
                 step_runtime_policy=step_runtime_policy,
                 synth_runtime_policy=synth_runtime_policy,
+                multipass_cfg=multipass_cfg,
                 env=env,
                 stream=stream,
                 add_dirs=add_dirs,
@@ -10886,6 +11383,7 @@ def _resume_flow_impl(
                     codex_meta=codex_meta,
                     quiet=quiet,
                     ui_enabled=ui_enabled,
+                    multipass_cfg=multipass_cfg,
                 )
                 success_resume_command = step_resume_command or success_resume_command
         else:
@@ -10968,88 +11466,28 @@ def _resume_flow_impl(
                         "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
                     },
                 )
-                synth_run_entry = _ensure_multipass_run_entry(
-                    progress.meta,
-                    kind="synth",
-                    output_path=review_md_path,
-                    template_id=builtin_prompt_id(templates["synth"]),
-                    prompt=synth_prompt,
-                    stage_llm_meta=synth_llm["meta"],
-                )
-                synth_result = run_llm_exec(
+                success_resume_command = _execute_multipass_synth_stage(
+                    progress=progress,
                     repo_dir=repo_dir,
-                    resolved=synth_llm["resolved"],
-                    resolution_meta=synth_llm["resolution_meta"],
-                    output_path=review_md_path,
-                    prompt=synth_prompt,
+                    work_dir=work_dir,
+                    session_id=session_id,
+                    review_md_path=review_md_path,
+                    synth_prompt=synth_prompt,
+                    synth_llm=synth_llm,
+                    synth_runtime_policy=synth_runtime_policy,
+                    synth_step_outputs=synth_step_outputs,
+                    grounding_mode=grounding_mode,
                     env=env,
                     stream=stream,
-                    progress=progress,
                     add_dirs=add_dirs,
-                    codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
-                    runtime_policy=synth_runtime_policy,
-                )
-                record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
-                _record_multipass_stage_llm(
-                    meta=progress.meta,
-                    stage_name="synth",
-                    stage_llm_meta=synth_llm["meta"],
-                )
-                synth_run_entry["usage"] = _normalize_llm_usage(synth_result.adapter_meta.get("usage"))
-                if synth_result.resume is not None:
-                    synth_run_entry["llm_session_id"] = synth_result.resume.session_id
-                    synth_run_entry["llm_provider"] = synth_result.resume.provider
-                success_resume_command = record_llm_resume(
-                    progress.meta.setdefault("llm", {}), synth_result.resume
-                )
-                if codex_meta is not None:
-                    codex_resume = (
-                        CodexResumeInfo(
-                            session_id=synth_result.resume.session_id,
-                            cwd=synth_result.resume.cwd,
-                            command=synth_result.resume.command,
-                        )
-                        if synth_result.resume is not None and synth_result.resume.provider == "codex"
-                        else None
-                    )
-                    record_codex_resume(progress.meta.setdefault("codex", {}), codex_resume)
-                _enforce_chunkhound_tool_proof(
-                    meta=progress.meta,
-                    work_dir=work_dir,
-                    provider=str(llm_resolved.get("provider") or ""),
-                    review_stage="multipass_synth",
+                    codex_meta=codex_meta,
+                    ui_enabled=ui_enabled,
                     prompt_template_name=templates["synth"],
-                    adapter_meta=synth_result.adapter_meta,
-                )
-                progress.flush()
-                _, synth_validation = _validate_or_reuse_synth_artifact(
-                    meta=progress.meta,
-                    work_dir=work_dir,
-                    grounding_mode=grounding_mode,
-                    artifact_path=review_md_path,
-                    step_outputs=[Path(item) for item in synth_step_outputs],
-                    repo_dir=repo_dir,
-                )
-                progress.flush()
-                if (
-                    grounding_mode == "strict"
-                    and synth_validation is not None
-                    and (synth_validation.get("valid") is False)
-                ):
-                    _emit_multipass_grounding_failure_playbook(
-                        meta=progress.meta,
-                        session_id=session_id,
-                        session_dir=review_md_path.parent,
-                        work_dir=work_dir,
-                        artifact_path=review_md_path,
-                        validation=synth_validation,
-                        resume_from="synth",
-                    )
-                    raise ReviewflowError("Multipass synth grounding validation failed for review.md.")
-                _record_multipass_review_artifact_llm(
-                    meta=progress.meta,
-                    stage_name="synth",
-                    stage_llm_meta=synth_llm["meta"],
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="Multipass synth grounding validation failed for review.md.",
+                    multipass_cfg=multipass_cfg,
                 )
 
         if did_work:

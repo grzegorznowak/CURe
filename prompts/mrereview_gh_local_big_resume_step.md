@@ -44,8 +44,8 @@ Safety guardrail:
 4. Think step by step, but keep only a minimal visible draft:
    - Put these under `### Steps taken` (5 words max per line).
 5. Never speculate about code you haven't read.
-6. Every non-empty `### Findings` bullet must end with an `Evidence:` suffix containing one or more real repo citations in `relative/path:line` form.
-7. If there are no findings, write exactly `- None.`.
+6. Trailing citation contract (shared across review prompts):
+$STEP_CITATION_CONTRACT
 
 # Output format
 ```markdown
@@ -56,7 +56,7 @@ Safety guardrail:
 - ...
 
 ### Findings
-- [Issue or observation]. Evidence: `path/to/file.py:123`
+- [Issue or observation]. Sources: `path/to/file.py:123`
 
 ### Suggested actions
 - [Concrete change or test]

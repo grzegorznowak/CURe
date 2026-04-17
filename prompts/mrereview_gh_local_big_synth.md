@@ -44,11 +44,8 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
-- Every non-empty bullet under `Strengths`, `In Scope Issues`, `Out of Scope Issues`, and `Reusability` must end with a `Sources:` suffix containing at least one real primary-evidence citation.
-- Accepted primary evidence in v1:
-  - repo or test files under the sandbox checkout, e.g. `src/module.py:12` or `tests/test_module.py:44`
-  - stable CURe session artifacts under `work/`, e.g. `work/pr-context.md:7`
-- `review.step-XX.md:line` may be included as extra traceability, but it does not count as the required primary evidence by itself.
+- Trailing citation contract (shared across review prompts):
+$SYNTH_CITATION_CONTRACT
 - Do not use any excluded grounding-skipped step artifact, even if that file still exists in the session directory.
 
 # Output Format

@@ -1137,6 +1137,75 @@ def prompt_grounding_retry_skip(
     )
 
 
+def prompt_grounding_retry_effort(
+    *,
+    provider: str,
+    default_effort: str | None,
+    effort_options: list[str],
+    stage_label: str,
+) -> str | None:
+    """TTY-only effort picker used on grounding retry.
+
+    Story 42: every interactive grounding retry reopens the effort picker so
+    operators can redirect thinking budget without re-running worker tokens
+    under a bad retry choice. Provider and model are fixed — only effort is
+    changeable.
+    """
+    if not effort_options:
+        return None
+    result = prompt_pr_model_and_effort_picker(
+        provider=provider,
+        default_model=None,
+        default_effort=default_effort,
+        model_options=[],
+        effort_options=list(effort_options),
+        prompt_for_model=False,
+        prompt_for_effort=True,
+        fixed_model=stage_label,
+        fixed_effort=None,
+    )
+    if not result:
+        return None
+    return result.get("reasoning_effort") or None
+
+
+def prompt_synth_grounding_retry_choice(
+    *,
+    attempt_count: int,
+    validation: dict[str, Any] | None,
+) -> str | None:
+    """TTY prompt for synth grounding failure.
+
+    Returns ``retry`` to rerun synth with a different effort, ``finalize`` to
+    apply severity-aware finalization (drop non-critical invalid bullets and
+    continue), or ``abort`` to emit the playbook and fail.
+    """
+    errors = validation.get("errors") if isinstance(validation, dict) else []
+    lines = [
+        "Synth artifact generated successfully; strict grounding rejected review.md.",
+        f"Attempt: {int(attempt_count)}",
+        "Errors:",
+    ]
+    listed = 0
+    if isinstance(errors, list):
+        for item in errors[:6]:
+            text = " ".join(str(item or "").strip().split())
+            if not text:
+                continue
+            lines.append(f"- {text}")
+            listed += 1
+    if listed == 0:
+        lines.append("- strict synth grounding validation failed")
+    return _run_tty_prompt(
+        lines=lines,
+        choices={
+            "retry": "rerun synth with a different effort",
+            "finalize": "drop non-critical / supportable bullets and continue",
+            "abort": "abort with the grounding playbook",
+        },
+    )
+
+
 def prompt_resume_grounding_skipped_steps(*, skipped_records: list[dict[str, Any]]) -> str | None:
     lines = [
         "This resume would revisit multipass steps with prior grounding skips.",

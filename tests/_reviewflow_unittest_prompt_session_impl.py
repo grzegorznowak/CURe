@@ -466,13 +466,13 @@ class PromptTemplateTests(unittest.TestCase):
     def test_multipass_grounding_prompts_require_parseable_citation_suffixes(self) -> None:
         step_text = (ROOT / "prompts" / "mrereview_gh_local_big_step.md").read_text(encoding="utf-8")
         synth_text = (ROOT / "prompts" / "mrereview_gh_local_big_synth.md").read_text(encoding="utf-8")
-        self.assertIn("Evidence:", step_text)
-        self.assertIn("relative/path:line", step_text)
+        self.assertIn("$STEP_CITATION_CONTRACT", step_text)
+        self.assertIn("Sources:", step_text)
+        self.assertNotIn("`Evidence:`", step_text)
+        self.assertIn("$SYNTH_CITATION_CONTRACT", synth_text)
         self.assertIn("Sources:", synth_text)
-        self.assertIn("primary-evidence citation", synth_text)
         self.assertIn("src/module.py:12", synth_text)
         self.assertIn("work/pr-context.md:7", synth_text)
-        self.assertIn("does not count as the required primary evidence", synth_text)
 
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
@@ -618,7 +618,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "- checked module",
                         "",
                         "### Findings",
-                        "- Input is unchecked. Evidence: `pkg/module.py:2`",
+                        "- Input is unchecked. Sources: `pkg/module.py:2`",
                         "",
                         "### Suggested actions",
                         "- Add validation",
@@ -656,7 +656,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "- checked module",
                         "",
                         "### Findings",
-                        "- Listener repro used `tcp:127.0.0.1:0` and still points to the real file. Evidence: `pkg/module.py:2`",
+                        "- Listener repro used `tcp:127.0.0.1:0` and still points to the real file. Sources: `pkg/module.py:2`",
                         "",
                         "### Suggested actions",
                         "- Add validation",
@@ -696,7 +696,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "- checked workflow",
                         "",
                         "### Findings",
-                        "- CI gate exists. Evidence: `.github/workflows/ci.yml:2`",
+                        "- CI gate exists. Sources: `.github/workflows/ci.yml:2`",
                         "",
                         "### Suggested actions",
                         "- None.",
@@ -734,7 +734,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "- checked workflow",
                         "",
                         "### Findings",
-                        "- CI gate exists. Evidence: `./.github/workflows/ci.yml:2`",
+                        "- CI gate exists. Sources: `./.github/workflows/ci.yml:2`",
                         "",
                         "### Suggested actions",
                         "- None.",
@@ -779,7 +779,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                 step_index=1,
             )
             self.assertFalse(result["valid"])
-            self.assertIn("missing a repo citation", "\n".join(result["errors"]))
+            self.assertIn("missing a trailing `Sources:` suffix", "\n".join(result["errors"]))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -805,7 +805,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "**Focus**: grounding",
                         "",
                         "### Findings",
-                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "- Something important. Sources: `pkg/module.py:2`",
                         "",
                     ]
                 ),
@@ -885,7 +885,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "**Focus**: grounding",
                         "",
                         "### Findings",
-                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "- Something important. Sources: `pkg/module.py:2`",
                         "",
                     ]
                 ),
@@ -963,7 +963,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "**Focus**: grounding",
                         "",
                         "### Findings",
-                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "- Something important. Sources: `pkg/module.py:2`",
                         "",
                     ]
                 ),
@@ -1039,7 +1039,7 @@ class MultipassGroundingValidationTests(unittest.TestCase):
                         "**Focus**: grounding",
                         "",
                         "### Findings",
-                        "- Something important. Evidence: `pkg/module.py:2`",
+                        "- Something important. Sources: `pkg/module.py:2`",
                         "",
                     ]
                 ),
@@ -1093,6 +1093,166 @@ class MultipassGroundingValidationTests(unittest.TestCase):
             )
             self.assertFalse(result["valid"])
             self.assertIn("cites missing source line pkg/module.py:9", "\n".join(result["errors"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_synth_grounding_reports_incomplete_file_only_sources(self) -> None:
+        root = ROOT / ".tmp_test_synth_grounding_incomplete_sources"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            session_dir = root / "session"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Something important. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read repo",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `pkg/module.py`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Provenance is missing. Sources: `pkg/module.py:3`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+            self.assertFalse(result["valid"])
+            rendered_errors = "\n".join(result["errors"])
+            self.assertIn("incomplete `Sources:` suffix", rendered_errors)
+            self.assertIn("'### Strengths' under '## Business / Product Assessment'", rendered_errors)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_synth_grounding_disambiguates_duplicate_section_labels(self) -> None:
+        root = ROOT / ".tmp_test_synth_grounding_duplicate_labels"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            session_dir = root / "session"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Something important. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read repo",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business strength without line. Sources: `pkg/module.py`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical strength without line. Sources: `pkg/module.py`",
+                        "",
+                        "### In Scope Issues",
+                        "- Technical issue is grounded. Sources: `pkg/module.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+            self.assertFalse(result["valid"])
+            section_labels = [item["section_label"] for item in result["invalid_bullets"]]
+            self.assertIn("'### Strengths' under '## Business / Product Assessment' (line 9)", section_labels)
+            self.assertIn("'### Strengths' under '## Technical Assessment' (line 21)", section_labels)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

@@ -6241,7 +6241,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -6594,7 +6594,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                                 "- checked repo",
                                 "",
                                 "### Findings",
-                                "- Input lacks validation. Evidence: `src/app.py:2`",
+                                "- Input lacks validation. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- Add checks",
@@ -8725,7 +8725,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -8985,7 +8985,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -9076,7 +9076,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -9387,7 +9387,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -10227,7 +10227,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- checked repo",
                                 "",
                                 "### Findings",
-                                "- Input lacks validation. Evidence: `src/app.py:2`",
+                                "- Input lacks validation. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- Add checks",
@@ -10654,7 +10654,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Input lacks validation. Evidence: `src/app.py:2`",
+                "- Input lacks validation. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- Add checks",
@@ -10976,7 +10976,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11257,7 +11257,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_resume_flow_completed_multipass_prints_playbook_for_incremental_synth_grounding_failure(self) -> None:
+    def test_resume_flow_completed_multipass_finalizes_noncritical_incremental_synth_grounding_issues(self) -> None:
         root = ROOT / ".tmp_test_resume_incremental_synth_grounding_failure"
         cfg = root / "reviewflow.toml"
         old_head = "1111111111111111111111111111111111111111"
@@ -11271,7 +11271,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11579,27 +11579,20 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
                 stack.enter_context(mock.patch.object(rf, "_eprint", side_effect=capture))
                 stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
-                with self.assertRaisesRegex(
-                    rf.ReviewflowError,
-                    "Incremental multipass synth grounding validation failed",
-                ):
-                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
+            rewritten_review = review_md.read_text(encoding="utf-8")
             playbook = "\n".join(messages)
+            self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
-            self.assertEqual(refreshed["status"], "error")
-            self.assertIn("synth", report["invalid_artifacts"])
-            self.assertIn("`review.md`", playbook)
-            self.assertIn("grounding_report.json", playbook)
-            self.assertIn("logs directory:", playbook)
-            self.assertIn("step-artifact citations alone are insufficient", playbook)
-            self.assertIn("cure status session-1 --json", playbook)
-            self.assertIn("cure watch session-1", playbook)
-            self.assertIn("cure resume session-1", playbook)
-            self.assertIn("cure resume session-1 --from synth", playbook)
-            self.assertIn('[multipass].grounding_mode = "warn"', playbook)
+            self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(report["invalid_artifacts"], [])
+            self.assertEqual(playbook, "")
+            self.assertIn("## Grounding omission summary", rewritten_review)
+            self.assertIn("[non-critical]", rewritten_review)
+            self.assertIn("- None.", rewritten_review)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -11618,7 +11611,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11793,7 +11786,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- Re-read changed files",
                                 "",
                                 "### Findings",
-                                "- The updated API path is now coherent. Evidence: `src/app.py:2`",
+                                "- The updated API path is now coherent. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- None.",
@@ -11814,7 +11807,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- Examined incremental diff",
                                 "",
                                 "### Findings",
-                                "- The new delta remains cosmetic in effect. Evidence: `src/app.py:2`",
+                                "- The new delta remains cosmetic in effect. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- None.",
@@ -12039,7 +12032,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "- checked repo",
                         "",
                         "### Findings",
-                        "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                        "- Existing validation looks stable. Sources: `src/app.py:2`",
                         "",
                         "### Suggested actions",
                         "- None.",
@@ -12334,7 +12327,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "- checked repo",
                         "",
                         "### Findings",
-                        "- API concern. Evidence: `src/app.py:2`",
+                        "- API concern. Sources: `src/app.py:2`",
                         "",
                     ]
                 ),
@@ -12405,7 +12398,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- checked tests",
                                 "",
                                 "### Findings",
-                                "- Test concern. Evidence: `src/app.py:3`",
+                                "- Test concern. Sources: `src/app.py:3`",
                                 "",
                             ]
                         ),
@@ -12620,6 +12613,201 @@ class ExtractionOwnershipTests(unittest.TestCase):
 
 
 class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
+    def test_apply_synth_severity_finalization_drops_only_targeted_duplicate_bullet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read repo",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Grounded issue. Sources: `pkg/module.py:3`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Reusable note. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            finalized, _, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={
+                    "valid": False,
+                    "invalid_bullets": [
+                        {
+                            "section": "Strengths",
+                            "section_label": "'### Strengths' under '## Business / Product Assessment' (line 9)",
+                            "section_line": 9,
+                            "section_key": "Business / Product Assessment|Strengths|9",
+                            "parent": "Business / Product Assessment",
+                            "bullet_index": 1,
+                            "bullet_text": "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                            "critical": False,
+                            "reason": "bad cite",
+                        }
+                    ],
+                },
+                ui_enabled=False,
+                allow_critical_omission=False,
+            )
+
+            self.assertTrue(finalized)
+            self.assertEqual(len(dropped), 1)
+            rewritten = review_md.read_text(encoding="utf-8")
+            self.assertIn("## Grounding omission summary", rewritten)
+            self.assertIn("## Business / Product Assessment\n**Verdict**: APPROVE\n\n### Strengths\n- None.", rewritten)
+            self.assertIn(
+                "## Technical Assessment\n**Verdict**: REQUEST CHANGES\n\n### Strengths\n- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                rewritten,
+            )
+
+    def test_execute_multipass_synth_stage_retries_with_codex_effort_override_in_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-1", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            valid_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(
+                adapter_meta={"usage": {"input_tokens": 1, "output_tokens": 1}},
+                resume=None,
+            )
+            synth_llm = {
+                "resolved": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "codex", "effective_reasoning_effort": "medium"},
+            }
+            run_invocations: list[dict[str, Any]] = []
+
+            def capture_run_llm_exec(**kwargs: Any) -> rf.LlmRunResult:
+                runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
+                resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+                run_invocations.append(
+                    {
+                        "resolved": dict(kwargs["resolved"]) if isinstance(kwargs.get("resolved"), dict) else {},
+                        "resolution_meta": dict(resolution_meta),
+                        "codex_flags": list(runtime_policy.get("codex_flags") or []),
+                    }
+                )
+                return llm_result
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", side_effect=capture_run_llm_exec) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    side_effect=[(False, invalid_validation), (True, valid_validation)],
+                ) as validate_mock,
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value="high") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof") as proof_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-1",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_resume_synth.md",
+                    run_kind="resume_synth",
+                    review_stage="multipass_resume_synth",
+                    stage_label="multipass resume synth",
+                    failure_message="resume synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(validate_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_called_once()
+            proof_mock.assert_called()
+            self.assertEqual(synth_llm["resolved"]["reasoning_effort"], "high")
+            self.assertIn('model_reasoning_effort="medium"', run_invocations[0]["codex_flags"])
+            self.assertIn('model_reasoning_effort="high"', run_invocations[1]["codex_flags"])
+            self.assertEqual(
+                (run_invocations[1]["resolution_meta"].get("resolved") or {}).get("reasoning_effort_source"),
+                "tty_prompt",
+            )
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"],
+                "high",
+            )
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
+                "high",
+            )
+            self.assertEqual(progress.meta["multipass"]["runs"][0]["llm"]["effective_reasoning_effort"], "high")
+
     def test_step_grounding_validation_error_carries_payload(self) -> None:
         err = rf.StepGroundingValidationError(
             "bad grounding",
@@ -12706,6 +12894,122 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertEqual(len(state["grounding_attempts"]), 1)
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(run_entry["first_grounding_failure_validation"]["errors"], ["missing citation"])
+
+    def test_execute_multipass_step_stage_retries_with_codex_effort_override_in_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}, "llm": {}, "codex": {}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "codex", "effective_reasoning_effort": "medium"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            run_invocations: list[dict[str, Any]] = []
+
+            def capture_step_run(**kwargs: Any) -> rf.MultipassStepRunResult:
+                runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
+                resolution_meta = kwargs["llm_resolution_meta"] if isinstance(kwargs.get("llm_resolution_meta"), dict) else {}
+                run_invocations.append(
+                    {
+                        "resolved": dict(kwargs["llm_resolved"]) if isinstance(kwargs.get("llm_resolved"), dict) else {},
+                        "resolution_meta": dict(resolution_meta),
+                        "codex_flags": list(runtime_policy.get("codex_flags") or []),
+                    }
+                )
+                return raw_result
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=capture_step_run) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value="high") as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                    llm_resolution_meta={
+                        "resolved": {
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            "reasoning_effort_source": "cli",
+                            "reasoning_effort_source_detail": "cli",
+                        }
+                    },
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(skipped, [])
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 2)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_called_once()
+            self.assertIn('model_reasoning_effort="medium"', run_invocations[0]["codex_flags"])
+            self.assertIn('model_reasoning_effort="high"', run_invocations[1]["codex_flags"])
+            self.assertEqual(
+                (run_invocations[1]["resolution_meta"].get("resolved") or {}).get("reasoning_effort_source"),
+                "tty_prompt",
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "completed")
+            self.assertTrue(state["grounding_retried"])
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"],
+                "high",
+            )
+            self.assertEqual(run_entry["llm"]["effective_reasoning_effort"], "high")
 
     def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
