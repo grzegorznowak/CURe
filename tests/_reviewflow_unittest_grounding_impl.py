@@ -12703,6 +12703,78 @@ class ExtractionOwnershipTests(unittest.TestCase):
 
 
 class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
+    def _codex_runtime_policy(self) -> dict[str, object]:
+        return {
+            "env": {},
+            "metadata": {},
+            "staged_paths": {},
+            "add_dirs": [],
+            "codex_config_overrides": [],
+            "codex_flags": [],
+            "dangerously_bypass_approvals_and_sandbox": True,
+        }
+
+    def _fake_materialize_chunkhound_env_config(
+        self,
+        *,
+        resolved_config: dict[str, object],
+        output_config_path: Path,
+        database_provider: str,
+        database_path: Path,
+    ) -> None:
+        output_config_path.parent.mkdir(parents=True, exist_ok=True)
+        output_config_path.write_text("{}", encoding="utf-8")
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fake_write_pr_context_file(
+        self,
+        *,
+        work_dir: Path,
+        pr: rf.PullRequestRef,
+        pr_meta: dict[str, object],
+    ) -> Path:
+        context_path = work_dir / "pr-context.md"
+        context_path.write_text("context", encoding="utf-8")
+        return context_path
+
+    def _valid_synth_markdown(self, primary_citation: str = "work/pr-context.md:1") -> str:
+        return "\n".join(
+            [
+                "### Steps taken",
+                "- Read step output",
+                "",
+                "**Summary**: ok",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                f"- Business value is clear. Sources: `{primary_citation}`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: REQUEST CHANGES",
+                "",
+                "### Strengths",
+                f"- Technical read happened. Sources: `{primary_citation}`",
+                "",
+                "### In Scope Issues",
+                f"- Missing provenance hygiene. Sources: `{primary_citation}`",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                f"- Artifact stays inspectable. Sources: `{primary_citation}`",
+                "",
+            ]
+        )
+
     def test_apply_synth_severity_finalization_drops_only_targeted_duplicate_bullet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13945,3 +14017,464 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
         self.assertEqual(synth_outputs, ["/tmp/review.step-01.md"])
         self.assertEqual(meta["multipass"]["grounding_skipped_steps"], [])
+
+    def test_strip_existing_synth_omission_footer_handles_offset_zero_heading(self) -> None:
+        heading = rf._SYNTH_OMISSION_FOOTER_HEADING
+        text = f"{heading}\n\nstub\n"
+
+        stripped = rf._strip_existing_synth_omission_footer(text)
+
+        self.assertEqual(stripped, "")
+
+    def test_strip_existing_synth_omission_footer_is_idempotent_across_successive_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                }
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        self.assertEqual(rewritten.count(rf._SYNTH_OMISSION_FOOTER_HEADING), 1)
+
+    def test_rewrite_and_footer_agree_on_filtered_omission_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Reusable note. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                },
+                {
+                    "section_key": "",
+                    "bullet_index": 0,
+                    "section_label": "unattributed phantom",
+                    "bullet_text": "- phantom bullet",
+                    "critical": False,
+                    "reason": "should not appear",
+                },
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rewritten = review_md.read_text(encoding="utf-8")
+            footer = rf._format_synth_omission_footer(dropped)
+
+        self.assertIn(rf._SYNTH_OMISSION_FOOTER_HEADING, rewritten)
+        self.assertNotIn("phantom bullet", rewritten)
+        self.assertNotIn("unattributed phantom", rewritten)
+        self.assertIn("bullet #1", footer)
+        self.assertNotIn("bullet #0", footer)
+        self.assertNotIn("unattributed phantom", footer)
+
+    def test_rewrite_ignores_indented_markdown_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "    ## Indented heading inside a code/quote block",
+                        "    - Not a section bullet. Sources: `pkg/module.py:9`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                }
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        body, _, footer = rewritten.partition(rf._SYNTH_OMISSION_FOOTER_HEADING)
+        self.assertNotIn("- Drop me.", body)
+        self.assertIn("    ## Indented heading inside a code/quote block", body)
+        self.assertIn("    - Not a section bullet.", body)
+        self.assertIn("dropped bullet text: Drop me.", footer)
+
+    def test_synth_grounding_error_list_uses_specific_citation_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `src/app.py:99`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        joined_errors = "\n".join(validation["errors"])
+        self.assertIn("cites missing source line", joined_errors)
+        self.assertNotIn(
+            "must cite at least one valid primary-evidence line",
+            "\n".join(
+                e
+                for e in validation["errors"]
+                if "cites missing source line" not in e and "cites unsupported synth source" not in e
+            ),
+        )
+
+    def test_apply_synth_severity_finalization_refuses_when_all_critical_would_empty_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Good. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Sole critical issue bullet. Sources: `pkg/module.py:99`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original_text = review_md.read_text(encoding="utf-8")
+            invalid_bullet = {
+                "section": "In Scope Issues",
+                "section_label": "'### In Scope Issues' under '## Business / Product Assessment' (line 7)",
+                "section_line": 7,
+                "section_key": "Business / Product Assessment|In Scope Issues|7",
+                "parent": "Business / Product Assessment",
+                "bullet_index": 1,
+                "bullet_text": "- Sole critical issue bullet. Sources: `pkg/module.py:99`",
+                "critical": True,
+                "reason": "cites missing source line",
+            }
+
+            finalized, result, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={"valid": False, "invalid_bullets": [invalid_bullet]},
+                ui_enabled=True,
+                allow_critical_omission=True,
+            )
+
+            self.assertFalse(finalized)
+            self.assertEqual(dropped, [])
+            self.assertEqual(review_md.read_text(encoding="utf-8"), original_text)
+
+    def test_ui_synth_retry_loop_enforces_ui_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-cap", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+            cap = rf._MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-cap",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap)
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
+
+    def test_step_grounding_retry_effort_picker_shows_last_override_as_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({
+                "session_id": "session-default",
+                "multipass": {"step_workers": 1, "runs": []},
+                "llm": {},
+                "codex": {},
+            })
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "codex", "effective_reasoning_effort": "medium"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result, raw_result]),
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        rf.StepGroundingValidationError(
+                            "bad grounding again",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry"),
+                mock.patch.object(
+                    rf,
+                    "prompt_grounding_retry_effort",
+                    side_effect=["high", "high"],
+                ) as effort_prompt,
+            ):
+                rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-default",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                    llm_resolution_meta={
+                        "resolved": {
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            "reasoning_effort_source": "cli",
+                            "reasoning_effort_source_detail": "cli",
+                        }
+                    },
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertEqual(effort_prompt.call_count, 2)
+            first_call_default = effort_prompt.call_args_list[0].kwargs.get("default_effort")
+            second_call_default = effort_prompt.call_args_list[1].kwargs.get("default_effort")
+            self.assertEqual(first_call_default, "medium")
+            self.assertEqual(second_call_default, "high")

@@ -45,6 +45,9 @@ SYNTH_CITATION_CONTRACT = (
     f"{CITATION_LABEL_PREFIX}` in all review prompts."
 )
 
+# Single-pass review prompts do not run the multipass grounding validators, so
+# this contract intentionally omits the "and fails grounding" consequence and
+# the `- None.` escape hatch present in the step/synth variants.
 REVIEW_CITATION_CONTRACT = (
     f"- When reporting findings, cite supporting evidence with a trailing "
     f"`{CITATION_LABEL_PREFIX}` suffix in {SOURCES_CITATION_SHAPE} form.\n"
@@ -61,12 +64,7 @@ CITATION_CONTRACT_KEYS = {
 }
 
 
-def citation_contract_vars() -> dict[str, str]:
-    """Return the ``$*_CITATION_CONTRACT`` template variables for prompt rendering."""
-    return dict(CITATION_CONTRACT_KEYS)
-
-
-_CITATION_LINE_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
+CITATION_LINE_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
 _BACKTICKED_SOURCE_ITEM_RE = re.compile(r"`([^`]+)`")
 
 
@@ -94,7 +92,7 @@ def has_sources_marker(body: str) -> bool:
 
 def has_path_line_citation(suffix_text: str) -> bool:
     """True when ``suffix_text`` contains at least one ``path:line`` citation."""
-    return bool(_CITATION_LINE_RE.search(suffix_text or ""))
+    return bool(CITATION_LINE_RE.search(suffix_text or ""))
 
 
 def _sources_suffix_items(suffix_text: str) -> list[str]:
@@ -116,4 +114,4 @@ def has_incomplete_sources(body: str) -> bool:
     items = _sources_suffix_items(suffix)
     if not items:
         return not has_path_line_citation(suffix)
-    return any(_CITATION_LINE_RE.fullmatch(item) is None for item in items)
+    return any(CITATION_LINE_RE.fullmatch(item) is None for item in items)

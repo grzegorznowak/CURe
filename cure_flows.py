@@ -1383,6 +1383,9 @@ def render_prompt(
         text = text.replace("$REVIEW_INTELLIGENCE_GUIDANCE", review_intelligence_guidance).replace(
             "${REVIEW_INTELLIGENCE_GUIDANCE}", review_intelligence_guidance
         )
+    # Citation-contract substitution runs after the extra_vars loop so an
+    # accidental ``extra_vars`` entry with the same key cannot shadow the
+    # hardcoded contract — the contract always wins.
     for contract_key, contract_value in CITATION_CONTRACT_KEYS.items():
         text = text.replace(f"${contract_key}", contract_value).replace(
             f"${{{contract_key}}}", contract_value

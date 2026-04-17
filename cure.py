@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from cure_branding import PRIMARY_CLI_COMMAND
 from cure_citations import (
     CITATION_LABEL,
+    CITATION_LINE_RE,
     has_incomplete_sources,
     has_path_line_citation,
     has_sources_marker,
@@ -220,10 +221,13 @@ DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
 _MULTIPASS_STEP_GROUNDING_MAX_RETRIES = 1
+# TTY-mode cap for synth grounding retries. The non-TTY path already honors the
+# caller-supplied `synth_max_auto_retries`; this bound exists so a scripted or
+# stuck TTY cannot loop indefinitely.
+_MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES = 5
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
-GROUNDING_CITATION_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
 
@@ -4781,7 +4785,7 @@ def _artifact_sha256(path: Path) -> str:
 
 def _citation_records(text: str) -> list[dict[str, Any]]:
     citations: list[dict[str, Any]] = []
-    for match in GROUNDING_CITATION_RE.finditer(text):
+    for match in CITATION_LINE_RE.finditer(text):
         citations.append(
             {
                 "raw": match.group(0),
@@ -5173,10 +5177,7 @@ def validate_multipass_synth_grounding(
                     f"Section {section_label} bullet #{bullet_index} must cite at least one "
                     "valid primary-evidence line; step-artifact citations alone are insufficient."
                 )
-                errors.append(
-                    f"Section {section_label} bullet #{bullet_index} must cite at least one "
-                    "valid primary-evidence line; step-artifact citations alone are insufficient."
-                )
+                errors.append(reason)
                 invalid_bullets.append(
                     {
                         "section": title,
@@ -5268,11 +5269,28 @@ _SYNTH_OMISSION_FOOTER_PREFACE = (
 )
 
 
+def _actionable_omission_items(dropped: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Entries the rewriter can actually remove from the review text.
+
+    Keep this aligned with the ``drop_keys`` filter in
+    :func:`_rewrite_review_md_dropping_bullets`; both must agree or the footer
+    would report phantom omissions that were never removed.
+    """
+    actionable: list[dict[str, Any]] = []
+    for item in dropped:
+        section_key = str(item.get("section_key") or "").strip()
+        bullet_index = int(item.get("bullet_index") or 0)
+        if section_key and bullet_index > 0:
+            actionable.append(item)
+    return actionable
+
+
 def _format_synth_omission_footer(dropped: list[dict[str, Any]]) -> str:
-    if not dropped:
+    actionable = _actionable_omission_items(dropped)
+    if not actionable:
         return ""
     lines = [_SYNTH_OMISSION_FOOTER_HEADING, "", _SYNTH_OMISSION_FOOTER_PREFACE, ""]
-    for item in dropped:
+    for item in actionable:
         section_label = str(item.get("section_label") or item.get("section") or "?")
         idx = int(item.get("bullet_index") or 0)
         reason = " ".join(str(item.get("reason") or "").strip().split())
@@ -5291,10 +5309,10 @@ def _strip_existing_synth_omission_footer(text: str) -> str:
     if _SYNTH_OMISSION_FOOTER_HEADING not in text:
         return text
     marker = text.find(_SYNTH_OMISSION_FOOTER_HEADING)
-    if marker <= 0:
+    if marker < 0:
         return text
-    trimmed = text[:marker].rstrip() + "\n"
-    return trimmed
+    trimmed = text[:marker].rstrip()
+    return trimmed + "\n" if trimmed else ""
 
 
 def _rewrite_review_md_dropping_bullets(
@@ -5306,13 +5324,13 @@ def _rewrite_review_md_dropping_bullets(
         return
     original = review_md_path.read_text(encoding="utf-8") if review_md_path.is_file() else ""
     original = _strip_existing_synth_omission_footer(original)
+    actionable = _actionable_omission_items(dropped)
     drop_keys = {
         (
             str(item.get("section_key") or "").strip(),
             int(item.get("bullet_index") or 0),
         )
-        for item in dropped
-        if str(item.get("section_key") or "").strip() and int(item.get("bullet_index") or 0) > 0
+        for item in actionable
     }
     if not drop_keys:
         return
@@ -5325,13 +5343,24 @@ def _rewrite_review_md_dropping_bullets(
     section_bullets_remaining: int = 0
     section_has_none_placeholder = False
     pending_none_placeholder = False
+    def _insert_none_placeholder() -> None:
+        # Drop trailing blanks so the placeholder sits directly after the
+        # section heading (no blank gap), then re-add a blank so a following
+        # section heading is still separated by one empty line.
+        while new_lines and not new_lines[-1].strip():
+            new_lines.pop()
+        new_lines.append("- None.")
+        new_lines.append("")
+
     for line_no, raw_line in enumerate(original.splitlines(), start=1):
-        stripped_line = raw_line.strip()
-        if stripped_line.startswith("## "):
+        # Match `_markdown_sections` exactly: only unindented `## `/`### ` lines
+        # count as section transitions, so the validator's section keys and the
+        # rewriter's drop-keys stay aligned on the same set of headings.
+        if raw_line.startswith("## ") and not raw_line.startswith("### "):
             if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
-                new_lines.append("- None.")
+                _insert_none_placeholder()
             pending_none_placeholder = False
-            current_parent = stripped_line[3:].strip()
+            current_parent = raw_line[3:].strip() or None
             current_title = None
             current_section_line = None
             current_section_key = ""
@@ -5339,10 +5368,10 @@ def _rewrite_review_md_dropping_bullets(
             section_has_none_placeholder = False
             new_lines.append(raw_line)
             continue
-        if stripped_line.startswith("### "):
+        if raw_line.startswith("### "):
             if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
-                new_lines.append("- None.")
-            current_title = stripped_line[4:].strip()
+                _insert_none_placeholder()
+            current_title = raw_line[4:].strip()
             current_section_line = line_no
             current_section_key = _synth_section_key(
                 parent=current_parent,
@@ -5355,6 +5384,7 @@ def _rewrite_review_md_dropping_bullets(
             pending_none_placeholder = current_title in _SYNTH_NON_CRITICAL_SECTIONS
             new_lines.append(raw_line)
             continue
+        stripped_line = raw_line.strip()
         if current_title is not None and stripped_line.startswith("- "):
             current_bullet_index += 1
             if (current_section_key, current_bullet_index) in drop_keys:
@@ -5367,7 +5397,7 @@ def _rewrite_review_md_dropping_bullets(
             continue
         new_lines.append(raw_line)
     if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
-        new_lines.append("- None.")
+        _insert_none_placeholder()
     rebuilt = "\n".join(new_lines).rstrip() + "\n"
     footer = _format_synth_omission_footer(dropped)
     if footer:
@@ -5500,6 +5530,9 @@ def _execute_multipass_synth_stage(
     failure_message: str,
     multipass_cfg: dict[str, Any] | None = None,
 ) -> str | None:
+    # Mutates ``synth_llm`` in place on a retry-time effort override so the
+    # next interactive retry prompt sees the last-tried effort as its default.
+    # Callers do not read the dict again after return.
     synth_run_entry = _ensure_multipass_run_entry(
         progress.meta,
         kind=run_kind,
@@ -5595,6 +5628,9 @@ def _execute_multipass_synth_stage(
             allow_critical_omission=False,
         )
         if finalized:
+            # First-pass severity finalization succeeded without a retry, so no
+            # ``grounding_attempts`` entry is recorded here by design: the
+            # synth output was accepted without rerunning the LLM.
             break
         attempt = _record_grounding_attempt(
             validation=synth_validation,
@@ -5602,10 +5638,20 @@ def _execute_multipass_synth_stage(
         )
         grounding_attempts.append(attempt)
         if ui_enabled:
-            choice = prompt_synth_grounding_retry_choice(
-                attempt_count=len(grounding_attempts),
-                validation=synth_validation,
-            )
+            if synth_retry_count >= _MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES:
+                log(
+                    "Synth grounding retry cap reached "
+                    f"({synth_retry_count} retries, limit "
+                    f"{_MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES}); "
+                    "emitting terminal failure playbook.",
+                    quiet=False,
+                )
+                choice = "abort"
+            else:
+                choice = prompt_synth_grounding_retry_choice(
+                    attempt_count=len(grounding_attempts),
+                    validation=synth_validation,
+                )
             if choice == "retry":
                 override_effort = prompt_grounding_retry_effort(
                     provider=str(synth_llm["resolved"].get("provider") or ""),
@@ -6892,6 +6938,12 @@ def _execute_multipass_step_stage(
             continue
         current_result = raw_result
         grounding_attempts: list[dict[str, Any]] = []
+        # Per-step retry state so an effort override applied mid-retry is
+        # reflected as the picker default on the next retry for this same
+        # step, without leaking into sibling steps.
+        current_llm_resolved: dict[str, Any] = dict(llm_resolved)
+        current_llm_resolution_meta: dict[str, Any] = dict(llm_resolution_meta)
+        current_runtime_policy: dict[str, Any] = runtime_policy
         while True:
             try:
                 success_resume_command = _finalize_multipass_step_result(
@@ -6902,7 +6954,7 @@ def _execute_multipass_step_stage(
                     entry=entry,
                     step_result=current_result.llm_result,
                     duration_seconds=current_result.duration_seconds,
-                    provider=str(llm_resolved.get("provider") or ""),
+                    provider=str(current_llm_resolved.get("provider") or ""),
                     templates=templates,
                     codex_meta=codex_meta,
                     review_stage=review_stage,
@@ -6949,30 +7001,27 @@ def _execute_multipass_step_stage(
                         choice = prompted_choice
                 if choice == "retry":
                     step_effort_options = list(
-                        _reasoning_effort_choices_for_provider(llm_resolved.get("provider"))
+                        _reasoning_effort_choices_for_provider(current_llm_resolved.get("provider"))
                     )
                     override_effort = prompt_grounding_retry_effort(
-                        provider=str(llm_resolved.get("provider") or ""),
-                        default_effort=str(llm_resolved.get("reasoning_effort") or "").strip() or None,
+                        provider=str(current_llm_resolved.get("provider") or ""),
+                        default_effort=str(current_llm_resolved.get("reasoning_effort") or "").strip() or None,
                         effort_options=step_effort_options,
                         stage_label=f"multipass step {entry.step_id or entry.index:>02}",
                     )
-                    retry_resolved = dict(llm_resolved)
-                    retry_resolution_meta = dict(llm_resolution_meta)
-                    retry_runtime_policy = runtime_policy
                     retry_stage_meta: dict[str, Any] | None = None
                     if override_effort:
                         rebuilt = _rebuild_multipass_retry_stage_state(
                             stage_name="step",
-                            llm_resolved=llm_resolved,
-                            llm_resolution_meta=llm_resolution_meta,
-                            runtime_policy=runtime_policy,
+                            llm_resolved=current_llm_resolved,
+                            llm_resolution_meta=current_llm_resolution_meta,
+                            runtime_policy=current_runtime_policy,
                             multipass_cfg=multipass_cfg,
                             override_effort=override_effort,
                         )
-                        retry_resolved = rebuilt["resolved"]
-                        retry_resolution_meta = rebuilt["resolution_meta"]
-                        retry_runtime_policy = rebuilt["runtime_policy"]
+                        current_llm_resolved = rebuilt["resolved"]
+                        current_llm_resolution_meta = rebuilt["resolution_meta"]
+                        current_runtime_policy = rebuilt["runtime_policy"]
                         retry_stage_meta = rebuilt["meta"]
                     with progress.mutate():
                         _set_multipass_step_state(
@@ -6999,12 +7048,12 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
-                        llm_resolved=retry_resolved,
-                        llm_resolution_meta=retry_resolution_meta,
+                        llm_resolved=current_llm_resolved,
+                        llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
                         stream=worker_stream,
                         add_dirs=add_dirs,
-                        runtime_policy=retry_runtime_policy,
+                        runtime_policy=current_runtime_policy,
                         quiet=quiet,
                     )
                     continue
@@ -7029,12 +7078,12 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
-                        llm_resolved=llm_resolved,
-                        llm_resolution_meta=llm_resolution_meta,
+                        llm_resolved=current_llm_resolved,
+                        llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
                         stream=worker_stream,
                         add_dirs=add_dirs,
-                        runtime_policy=runtime_policy,
+                        runtime_policy=current_runtime_policy,
                         quiet=quiet,
                     )
                     continue
