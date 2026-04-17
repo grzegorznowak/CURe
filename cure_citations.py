@@ -67,6 +67,7 @@ def citation_contract_vars() -> dict[str, str]:
 
 
 _CITATION_LINE_RE = re.compile(r"`?([A-Za-z0-9._/-]+):([1-9][0-9]*)`?")
+_BACKTICKED_SOURCE_ITEM_RE = re.compile(r"`([^`]+)`")
 
 
 def trailing_sources_suffix(body: str) -> str:
@@ -96,13 +97,23 @@ def has_path_line_citation(suffix_text: str) -> bool:
     return bool(_CITATION_LINE_RE.search(suffix_text or ""))
 
 
-def has_incomplete_sources(body: str) -> bool:
-    """True when the bullet has a ``Sources:`` suffix without any ``path:line``.
+def _sources_suffix_items(suffix_text: str) -> list[str]:
+    """Return the individual citation items carried in a ``Sources:`` suffix."""
+    text = str(suffix_text or "").strip()
+    if not text:
+        return []
+    backticked = [match.group(1).strip() for match in _BACKTICKED_SOURCE_ITEM_RE.finditer(text)]
+    if backticked:
+        return [item for item in backticked if item]
+    return [item.strip().strip("`") for item in text.split(",") if item.strip()]
 
-    This is the file-only case Story 42 reclassifies from "missing" to
-    "invalid or incomplete".
-    """
+
+def has_incomplete_sources(body: str) -> bool:
+    """True when any citation in the trailing ``Sources:`` suffix is incomplete."""
     suffix = trailing_sources_suffix(body)
     if not suffix:
         return False
-    return not has_path_line_citation(suffix)
+    items = _sources_suffix_items(suffix)
+    if not items:
+        return not has_path_line_citation(suffix)
+    return any(_CITATION_LINE_RE.fullmatch(item) is None for item in items)

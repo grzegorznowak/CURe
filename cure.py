@@ -4959,13 +4959,19 @@ def validate_multipass_step_grounding(
         body = bullet[2:].strip()
         if body == "None.":
             continue
+        if has_incomplete_sources(body):
+            errors.append(
+                f"Findings bullet #{bullet_index} has an incomplete `{CITATION_LABEL}:` "
+                "suffix (every citation needs `path:line`)."
+            )
+            continue
         sources_suffix = trailing_sources_suffix(body)
         bullet_citations = _citation_records(sources_suffix)
         if not bullet_citations:
             if has_sources_marker(body):
                 errors.append(
                     f"Findings bullet #{bullet_index} has an incomplete `{CITATION_LABEL}:` "
-                    "suffix (file only, needs `path:line`)."
+                    "suffix (every citation needs `path:line`)."
                 )
             else:
                 errors.append(
@@ -5058,13 +5064,33 @@ def validate_multipass_synth_grounding(
             body = bullet[2:].strip()
             if body == "None.":
                 continue
+            if has_incomplete_sources(body):
+                reason = (
+                    f"Section {section_label} bullet #{bullet_index} has an incomplete "
+                    f"`{CITATION_LABEL}:` suffix (every citation needs `path:line`)."
+                )
+                errors.append(reason)
+                invalid_bullets.append(
+                    {
+                        "section": title,
+                        "section_label": section_label,
+                        "section_line": section_line,
+                        "section_key": section_key,
+                        "parent": section.get("parent"),
+                        "bullet_index": bullet_index,
+                        "bullet_text": bullet,
+                        "critical": is_critical,
+                        "reason": reason,
+                    }
+                )
+                continue
             sources_suffix = trailing_sources_suffix(body)
             bullet_citations = _citation_records(sources_suffix)
             if not bullet_citations:
                 if has_sources_marker(body):
                     reason = (
                         f"Section {section_label} bullet #{bullet_index} has an "
-                        f"incomplete `{CITATION_LABEL}:` suffix (file only, needs `path:line`)."
+                        f"incomplete `{CITATION_LABEL}:` suffix (every citation needs `path:line`)."
                     )
                 else:
                     reason = (
@@ -5088,6 +5114,7 @@ def validate_multipass_synth_grounding(
                 )
                 continue
             valid_primary_citation_found = False
+            bullet_specific_reason = ""
             for citation in bullet_citations:
                 citation_path = str(citation["path"])
                 target = step_output_map.get(citation_path)
@@ -5119,29 +5146,37 @@ def validate_multipass_synth_grounding(
                     "counts_as_primary": counts_as_primary,
                 }
                 if target is None or (not target.is_file()):
-                    errors.append(
+                    citation_reason = (
                         f"Section {section_label} bullet #{bullet_index} cites unsupported synth source "
                         f"{citation_path}:{citation['line']}."
                     )
+                    errors.append(citation_reason)
                     entry["valid"] = False
                 elif not _line_exists_in_file(target, int(citation["line"])):
-                    errors.append(
+                    citation_reason = (
                         f"Section {section_label} bullet #{bullet_index} cites missing source line "
                         f"{citation_path}:{citation['line']}."
                     )
+                    errors.append(citation_reason)
                     entry["valid"] = False
                 else:
+                    citation_reason = ""
                     entry["valid"] = True
                     if counts_as_primary:
                         valid_primary_citation_found = True
                         primary_source_shas[str(target.resolve())] = _artifact_sha256(target)
+                if citation_reason and not bullet_specific_reason:
+                    bullet_specific_reason = citation_reason
                 citations.append(entry)
             if not valid_primary_citation_found:
-                reason = (
+                reason = bullet_specific_reason or (
                     f"Section {section_label} bullet #{bullet_index} must cite at least one "
                     "valid primary-evidence line; step-artifact citations alone are insufficient."
                 )
-                errors.append(reason)
+                errors.append(
+                    f"Section {section_label} bullet #{bullet_index} must cite at least one "
+                    "valid primary-evidence line; step-artifact citations alone are insufficient."
+                )
                 invalid_bullets.append(
                     {
                         "section": title,
@@ -5288,11 +5323,12 @@ def _rewrite_review_md_dropping_bullets(
     current_section_key: str = ""
     current_bullet_index = 0
     section_bullets_remaining: int = 0
+    section_has_none_placeholder = False
     pending_none_placeholder = False
     for line_no, raw_line in enumerate(original.splitlines(), start=1):
         stripped_line = raw_line.strip()
         if stripped_line.startswith("## "):
-            if pending_none_placeholder and section_bullets_remaining == 0:
+            if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
                 new_lines.append("- None.")
             pending_none_placeholder = False
             current_parent = stripped_line[3:].strip()
@@ -5300,10 +5336,11 @@ def _rewrite_review_md_dropping_bullets(
             current_section_line = None
             current_section_key = ""
             current_bullet_index = 0
+            section_has_none_placeholder = False
             new_lines.append(raw_line)
             continue
         if stripped_line.startswith("### "):
-            if pending_none_placeholder and section_bullets_remaining == 0:
+            if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
                 new_lines.append("- None.")
             current_title = stripped_line[4:].strip()
             current_section_line = line_no
@@ -5314,6 +5351,7 @@ def _rewrite_review_md_dropping_bullets(
             )
             current_bullet_index = 0
             section_bullets_remaining = 0
+            section_has_none_placeholder = False
             pending_none_placeholder = current_title in _SYNTH_NON_CRITICAL_SECTIONS
             new_lines.append(raw_line)
             continue
@@ -5321,12 +5359,14 @@ def _rewrite_review_md_dropping_bullets(
             current_bullet_index += 1
             if (current_section_key, current_bullet_index) in drop_keys:
                 continue
-            if stripped_line != "- None.":
+            if stripped_line == "- None.":
+                section_has_none_placeholder = True
+            else:
                 section_bullets_remaining += 1
             new_lines.append(raw_line)
             continue
         new_lines.append(raw_line)
-    if pending_none_placeholder and section_bullets_remaining == 0:
+    if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
         new_lines.append("- None.")
     rebuilt = "\n".join(new_lines).rstrip() + "\n"
     footer = _format_synth_omission_footer(dropped)
@@ -5471,9 +5511,20 @@ def _execute_multipass_synth_stage(
     synth_effort_options = list(
         _reasoning_effort_choices_for_provider(synth_llm["resolved"].get("provider"))
     )
+    grounding_attempts: list[dict[str, Any]] = []
     synth_retry_count = 0
     synth_max_auto_retries = 1
     success_resume_command: str | None = None
+
+    def _persist_synth_grounding_state() -> None:
+        if not grounding_attempts:
+            return
+        synth_run_entry["grounding_retried"] = bool(synth_retry_count > 0)
+        synth_run_entry["grounding_attempts"] = list(grounding_attempts)
+        synth_run_entry["first_grounding_failure_validation"] = dict(
+            grounding_attempts[0].get("validation") or {}
+        )
+
     while True:
         progress.flush()
         synth_result = run_llm_exec(
@@ -5545,9 +5596,14 @@ def _execute_multipass_synth_stage(
         )
         if finalized:
             break
+        attempt = _record_grounding_attempt(
+            validation=synth_validation,
+            attempt_number=len(grounding_attempts) + 1,
+        )
+        grounding_attempts.append(attempt)
         if ui_enabled:
             choice = prompt_synth_grounding_retry_choice(
-                attempt_count=synth_retry_count + 1,
+                attempt_count=len(grounding_attempts),
                 validation=synth_validation,
             )
             if choice == "retry":
@@ -5577,6 +5633,7 @@ def _execute_multipass_synth_stage(
                         stage_llm_meta=synth_llm["meta"],
                     )
                 synth_retry_count += 1
+                _persist_synth_grounding_state()
                 continue
             if choice == "finalize":
                 finalized, synth_validation, _ = _apply_synth_severity_finalization(
@@ -5594,7 +5651,9 @@ def _execute_multipass_synth_stage(
                     break
         elif synth_retry_count < synth_max_auto_retries:
             synth_retry_count += 1
+            _persist_synth_grounding_state()
             continue
+        _persist_synth_grounding_state()
         _emit_multipass_grounding_failure_playbook(
             meta=progress.meta,
             session_id=session_id,
@@ -5605,6 +5664,7 @@ def _execute_multipass_synth_stage(
             resume_from="synth",
         )
         raise ReviewflowError(failure_message)
+    _persist_synth_grounding_state()
     _record_multipass_review_artifact_llm(
         meta=progress.meta,
         stage_name="synth",
@@ -11320,36 +11380,37 @@ def _resume_flow_impl(
                 )
         progress.flush()
 
-        resume_skip_choice = _resolve_resume_grounding_skip_choice(
-            meta=progress.meta,
-            step_entries=step_entries,
-            ui_enabled=ui_enabled,
-        )
-        prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
-        if resume_skip_choice:
-            progress.meta.setdefault("multipass", {}).setdefault("resume", {})[
-                "grounding_skipped_override"
-            ] = {
-                "choice": resume_skip_choice,
-                "step_ids": sorted(prior_skipped_ids),
-            }
-            updated_entries: list[MultipassStepEntry] = []
-            for entry in step_entries:
-                should_run = entry.should_run
-                if entry.step_id in prior_skipped_ids:
-                    should_run = resume_skip_choice == "rerun"
-                updated_entries.append(
-                    MultipassStepEntry(
-                        index=entry.index,
-                        step_id=entry.step_id,
-                        step_title=entry.step_title,
-                        step_focus=entry.step_focus,
-                        output_path=entry.output_path,
-                        prompt=entry.prompt,
-                        should_run=should_run,
+        if from_phase != "synth":
+            resume_skip_choice = _resolve_resume_grounding_skip_choice(
+                meta=progress.meta,
+                step_entries=step_entries,
+                ui_enabled=ui_enabled,
+            )
+            prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+            if resume_skip_choice:
+                progress.meta.setdefault("multipass", {}).setdefault("resume", {})[
+                    "grounding_skipped_override"
+                ] = {
+                    "choice": resume_skip_choice,
+                    "step_ids": sorted(prior_skipped_ids),
+                }
+                updated_entries: list[MultipassStepEntry] = []
+                for entry in step_entries:
+                    should_run = entry.should_run
+                    if entry.step_id in prior_skipped_ids:
+                        should_run = resume_skip_choice == "rerun"
+                    updated_entries.append(
+                        MultipassStepEntry(
+                            index=entry.index,
+                            step_id=entry.step_id,
+                            step_title=entry.step_title,
+                            step_focus=entry.step_focus,
+                            output_path=entry.output_path,
+                            prompt=entry.prompt,
+                            should_run=should_run,
+                        )
                     )
-                )
-            step_entries = updated_entries
+                step_entries = updated_entries
 
         step_outputs = [str(entry.output_path) for entry in step_entries]
         step_reran = any(entry.should_run for entry in step_entries)

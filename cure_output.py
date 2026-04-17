@@ -1043,6 +1043,8 @@ def prompt_pr_model_and_effort_picker(
     try:
         selected_model = default_model
         selected_effort = default_effort
+        model_changed = False
+        effort_changed = False
         provider_name = str(provider or "").strip() or "unknown"
         writer.write(f"CURe review settings for {provider_name}\n")
         if fixed_model:
@@ -1069,24 +1071,33 @@ def prompt_pr_model_and_effort_picker(
                     selected_model = model_options[int(choice) - 1][1]
                 else:
                     selected_model = choice
+                model_changed = True
         if prompt_for_effort:
             writer.write(f"Press Enter to keep effort: {default_effort or '(unset)'}\n")
             for idx, value in enumerate(effort_options, start=1):
                 writer.write(f"  {idx}) {value}\n")
-            writer.write("Select effort number: ")
+            writer.write("Select effort number or name: ")
             writer.flush()
             response = reader.readline()
             if not response:
                 raise ReviewflowError("PR model/effort picker aborted: /dev/tty closed before effort selection.")
             choice = str(response).strip()
             if choice:
-                if not choice.isdigit() or not (1 <= int(choice) <= len(effort_options)):
-                    raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
-                selected_effort = effort_options[int(choice) - 1]
+                if choice.isdigit():
+                    if not (1 <= int(choice) <= len(effort_options)):
+                        raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
+                    selected_effort = effort_options[int(choice) - 1]
+                else:
+                    normalized = choice.lower()
+                    matched = next((value for value in effort_options if value.lower() == normalized), None)
+                    if matched is None:
+                        raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
+                    selected_effort = matched
+                effort_changed = True
         result: dict[str, str] = {}
-        if prompt_for_model and selected_model:
+        if prompt_for_model and model_changed and selected_model:
             result["model"] = selected_model
-        if prompt_for_effort and selected_effort:
+        if prompt_for_effort and effort_changed and selected_effort:
             result["reasoning_effort"] = selected_effort
         if result:
             writer.write(
