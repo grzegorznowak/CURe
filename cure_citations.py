@@ -100,10 +100,18 @@ def _sources_suffix_items(suffix_text: str) -> list[str]:
     text = str(suffix_text or "").strip()
     if not text:
         return []
-    backticked = [match.group(1).strip() for match in _BACKTICKED_SOURCE_ITEM_RE.finditer(text)]
-    if backticked:
-        return [item for item in backticked if item]
-    return [item.strip().strip("`") for item in text.split(",") if item.strip()]
+    items: list[str] = []
+    cursor = 0
+    for match in _BACKTICKED_SOURCE_ITEM_RE.finditer(text):
+        prefix = text[cursor:match.start()]
+        items.extend(item.strip().strip("`") for item in prefix.split(",") if item.strip())
+        backticked_item = match.group(1).strip()
+        if backticked_item:
+            items.append(backticked_item)
+        cursor = match.end()
+    tail = text[cursor:]
+    items.extend(item.strip().strip("`") for item in tail.split(",") if item.strip())
+    return items
 
 
 def has_incomplete_sources(body: str) -> bool:

@@ -6537,6 +6537,130 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
         self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
 
+    def test_step_grounding_rejects_backtick_plus_bare_residue_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            step_output = root / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Mixed citations. Sources: `src/app.py:2` src/app.py",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_step_grounding(
+                artifact_path=step_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+
+    def test_synth_grounding_rejects_backtick_plus_bare_residue_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:2` src/app.py",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+        self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
+
+    def test_synth_grounding_requires_required_sections_under_each_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical strength one. Sources: `src/app.py:2`",
+                        "",
+                        "### Strengths",
+                        "- Technical strength two. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "Missing required synth section '### Strengths' under '## Business / Product Assessment'.",
+            "\n".join(validation["errors"]),
+        )
+
     def test_synth_grounding_invalid_bullets_keep_specific_citation_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13150,6 +13274,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 duration_seconds=1.25,
             )
             run_invocations: list[dict[str, Any]] = []
+            retry_state_snapshots: list[dict[str, Any]] = []
 
             def capture_step_run(**kwargs: Any) -> rf.MultipassStepRunResult:
                 runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
@@ -13161,6 +13286,13 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                         "codex_flags": list(runtime_policy.get("codex_flags") or []),
                     }
                 )
+                if len(run_invocations) == 2:
+                    retry_state_snapshots.append(
+                        {
+                            "state": dict(progress.meta["multipass"]["step_states"][0]),
+                            "run_entry": dict(progress.meta["multipass"]["runs"][0]),
+                        }
+                    )
                 return raw_result
 
             with (
@@ -13233,6 +13365,99 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 "high",
             )
             self.assertEqual(run_entry["llm"]["effective_reasoning_effort"], "high")
+            self.assertEqual(len(retry_state_snapshots), 1)
+            self.assertEqual(retry_state_snapshots[0]["state"]["status"], "retrying_grounding")
+            self.assertTrue(retry_state_snapshots[0]["run_entry"]["grounding_retried"])
+            self.assertEqual(len(retry_state_snapshots[0]["run_entry"]["grounding_attempts"]), 1)
+            self.assertEqual(
+                retry_state_snapshots[0]["run_entry"]["first_grounding_failure_validation"]["errors"],
+                ["missing citation"],
+            )
+
+    def test_execute_multipass_step_stage_ui_retry_loop_enforces_ui_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-cap", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            cap = rf._MULTIPASS_STEP_GROUNDING_UI_MAX_RETRIES
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "_run_multipass_step_llm",
+                    return_value=raw_result,
+                ) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-cap",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap)
+            self.assertEqual(effort_prompt.call_count, cap)
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "grounding_skipped")
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
 
     def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13755,6 +13980,20 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     "enabled": True,
                     "plan_json_path": str(plan_json),
                     "grounding_mode": "strict",
+                    "step_states": [
+                        {
+                            "step_index": 1,
+                            "step_id": "01",
+                            "step_title": "API review",
+                            "status": "completed",
+                        },
+                        {
+                            "step_index": 2,
+                            "step_id": "02",
+                            "step_title": "Tests review",
+                            "status": "completed",
+                        },
+                    ],
                     "grounding_skipped_steps": [
                         {"step_id": "01", "step_title": "API review", "reason": "bad cite"}
                     ],

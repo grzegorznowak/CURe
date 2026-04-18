@@ -221,6 +221,10 @@ DEFAULT_MULTIPASS_MAX_STEPS = 20
 MULTIPASS_MAX_STEPS_HARD_CAP = 20
 DEFAULT_MULTIPASS_STEP_WORKERS = 4
 _MULTIPASS_STEP_GROUNDING_MAX_RETRIES = 1
+# TTY-mode cap for step grounding retries. Non-TTY mode still uses the single
+# automatic retry above; this bound prevents an interactive loop from retrying
+# forever when grounding never stabilizes.
+_MULTIPASS_STEP_GROUNDING_UI_MAX_RETRIES = 5
 # TTY-mode cap for synth grounding retries. The non-TTY path already honors the
 # caller-supplied `synth_max_auto_retries`; this bound exists so a scripted or
 # stuck TTY cannot loop indefinitely.
@@ -4843,14 +4847,18 @@ def _synth_section_key(*, parent: str | None, title: str | None, line_no: int | 
 
 _SYNTH_NON_CRITICAL_SECTIONS = frozenset({"Strengths", "Reusability"})
 _SYNTH_CRITICAL_SECTIONS = frozenset({"In Scope Issues", "Out of Scope Issues"})
-# Minimum bullet counts per synth section title. Keys must stay in lockstep with
-# the union of the two frozensets above; the assertion below fails fast at
-# import time if a future maintainer adds a title to one without the other.
+# Parent-aware synth structure requirements. The prompt requires these sections
+# under each top-level assessment, so validation must count by `(parent, title)`
+# rather than allowing one parent to satisfy the other's quota with duplicates.
+_SYNTH_REQUIRED_SECTIONS_BY_PARENT: dict[str, frozenset[str]] = {
+    "Business / Product Assessment": frozenset({"Strengths", "In Scope Issues", "Out of Scope Issues"}),
+    "Technical Assessment": frozenset(
+        {"Strengths", "In Scope Issues", "Out of Scope Issues", "Reusability"}
+    ),
+}
 _SYNTH_REQUIRED_COUNTS: dict[str, int] = {
-    "Strengths": 2,
-    "In Scope Issues": 2,
-    "Out of Scope Issues": 2,
-    "Reusability": 1,
+    title: sum(1 for titles in _SYNTH_REQUIRED_SECTIONS_BY_PARENT.values() if title in titles)
+    for title in (_SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS)
 }
 assert set(_SYNTH_REQUIRED_COUNTS.keys()) == (
     _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
@@ -4858,6 +4866,12 @@ assert set(_SYNTH_REQUIRED_COUNTS.keys()) == (
     "_SYNTH_REQUIRED_COUNTS keys must match the union of _SYNTH_NON_CRITICAL_SECTIONS "
     "and _SYNTH_CRITICAL_SECTIONS; the relevant_titles filter and the count check "
     "would otherwise silently desync."
+)
+assert frozenset().union(*_SYNTH_REQUIRED_SECTIONS_BY_PARENT.values()) == (
+    _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
+), (
+    "_SYNTH_REQUIRED_SECTIONS_BY_PARENT values must match the union of "
+    "_SYNTH_NON_CRITICAL_SECTIONS and _SYNTH_CRITICAL_SECTIONS."
 )
 
 
@@ -4999,7 +5013,6 @@ def validate_multipass_synth_grounding(
     text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
     sections = _markdown_sections(text)
     relevant_titles = _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
-    required_counts = dict(_SYNTH_REQUIRED_COUNTS)
     step_output_map: dict[str, Path] = {}
     source_shas: dict[str, str] = {}
     primary_source_shas: dict[str, str] = {}
@@ -5008,16 +5021,21 @@ def validate_multipass_synth_grounding(
         step_output_map[step_output.name] = step_output
         source_shas[step_output.name] = _artifact_sha256(step_output)
 
-    title_counts = {title: 0 for title in required_counts}
+    required_parent_counts = {
+        parent: {title: 0 for title in titles}
+        for parent, titles in _SYNTH_REQUIRED_SECTIONS_BY_PARENT.items()
+    }
     for section in sections:
         title = str(section.get("title") or "")
         if title not in relevant_titles:
             continue
-        title_counts[title] += 1
+        section_parent = str(section.get("parent") or "").strip()
+        if title in required_parent_counts.get(section_parent, {}):
+            required_parent_counts[section_parent][title] += 1
         section_label = _synth_section_label(section)
         section_line = int(section.get("line") or 0)
         section_key = _synth_section_key(
-            parent=str(section.get("parent") or ""),
+            parent=section_parent,
             title=title,
             line_no=section_line,
         )
@@ -5157,9 +5175,10 @@ def validate_multipass_synth_grounding(
                     }
                 )
 
-    for title, required_count in required_counts.items():
-        if title_counts[title] < required_count:
-            errors.append(f"Missing required synth section count for '### {title}' (expected {required_count}).")
+    for parent, title_counts in required_parent_counts.items():
+        for title, required_count in title_counts.items():
+            if required_count < 1:
+                errors.append(f"Missing required synth section '### {title}' under '## {parent}'.")
 
     return _build_grounding_result(
         stage_key="synth",
@@ -5991,9 +6010,13 @@ def _persist_grounding_summary(
     *,
     meta: dict[str, Any],
     step_entries: list[MultipassStepEntry],
+    prefer_persisted_skips: bool = False,
 ) -> list[str]:
     mp = meta.setdefault("multipass", {})
-    current_skipped_records = _grounding_skipped_step_records(meta)
+    current_skipped_records = _grounding_skipped_step_records(
+        meta,
+        prefer_persisted=prefer_persisted_skips,
+    )
     skipped_by_id = {
         str(item.get("step_id") or "").strip(): dict(item)
         for item in current_skipped_records
@@ -6042,12 +6065,17 @@ def _prepare_synth_inputs(
     session_dir: Path,
     work_dir: Path,
     review_md_path: Path,
+    prefer_persisted_skips: bool = False,
 ) -> tuple[list[str], str]:
     """Persist grounding summary, build skipped-step disclosure text, and enforce
     the all-skipped terminal guard shared across PR, incremental resume, and main
     resume flows.  Returns ``(synth_step_outputs, skipped_prompt_text)`` when at
     least one step survives grounding; raises ``ReviewflowError`` otherwise."""
-    synth_step_outputs = _persist_grounding_summary(meta=meta, step_entries=step_entries)
+    synth_step_outputs = _persist_grounding_summary(
+        meta=meta,
+        step_entries=step_entries,
+        prefer_persisted_skips=prefer_persisted_skips,
+    )
     raw_skipped = meta.setdefault("multipass", {}).get("grounding_skipped_steps")
     skipped_prompt_text = _grounding_skipped_prompt_text(
         raw_skipped if isinstance(raw_skipped, list) else []
@@ -6903,12 +6931,27 @@ def _execute_multipass_step_stage(
             continue
         current_result = raw_result
         grounding_attempts: list[dict[str, Any]] = []
+        step_retry_count = 0
         # Per-step retry state so an effort override applied mid-retry is
         # reflected as the picker default on the next retry for this same
         # step, without leaking into sibling steps.
         current_llm_resolved: dict[str, Any] = dict(llm_resolved)
         current_llm_resolution_meta: dict[str, Any] = dict(llm_resolution_meta)
         current_runtime_policy: dict[str, Any] = dict(runtime_policy)
+
+        def _persist_step_grounding_state(*, grounding_retried: bool) -> dict[str, Any] | None:
+            if not grounding_attempts:
+                return None
+            run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+            if run_entry is None:
+                raise ReviewflowError(f"Missing multipass run entry for step {entry.index:02d}.")
+            run_entry["grounding_retried"] = grounding_retried
+            run_entry["grounding_attempts"] = list(grounding_attempts)
+            run_entry["first_grounding_failure_validation"] = dict(
+                grounding_attempts[0].get("validation") or {}
+            )
+            return run_entry
+
         while True:
             try:
                 success_resume_command = _finalize_multipass_step_result(
@@ -6926,17 +6969,8 @@ def _execute_multipass_step_stage(
                     prompt_template_name=prompt_template_name,
                 ) or success_resume_command
                 with progress.mutate():
-                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
                     if grounding_attempts:
-                        if run_entry is None:
-                            raise ReviewflowError(
-                                f"Missing multipass run entry for step {entry.index:02d}."
-                            )
-                        run_entry["grounding_retried"] = True
-                        run_entry["grounding_attempts"] = list(grounding_attempts)
-                        run_entry["first_grounding_failure_validation"] = dict(
-                            grounding_attempts[0].get("validation") or {}
-                        )
+                        _persist_step_grounding_state(grounding_retried=True)
                         _set_multipass_step_state(
                             progress.meta,
                             entry=entry,
@@ -6956,14 +6990,24 @@ def _execute_multipass_step_stage(
                 grounding_attempts.append(attempt)
                 choice = ""
                 if ui_enabled:
-                    prompted_choice = prompt_grounding_retry_skip(
-                        step_id=entry.step_id,
-                        step_title=entry.step_title,
-                        attempt_count=len(grounding_attempts),
-                        validation=exc.step_validation,
-                    )
-                    if prompted_choice in {"retry", "skip"}:
-                        choice = prompted_choice
+                    if step_retry_count >= _MULTIPASS_STEP_GROUNDING_UI_MAX_RETRIES:
+                        log(
+                            "Step grounding retry cap reached "
+                            f"({step_retry_count} retries, limit "
+                            f"{_MULTIPASS_STEP_GROUNDING_UI_MAX_RETRIES}); "
+                            f"marking step {entry.step_id or entry.index:>02} grounding-skipped.",
+                            quiet=False,
+                        )
+                        choice = "skip"
+                    else:
+                        prompted_choice = prompt_grounding_retry_skip(
+                            step_id=entry.step_id,
+                            step_title=entry.step_title,
+                            attempt_count=len(grounding_attempts),
+                            validation=exc.step_validation,
+                        )
+                        if prompted_choice in {"retry", "skip"}:
+                            choice = prompted_choice
                 if choice == "retry":
                     step_effort_options = list(
                         _reasoning_effort_choices_for_provider(current_llm_resolved.get("provider"))
@@ -6988,6 +7032,7 @@ def _execute_multipass_step_stage(
                         current_llm_resolution_meta = rebuilt["resolution_meta"]
                         current_runtime_policy = rebuilt["runtime_policy"]
                         retry_stage_meta = rebuilt["meta"]
+                    step_retry_count += 1
                     with progress.mutate():
                         _set_multipass_step_state(
                             progress.meta,
@@ -7000,6 +7045,7 @@ def _execute_multipass_step_stage(
                             grounding_attempts=grounding_attempts,
                             grounding_retried=True,
                         )
+                        _persist_step_grounding_state(grounding_retried=True)
                         if retry_stage_meta is not None:
                             _record_multipass_stage_llm(
                                 meta=progress.meta,
@@ -7027,6 +7073,7 @@ def _execute_multipass_step_stage(
                         f"Retrying multipass grounding step {entry.step_id or entry.index:>02}: {attempt['reason']}",
                         quiet=quiet,
                     )
+                    step_retry_count += 1
                     with progress.mutate():
                         _set_multipass_step_state(
                             progress.meta,
@@ -7039,6 +7086,7 @@ def _execute_multipass_step_stage(
                             grounding_attempts=grounding_attempts,
                             grounding_retried=True,
                         )
+                        _persist_step_grounding_state(grounding_retried=True)
                     current_result = _run_multipass_step_llm(
                         entry=entry,
                         progress=progress,
@@ -7055,16 +7103,13 @@ def _execute_multipass_step_stage(
                 skipped_record = _build_grounding_skipped_record(entry=entry, attempts=grounding_attempts)
                 skipped_records.append(skipped_record)
                 with progress.mutate():
-                    run_entry = _find_multipass_step_run_entry(progress.meta, step_index=entry.index)
+                    run_entry = _persist_step_grounding_state(
+                        grounding_retried=bool(len(grounding_attempts) > 1)
+                    )
                     if run_entry is None:
                         raise ReviewflowError(
                             f"Missing multipass run entry for step {entry.index:02d}."
                         )
-                    run_entry["grounding_retried"] = bool(len(grounding_attempts) > 1)
-                    run_entry["grounding_attempts"] = list(grounding_attempts)
-                    run_entry["first_grounding_failure_validation"] = dict(
-                        grounding_attempts[0].get("validation") or {}
-                    )
                     run_entry["grounding_skipped"] = True
                     _set_multipass_step_state(
                         progress.meta,
@@ -11490,6 +11535,7 @@ def _resume_flow_impl(
             session_dir=session_dir,
             work_dir=work_dir,
             review_md_path=review_md_path,
+            prefer_persisted_skips=from_phase == "synth",
         )
 
         should_synth = (

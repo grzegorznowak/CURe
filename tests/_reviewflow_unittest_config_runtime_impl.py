@@ -202,17 +202,20 @@ class CureCitationsPublicApiTests(unittest.TestCase):
         self.assertFalse(cc.has_path_line_citation("src/a.py"))
         self.assertFalse(cc.has_path_line_citation("src/a.py:0"))
 
-    def test_sources_suffix_items_prefers_backticked(self) -> None:
+    def test_sources_suffix_items_preserves_backticked_and_bare_residue(self) -> None:
         import cure_citations as cc
 
         self.assertEqual(
             cc._sources_suffix_items("`src/a.py:12`, `tests/b.py:44`"),
             ["src/a.py:12", "tests/b.py:44"],
         )
-        # Mixed backtick + bare: backticks win; bare items are ignored.
         self.assertEqual(
             cc._sources_suffix_items("`src/a.py:12`, tests/b.py"),
-            ["src/a.py:12"],
+            ["src/a.py:12", "tests/b.py"],
+        )
+        self.assertEqual(
+            cc._sources_suffix_items("`src/a.py:12` tests/b.py"),
+            ["src/a.py:12", "tests/b.py"],
         )
 
     def test_sources_suffix_items_comma_split_when_no_backticks(self) -> None:
@@ -256,6 +259,9 @@ class CureCitationsPublicApiTests(unittest.TestCase):
         )
         self.assertTrue(
             cc.has_incomplete_sources("Finding. Sources: src/a.py:12, src/b.py")
+        )
+        self.assertTrue(
+            cc.has_incomplete_sources("Finding. Sources: `src/a.py:12` src/b.py")
         )
 
     def test_has_incomplete_sources_false_when_no_marker(self) -> None:
