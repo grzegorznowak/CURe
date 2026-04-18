@@ -10,4 +10,9 @@ if str(TESTS_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from _reviewflow_unittest_prompts import PromptResourceTests, PromptTemplateTests, RenderPromptTests  # noqa: E402, F401
+from _reviewflow_unittest_prompts import (  # noqa: E402, F401
+    CureCitationsPublicApiTests,
+    PromptResourceTests,
+    PromptTemplateTests,
+    RenderPromptTests,
+)

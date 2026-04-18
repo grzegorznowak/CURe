@@ -14379,6 +14379,333 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
 
+    def test_synth_retry_finalize_choice_drops_critical_bullets_and_breaks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-finalize", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            finalized_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    side_effect=[
+                        # first-pass (allow_critical_omission=False) refuses
+                        (False, invalid_validation, []),
+                        # second-pass (allow_critical_omission=True) succeeds
+                        (True, finalized_validation, [{"section_key": "k", "bullet_index": 1}]),
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="finalize") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-finalize",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": [],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            # Only one LLM exec: finalize path must not rerun the synth LLM.
+            self.assertEqual(run_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            # "finalize" path must not ask for an effort override — that's a
+            # retry-only prompt.
+            effort_prompt.assert_not_called()
+            # Two finalize calls: first-pass (non-critical-only) then
+            # second-pass (allow_critical_omission=True after "finalize" choice).
+            self.assertEqual(finalize_mock.call_count, 2)
+            second_call_kwargs = finalize_mock.call_args_list[1].kwargs
+            self.assertTrue(second_call_kwargs["allow_critical_omission"])
+            # Terminal playbook must not fire on a successful finalization.
+            playbook_mock.assert_not_called()
+
+    def test_synth_retry_non_ui_auto_retries_once_then_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-non-ui", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-non-ui",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            # Single auto-retry: first attempt + one retry = 2 exec calls total.
+            self.assertEqual(run_mock.call_count, 2)
+            # UI prompts must never fire in non-UI mode.
+            retry_prompt.assert_not_called()
+            effort_prompt.assert_not_called()
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_synth_retry_none_effort_keeps_original_synth_llm_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-none", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            valid_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm: dict[str, Any] = {
+                "resolved": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "codex", "effective_reasoning_effort": "medium"},
+            }
+            # Snapshot the original resolved/resolution_meta/meta before the call.
+            original_resolved = dict(synth_llm["resolved"])
+            original_resolution_meta_resolved = dict(synth_llm["resolution_meta"]["resolved"])
+            original_meta = dict(synth_llm["meta"])
+
+            rebuild_mock = mock.MagicMock()
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    side_effect=[(False, invalid_validation), (True, valid_validation)],
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry"),
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+                mock.patch.object(rf, "_rebuild_multipass_retry_stage_state", rebuild_mock),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+            ):
+                rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-none",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            # Retry happened (two exec calls, one picker prompt).
+            self.assertEqual(run_mock.call_count, 2)
+            effort_prompt.assert_called_once()
+            # None effort must NOT trigger a stage rebuild.
+            rebuild_mock.assert_not_called()
+            # Original synth_llm dict is untouched.
+            self.assertEqual(synth_llm["resolved"], original_resolved)
+            self.assertEqual(synth_llm["resolution_meta"]["resolved"], original_resolution_meta_resolved)
+            self.assertEqual(synth_llm["meta"], original_meta)
+
+    def test_apply_synth_severity_finalization_blocks_critical_incremental_finalization(self) -> None:
+        """Incremental resume path: a critical-section failure must not be dropped.
+
+        Mirrors the primary-synth critical-bullet survivor guard, covering the
+        call site routed from ``_validate_or_reuse_synth_artifact`` on the
+        incremental-resume path (tests/_reviewflow_unittest_grounding_impl.py's
+        earlier incremental finalization coverage is non-critical only).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Good. Sources: `pkg/module.py:2`",
+                        "- Good2. Sources: `pkg/module.py:3`",
+                        "",
+                        "### In Scope Issues",
+                        "- Sole critical bullet. Sources: `pkg/module.py:99`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "- Good2. Sources: `pkg/module.py:2`",
+                        "",
+                        "### Reusability",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original_text = review_md.read_text(encoding="utf-8")
+            critical_bullet = {
+                "section": "In Scope Issues",
+                "section_label": "'### In Scope Issues' under '## Business / Product Assessment' (line 7)",
+                "section_line": 7,
+                "section_key": "Business / Product Assessment|In Scope Issues|7",
+                "parent": "Business / Product Assessment",
+                "bullet_index": 1,
+                "bullet_text": "- Sole critical bullet. Sources: `pkg/module.py:99`",
+                "critical": True,
+                "reason": "cites missing source line",
+            }
+
+            # Non-UI incremental finalization (allow_critical_omission defaults
+            # to False): critical bullet must never be dropped — even if it is
+            # the only invalid bullet.
+            finalized, result, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={"valid": False, "invalid_bullets": [critical_bullet]},
+                ui_enabled=False,
+                allow_critical_omission=False,
+            )
+
+            self.assertFalse(finalized)
+            self.assertEqual(dropped, [])
+            # Review markdown untouched.
+            self.assertEqual(review_md.read_text(encoding="utf-8"), original_text)
+
     def test_step_grounding_retry_effort_picker_shows_last_override_as_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

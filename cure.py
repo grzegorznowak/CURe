@@ -4260,55 +4260,6 @@ def review_intelligence_prompt_vars(cfg: ReviewIntelligenceConfig) -> dict[str, 
     return {"REVIEW_INTELLIGENCE_GUIDANCE": build_review_intelligence_guidance(cfg)}
 
 
-def render_prompt(
-    template_text: str,
-    *,
-    base_ref_for_review: str,
-    pr_url: str,
-    pr_number: int,
-    gh_host: str,
-    gh_owner: str,
-    gh_repo_name: str,
-    gh_repo: str,
-    agent_desc: str,
-    head_ref: str = "HEAD",
-    extra_vars: dict[str, str] | None = None,
-) -> str:
-    # Back-compat: existing reviewflow placeholders.
-    text = template_text.replace("<base>", base_ref_for_review)
-
-    # Legacy-ish placeholders (mrereview_gh*).
-    text = text.replace("$PR_URL", pr_url).replace("${PR_URL}", pr_url)
-    text = text.replace("$PR_NUMBER", str(pr_number)).replace("${PR_NUMBER}", str(pr_number))
-    text = text.replace("$GH_HOST", gh_host).replace("${GH_HOST}", gh_host)
-    text = text.replace("$GH_OWNER", gh_owner).replace("${GH_OWNER}", gh_owner)
-    text = text.replace("$GH_REPO_NAME", gh_repo_name).replace(
-        "${GH_REPO_NAME}", gh_repo_name
-    )
-    text = text.replace("$GH_REPO", gh_repo).replace("${GH_REPO}", gh_repo)
-    text = text.replace("$BASE_REF", base_ref_for_review).replace(
-        "${BASE_REF}", base_ref_for_review
-    )
-    text = text.replace("$HEAD_REF", head_ref).replace("${HEAD_REF}", head_ref)
-    review_intelligence_guidance: str | None = None
-    if extra_vars:
-        for k, v in extra_vars.items():
-            key = str(k).strip()
-            if not key:
-                continue
-            if key == "REVIEW_INTELLIGENCE_GUIDANCE":
-                review_intelligence_guidance = str(v)
-                continue
-            text = text.replace(f"${key}", str(v)).replace(f"${{{key}}}", str(v))
-    if review_intelligence_guidance is not None:
-        text = text.replace("$REVIEW_INTELLIGENCE_GUIDANCE", review_intelligence_guidance).replace(
-            "${REVIEW_INTELLIGENCE_GUIDANCE}", review_intelligence_guidance
-        )
-    # Replace AGENT_DESC last to avoid mutating its contents if it contains `$FOO`.
-    text = text.replace("$AGENT_DESC", agent_desc).replace("${AGENT_DESC}", agent_desc)
-    return text
-
-
 @dataclass(frozen=True)
 class ReviewVerdicts:
     business: str | None
@@ -4892,6 +4843,22 @@ def _synth_section_key(*, parent: str | None, title: str | None, line_no: int | 
 
 _SYNTH_NON_CRITICAL_SECTIONS = frozenset({"Strengths", "Reusability"})
 _SYNTH_CRITICAL_SECTIONS = frozenset({"In Scope Issues", "Out of Scope Issues"})
+# Minimum bullet counts per synth section title. Keys must stay in lockstep with
+# the union of the two frozensets above; the assertion below fails fast at
+# import time if a future maintainer adds a title to one without the other.
+_SYNTH_REQUIRED_COUNTS: dict[str, int] = {
+    "Strengths": 2,
+    "In Scope Issues": 2,
+    "Out of Scope Issues": 2,
+    "Reusability": 1,
+}
+assert set(_SYNTH_REQUIRED_COUNTS.keys()) == (
+    _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
+), (
+    "_SYNTH_REQUIRED_COUNTS keys must match the union of _SYNTH_NON_CRITICAL_SECTIONS "
+    "and _SYNTH_CRITICAL_SECTIONS; the relevant_titles filter and the count check "
+    "would otherwise silently desync."
+)
 
 
 def _section_bullets(section: dict[str, Any]) -> list[str]:
@@ -5032,12 +4999,7 @@ def validate_multipass_synth_grounding(
     text = artifact_path.read_text(encoding="utf-8") if artifact_path.is_file() else ""
     sections = _markdown_sections(text)
     relevant_titles = _SYNTH_NON_CRITICAL_SECTIONS | _SYNTH_CRITICAL_SECTIONS
-    required_counts = {
-        "Strengths": 2,
-        "In Scope Issues": 2,
-        "Out of Scope Issues": 2,
-        "Reusability": 1,
-    }
+    required_counts = dict(_SYNTH_REQUIRED_COUNTS)
     step_output_map: dict[str, Path] = {}
     source_shas: dict[str, str] = {}
     primary_source_shas: dict[str, str] = {}
@@ -5118,7 +5080,7 @@ def validate_multipass_synth_grounding(
                 )
                 continue
             valid_primary_citation_found = False
-            bullet_specific_reason = ""
+            bullet_specific_reasons: list[str] = []
             for citation in bullet_citations:
                 citation_path = str(citation["path"])
                 target = step_output_map.get(citation_path)
@@ -5169,14 +5131,17 @@ def validate_multipass_synth_grounding(
                     if counts_as_primary:
                         valid_primary_citation_found = True
                         primary_source_shas[str(target.resolve())] = _artifact_sha256(target)
-                if citation_reason and not bullet_specific_reason:
-                    bullet_specific_reason = citation_reason
+                if citation_reason:
+                    bullet_specific_reasons.append(citation_reason)
                 citations.append(entry)
             if not valid_primary_citation_found:
-                reason = bullet_specific_reason or (
-                    f"Section {section_label} bullet #{bullet_index} must cite at least one "
-                    "valid primary-evidence line; step-artifact citations alone are insufficient."
-                )
+                if bullet_specific_reasons:
+                    reason = " / ".join(bullet_specific_reasons)
+                else:
+                    reason = (
+                        f"Section {section_label} bullet #{bullet_index} must cite at least one "
+                        "valid primary-evidence line; step-artifact citations alone are insufficient."
+                    )
                 errors.append(reason)
                 invalid_bullets.append(
                     {
@@ -6943,7 +6908,7 @@ def _execute_multipass_step_stage(
         # step, without leaking into sibling steps.
         current_llm_resolved: dict[str, Any] = dict(llm_resolved)
         current_llm_resolution_meta: dict[str, Any] = dict(llm_resolution_meta)
-        current_runtime_policy: dict[str, Any] = runtime_policy
+        current_runtime_policy: dict[str, Any] = dict(runtime_policy)
         while True:
             try:
                 success_resume_command = _finalize_multipass_step_result(

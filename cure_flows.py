@@ -1369,6 +1369,14 @@ def render_prompt(
         "${BASE_REF}", base_ref_for_review
     )
     text = text.replace("$HEAD_REF", head_ref).replace("${HEAD_REF}", head_ref)
+    # Citation-contract substitution runs BEFORE the extra_vars loop so the
+    # hardcoded contract is written into the template first; a colliding
+    # ``extra_vars`` key then finds no remaining placeholder to overwrite and
+    # becomes a no-op — the contract always wins.
+    for contract_key, contract_value in CITATION_CONTRACT_KEYS.items():
+        text = text.replace(f"${contract_key}", contract_value).replace(
+            f"${{{contract_key}}}", contract_value
+        )
     review_intelligence_guidance: str | None = None
     if extra_vars:
         for k, v in extra_vars.items():
@@ -1382,13 +1390,6 @@ def render_prompt(
     if review_intelligence_guidance is not None:
         text = text.replace("$REVIEW_INTELLIGENCE_GUIDANCE", review_intelligence_guidance).replace(
             "${REVIEW_INTELLIGENCE_GUIDANCE}", review_intelligence_guidance
-        )
-    # Citation-contract substitution runs after the extra_vars loop so an
-    # accidental ``extra_vars`` entry with the same key cannot shadow the
-    # hardcoded contract — the contract always wins.
-    for contract_key, contract_value in CITATION_CONTRACT_KEYS.items():
-        text = text.replace(f"${contract_key}", contract_value).replace(
-            f"${{{contract_key}}}", contract_value
         )
     # Replace AGENT_DESC last to avoid mutating its contents if it contains `$FOO`.
     text = text.replace("$AGENT_DESC", agent_desc).replace("${AGENT_DESC}", agent_desc)

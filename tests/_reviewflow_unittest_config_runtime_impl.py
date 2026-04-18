@@ -106,6 +106,172 @@ class RenderPromptTests(unittest.TestCase):
         self.assertIn("X=value", rendered)
         self.assertIn("GUIDANCE=Use $X literally.", rendered)
 
+    def test_render_prompt_expands_citation_contract_keys(self) -> None:
+        import cure_citations
+
+        template = "\n".join(
+            [
+                "STEP=$STEP_CITATION_CONTRACT",
+                "SYNTH=$SYNTH_CITATION_CONTRACT",
+                "REVIEW=$REVIEW_CITATION_CONTRACT",
+                "STEP_BRACE=${STEP_CITATION_CONTRACT}",
+            ]
+        )
+        rendered = rf.render_prompt(
+            template,
+            base_ref_for_review="cure_base__develop",
+            pr_url="https://github.com/acme/repo/pull/1",
+            pr_number=1,
+            gh_host="github.com",
+            gh_owner="acme",
+            gh_repo_name="repo",
+            gh_repo="acme/repo",
+            agent_desc="hello",
+            head_ref="HEAD",
+        )
+        self.assertNotIn("$STEP_CITATION_CONTRACT", rendered)
+        self.assertNotIn("$SYNTH_CITATION_CONTRACT", rendered)
+        self.assertNotIn("$REVIEW_CITATION_CONTRACT", rendered)
+        self.assertNotIn("${STEP_CITATION_CONTRACT}", rendered)
+        self.assertIn(cure_citations.STEP_CITATION_CONTRACT, rendered)
+        self.assertIn(cure_citations.SYNTH_CITATION_CONTRACT, rendered)
+        self.assertIn(cure_citations.REVIEW_CITATION_CONTRACT, rendered)
+
+    def test_render_prompt_contract_wins_over_colliding_extra_vars(self) -> None:
+        import cure_citations
+
+        template = "STEP=$STEP_CITATION_CONTRACT\n"
+        rendered = rf.render_prompt(
+            template,
+            base_ref_for_review="cure_base__develop",
+            pr_url="https://github.com/acme/repo/pull/1",
+            pr_number=1,
+            gh_host="github.com",
+            gh_owner="acme",
+            gh_repo_name="repo",
+            gh_repo="acme/repo",
+            agent_desc="hello",
+            head_ref="HEAD",
+            extra_vars={"STEP_CITATION_CONTRACT": "INJECTED_BY_EXTRA_VARS"},
+        )
+        self.assertNotIn("INJECTED_BY_EXTRA_VARS", rendered)
+        self.assertIn(cure_citations.STEP_CITATION_CONTRACT, rendered)
+
+
+class CureCitationsPublicApiTests(unittest.TestCase):
+    """Direct unit coverage for the five public helpers in ``cure_citations``.
+
+    These helpers are foundational to the Story 42 grounding pipeline but had
+    been exercised only indirectly through validator integration tests.
+    """
+
+    def test_trailing_sources_suffix_returns_trimmed_tail(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(
+            cc.trailing_sources_suffix("Finding. Sources: `src/a.py:12`"),
+            "`src/a.py:12`",
+        )
+        self.assertEqual(
+            cc.trailing_sources_suffix("Finding. Sources:   `src/a.py:12`  "),
+            "`src/a.py:12`",
+        )
+
+    def test_trailing_sources_suffix_absent_when_marker_missing_or_empty(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(cc.trailing_sources_suffix("Finding without marker"), "")
+        self.assertEqual(cc.trailing_sources_suffix("Sources: `src/a.py:12`"), "")
+        self.assertEqual(cc.trailing_sources_suffix("Finding. Sources:   "), "")
+
+    def test_has_sources_marker_requires_head_and_tail(self) -> None:
+        import cure_citations as cc
+
+        self.assertTrue(cc.has_sources_marker("Finding. Sources: `src/a.py:12`"))
+        self.assertFalse(cc.has_sources_marker("Finding without marker"))
+        self.assertFalse(cc.has_sources_marker("Sources: `src/a.py:12`"))
+        self.assertFalse(cc.has_sources_marker("Finding. Sources:   "))
+
+    def test_has_path_line_citation_matches_backticked_and_bare(self) -> None:
+        import cure_citations as cc
+
+        self.assertTrue(cc.has_path_line_citation("`src/a.py:12`"))
+        self.assertTrue(cc.has_path_line_citation("src/a.py:12"))
+        self.assertTrue(cc.has_path_line_citation("see `src/a.py:12`, also `tests/b.py:44`"))
+        self.assertFalse(cc.has_path_line_citation(""))
+        self.assertFalse(cc.has_path_line_citation("src/a.py"))
+        self.assertFalse(cc.has_path_line_citation("src/a.py:0"))
+
+    def test_sources_suffix_items_prefers_backticked(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(
+            cc._sources_suffix_items("`src/a.py:12`, `tests/b.py:44`"),
+            ["src/a.py:12", "tests/b.py:44"],
+        )
+        # Mixed backtick + bare: backticks win; bare items are ignored.
+        self.assertEqual(
+            cc._sources_suffix_items("`src/a.py:12`, tests/b.py"),
+            ["src/a.py:12"],
+        )
+
+    def test_sources_suffix_items_comma_split_when_no_backticks(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(
+            cc._sources_suffix_items("src/a.py:12, tests/b.py:44"),
+            ["src/a.py:12", "tests/b.py:44"],
+        )
+        self.assertEqual(
+            cc._sources_suffix_items("src/a.py:12,  , tests/b.py:44"),
+            ["src/a.py:12", "tests/b.py:44"],
+        )
+
+    def test_sources_suffix_items_empty_for_blank_input(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(cc._sources_suffix_items(""), [])
+        self.assertEqual(cc._sources_suffix_items("   "), [])
+
+    def test_has_incomplete_sources_flags_file_only_tail(self) -> None:
+        import cure_citations as cc
+
+        self.assertTrue(cc.has_incomplete_sources("Finding. Sources: `src/a.py`"))
+        self.assertTrue(cc.has_incomplete_sources("Finding. Sources: src/a.py"))
+
+    def test_has_incomplete_sources_accepts_complete_tail(self) -> None:
+        import cure_citations as cc
+
+        self.assertFalse(cc.has_incomplete_sources("Finding. Sources: `src/a.py:12`"))
+        self.assertFalse(
+            cc.has_incomplete_sources("Finding. Sources: `src/a.py:12`, `tests/b.py:44`")
+        )
+
+    def test_has_incomplete_sources_flags_mixed_complete_and_file_only(self) -> None:
+        import cure_citations as cc
+
+        # At least one file-only citation in the tail → incomplete.
+        self.assertTrue(
+            cc.has_incomplete_sources("Finding. Sources: `src/a.py:12`, `src/b.py`")
+        )
+        self.assertTrue(
+            cc.has_incomplete_sources("Finding. Sources: src/a.py:12, src/b.py")
+        )
+
+    def test_has_incomplete_sources_false_when_no_marker(self) -> None:
+        import cure_citations as cc
+
+        self.assertFalse(cc.has_incomplete_sources("Finding without marker"))
+        self.assertFalse(cc.has_incomplete_sources("Finding. Sources:   "))
+
+    def test_has_incomplete_sources_empty_items_fallback_uses_path_line_search(self) -> None:
+        """When _sources_suffix_items returns [], fall back to CITATION_LINE_RE.search."""
+        import cure_citations as cc
+
+        # Suffix text with only commas/whitespace → items == [] → fall back path.
+        # Using a comma-only tail: split on `,` yields [""] filtered to [] by .strip().
+        self.assertTrue(cc.has_incomplete_sources("Finding. Sources: ,,,"))
+
 
 class ReviewIntelligenceConfigTests(unittest.TestCase):
     def test_load_review_intelligence_config_parses_toml(self) -> None:
