@@ -227,7 +227,15 @@ class CureCitationsPublicApiTests(unittest.TestCase):
         )
         self.assertEqual(
             cc._sources_suffix_items("src/a.py:12,  , tests/b.py:44"),
-            ["src/a.py:12", "tests/b.py:44"],
+            ["src/a.py:12", "", "tests/b.py:44"],
+        )
+
+    def test_sources_suffix_items_preserves_empty_comma_slots_after_backticks(self) -> None:
+        import cure_citations as cc
+
+        self.assertEqual(
+            cc._sources_suffix_items("`src/a.py:12`, ,"),
+            ["src/a.py:12", "", ""],
         )
 
     def test_sources_suffix_items_empty_for_blank_input(self) -> None:
@@ -270,13 +278,12 @@ class CureCitationsPublicApiTests(unittest.TestCase):
         self.assertFalse(cc.has_incomplete_sources("Finding without marker"))
         self.assertFalse(cc.has_incomplete_sources("Finding. Sources:   "))
 
-    def test_has_incomplete_sources_empty_items_fallback_uses_path_line_search(self) -> None:
-        """When _sources_suffix_items returns [], fall back to CITATION_LINE_RE.search."""
+    def test_has_incomplete_sources_flags_empty_comma_slots(self) -> None:
         import cure_citations as cc
 
-        # Suffix text with only commas/whitespace → items == [] → fall back path.
-        # Using a comma-only tail: split on `,` yields [""] filtered to [] by .strip().
         self.assertTrue(cc.has_incomplete_sources("Finding. Sources: ,,,"))
+        self.assertTrue(cc.has_incomplete_sources("Finding. Sources: `src/a.py:12`, ,"))
+        self.assertTrue(cc.has_incomplete_sources("Finding. Sources: src/a.py:12, , tests/b.py:44"))
 
 
 class ReviewIntelligenceConfigTests(unittest.TestCase):

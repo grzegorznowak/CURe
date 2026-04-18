@@ -6044,7 +6044,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(self._valid_synth_markdown(), encoding="utf-8")
             else:
                 raise AssertionError(f"unexpected output path: {output_path}")
@@ -6250,7 +6250,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 work_context = output_path.parent / "work" / "pr-context.md"
                 work_context.parent.mkdir(parents=True, exist_ok=True)
                 work_context.write_text("context\n", encoding="utf-8")
@@ -6661,6 +6661,105 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             "\n".join(validation["errors"]),
         )
 
+    def test_synth_grounding_prefers_repo_source_for_same_name_step_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            repo_root_review = repo_dir / "review.step-01.md"
+            repo_root_review.write_text("repo root evidence\n", encoding="utf-8")
+            step_output = root / "session-step-output" / "review.step-01.md"
+            step_output.parent.mkdir(parents=True)
+            step_output.write_text("step artifact evidence\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="review.step-01.md:1"),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertTrue(validation["valid"], validation["errors"])
+        repo_citations = [
+            item
+            for item in validation["citations"]
+            if item["path"] == "review.step-01.md"
+            and item["section"] in {"Strengths", "In Scope Issues", "Reusability"}
+        ]
+        self.assertTrue(repo_citations)
+        self.assertTrue(all(item["source_kind"] == "repo" for item in repo_citations))
+        self.assertTrue(all(item["counts_as_primary"] is True for item in repo_citations))
+
+    def test_synth_grounding_rejects_indented_pseudo_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "    - Indented pseudo-bullet. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical strength. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "Section '### Strengths' under '## Business / Product Assessment' (line 9) must include at least one bullet.",
+            "\n".join(validation["errors"]),
+        )
+
     def test_synth_grounding_invalid_bullets_keep_specific_citation_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6817,7 +6916,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(self._valid_synth_markdown(primary_citation="src/app.py:2"), encoding="utf-8")
                 else:
                     raise AssertionError(f"unexpected output path: {output_path}")
@@ -8952,7 +9051,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     work_dir=work_dir,
                     commands=["search", "research"],
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
@@ -9209,7 +9308,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 commands = ["search"]
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
                 commands = []
             else:
@@ -9300,7 +9399,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
@@ -9444,7 +9543,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
                 step_two_finished.set()
                 adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 synth_prompts.append(str(kwargs["prompt"]))
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
@@ -9614,7 +9713,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     work_dir=work_dir,
                     commands=["search"],
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
                     encoding="utf-8",
@@ -10451,7 +10550,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -11341,7 +11440,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         work_dir=work_dir,
                         commands=["search", "research"],
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -11672,7 +11771,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         work_dir=work_dir,
                         commands=["search", "research"],
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(invalid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -12031,7 +12130,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -12619,7 +12718,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -14541,6 +14640,32 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertEqual(dropped, [])
             self.assertEqual(review_md.read_text(encoding="utf-8"), original_text)
 
+    def test_synth_section_surviving_bullet_counts_ignores_indented_pseudo_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### In Scope Issues",
+                        "- Real issue bullet. Sources: `pkg/module.py:2`",
+                        "    - Indented pseudo-bullet. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            counts = rf._synth_section_surviving_bullet_counts(
+                artifact_path=review_md,
+                drop_keys={("Business / Product Assessment|In Scope Issues|4", 1)},
+            )
+
+        self.assertEqual(counts["Business / Product Assessment|In Scope Issues|4"], 0)
+
     def test_ui_synth_retry_loop_enforces_ui_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -14612,11 +14737,92 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     )
 
             self.assertEqual(run_mock.call_count, cap + 1)
-            self.assertEqual(retry_prompt.call_count, cap)
+            self.assertEqual(retry_prompt.call_count, cap + 1)
             playbook_mock.assert_called_once()
             run_entry = progress.meta["multipass"]["runs"][0]
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
+
+    def test_ui_synth_retry_cap_still_allows_finalize_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-cap-finalize", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            finalized_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+            cap = rf._MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES
+            prompt_choices = ["retry"] * cap + ["finalize"]
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    side_effect=[
+                        *((False, invalid_validation, []) for _ in range(cap + 1)),
+                        (True, finalized_validation, [{"section_key": "k", "bullet_index": 1}]),
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", side_effect=prompt_choices) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-cap-finalize",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": [],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap + 1)
+            self.assertEqual(effort_prompt.call_count, cap)
+            self.assertTrue(finalize_mock.call_args_list[-1].kwargs["allow_critical_omission"])
+            playbook_mock.assert_not_called()
 
     def test_synth_retry_finalize_choice_drops_critical_bullets_and_breaks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -14785,6 +14991,97 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             run_entry = progress.meta["multipass"]["runs"][0]
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_non_ui_synth_retry_preserves_first_failed_artifact_and_validation_until_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-preserve", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            first_invalid = self._valid_synth_markdown(primary_citation="src/app.py:99").replace(
+                "Business value is clear.",
+                "First failed synth attempt.",
+                1,
+            )
+            second_invalid = self._valid_synth_markdown(primary_citation="src/app.py:999").replace(
+                "Business value is clear.",
+                "Second failed synth attempt.",
+                1,
+            )
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            attempt_outputs = [first_invalid, second_invalid]
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(attempt_outputs.pop(0), encoding="utf-8")
+                return llm_result
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec) as run_mock,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaisesRegex(rf.ReviewflowError, "synth failed"):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        work_dir=work_dir,
+                        session_id="session-preserve",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm={
+                            "resolved": {
+                                "provider": "openai",
+                                "model": "gpt-5",
+                                "reasoning_effort": "medium",
+                            },
+                            "resolution_meta": {
+                                "resolved": {
+                                    "model": "gpt-5",
+                                    "reasoning_effort": "medium",
+                                    "reasoning_effort_source": "cli",
+                                    "reasoning_effort_source_detail": "cli",
+                                }
+                            },
+                            "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+                        },
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, 2)
+            playbook_mock.assert_called_once()
+            review_text = review_md.read_text(encoding="utf-8")
+            self.assertIn("First failed synth attempt.", review_text)
+            self.assertNotIn("Second failed synth attempt.", review_text)
+            synth_entry = progress.meta["multipass"]["validation"]["artifacts"]["synth"]
+            self.assertEqual(synth_entry["artifact_path"], str(review_md))
+            self.assertEqual(synth_entry["artifact_sha256"], rf._artifact_sha256(review_md))
 
     def test_synth_retry_none_effort_keeps_original_synth_llm_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

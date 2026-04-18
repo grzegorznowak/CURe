@@ -95,22 +95,38 @@ def has_path_line_citation(suffix_text: str) -> bool:
     return bool(CITATION_LINE_RE.search(suffix_text or ""))
 
 
+def _split_sources_slot(slot_text: str) -> list[str]:
+    """Split one comma-delimited slot into normalized citation fragments.
+
+    Empty slots are preserved as ``""`` so malformed suffixes like ```, ,``` or
+    trailing commas remain visible to :func:`has_incomplete_sources` instead of
+    being silently discarded.
+    """
+    normalized_slot = str(slot_text or "").strip()
+    if not normalized_slot:
+        return [""]
+    items: list[str] = []
+    cursor = 0
+    for match in _BACKTICKED_SOURCE_ITEM_RE.finditer(normalized_slot):
+        prefix = normalized_slot[cursor:match.start()].strip().strip("`")
+        if prefix:
+            items.append(prefix)
+        items.append(match.group(1).strip())
+        cursor = match.end()
+    tail = normalized_slot[cursor:].strip().strip("`")
+    if tail:
+        items.append(tail)
+    return items or [""]
+
+
 def _sources_suffix_items(suffix_text: str) -> list[str]:
     """Return the individual citation items carried in a ``Sources:`` suffix."""
     text = str(suffix_text or "").strip()
     if not text:
         return []
     items: list[str] = []
-    cursor = 0
-    for match in _BACKTICKED_SOURCE_ITEM_RE.finditer(text):
-        prefix = text[cursor:match.start()]
-        items.extend(item.strip().strip("`") for item in prefix.split(",") if item.strip())
-        backticked_item = match.group(1).strip()
-        if backticked_item:
-            items.append(backticked_item)
-        cursor = match.end()
-    tail = text[cursor:]
-    items.extend(item.strip().strip("`") for item in tail.split(",") if item.strip())
+    for slot in text.split(","):
+        items.extend(_split_sources_slot(slot))
     return items
 
 

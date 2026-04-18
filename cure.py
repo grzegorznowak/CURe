@@ -4878,9 +4878,9 @@ assert frozenset().union(*_SYNTH_REQUIRED_SECTIONS_BY_PARENT.values()) == (
 def _section_bullets(section: dict[str, Any]) -> list[str]:
     bullets: list[str] = []
     for raw in section.get("lines", []):
-        stripped = str(raw).strip()
-        if stripped.startswith("- "):
-            bullets.append(stripped)
+        raw_line = str(raw)
+        if raw_line.startswith("- "):
+            bullets.append(raw_line.strip())
     return bullets
 
 
@@ -5101,24 +5101,29 @@ def validate_multipass_synth_grounding(
             bullet_specific_reasons: list[str] = []
             for citation in bullet_citations:
                 citation_path = str(citation["path"])
-                target = step_output_map.get(citation_path)
+                target: Path | None = None
                 counts_as_primary = False
-                source_kind = "step_artifact" if target is not None else None
+                source_kind: str | None = None
+                if citation_path.startswith("work/"):
+                    work_target = _resolve_work_grounding_path(
+                        session_dir=session_dir,
+                        work_dir=work_dir,
+                        relative_path=citation_path,
+                    )
+                    if work_target is not None and work_target.is_file():
+                        target = work_target
+                        counts_as_primary = True
+                        source_kind = "session_artifact"
                 if target is None:
-                    if citation_path.startswith("work/"):
-                        target = _resolve_work_grounding_path(
-                            session_dir=session_dir,
-                            work_dir=work_dir,
-                            relative_path=citation_path,
-                        )
-                        if target is not None:
-                            counts_as_primary = True
-                            source_kind = "session_artifact"
-                    if target is None:
-                        target = _resolve_grounding_path(root_dir=repo_dir, relative_path=citation_path)
-                        if target is not None:
-                            counts_as_primary = True
-                            source_kind = "repo"
+                    repo_target = _resolve_grounding_path(root_dir=repo_dir, relative_path=citation_path)
+                    if repo_target is not None and repo_target.is_file():
+                        target = repo_target
+                        counts_as_primary = True
+                        source_kind = "repo"
+                if target is None:
+                    target = step_output_map.get(citation_path)
+                    if target is not None:
+                        source_kind = "step_artifact"
                 entry = {
                     "section": title,
                     "section_label": section_label,
@@ -5241,6 +5246,18 @@ def _validation_entry_for_stage(meta: dict[str, Any], stage_key: str) -> dict[st
     artifacts = validation.get("artifacts") if isinstance(validation.get("artifacts"), dict) else {}
     entry = artifacts.get(stage_key)
     return entry if isinstance(entry, dict) else None
+
+
+def _synth_candidate_artifact_path(review_md_path: Path) -> Path:
+    return review_md_path.with_name(f"{review_md_path.stem}.candidate{review_md_path.suffix}")
+
+
+def _promote_synth_candidate_artifact(*, candidate_path: Path, review_md_path: Path) -> None:
+    if candidate_path == review_md_path:
+        return
+    if not candidate_path.is_file():
+        return
+    candidate_path.replace(review_md_path)
 
 
 _SYNTH_OMISSION_FOOTER_HEADING = "## Grounding omission summary"
@@ -5369,7 +5386,7 @@ def _rewrite_review_md_dropping_bullets(
             new_lines.append(raw_line)
             continue
         stripped_line = raw_line.strip()
-        if current_title is not None and stripped_line.startswith("- "):
+        if current_title is not None and raw_line.startswith("- "):
             current_bullet_index += 1
             if (current_section_key, current_bullet_index) in drop_keys:
                 continue
@@ -5430,6 +5447,7 @@ def _apply_synth_severity_finalization(
     validation: dict[str, Any] | None,
     ui_enabled: bool,
     allow_critical_omission: bool,
+    persist_result: bool = True,
 ) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]]]:
     """Drop invalid bullets per Story 42 severity rules and revalidate.
 
@@ -5486,7 +5504,8 @@ def _apply_synth_severity_finalization(
         repo_dir=repo_dir,
         work_dir=work_dir,
     )
-    _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=revalidation)
+    if persist_result:
+        _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=revalidation)
     return bool(revalidation.get("valid")), revalidation, dropped
 
 
@@ -5532,6 +5551,14 @@ def _execute_multipass_synth_stage(
     synth_retry_count = 0
     synth_max_auto_retries = 1
     success_resume_command: str | None = None
+    synth_step_output_paths = [Path(item) for item in synth_step_outputs]
+    candidate_review_md_path = _synth_candidate_artifact_path(review_md_path)
+    existing_synth_entry = _validation_entry_for_stage(progress.meta, "synth")
+    preserve_failed_artifact = bool(
+        review_md_path.is_file()
+        and isinstance(existing_synth_entry, dict)
+        and existing_synth_entry.get("valid") is False
+    )
 
     def _persist_synth_grounding_state() -> None:
         if not grounding_attempts:
@@ -5542,13 +5569,32 @@ def _execute_multipass_synth_stage(
             grounding_attempts[0].get("validation") or {}
         )
 
+    def _accept_synth_artifact(
+        candidate_path: Path,
+        accepted_validation: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if candidate_path != review_md_path and (not candidate_path.is_file()):
+            return accepted_validation
+        _promote_synth_candidate_artifact(candidate_path=candidate_path, review_md_path=review_md_path)
+        _, accepted_validation = _validate_or_reuse_synth_artifact(
+            meta=progress.meta,
+            work_dir=work_dir,
+            grounding_mode=grounding_mode,
+            artifact_path=review_md_path,
+            step_outputs=synth_step_output_paths,
+            repo_dir=repo_dir,
+            persist_result=True,
+        )
+        return accepted_validation
+
     while True:
+        current_review_md_path = candidate_review_md_path if preserve_failed_artifact else review_md_path
         progress.flush()
         synth_result = run_llm_exec(
             repo_dir=repo_dir,
             resolved=synth_llm["resolved"],
             resolution_meta=synth_llm["resolution_meta"],
-            output_path=review_md_path,
+            output_path=current_review_md_path,
             prompt=synth_prompt,
             env=env,
             stream=stream,
@@ -5593,28 +5639,37 @@ def _execute_multipass_synth_stage(
             meta=progress.meta,
             work_dir=work_dir,
             grounding_mode=grounding_mode,
-            artifact_path=review_md_path,
-            step_outputs=[Path(item) for item in synth_step_outputs],
+            artifact_path=current_review_md_path,
+            step_outputs=synth_step_output_paths,
             repo_dir=repo_dir,
+            persist_result=not preserve_failed_artifact,
         )
         progress.flush()
         if grounding_mode != "strict" or synth_validation is None or synth_validation.get("valid") is True:
+            if current_review_md_path != review_md_path:
+                synth_validation = _accept_synth_artifact(current_review_md_path, synth_validation)
             break
+        if current_review_md_path == review_md_path:
+            preserve_failed_artifact = True
+            if review_md_path.is_file():
+                shutil.copyfile(review_md_path, candidate_review_md_path)
         finalized, synth_validation, _ = _apply_synth_severity_finalization(
             meta=progress.meta,
             work_dir=work_dir,
             grounding_mode=grounding_mode,
-            artifact_path=review_md_path,
-            step_outputs=[Path(item) for item in synth_step_outputs],
+            artifact_path=candidate_review_md_path,
+            step_outputs=synth_step_output_paths,
             repo_dir=repo_dir,
             validation=synth_validation,
             ui_enabled=ui_enabled,
             allow_critical_omission=False,
+            persist_result=False,
         )
         if finalized:
             # First-pass severity finalization succeeded without a retry, so no
             # ``grounding_attempts`` entry is recorded here by design: the
             # synth output was accepted without rerunning the LLM.
+            synth_validation = _accept_synth_artifact(candidate_review_md_path, synth_validation)
             break
         attempt = _record_grounding_attempt(
             validation=synth_validation,
@@ -5622,20 +5677,19 @@ def _execute_multipass_synth_stage(
         )
         grounding_attempts.append(attempt)
         if ui_enabled:
-            if synth_retry_count >= _MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES:
+            choice = prompt_synth_grounding_retry_choice(
+                attempt_count=len(grounding_attempts),
+                validation=synth_validation,
+            )
+            if choice == "retry" and synth_retry_count >= _MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES:
                 log(
                     "Synth grounding retry cap reached "
                     f"({synth_retry_count} retries, limit "
                     f"{_MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES}); "
-                    "emitting terminal failure playbook.",
+                    "retry is no longer available; finalize or abort remain available.",
                     quiet=False,
                 )
                 choice = "abort"
-            else:
-                choice = prompt_synth_grounding_retry_choice(
-                    attempt_count=len(grounding_attempts),
-                    validation=synth_validation,
-                )
             if choice == "retry":
                 override_effort = prompt_grounding_retry_effort(
                     provider=str(synth_llm["resolved"].get("provider") or ""),
@@ -5670,14 +5724,16 @@ def _execute_multipass_synth_stage(
                     meta=progress.meta,
                     work_dir=work_dir,
                     grounding_mode=grounding_mode,
-                    artifact_path=review_md_path,
-                    step_outputs=[Path(item) for item in synth_step_outputs],
+                    artifact_path=candidate_review_md_path,
+                    step_outputs=synth_step_output_paths,
                     repo_dir=repo_dir,
                     validation=synth_validation,
                     ui_enabled=True,
                     allow_critical_omission=True,
+                    persist_result=False,
                 )
                 if finalized:
+                    synth_validation = _accept_synth_artifact(candidate_review_md_path, synth_validation)
                     break
         elif synth_retry_count < synth_max_auto_retries:
             synth_retry_count += 1
@@ -5897,6 +5953,7 @@ def _validate_or_reuse_synth_artifact(
     artifact_path: Path,
     step_outputs: list[Path],
     repo_dir: Path,
+    persist_result: bool = True,
 ) -> tuple[bool, dict[str, Any] | None]:
     if grounding_mode == "off":
         return True, None
@@ -5914,7 +5971,8 @@ def _validate_or_reuse_synth_artifact(
         repo_dir=repo_dir,
         work_dir=work_dir,
     )
-    _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
+    if persist_result:
+        _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
     return bool(result.get("valid")), result
 
 
