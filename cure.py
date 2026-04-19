@@ -5157,15 +5157,18 @@ def validate_multipass_synth_grounding(
                 if citation_reason:
                     bullet_specific_reasons.append(citation_reason)
                 citations.append(entry)
-            if not valid_primary_citation_found:
-                if bullet_specific_reasons:
-                    reason = " / ".join(bullet_specific_reasons)
-                else:
-                    reason = (
-                        f"Section {section_label} bullet #{bullet_index} must cite at least one "
-                        "valid primary-evidence line; step-artifact citations alone are insufficient."
-                    )
+            reason: str | None = None
+            if bullet_specific_reasons:
+                reason = " / ".join(bullet_specific_reasons)
+                if not valid_primary_citation_found:
+                    errors.append(reason)
+            elif not valid_primary_citation_found:
+                reason = (
+                    f"Section {section_label} bullet #{bullet_index} must cite at least one "
+                    "valid primary-evidence line; step-artifact citations alone are insufficient."
+                )
                 errors.append(reason)
+            if reason is not None:
                 invalid_bullets.append(
                     {
                         "section": title,

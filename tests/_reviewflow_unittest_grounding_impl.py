@@ -6537,6 +6537,37 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
         self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
 
+    def test_synth_grounding_marks_mixed_valid_and_invalid_primary_citations_for_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:2`, `src/app.py:99`",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("missing source line src/app.py:99", "\n".join(validation["errors"]))
+        self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
+        self.assertIn("missing source line src/app.py:99", validation["invalid_bullets"][0]["reason"])
+
     def test_step_grounding_rejects_backtick_plus_bare_residue_sources_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13831,6 +13862,24 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             )
 
         self.assertIsNone(result)
+
+    def test_synth_grounding_retry_prompt_finalize_text_mentions_issue_bullet_omission(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("finalize\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_synth_grounding_retry_choice(
+                attempt_count=2,
+                validation={"errors": ["missing citation", "bad line reference"]},
+            )
+
+        rendered = writer.getvalue()
+        self.assertEqual(result, "finalize")
+        self.assertIn("drop invalid bullets", rendered)
+        self.assertIn("issue bullets if the section keeps another grounded bullet", rendered)
 
     def test_provider_model_options_include_codex_models(self) -> None:
         values = [value for _, value in rf._provider_model_options("codex")]
