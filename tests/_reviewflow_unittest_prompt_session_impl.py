@@ -199,6 +199,8 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("./rf-jira", text)
             self.assertNotIn("REVIEWFLOW_CRAWL_ALLOW_HOSTS", text)
             self.assertNotIn("./rf-fetch-url", text)
+        self.assertIn("$REVIEW_CITATION_CONTRACT", followup)
+        self.assertIn("$REVIEW_CITATION_CONTRACT", big_followup)
 
     def test_review_templates_use_plain_code_under_review_wording(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")

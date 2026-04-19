@@ -69,6 +69,8 @@ If you must ABORT:
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
+- Trailing citation contract (shared across review prompts):
+$REVIEW_CITATION_CONTRACT
 
 ## Output Format
 ```markdown
