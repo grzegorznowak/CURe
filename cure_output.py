@@ -1184,6 +1184,7 @@ def prompt_synth_grounding_retry_choice(
     *,
     attempt_count: int,
     validation: dict[str, Any] | None,
+    retry_available: bool = True,
 ) -> str | None:
     """TTY prompt for synth grounding failure.
 
@@ -1191,6 +1192,9 @@ def prompt_synth_grounding_retry_choice(
     apply severity-aware finalization (drop invalid bullets, including
     supportable issue bullets when the section stays grounded, and continue),
     or ``abort`` to emit the playbook and fail.
+
+    When ``retry_available`` is False (e.g. at the retry cap), the ``retry``
+    option is suppressed and only ``finalize`` / ``abort`` are offered.
     """
     errors = validation.get("errors") if isinstance(validation, dict) else []
     lines = [
@@ -1208,13 +1212,14 @@ def prompt_synth_grounding_retry_choice(
             listed += 1
     if listed == 0:
         lines.append("- strict synth grounding validation failed")
+    choices: dict[str, str] = {}
+    if retry_available:
+        choices["retry"] = "rerun synth with a different effort"
+    choices["finalize"] = "drop invalid bullets, including issue bullets if the section keeps another grounded bullet, and continue"
+    choices["abort"] = "abort with the grounding playbook"
     return _run_tty_prompt(
         lines=lines,
-        choices={
-            "retry": "rerun synth with a different effort",
-            "finalize": "drop invalid bullets, including issue bullets if the section keeps another grounded bullet, and continue",
-            "abort": "abort with the grounding playbook",
-        },
+        choices=choices,
     )
 
 

@@ -5656,6 +5656,7 @@ def _execute_multipass_synth_stage(
             preserve_failed_artifact = True
             if review_md_path.is_file():
                 shutil.copyfile(review_md_path, candidate_review_md_path)
+        pre_finalization_validation = synth_validation
         finalized, synth_validation, _ = _apply_synth_severity_finalization(
             meta=progress.meta,
             work_dir=work_dir,
@@ -5675,7 +5676,7 @@ def _execute_multipass_synth_stage(
             synth_validation = _accept_synth_artifact(candidate_review_md_path, synth_validation)
             break
         attempt = _record_grounding_attempt(
-            validation=synth_validation,
+            validation=pre_finalization_validation,
             attempt_number=len(grounding_attempts) + 1,
         )
         grounding_attempts.append(attempt)
@@ -5689,10 +5690,14 @@ def _execute_multipass_synth_stage(
                     "Synth grounding retry cap reached "
                     f"({synth_retry_count} retries, limit "
                     f"{_MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES}); "
-                    "retry is no longer available; finalize or abort remain available.",
+                    "retry is no longer available.",
                     quiet=False,
                 )
-                choice = "abort"
+                choice = prompt_synth_grounding_retry_choice(
+                    attempt_count=len(grounding_attempts),
+                    validation=synth_validation,
+                    retry_available=False,
+                )
             if choice == "retry":
                 override_effort = prompt_grounding_retry_effort(
                     provider=str(synth_llm["resolved"].get("provider") or ""),
@@ -5748,7 +5753,7 @@ def _execute_multipass_synth_stage(
             session_id=session_id,
             session_dir=review_md_path.parent,
             work_dir=work_dir,
-            artifact_path=review_md_path,
+            artifact_path=current_review_md_path,
             validation=synth_validation,
             resume_from="synth",
         )
@@ -10641,11 +10646,15 @@ def _run_incremental_completed_multipass_resume(
             )
     progress.flush()
 
-    resume_skip_choice = _resolve_resume_grounding_skip_choice(
-        meta=progress.meta,
-        step_entries=step_entries,
-        ui_enabled=ui_enabled,
-    )
+    is_synth_only_decision = resume_meta.get("decision") == "synth_only"
+    if is_synth_only_decision:
+        resume_skip_choice = ""
+    else:
+        resume_skip_choice = _resolve_resume_grounding_skip_choice(
+            meta=progress.meta,
+            step_entries=step_entries,
+            ui_enabled=ui_enabled,
+        )
     prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
     if resume_skip_choice:
         resume_meta["grounding_skipped_override"] = {
@@ -10724,6 +10733,7 @@ def _run_incremental_completed_multipass_resume(
         session_dir=session_dir,
         work_dir=work_dir,
         review_md_path=review_md_path,
+        prefer_persisted_skips=is_synth_only_decision,
     )
 
     progress.meta.setdefault("multipass", {})["current"] = {

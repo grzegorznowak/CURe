@@ -6454,7 +6454,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             self._assert_grounding_playbook(
                 playbook,
                 session_id=session_dir.name,
-                artifact_name="review.md",
+                artifact_name="review.candidate.md",
                 resume_from="synth",
                 error_fragment="step-artifact citations alone are insufficient",
             )
@@ -14750,7 +14750,11 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     "_apply_synth_severity_finalization",
                     return_value=(False, invalid_validation, []),
                 ),
-                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry") as retry_prompt,
+                mock.patch.object(
+                    rf,
+                    "prompt_synth_grounding_retry_choice",
+                    side_effect=["retry"] * (cap + 1) + ["abort"],
+                ) as retry_prompt,
                 mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None),
                 mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
                 mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
@@ -14786,7 +14790,9 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     )
 
             self.assertEqual(run_mock.call_count, cap + 1)
-            self.assertEqual(retry_prompt.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap + 2)
+            last_reprompt = retry_prompt.call_args_list[-1]
+            self.assertFalse(last_reprompt.kwargs.get("retry_available", True))
             playbook_mock.assert_called_once()
             run_entry = progress.meta["multipass"]["runs"][0]
             self.assertTrue(run_entry["grounding_retried"])
@@ -15390,3 +15396,244 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             second_call_default = effort_prompt.call_args_list[1].kwargs.get("default_effort")
             self.assertEqual(first_call_default, "medium")
             self.assertEqual(second_call_default, "high")
+
+    def test_first_grounding_failure_validation_captures_pre_finalization_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-pre-final", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            raw_validation = {
+                "valid": False,
+                "errors": ["raw pre-finalization error"],
+                "invalid_bullets": [{"section_key": "k", "bullet_index": 1, "critical": False}],
+            }
+            post_finalization_validation = {
+                "valid": False,
+                "errors": ["post-finalization error after non-critical drop"],
+                "invalid_bullets": [],
+            }
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, raw_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, post_finalization_validation, [{"section_key": "k", "bullet_index": 1}]),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="abort"),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook"),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-pre-final",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            run_entry = progress.meta["multipass"]["runs"][0]
+            first_failure = run_entry["first_grounding_failure_validation"]
+            self.assertIn("raw pre-finalization error", first_failure.get("errors", []))
+            self.assertNotIn("post-finalization error", str(first_failure.get("errors", [])))
+
+    def test_terminal_playbook_reports_candidate_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({
+                "session_id": "session-candidate",
+                "multipass": {
+                    "runs": [],
+                    "validation": {"valid": False},
+                },
+                "llm": {},
+                "codex": {},
+            })
+            review_md = root / "review.md"
+            review_md.write_text("prior synth output")
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-candidate",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            playbook_mock.assert_called_once()
+            reported_path = playbook_mock.call_args.kwargs.get("artifact_path")
+            self.assertTrue(str(reported_path).endswith("review.candidate.md"))
+
+    def test_incremental_resume_synth_only_skips_grounding_skip_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            step_01_output = root / "review.step-01.md"
+            step_01_output.write_text("step 01 output")
+            step_02_output = root / "review.step-02.md"
+            step_02_output.write_text("step 02 output")
+            review_md = root / "review.md"
+            review_md.write_text("old review")
+            progress.init({
+                "session_id": "session-synth-only",
+                "pr_url": "https://github.com/x/y/pull/1",
+                "number": 1,
+                "multipass": {
+                    "runs": [],
+                    "step_states": [
+                        {
+                            "step_index": 1,
+                            "step_id": "01",
+                            "step_title": "step one",
+                            "step_focus": "focus",
+                            "output_path": str(step_01_output),
+                            "status": "completed",
+                            "reusable": True,
+                        },
+                        {
+                            "step_index": 2,
+                            "step_id": "02",
+                            "step_title": "step two",
+                            "step_focus": "focus",
+                            "output_path": str(step_02_output),
+                            "status": "completed",
+                            "reusable": True,
+                        },
+                    ],
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "step one", "reason": "skipped"},
+                    ],
+                    "grounding_skipped_step_count": 1,
+                    "artifacts": {
+                        "step_outputs": [str(step_01_output), str(step_02_output)],
+                        "synth_step_outputs": [str(step_02_output)],
+                    },
+                },
+                "llm": {},
+                "codex": {},
+            })
+            step_entries = [
+                rf.MultipassStepEntry(
+                    index=1, step_id="01", step_title="step one",
+                    step_focus="focus", output_path=step_01_output,
+                    prompt="prompt", should_run=False,
+                ),
+                rf.MultipassStepEntry(
+                    index=2, step_id="02", step_title="step two",
+                    step_focus="focus", output_path=step_02_output,
+                    prompt="prompt", should_run=False,
+                ),
+            ]
+            skip_choice = rf._resolve_resume_grounding_skip_choice(
+                meta=progress.meta,
+                step_entries=step_entries,
+                ui_enabled=False,
+            )
+            self.assertEqual(skip_choice, "rerun")
+            synth_outputs, _ = rf._prepare_synth_inputs(
+                meta=progress.meta,
+                step_entries=step_entries,
+                session_id="session-synth-only",
+                session_dir=root,
+                work_dir=root,
+                review_md_path=review_md,
+                prefer_persisted_skips=True,
+            )
+            self.assertEqual(synth_outputs, [str(step_02_output)])
+            self.assertNotIn(str(step_01_output), synth_outputs)
