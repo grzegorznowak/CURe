@@ -72,13 +72,13 @@ Output ONLY the final review (no plan, no step outputs appended):
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
 
 ### Strengths
-- ...
+- ... Sources: `src/module.py:12`
 
 ### In Scope Issues
-- ...
+- ... Sources: `src/module.py:24`
 
 ### Out of Scope Issues
-- ...
+- ... Sources: `work/pr-context.md:7`
 
 ### Reusability
 - ... Sources: `tests/test_module.py:44`

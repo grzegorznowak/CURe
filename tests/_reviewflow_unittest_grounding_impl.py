@@ -13589,6 +13589,83 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
 
+    def test_execute_multipass_step_stage_tty_loss_skips_instead_of_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-tty-loss", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", return_value=raw_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value=None) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-tty-loss",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_not_called()
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            self.assertEqual(state["status"], "grounding_skipped")
+
     def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -15637,3 +15714,34 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             )
             self.assertEqual(synth_outputs, [str(step_02_output)])
             self.assertNotIn(str(step_01_output), synth_outputs)
+
+    def test_grounding_skipped_step_ids_can_prefer_persisted_records(self) -> None:
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {
+                        "step_index": 1,
+                        "step_id": "01",
+                        "step_title": "step one",
+                        "status": "reused",
+                        "reusable": True,
+                    },
+                    {
+                        "step_index": 2,
+                        "step_id": "02",
+                        "step_title": "step two",
+                        "status": "reused",
+                        "reusable": True,
+                    },
+                ],
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "step one", "reason": "skipped"},
+                ],
+            }
+        }
+
+        self.assertEqual(rf._grounding_skipped_step_ids(meta), set())
+        self.assertEqual(
+            rf._grounding_skipped_step_ids(meta, prefer_persisted=True),
+            {"01"},
+        )

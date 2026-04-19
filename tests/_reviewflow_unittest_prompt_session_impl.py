@@ -478,6 +478,21 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("src/module.py:12", synth_text)
         self.assertIn("work/pr-context.md:7", synth_text)
 
+    def test_synth_prompts_use_cited_examples_for_governed_sections(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("### Strengths\n- ... Sources:", text)
+            self.assertIn("### In Scope Issues\n- ... Sources:", text)
+            self.assertIn("### Out of Scope Issues\n- ... Sources:", text)
+            self.assertIn("### Reusability\n- ... Sources:", text)
+            self.assertNotIn("### Strengths\n- ...\n", text)
+            self.assertNotIn("### In Scope Issues\n- ...\n", text)
+            self.assertNotIn("### Out of Scope Issues\n- ...\n", text)
+
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",

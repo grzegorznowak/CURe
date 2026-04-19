@@ -6019,9 +6019,13 @@ def _grounding_skipped_step_records(
     return []
 
 
-def _grounding_skipped_step_ids(meta: dict[str, Any]) -> set[str]:
+def _grounding_skipped_step_ids(
+    meta: dict[str, Any],
+    *,
+    prefer_persisted: bool = False,
+) -> set[str]:
     skipped: set[str] = set()
-    for item in _grounding_skipped_step_records(meta):
+    for item in _grounding_skipped_step_records(meta, prefer_persisted=prefer_persisted):
         step_id = str(item.get("step_id") or "").strip()
         if step_id:
             skipped.add(step_id)
@@ -7074,6 +7078,13 @@ def _execute_multipass_step_stage(
                         )
                         if prompted_choice in {"retry", "skip"}:
                             choice = prompted_choice
+                        elif prompted_choice is None:
+                            log(
+                                "Step grounding retry prompt lost /dev/tty; "
+                                f"marking step {entry.step_id or entry.index:>02} grounding-skipped.",
+                                quiet=False,
+                            )
+                            choice = "skip"
                 if choice == "retry":
                     step_effort_options = list(
                         _reasoning_effort_choices_for_provider(current_llm_resolved.get("provider"))
@@ -10655,7 +10666,10 @@ def _run_incremental_completed_multipass_resume(
             step_entries=step_entries,
             ui_enabled=ui_enabled,
         )
-    prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+    prior_skipped_ids = _grounding_skipped_step_ids(
+        progress.meta,
+        prefer_persisted=bool(resume_skip_choice),
+    )
     if resume_skip_choice:
         resume_meta["grounding_skipped_override"] = {
             "choice": resume_skip_choice,
@@ -10709,7 +10723,10 @@ def _run_incremental_completed_multipass_resume(
         success_resume_command = step_resume_command or success_resume_command
     else:
         with progress.mutate():
-            skipped_ids = _grounding_skipped_step_ids(progress.meta)
+            skipped_ids = _grounding_skipped_step_ids(
+                progress.meta,
+                prefer_persisted=is_synth_only_decision or resume_skip_choice == "keep",
+            )
             progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})["step_outputs"] = list(step_outputs)
             progress.meta.setdefault("multipass", {})["effective_step_workers"] = 0
             progress.meta.setdefault("multipass", {})["step_states"] = [
@@ -10733,7 +10750,7 @@ def _run_incremental_completed_multipass_resume(
         session_dir=session_dir,
         work_dir=work_dir,
         review_md_path=review_md_path,
-        prefer_persisted_skips=is_synth_only_decision,
+        prefer_persisted_skips=is_synth_only_decision or resume_skip_choice == "keep",
     )
 
     progress.meta.setdefault("multipass", {})["current"] = {
@@ -11516,7 +11533,10 @@ def _resume_flow_impl(
                 step_entries=step_entries,
                 ui_enabled=ui_enabled,
             )
-            prior_skipped_ids = _grounding_skipped_step_ids(progress.meta)
+            prior_skipped_ids = _grounding_skipped_step_ids(
+                progress.meta,
+                prefer_persisted=bool(resume_skip_choice),
+            )
             if resume_skip_choice:
                 progress.meta.setdefault("multipass", {}).setdefault("resume", {})[
                     "grounding_skipped_override"
@@ -11579,7 +11599,10 @@ def _resume_flow_impl(
                 success_resume_command = step_resume_command or success_resume_command
         else:
             with progress.mutate():
-                skipped_ids = _grounding_skipped_step_ids(progress.meta)
+                skipped_ids = _grounding_skipped_step_ids(
+                    progress.meta,
+                    prefer_persisted=from_phase == "synth" or resume_skip_choice == "keep",
+                )
                 progress.meta.setdefault("multipass", {}).setdefault("artifacts", {})[
                     "step_outputs"
                 ] = list(step_outputs)
@@ -11606,7 +11629,7 @@ def _resume_flow_impl(
             session_dir=session_dir,
             work_dir=work_dir,
             review_md_path=review_md_path,
-            prefer_persisted_skips=from_phase == "synth",
+            prefer_persisted_skips=from_phase == "synth" or resume_skip_choice == "keep",
         )
 
         should_synth = (
