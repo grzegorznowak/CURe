@@ -538,15 +538,19 @@ class PromptTemplateTests(unittest.TestCase):
                     **rf.verbose_review_findings_prompt_vars(enabled=True),
                 },
             )
-            self.assertIn("Severity/Impact: Critical | High | Medium | Low | Info", rendered)
-            self.assertIn("Likelihood: High | Medium | Low | Not Assessed", rendered)
-            self.assertIn("Why:", rendered)
-            self.assertIn("Assumptions / Preconditions:", rendered)
-            self.assertIn("Downgrade Factors:", rendered)
-            self.assertIn("Code Trail:", rendered)
-            self.assertIn("Reproduction Story/Diagram:", rendered)
+            self.assertIn("<details open>", rendered)
+            self.assertIn("SEVERITY_LABEL", rendered)
+            self.assertIn("LIKELIHOOD_LABEL", rendered)
+            self.assertIn("**Why:**", rendered)
+            self.assertIn("**Assumptions / Preconditions:**", rendered)
+            self.assertIn("**Downgrade Factors:**", rendered)
+            self.assertIn("**Code Trail:**", rendered)
+            self.assertIn("Sources: `file:line`, `file:line`", rendered)
+            self.assertIn("**Reproduction:**", rendered)
             self.assertIn("Not applicable.", rendered)
             self.assertIn("simple operator-facing explanation", rendered)
+            self.assertIn("Critical, High, Medium, Low, Info", rendered)
+            self.assertIn("High, Medium, Low, Not Assessed", rendered)
 
             default_rendered = rf.render_prompt(
                 path.read_text(encoding="utf-8"),
@@ -565,7 +569,7 @@ class PromptTemplateTests(unittest.TestCase):
                 },
             )
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
-            self.assertNotIn("Severity/Impact: Critical | High | Medium | Low | Info", default_rendered)
+            self.assertNotIn("<details open>", default_rendered)
 
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [

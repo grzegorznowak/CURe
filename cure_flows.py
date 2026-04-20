@@ -1348,19 +1348,34 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
             """
             Verbose finding explanation mode is ENABLED for this final review artifact.
             - Keep the default top-level section layout unchanged.
-            - For every concrete issue under `### In Scope Issues` or `### Out of Scope Issues`, expand the finding using this exact mini-schema:
-              - `<finding summary>`
-                Severity/Impact: Critical | High | Medium | Low | Info
-                Likelihood: High | Medium | Low | Not Assessed
-                Why: <simple operator-facing explanation of why the change is being requested>
-                Assumptions / Preconditions: <required conditions, or `None.`>
-                Downgrade Factors: <what would reduce confidence or impact, or `None.`>
-                Code Trail: <grounded code-path explanation ending with a trailing `Sources:` suffix that follows the existing citation contract>
-                Reproduction Story/Diagram: <brief reproduction narrative or simple text diagram>, or `Not applicable.`
-            - Keep `Why` simple operator-facing language and do not expose hidden chain-of-thought.
-            - Use the rating vocab exactly as written above.
+            - For every concrete issue under `### In Scope Issues` or `### Out of Scope Issues`, format the finding as a collapsible card using this exact structure:
+
+              ```
+              - <finding summary>
+
+                <details open>
+                <summary><b>SEVERITY_LABEL</b> severity · <b>LIKELIHOOD_LABEL</b> likelihood</summary>
+
+                **Why:** <simple operator-facing explanation of why the change is being requested>
+
+                **Assumptions / Preconditions:** <required conditions, or `None.`>
+
+                **Downgrade Factors:** <what would reduce confidence or impact, or `None.`>
+
+                **Code Trail:** <grounded code-path explanation ending with a trailing `Sources:` line that follows the existing citation contract>
+                Sources: `file:line`, `file:line`
+
+                **Reproduction:** <brief reproduction narrative or simple text diagram>, or `Not applicable.`
+
+                </details>
+              ```
+
+            - SEVERITY_LABEL must be one of: Critical, High, Medium, Low, Info.
+            - LIKELIHOOD_LABEL must be one of: High, Medium, Low, Not Assessed.
+            - Keep `Why` in simple operator-facing language and do not expose hidden chain-of-thought.
             - Prefer `Likelihood: Not Assessed` over fake precision when the evidence is insufficient.
-            - Keep `### Strengths` and `### Reusability` as concise cited bullets.
+            - The `<details open>` tag ensures the card is expanded by default but collapsible by the reader.
+            - Keep `### Strengths` and `### Reusability` as concise cited bullets (no cards needed).
             """
         ).strip()
     return {"VERBOSE_FINDING_MODE_GUIDANCE": guidance}

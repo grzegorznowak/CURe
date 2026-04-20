@@ -16093,4 +16093,6 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
             prompt = captured["prompt"]
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", prompt)
-            self.assertIn("Severity/Impact: Critical | High | Medium | Low | Info", prompt)
+            self.assertIn("<details open>", prompt)
+            self.assertIn("SEVERITY_LABEL", prompt)
+            self.assertIn("LIKELIHOOD_LABEL", prompt)
