@@ -5312,11 +5312,18 @@ def _format_synth_omission_footer(dropped: list[dict[str, Any]]) -> str:
 def _strip_existing_synth_omission_footer(text: str) -> str:
     if _SYNTH_OMISSION_FOOTER_HEADING not in text:
         return text
-    marker = text.find(_SYNTH_OMISSION_FOOTER_HEADING)
-    if marker < 0:
-        return text
-    trimmed = text[:marker].rstrip()
-    return trimmed + "\n" if trimmed else ""
+    lines = text.splitlines()
+    in_fence = False
+    for idx, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+        if in_fence:
+            continue
+        if raw_line == _SYNTH_OMISSION_FOOTER_HEADING:
+            trimmed = "\n".join(lines[:idx]).rstrip()
+            return trimmed + "\n" if trimmed else ""
+    return text
 
 
 def _rewrite_review_md_dropping_bullets(
@@ -5347,6 +5354,7 @@ def _rewrite_review_md_dropping_bullets(
     section_bullets_remaining: int = 0
     section_has_none_placeholder = False
     pending_none_placeholder = False
+    dropping_bullet_continuation = False
     def _insert_none_placeholder() -> None:
         # Drop trailing blanks so the placeholder sits directly after the
         # section heading (no blank gap), then re-add a blank so a following
@@ -5364,6 +5372,7 @@ def _rewrite_review_md_dropping_bullets(
             if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
                 _insert_none_placeholder()
             pending_none_placeholder = False
+            dropping_bullet_continuation = False
             current_parent = raw_line[3:].strip() or None
             current_title = None
             current_section_line = None
@@ -5386,12 +5395,15 @@ def _rewrite_review_md_dropping_bullets(
             section_bullets_remaining = 0
             section_has_none_placeholder = False
             pending_none_placeholder = current_title in _SYNTH_NON_CRITICAL_SECTIONS
+            dropping_bullet_continuation = False
             new_lines.append(raw_line)
             continue
         stripped_line = raw_line.strip()
         if current_title is not None and raw_line.startswith("- "):
+            dropping_bullet_continuation = False
             current_bullet_index += 1
             if (current_section_key, current_bullet_index) in drop_keys:
+                dropping_bullet_continuation = True
                 continue
             if stripped_line == "- None.":
                 section_has_none_placeholder = True
@@ -5399,6 +5411,14 @@ def _rewrite_review_md_dropping_bullets(
                 section_bullets_remaining += 1
             new_lines.append(raw_line)
             continue
+        if dropping_bullet_continuation:
+            if not raw_line.strip():
+                dropping_bullet_continuation = False
+                new_lines.append(raw_line)
+                continue
+            if raw_line.startswith((" ", "\t")):
+                continue
+            dropping_bullet_continuation = False
         new_lines.append(raw_line)
     if pending_none_placeholder and section_bullets_remaining == 0 and not section_has_none_placeholder:
         _insert_none_placeholder()
@@ -5553,6 +5573,7 @@ def _execute_multipass_synth_stage(
     grounding_attempts: list[dict[str, Any]] = []
     synth_retry_count = 0
     synth_max_auto_retries = 1
+    synth_retry_ui_enabled = ui_enabled
     success_resume_command: str | None = None
     synth_step_output_paths = [Path(item) for item in synth_step_outputs]
     candidate_review_md_path = _synth_candidate_artifact_path(review_md_path)
@@ -5680,11 +5701,19 @@ def _execute_multipass_synth_stage(
             attempt_number=len(grounding_attempts) + 1,
         )
         grounding_attempts.append(attempt)
-        if ui_enabled:
+        choice: str | None = None
+        if synth_retry_ui_enabled:
             choice = prompt_synth_grounding_retry_choice(
                 attempt_count=len(grounding_attempts),
                 validation=synth_validation,
             )
+            if choice is None:
+                log(
+                    "Synth grounding retry prompt lost /dev/tty; "
+                    "falling back to the non-interactive single auto-retry path.",
+                    quiet=False,
+                )
+                synth_retry_ui_enabled = False
             if choice == "retry" and synth_retry_count >= _MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES:
                 log(
                     "Synth grounding retry cap reached "
@@ -5743,7 +5772,7 @@ def _execute_multipass_synth_stage(
                 if finalized:
                     synth_validation = _accept_synth_artifact(candidate_review_md_path, synth_validation)
                     break
-        elif synth_retry_count < synth_max_auto_retries:
+        if ((not synth_retry_ui_enabled) or choice is None) and synth_retry_count < synth_max_auto_retries:
             synth_retry_count += 1
             _persist_synth_grounding_state()
             continue

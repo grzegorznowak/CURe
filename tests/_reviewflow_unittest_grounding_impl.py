@@ -13321,6 +13321,54 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         self.assertNotIn("### Strengths\n- None.\n- None.\n", rewritten)
         self.assertIn("## Business / Product Assessment\n**Verdict**: APPROVE\n\n### Strengths\n- None.\n", rewritten)
 
+    def test_rewrite_review_md_dropping_bullets_removes_continuation_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "  continuation that should disappear with the dropped bullet",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            rf._rewrite_review_md_dropping_bullets(
+                review_md_path=review_md,
+                dropped=[
+                    {
+                        "section_key": "Technical Assessment|Strengths|4",
+                        "bullet_index": 1,
+                        "section_label": "'### Strengths' under '## Technical Assessment' (line 4)",
+                        "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                        "critical": False,
+                        "reason": "bad cite",
+                    }
+                ],
+            )
+
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        body, _, footer = rewritten.partition(rf._SYNTH_OMISSION_FOOTER_HEADING)
+        self.assertNotIn("continuation that should disappear", body)
+        self.assertIn("### Strengths\n- None.\n", body)
+        self.assertIn("dropped bullet text: Drop me.", footer)
+
     def test_step_grounding_validation_error_carries_payload(self) -> None:
         err = rf.StepGroundingValidationError(
             "bad grounding",
@@ -14574,6 +14622,28 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
         self.assertEqual(stripped, "")
 
+    def test_strip_existing_synth_omission_footer_ignores_heading_inside_fenced_code(self) -> None:
+        heading = rf._SYNTH_OMISSION_FOOTER_HEADING
+        text = "\n".join(
+            [
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "```md",
+                heading,
+                "quoted inside fence",
+                "```",
+                "",
+                "### Reusability",
+                "- Still here. Sources: `pkg/module.py:1`",
+                "",
+            ]
+        )
+
+        stripped = rf._strip_existing_synth_omission_footer(text)
+
+        self.assertEqual(stripped, text)
+
     def test_strip_existing_synth_omission_footer_is_idempotent_across_successive_rewrites(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             review_md = Path(tmp) / "review.md"
@@ -15202,6 +15272,83 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertEqual(run_mock.call_count, 2)
             # UI prompts must never fire in non-UI mode.
             retry_prompt.assert_not_called()
+            effort_prompt.assert_not_called()
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_ui_synth_retry_lost_tty_uses_non_ui_auto_retry_once_then_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-ui-lost-tty", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value=None) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-ui-lost-tty",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, 2)
+            retry_prompt.assert_called_once()
             effort_prompt.assert_not_called()
             playbook_mock.assert_called_once()
             run_entry = progress.meta["multipass"]["runs"][0]
