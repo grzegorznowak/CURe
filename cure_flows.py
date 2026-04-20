@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -1338,6 +1339,31 @@ def review_intelligence_prompt_vars(
             capability_summary=capability_summary,
         )
     }
+
+
+def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
+    guidance = ""
+    if enabled:
+        guidance = textwrap.dedent(
+            """
+            Verbose finding explanation mode is ENABLED for this final review artifact.
+            - Keep the default top-level section layout unchanged.
+            - For every concrete issue under `### In Scope Issues` or `### Out of Scope Issues`, expand the finding using this exact mini-schema:
+              - `<finding summary>`
+                Severity/Impact: Critical | High | Medium | Low | Info
+                Likelihood: High | Medium | Low | Not Assessed
+                Why: <simple operator-facing explanation of why the change is being requested>
+                Assumptions / Preconditions: <required conditions, or `None.`>
+                Downgrade Factors: <what would reduce confidence or impact, or `None.`>
+                Code Trail: <grounded code-path explanation ending with a trailing `Sources:` suffix that follows the existing citation contract>
+                Reproduction Story/Diagram: <brief reproduction narrative or simple text diagram>, or `Not applicable.`
+            - Keep `Why` simple operator-facing language and do not expose hidden chain-of-thought.
+            - Use the rating vocab exactly as written above.
+            - Prefer `Likelihood: Not Assessed` over fake precision when the evidence is insufficient.
+            - Keep `### Strengths` and `### Reusability` as concise cited bullets.
+            """
+        ).strip()
+    return {"VERBOSE_FINDING_MODE_GUIDANCE": guidance}
 
 def render_prompt(
     template_text: str,
@@ -3155,6 +3181,7 @@ __all__ = [
     'resolve_session_baseline_selection',
     'restore_session_chunkhound_db_from_baseline',
     'review_intelligence_prompt_vars',
+    'verbose_review_findings_prompt_vars',
     'chunkhound_env',
     'same_device',
     'validate_operator_chunkhound_seed_source',

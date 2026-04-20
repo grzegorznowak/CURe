@@ -57,6 +57,7 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
 - Trailing citation contract (shared across review prompts):
 $SYNTH_CITATION_CONTRACT
 - Do not use any excluded grounding-skipped step artifact, even if that file still exists in the session directory.
+$VERBOSE_FINDING_MODE_GUIDANCE
 
 # Output Format
 Output ONLY the final review:

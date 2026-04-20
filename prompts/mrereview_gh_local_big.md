@@ -59,6 +59,7 @@ If you must ABORT:
 - Use `- None.` when a scope bucket is empty.
 - Trailing citation contract (shared across review prompts):
 $REVIEW_CITATION_CONTRACT
+$VERBOSE_FINDING_MODE_GUIDANCE
 
 # Critical Checks (for each review step)
 - Can existing code be extended instead of creating new (DRY)?

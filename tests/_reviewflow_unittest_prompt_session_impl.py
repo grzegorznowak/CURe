@@ -204,6 +204,28 @@ class PromptTemplateTests(unittest.TestCase):
         zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
         self.assertIn("$REVIEW_CITATION_CONTRACT", zip_template)
 
+    def test_final_review_templates_expose_verbose_finding_placeholder(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$VERBOSE_FINDING_MODE_GUIDANCE", text)
+
+        self.assertNotIn(
+            "$VERBOSE_FINDING_MODE_GUIDANCE",
+            (ROOT / "prompts" / "default.md").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "$VERBOSE_FINDING_MODE_GUIDANCE",
+            (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
+        )
+
     def test_review_templates_use_plain_code_under_review_wording(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
         self.assertIn("Treat the sandbox checkout as the code under review", normal)
@@ -492,6 +514,61 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("### Strengths\n- ...\n", text)
             self.assertNotIn("### In Scope Issues\n- ...\n", text)
             self.assertNotIn("### Out of Scope Issues\n- ...\n", text)
+
+    def test_verbose_finding_mode_guidance_renders_required_fields_for_final_reviews(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            rendered = rf.render_prompt(
+                path.read_text(encoding="utf-8"),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars={
+                    "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.\n",
+                    **rf.verbose_review_findings_prompt_vars(enabled=True),
+                },
+            )
+            self.assertIn("Severity/Impact: Critical | High | Medium | Low | Info", rendered)
+            self.assertIn("Likelihood: High | Medium | Low | Not Assessed", rendered)
+            self.assertIn("Why:", rendered)
+            self.assertIn("Assumptions / Preconditions:", rendered)
+            self.assertIn("Downgrade Factors:", rendered)
+            self.assertIn("Code Trail:", rendered)
+            self.assertIn("Reproduction Story/Diagram:", rendered)
+            self.assertIn("Not applicable.", rendered)
+            self.assertIn("simple operator-facing explanation", rendered)
+
+            default_rendered = rf.render_prompt(
+                path.read_text(encoding="utf-8"),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars={
+                    "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.\n",
+                    **rf.verbose_review_findings_prompt_vars(enabled=False),
+                },
+            )
+            self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
+            self.assertNotIn("Severity/Impact: Critical | High | Medium | Low | Info", default_rendered)
 
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
@@ -3094,6 +3171,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                 codex_model=None,
                 codex_effort=None,
                 codex_plan_effort=None,
+                wtf=False,
                 quiet=False,
                 no_stream=True,
                 ui="off",
@@ -3116,6 +3194,39 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+    def test_resume_flow_copies_wtf_flag_into_followup_handoff(self) -> None:
+        args = argparse.Namespace(
+            session_id="session-123",
+            from_phase="auto",
+            no_index=False,
+            codex_model=None,
+            codex_effort=None,
+            codex_plan_effort=None,
+            wtf=True,
+            quiet=False,
+            no_stream=True,
+            ui="off",
+            verbosity="normal",
+        )
+        paths = rf.ReviewflowPaths(
+            sandbox_root=ROOT / ".tmp_resume_followup_handoff_root",
+            cache_root=ROOT / ".tmp_resume_followup_handoff_cache",
+            review_chunkhound_config=ROOT / ".tmp_resume_followup_handoff_cfg.json",
+            main_chunkhound_config=ROOT / ".tmp_resume_followup_handoff_cfg.json",
+        )
+
+        with (
+            mock.patch.object(rf, "resolve_resume_target", return_value=("resolved-session", "followup")),
+            mock.patch.object(rf, "followup_flow", return_value=17) as followup_flow,
+        ):
+            rc = rf.resume_flow(args, paths=paths)
+
+        self.assertEqual(rc, 17)
+        followup_args = followup_flow.call_args.args[0]
+        self.assertEqual(followup_args.session_id, "resolved-session")
+        self.assertFalse(followup_args.no_update)
+        self.assertTrue(followup_args.wtf)
+
     def test_followup_no_update_does_not_require_gh_auth_before_local_setup(self) -> None:
         root = ROOT / ".tmp_test_followup_no_update_auth_root"
         cfg = ROOT / ".tmp_test_followup_no_update_auth_cfg.json"
@@ -3130,6 +3241,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                 codex_model=None,
                 codex_effort=None,
                 codex_plan_effort=None,
+                wtf=False,
                 quiet=False,
                 no_stream=True,
                 ui="off",
@@ -3166,6 +3278,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
                 codex_model=None,
                 codex_effort=None,
                 codex_plan_effort=None,
+                wtf=False,
                 quiet=False,
                 no_stream=True,
                 ui="off",
