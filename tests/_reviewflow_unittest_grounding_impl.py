@@ -6728,6 +6728,42 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         self.assertTrue(all(item["source_kind"] == "repo" for item in repo_citations))
         self.assertTrue(all(item["counts_as_primary"] is True for item in repo_citations))
 
+    def test_synth_grounding_rejects_repo_fallback_for_missing_work_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "work").mkdir()
+            (repo_dir / "work" / "pr-context.md").write_text("repo copy only\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="work/pr-context.md:1"),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        synth_citations = [
+            item
+            for item in validation["citations"]
+            if item["path"] == "work/pr-context.md"
+            and item["section"] in {"Strengths", "In Scope Issues", "Reusability"}
+        ]
+        self.assertTrue(synth_citations)
+        self.assertTrue(all(item["source_kind"] is None for item in synth_citations))
+        self.assertTrue(all(item["counts_as_primary"] is False for item in synth_citations))
+        self.assertTrue(
+            any("cites unsupported synth source work/pr-context.md:1" in err for err in validation["errors"])
+        )
+
     def test_synth_grounding_rejects_indented_pseudo_bullets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -14366,6 +14402,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             work_dir = root / "work"
             work_dir.mkdir()
             review_md_path = session_dir / "review.md"
+            (root / "review.step-02.md").write_text("grounded step output\n", encoding="utf-8")
             entries = [
                 rf.MultipassStepEntry(
                     index=1,
@@ -14455,6 +14492,53 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertTrue(emitted_playbook, "Expected grounding failure playbook to be emitted")
             self.assertEqual(meta["status"], "error")
             self.assertEqual(meta["multipass"]["status"], "step_failed")
+
+    def test_prepare_synth_inputs_raises_when_non_skipped_step_output_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            missing_output = root / "review.step-01.md"
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Safety",
+                step_focus="f",
+                output_path=missing_output,
+                prompt="p",
+                should_run=False,
+            )
+            meta: dict[str, Any] = {"session_id": "test-session", "multipass": {}}
+            emitted_playbook: list[dict[str, Any]] = []
+
+            def capture_playbook(**kwargs: Any) -> None:
+                emitted_playbook.append(dict(kwargs))
+
+            with (
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook", side_effect=capture_playbook),
+                self.assertRaisesRegex(
+                    rf.ReviewflowError,
+                    "Missing synth input artifacts prevent review synthesis from continuing",
+                ),
+            ):
+                rf._prepare_synth_inputs(
+                    meta=meta,
+                    step_entries=[entry],
+                    session_id="test-session",
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    review_md_path=review_md_path,
+                )
+
+            self.assertTrue(emitted_playbook, "Expected grounding failure playbook to be emitted")
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+            validation = emitted_playbook[0]["validation"]
+            self.assertIn("Missing synth input artifacts", "\n".join(validation["errors"]))
+            self.assertEqual(meta["multipass"]["artifacts"]["synth_step_outputs"], [str(missing_output)])
 
     def test_persist_grounding_summary_prefers_current_step_state_over_stale_persisted_skip(self) -> None:
         entry = rf.MultipassStepEntry(

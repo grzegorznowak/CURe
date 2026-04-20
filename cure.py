@@ -5114,13 +5114,13 @@ def validate_multipass_synth_grounding(
                         target = work_target
                         counts_as_primary = True
                         source_kind = "session_artifact"
-                if target is None:
+                if target is None and not citation_path.startswith("work/"):
                     repo_target = _resolve_grounding_path(root_dir=repo_dir, relative_path=citation_path)
                     if repo_target is not None and repo_target.is_file():
                         target = repo_target
                         counts_as_primary = True
                         source_kind = "repo"
-                if target is None:
+                if target is None and not citation_path.startswith("work/"):
                     target = step_output_map.get(citation_path)
                     if target is not None:
                         source_kind = "step_artifact"
@@ -6150,6 +6150,28 @@ def _prepare_synth_inputs(
     skipped_prompt_text = _grounding_skipped_prompt_text(
         raw_skipped if isinstance(raw_skipped, list) else []
     )
+    missing_synth_inputs = [path for path in synth_step_outputs if not Path(path).is_file()]
+    if missing_synth_inputs:
+        meta["status"] = "error"
+        meta.setdefault("multipass", {})["status"] = "step_failed"
+        missing_list = ", ".join(missing_synth_inputs)
+        _emit_multipass_grounding_failure_playbook(
+            meta=meta,
+            session_id=session_id,
+            session_dir=session_dir,
+            work_dir=work_dir,
+            artifact_path=review_md_path,
+            validation={
+                "errors": [
+                    "Missing synth input artifacts prevent review synthesis from continuing.",
+                    f"Missing synth input artifacts: {missing_list}",
+                ]
+            },
+            resume_from="steps",
+        )
+        raise ReviewflowError(
+            "Missing synth input artifacts prevent review synthesis from continuing."
+        )
     if not synth_step_outputs:
         meta["status"] = "error"
         meta.setdefault("multipass", {})["status"] = "step_failed"
