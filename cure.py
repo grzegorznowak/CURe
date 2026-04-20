@@ -10498,6 +10498,7 @@ def _run_incremental_completed_multipass_resume(
     ui_enabled: bool,
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
+    wtf_enabled: bool,
 ) -> str | None:
     templates = incremental_resume_prompt_template_names()
     mp = progress.meta.setdefault("multipass", {})
@@ -10846,6 +10847,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -11339,6 +11341,7 @@ def _resume_flow_impl(
                 ui_enabled=ui_enabled,
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
+                wtf_enabled=bool(getattr(args, "wtf", False)),
             )
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()

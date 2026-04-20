@@ -206,6 +206,7 @@ class PromptTemplateTests(unittest.TestCase):
 
     def test_final_review_templates_expose_verbose_finding_placeholder(self) -> None:
         prompt_paths = [
+            ROOT / "prompts" / "default.md",
             ROOT / "prompts" / "mrereview_gh_local.md",
             ROOT / "prompts" / "mrereview_gh_local_big.md",
             ROOT / "prompts" / "mrereview_gh_local_followup.md",
@@ -216,11 +217,6 @@ class PromptTemplateTests(unittest.TestCase):
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("$VERBOSE_FINDING_MODE_GUIDANCE", text)
-
-        self.assertNotIn(
-            "$VERBOSE_FINDING_MODE_GUIDANCE",
-            (ROOT / "prompts" / "default.md").read_text(encoding="utf-8"),
-        )
         self.assertNotIn(
             "$VERBOSE_FINDING_MODE_GUIDANCE",
             (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
@@ -517,6 +513,7 @@ class PromptTemplateTests(unittest.TestCase):
 
     def test_verbose_finding_mode_guidance_renders_required_fields_for_final_reviews(self) -> None:
         prompt_paths = [
+            ROOT / "prompts" / "default.md",
             ROOT / "prompts" / "mrereview_gh_local.md",
             ROOT / "prompts" / "mrereview_gh_local_big.md",
             ROOT / "prompts" / "mrereview_gh_local_followup.md",

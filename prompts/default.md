@@ -42,6 +42,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 - Use `- None.` when a scope bucket is empty.
 - Trailing citation contract (shared across review prompts):
 $REVIEW_CITATION_CONTRACT
+$VERBOSE_FINDING_MODE_GUIDANCE
 
 ## Output format (Markdown)
 Provide exactly:
