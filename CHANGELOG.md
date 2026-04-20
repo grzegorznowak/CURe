@@ -8,6 +8,23 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.4.0] - 2026-04-20
+
+### Added
+
+- Citation contract for review sources: follow-up and synthesis reviews now emit structured citations that trace each finding back to the originating diff chunk or prior-step artifact, via the new `cure_citations` module.
+
+### Changed
+
+- Multipass review phases renamed for clarity; step prompts tightened to enforce grounding against the actual diff rather than paraphrased summaries.
+- Synthesis retries now preserve intermediate artifacts and cap UI retry attempts, with clearer operator feedback on retry state and effort.
+
+### Fixed
+
+- Synthesis finalization no longer drops findings when mixing cited and uncited sources in the same review pass.
+- Resume flow correctly re-enters synthesis when the prior run was synth-only, instead of skipping to the next step.
+- Omission rewrite footer and grounding rejection messaging aligned across all review modes (local, zip, follow-up).
+
 ## [0.3.9] - 2026-04-16
 
 ### Fixed
