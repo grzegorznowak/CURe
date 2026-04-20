@@ -62,6 +62,8 @@ If you must ABORT:
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
+- Trailing citation contract (shared across review prompts):
+$REVIEW_CITATION_CONTRACT
 
 # Critical Checks
 Before approving, verify:
@@ -87,7 +89,7 @@ Before approving, verify:
   - Use `search` to quickly find definitions, call sites, and similar patterns.
   - Use `research` for deeper cross-file/architecture understanding (when needed).
   - Prefer `search` before opening large files; do not speculate without reading sources.
-  - Cite `path:line` in issues when possible.
+  - Cite `path:line` in issues when possible, using the trailing `Sources:` suffix contract.
 - If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**Verdict**` lines to `REJECT`.
 - Whenever you need to widen understanding by going into specific areas deeper, use subagents to do targeted full reads of given parts of the codebase.
 

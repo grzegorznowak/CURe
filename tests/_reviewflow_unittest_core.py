@@ -9,6 +9,7 @@ from _reviewflow_unittest_grounding_impl import (
     ExactRepoLocalDuckdbReuseTests,
     ExtractionOwnershipTests,
     LocalMarkdownNormalizationTests,
+    MultipassGroundingRecoveryUnitTests,
     MultipassGroundingRuntimeTests,
     RefactorRegressionTests,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "JiraConfigCopyTests",
     "ListSessionsTests",
     "LocalMarkdownNormalizationTests",
+    "MultipassGroundingRecoveryUnitTests",
     "MultipassGroundingRuntimeTests",
     "MultipassGroundingValidationTests",
     "MultipassPlanParsingTests",

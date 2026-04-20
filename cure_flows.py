@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 from chunkhound_summary import parse_chunkhound_index_summary
+from cure_citations import CITATION_CONTRACT_KEYS
 from cure_errors import ReviewflowError
 from cure_output import ChunkhoundLiveProgressReporter, _eprint, active_output, log
 from cure_runtime import (
@@ -1368,6 +1369,14 @@ def render_prompt(
         "${BASE_REF}", base_ref_for_review
     )
     text = text.replace("$HEAD_REF", head_ref).replace("${HEAD_REF}", head_ref)
+    # Citation-contract substitution runs BEFORE the extra_vars loop so the
+    # hardcoded contract is written into the template first; a colliding
+    # ``extra_vars`` key then finds no remaining placeholder to overwrite and
+    # becomes a no-op — the contract always wins.
+    for contract_key, contract_value in CITATION_CONTRACT_KEYS.items():
+        text = text.replace(f"${contract_key}", contract_value).replace(
+            f"${{{contract_key}}}", contract_value
+        )
     review_intelligence_guidance: str | None = None
     if extra_vars:
         for k, v in extra_vars.items():

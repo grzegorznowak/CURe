@@ -6044,7 +6044,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(self._valid_synth_markdown(), encoding="utf-8")
             else:
                 raise AssertionError(f"unexpected output path: {output_path}")
@@ -6241,7 +6241,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -6250,7 +6250,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 work_context = output_path.parent / "work" / "pr-context.md"
                 work_context.parent.mkdir(parents=True, exist_ok=True)
                 work_context.write_text("context\n", encoding="utf-8")
@@ -6454,7 +6454,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             self._assert_grounding_playbook(
                 playbook,
                 session_id=session_dir.name,
-                artifact_name="review.md",
+                artifact_name="review.candidate.md",
                 resume_from="synth",
                 error_fragment="step-artifact citations alone are insufficient",
             )
@@ -6475,6 +6475,386 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             self.assertTrue(report["artifacts"]["synth"]["valid"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_step_grounding_rejects_mixed_complete_and_incomplete_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            step_output = root / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Mixed citations. Sources: `src/app.py:2`, `src/app.py`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_step_grounding(
+                artifact_path=step_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+
+    def test_synth_grounding_rejects_mixed_complete_and_incomplete_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:2`, `src/app.py`",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+        self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
+
+    def test_synth_grounding_marks_mixed_valid_and_invalid_primary_citations_for_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:2`, `src/app.py:99`",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("missing source line src/app.py:99", "\n".join(validation["errors"]))
+        self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
+        self.assertIn("missing source line src/app.py:99", validation["invalid_bullets"][0]["reason"])
+
+    def test_step_grounding_rejects_backtick_plus_bare_residue_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            step_output = root / "review.step-01.md"
+            step_output.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Findings",
+                        "- Mixed citations. Sources: `src/app.py:2` src/app.py",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_step_grounding(
+                artifact_path=step_output,
+                repo_dir=repo_dir,
+                step_index=1,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+
+    def test_synth_grounding_rejects_backtick_plus_bare_residue_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:2` src/app.py",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("incomplete `Sources:` suffix", "\n".join(validation["errors"]))
+        self.assertEqual(validation["invalid_bullets"][0]["bullet_index"], 1)
+
+    def test_synth_grounding_requires_required_sections_under_each_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical strength one. Sources: `src/app.py:2`",
+                        "",
+                        "### Strengths",
+                        "- Technical strength two. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "Missing required synth section '### Strengths' under '## Business / Product Assessment'.",
+            "\n".join(validation["errors"]),
+        )
+
+    def test_synth_grounding_prefers_repo_source_for_same_name_step_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            repo_root_review = repo_dir / "review.step-01.md"
+            repo_root_review.write_text("repo root evidence\n", encoding="utf-8")
+            step_output = root / "session-step-output" / "review.step-01.md"
+            step_output.parent.mkdir(parents=True)
+            step_output.write_text("step artifact evidence\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="review.step-01.md:1"),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[step_output],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertTrue(validation["valid"], validation["errors"])
+        repo_citations = [
+            item
+            for item in validation["citations"]
+            if item["path"] == "review.step-01.md"
+            and item["section"] in {"Strengths", "In Scope Issues", "Reusability"}
+        ]
+        self.assertTrue(repo_citations)
+        self.assertTrue(all(item["source_kind"] == "repo" for item in repo_citations))
+        self.assertTrue(all(item["counts_as_primary"] is True for item in repo_citations))
+
+    def test_synth_grounding_rejects_repo_fallback_for_missing_work_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "work").mkdir()
+            (repo_dir / "work" / "pr-context.md").write_text("repo copy only\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="work/pr-context.md:1"),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        synth_citations = [
+            item
+            for item in validation["citations"]
+            if item["path"] == "work/pr-context.md"
+            and item["section"] in {"Strengths", "In Scope Issues", "Reusability"}
+        ]
+        self.assertTrue(synth_citations)
+        self.assertTrue(all(item["source_kind"] is None for item in synth_citations))
+        self.assertTrue(all(item["counts_as_primary"] is False for item in synth_citations))
+        self.assertTrue(
+            any("cites unsupported synth source work/pr-context.md:1" in err for err in validation["errors"])
+        )
+
+    def test_synth_grounding_rejects_indented_pseudo_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "    - Indented pseudo-bullet. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical strength. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "Section '### Strengths' under '## Business / Product Assessment' (line 9) must include at least one bullet.",
+            "\n".join(validation["errors"]),
+        )
+
+    def test_synth_grounding_invalid_bullets_keep_specific_citation_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                self._valid_synth_markdown(primary_citation="src/app.py:2").replace(
+                    "Sources: `src/app.py:2`",
+                    "Sources: `src/app.py:99`",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("cites missing source line", validation["invalid_bullets"][0]["reason"])
 
     def test_resume_flow_reruns_invalid_existing_step_artifact(self) -> None:
         root = ROOT / ".tmp_test_resume_grounding_rerun"
@@ -6594,7 +6974,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                                 "- checked repo",
                                 "",
                                 "### Findings",
-                                "- Input lacks validation. Evidence: `src/app.py:2`",
+                                "- Input lacks validation. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- Add checks",
@@ -6603,7 +6983,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(self._valid_synth_markdown(primary_citation="src/app.py:2"), encoding="utf-8")
                 else:
                     raise AssertionError(f"unexpected output path: {output_path}")
@@ -8725,7 +9105,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -8738,7 +9118,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     work_dir=work_dir,
                     commands=["search", "research"],
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
@@ -8985,7 +9365,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -8995,7 +9375,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 commands = ["search"]
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
                 commands = []
             else:
@@ -9076,7 +9456,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -9086,7 +9466,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
@@ -9230,7 +9610,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
                 step_two_finished.set()
                 adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 synth_prompts.append(str(kwargs["prompt"]))
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
@@ -9387,7 +9767,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "- checked repo",
                             "",
                             "### Findings",
-                            "- Input lacks validation. Evidence: `src/app.py:2`",
+                            "- Input lacks validation. Sources: `src/app.py:2`",
                             "",
                             "### Suggested actions",
                             "- Add checks",
@@ -9400,7 +9780,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     work_dir=work_dir,
                     commands=["search"],
                 )
-            elif output_path.name == "review.md":
+            elif output_path.name in {"review.md", "review.candidate.md"}:
                 output_path.write_text(
                     _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
                     encoding="utf-8",
@@ -10227,7 +10607,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- checked repo",
                                 "",
                                 "### Findings",
-                                "- Input lacks validation. Evidence: `src/app.py:2`",
+                                "- Input lacks validation. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- Add checks",
@@ -10237,7 +10617,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -10654,7 +11034,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Input lacks validation. Evidence: `src/app.py:2`",
+                "- Input lacks validation. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- Add checks",
@@ -10976,7 +11356,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11127,7 +11507,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         work_dir=work_dir,
                         commands=["search", "research"],
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -11257,7 +11637,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_resume_flow_completed_multipass_prints_playbook_for_incremental_synth_grounding_failure(self) -> None:
+    def test_resume_flow_completed_multipass_finalizes_noncritical_incremental_synth_grounding_issues(self) -> None:
         root = ROOT / ".tmp_test_resume_incremental_synth_grounding_failure"
         cfg = root / "reviewflow.toml"
         old_head = "1111111111111111111111111111111111111111"
@@ -11271,7 +11651,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11458,7 +11838,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         work_dir=work_dir,
                         commands=["search", "research"],
                     )
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(invalid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -11579,27 +11959,20 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
                 stack.enter_context(mock.patch.object(rf, "_eprint", side_effect=capture))
                 stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
-                with self.assertRaisesRegex(
-                    rf.ReviewflowError,
-                    "Incremental multipass synth grounding validation failed",
-                ):
-                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
+            rewritten_review = review_md.read_text(encoding="utf-8")
             playbook = "\n".join(messages)
+            self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
-            self.assertEqual(refreshed["status"], "error")
-            self.assertIn("synth", report["invalid_artifacts"])
-            self.assertIn("`review.md`", playbook)
-            self.assertIn("grounding_report.json", playbook)
-            self.assertIn("logs directory:", playbook)
-            self.assertIn("step-artifact citations alone are insufficient", playbook)
-            self.assertIn("cure status session-1 --json", playbook)
-            self.assertIn("cure watch session-1", playbook)
-            self.assertIn("cure resume session-1", playbook)
-            self.assertIn("cure resume session-1 --from synth", playbook)
-            self.assertIn('[multipass].grounding_mode = "warn"', playbook)
+            self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(report["invalid_artifacts"], [])
+            self.assertEqual(playbook, "")
+            self.assertIn("## Grounding omission summary", rewritten_review)
+            self.assertIn("[non-critical]", rewritten_review)
+            self.assertIn("- None.", rewritten_review)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -11618,7 +11991,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "- checked repo",
                 "",
                 "### Findings",
-                "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                "- Existing validation looks stable. Sources: `src/app.py:2`",
                 "",
                 "### Suggested actions",
                 "- None.",
@@ -11793,7 +12166,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- Re-read changed files",
                                 "",
                                 "### Findings",
-                                "- The updated API path is now coherent. Evidence: `src/app.py:2`",
+                                "- The updated API path is now coherent. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- None.",
@@ -11814,7 +12187,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- Examined incremental diff",
                                 "",
                                 "### Findings",
-                                "- The new delta remains cosmetic in effect. Evidence: `src/app.py:2`",
+                                "- The new delta remains cosmetic in effect. Sources: `src/app.py:2`",
                                 "",
                                 "### Suggested actions",
                                 "- None.",
@@ -11824,7 +12197,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -12039,7 +12412,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "- checked repo",
                         "",
                         "### Findings",
-                        "- Existing validation looks stable. Evidence: `src/app.py:2`",
+                        "- Existing validation looks stable. Sources: `src/app.py:2`",
                         "",
                         "### Suggested actions",
                         "- None.",
@@ -12334,7 +12707,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "- checked repo",
                         "",
                         "### Findings",
-                        "- API concern. Evidence: `src/app.py:2`",
+                        "- API concern. Sources: `src/app.py:2`",
                         "",
                     ]
                 ),
@@ -12405,14 +12778,14 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "- checked tests",
                                 "",
                                 "### Findings",
-                                "- Test concern. Evidence: `src/app.py:3`",
+                                "- Test concern. Sources: `src/app.py:3`",
                                 "",
                             ]
                         ),
                         encoding="utf-8",
                     )
                     adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
-                elif output_path.name == "review.md":
+                elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
                     adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
                 else:
@@ -12620,6 +12993,382 @@ class ExtractionOwnershipTests(unittest.TestCase):
 
 
 class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
+    def _codex_runtime_policy(self) -> dict[str, object]:
+        return {
+            "env": {},
+            "metadata": {},
+            "staged_paths": {},
+            "add_dirs": [],
+            "codex_config_overrides": [],
+            "codex_flags": [],
+            "dangerously_bypass_approvals_and_sandbox": True,
+        }
+
+    def _fake_materialize_chunkhound_env_config(
+        self,
+        *,
+        resolved_config: dict[str, object],
+        output_config_path: Path,
+        database_provider: str,
+        database_path: Path,
+    ) -> None:
+        output_config_path.parent.mkdir(parents=True, exist_ok=True)
+        output_config_path.write_text("{}", encoding="utf-8")
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fake_write_pr_context_file(
+        self,
+        *,
+        work_dir: Path,
+        pr: rf.PullRequestRef,
+        pr_meta: dict[str, object],
+    ) -> Path:
+        context_path = work_dir / "pr-context.md"
+        context_path.write_text("context", encoding="utf-8")
+        return context_path
+
+    def _valid_synth_markdown(self, primary_citation: str = "work/pr-context.md:1") -> str:
+        return "\n".join(
+            [
+                "### Steps taken",
+                "- Read step output",
+                "",
+                "**Summary**: ok",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "### Strengths",
+                f"- Business value is clear. Sources: `{primary_citation}`",
+                "",
+                "### In Scope Issues",
+                "- None.",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: REQUEST CHANGES",
+                "",
+                "### Strengths",
+                f"- Technical read happened. Sources: `{primary_citation}`",
+                "",
+                "### In Scope Issues",
+                f"- Missing provenance hygiene. Sources: `{primary_citation}`",
+                "",
+                "### Out of Scope Issues",
+                "- None.",
+                "",
+                "### Reusability",
+                f"- Artifact stays inspectable. Sources: `{primary_citation}`",
+                "",
+            ]
+        )
+
+    def test_apply_synth_severity_finalization_drops_only_targeted_duplicate_bullet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read repo",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Grounded issue. Sources: `pkg/module.py:3`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Reusable note. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            finalized, _, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={
+                    "valid": False,
+                    "invalid_bullets": [
+                        {
+                            "section": "Strengths",
+                            "section_label": "'### Strengths' under '## Business / Product Assessment' (line 9)",
+                            "section_line": 9,
+                            "section_key": "Business / Product Assessment|Strengths|9",
+                            "parent": "Business / Product Assessment",
+                            "bullet_index": 1,
+                            "bullet_text": "- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                            "critical": False,
+                            "reason": "bad cite",
+                        }
+                    ],
+                },
+                ui_enabled=False,
+                allow_critical_omission=False,
+            )
+
+            self.assertTrue(finalized)
+            self.assertEqual(len(dropped), 1)
+            rewritten = review_md.read_text(encoding="utf-8")
+            self.assertIn("## Grounding omission summary", rewritten)
+            self.assertIn("## Business / Product Assessment\n**Verdict**: APPROVE\n\n### Strengths\n- None.", rewritten)
+            self.assertIn(
+                "## Technical Assessment\n**Verdict**: REQUEST CHANGES\n\n### Strengths\n- Shared duplicate bullet. Sources: `pkg/module.py:2`",
+                rewritten,
+            )
+
+    def test_execute_multipass_synth_stage_retries_with_codex_effort_override_in_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-1", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            valid_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(
+                adapter_meta={"usage": {"input_tokens": 1, "output_tokens": 1}},
+                resume=None,
+            )
+            synth_llm = {
+                "resolved": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "codex", "effective_reasoning_effort": "medium"},
+            }
+            run_invocations: list[dict[str, Any]] = []
+
+            def capture_run_llm_exec(**kwargs: Any) -> rf.LlmRunResult:
+                runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
+                resolution_meta = kwargs["resolution_meta"] if isinstance(kwargs.get("resolution_meta"), dict) else {}
+                run_invocations.append(
+                    {
+                        "resolved": dict(kwargs["resolved"]) if isinstance(kwargs.get("resolved"), dict) else {},
+                        "resolution_meta": dict(resolution_meta),
+                        "codex_flags": list(runtime_policy.get("codex_flags") or []),
+                    }
+                )
+                return llm_result
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", side_effect=capture_run_llm_exec) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    side_effect=[(False, invalid_validation), (True, valid_validation)],
+                ) as validate_mock,
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value="high") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof") as proof_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-1",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_resume_synth.md",
+                    run_kind="resume_synth",
+                    review_stage="multipass_resume_synth",
+                    stage_label="multipass resume synth",
+                    failure_message="resume synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(validate_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_called_once()
+            proof_mock.assert_called()
+            self.assertEqual(synth_llm["resolved"]["reasoning_effort"], "high")
+            self.assertIn('model_reasoning_effort="medium"', run_invocations[0]["codex_flags"])
+            self.assertIn('model_reasoning_effort="high"', run_invocations[1]["codex_flags"])
+            self.assertEqual(
+                (run_invocations[1]["resolution_meta"].get("resolved") or {}).get("reasoning_effort_source"),
+                "tty_prompt",
+            )
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["stages"]["synth"]["effective_reasoning_effort"],
+                "high",
+            )
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["review_artifact_llm"]["effective_reasoning_effort"],
+                "high",
+            )
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(run_entry["llm"]["effective_reasoning_effort"], "high")
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 1)
+            self.assertEqual(run_entry["first_grounding_failure_validation"]["errors"], ["missing citation"])
+
+    def test_rewrite_review_md_dropping_bullets_keeps_single_existing_none_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- None.",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Grounded issue. Sources: `pkg/module.py:3`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Reusable note. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            rf._rewrite_review_md_dropping_bullets(
+                review_md_path=review_md,
+                dropped=[
+                    {
+                        "section_key": "Technical Assessment|Strengths|16",
+                        "bullet_index": 1,
+                        "section_label": "'### Strengths' under '## Technical Assessment' (line 16)",
+                        "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                        "critical": False,
+                        "reason": "bad cite",
+                    }
+                ],
+            )
+
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        self.assertNotIn("### Strengths\n- None.\n- None.\n", rewritten)
+        self.assertIn("## Business / Product Assessment\n**Verdict**: APPROVE\n\n### Strengths\n- None.\n", rewritten)
+
+    def test_rewrite_review_md_dropping_bullets_removes_continuation_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "  continuation that should disappear with the dropped bullet",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            rf._rewrite_review_md_dropping_bullets(
+                review_md_path=review_md,
+                dropped=[
+                    {
+                        "section_key": "Technical Assessment|Strengths|4",
+                        "bullet_index": 1,
+                        "section_label": "'### Strengths' under '## Technical Assessment' (line 4)",
+                        "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                        "critical": False,
+                        "reason": "bad cite",
+                    }
+                ],
+            )
+
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        body, _, footer = rewritten.partition(rf._SYNTH_OMISSION_FOOTER_HEADING)
+        self.assertNotIn("continuation that should disappear", body)
+        self.assertIn("### Strengths\n- None.\n", body)
+        self.assertIn("dropped bullet text: Drop me.", footer)
+
     def test_step_grounding_validation_error_carries_payload(self) -> None:
         err = rf.StepGroundingValidationError(
             "bad grounding",
@@ -12706,6 +13455,300 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertEqual(len(state["grounding_attempts"]), 1)
             self.assertTrue(run_entry["grounding_retried"])
             self.assertEqual(run_entry["first_grounding_failure_validation"]["errors"], ["missing citation"])
+
+    def test_execute_multipass_step_stage_retries_with_codex_effort_override_in_tty_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-1", "multipass": {"step_workers": 1, "runs": []}, "llm": {}, "codex": {}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "codex", "effective_reasoning_effort": "medium"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            run_invocations: list[dict[str, Any]] = []
+            retry_state_snapshots: list[dict[str, Any]] = []
+
+            def capture_step_run(**kwargs: Any) -> rf.MultipassStepRunResult:
+                runtime_policy = kwargs["runtime_policy"] if isinstance(kwargs.get("runtime_policy"), dict) else {}
+                resolution_meta = kwargs["llm_resolution_meta"] if isinstance(kwargs.get("llm_resolution_meta"), dict) else {}
+                run_invocations.append(
+                    {
+                        "resolved": dict(kwargs["llm_resolved"]) if isinstance(kwargs.get("llm_resolved"), dict) else {},
+                        "resolution_meta": dict(resolution_meta),
+                        "codex_flags": list(runtime_policy.get("codex_flags") or []),
+                    }
+                )
+                if len(run_invocations) == 2:
+                    retry_state_snapshots.append(
+                        {
+                            "state": dict(progress.meta["multipass"]["step_states"][0]),
+                            "run_entry": dict(progress.meta["multipass"]["runs"][0]),
+                        }
+                    )
+                return raw_result
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=capture_step_run) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value="high") as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-1",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                    llm_resolution_meta={
+                        "resolved": {
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            "reasoning_effort_source": "cli",
+                            "reasoning_effort_source_detail": "cli",
+                        }
+                    },
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(skipped, [])
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(finalize_mock.call_count, 2)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_called_once()
+            self.assertIn('model_reasoning_effort="medium"', run_invocations[0]["codex_flags"])
+            self.assertIn('model_reasoning_effort="high"', run_invocations[1]["codex_flags"])
+            self.assertEqual(
+                (run_invocations[1]["resolution_meta"].get("resolved") or {}).get("reasoning_effort_source"),
+                "tty_prompt",
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "completed")
+            self.assertTrue(state["grounding_retried"])
+            self.assertEqual(
+                progress.meta["multipass"]["llm"]["stages"]["step"]["effective_reasoning_effort"],
+                "high",
+            )
+            self.assertEqual(run_entry["llm"]["effective_reasoning_effort"], "high")
+            self.assertEqual(len(retry_state_snapshots), 1)
+            self.assertEqual(retry_state_snapshots[0]["state"]["status"], "retrying_grounding")
+            self.assertTrue(retry_state_snapshots[0]["run_entry"]["grounding_retried"])
+            self.assertEqual(len(retry_state_snapshots[0]["run_entry"]["grounding_attempts"]), 1)
+            self.assertEqual(
+                retry_state_snapshots[0]["run_entry"]["first_grounding_failure_validation"]["errors"],
+                ["missing citation"],
+            )
+
+    def test_execute_multipass_step_stage_ui_retry_loop_enforces_ui_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-cap", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+            cap = rf._MULTIPASS_STEP_GROUNDING_UI_MAX_RETRIES
+
+            with (
+                mock.patch.object(
+                    rf,
+                    "_run_multipass_step_llm",
+                    return_value=raw_result,
+                ) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-cap",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap)
+            self.assertEqual(effort_prompt.call_count, cap)
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertEqual(state["status"], "grounding_skipped")
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
+
+    def test_execute_multipass_step_stage_tty_loss_skips_instead_of_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({"session_id": "session-tty-loss", "multipass": {"step_workers": 1, "runs": []}})
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "openai"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", return_value=raw_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=rf.StepGroundingValidationError(
+                        "bad grounding",
+                        step_validation={"valid": False, "errors": ["missing citation"]},
+                    ),
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value=None) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+            ):
+                resume_command, skipped = rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-tty-loss",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "openai"},
+                    llm_resolution_meta={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={},
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(resume_command)
+            self.assertEqual(run_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_not_called()
+            self.assertEqual(
+                skipped,
+                [{"step_index": 1, "step_id": "01", "step_title": "API review", "reason": "missing citation"}],
+            )
+            state = progress.meta["multipass"]["step_states"][0]
+            self.assertEqual(state["status"], "grounding_skipped")
 
     def test_execute_multipass_step_stage_skips_after_retry_exhaustion_in_non_tty_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12943,6 +13986,62 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             )
         self.assertEqual(result, {"model": "gpt-5.4", "reasoning_effort": "high"})
 
+    def test_pr_picker_accepts_named_effort_selection(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("max\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_pr_model_and_effort_picker(
+                provider="claude",
+                default_model="claude-sonnet-4-6",
+                default_effort="high",
+                model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
+                effort_options=["low", "medium", "high", "max"],
+                prompt_for_model=False,
+                prompt_for_effort=True,
+            )
+
+        self.assertEqual(result, {"reasoning_effort": "max"})
+        self.assertIn("Select effort number or name:", writer.getvalue())
+
+    def test_grounding_retry_effort_returns_none_when_effort_is_kept(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_grounding_retry_effort(
+                provider="claude",
+                default_effort="high",
+                effort_options=["low", "medium", "high", "max"],
+                stage_label="multipass step 08",
+            )
+
+        self.assertIsNone(result)
+
+    def test_synth_grounding_retry_prompt_finalize_text_mentions_issue_bullet_omission(self) -> None:
+        class _KeepOpenStringIO(StringIO):
+            def close(self) -> None:
+                pass
+
+        reader = StringIO("finalize\n")
+        writer = _KeepOpenStringIO()
+        with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
+            result = cure_output.prompt_synth_grounding_retry_choice(
+                attempt_count=2,
+                validation={"errors": ["missing citation", "bad line reference"]},
+            )
+
+        rendered = writer.getvalue()
+        self.assertEqual(result, "finalize")
+        self.assertIn("drop invalid bullets", rendered)
+        self.assertIn("issue bullets if the section keeps another grounded bullet", rendered)
+
     def test_provider_model_options_include_codex_models(self) -> None:
         values = [value for _, value in rf._provider_model_options("codex")]
         self.assertIn("gpt-5.4", values)
@@ -13108,6 +14207,241 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         prompt_mock.assert_called_once()
         self.assertEqual(choice, "keep")
 
+    def test_resume_flow_from_synth_keeps_grounding_skipped_steps_in_non_tty_mode(self) -> None:
+        root = ROOT / ".tmp_test_resume_from_synth_keeps_skipped_steps"
+        cfg = root / "reviewflow.toml"
+        valid_step_markdown = "\n".join(
+            [
+                "### Step Result: 02 — Tests review",
+                "**Focus**: tests",
+                "",
+                "### Steps taken",
+                "- checked repo",
+                "",
+                "### Findings",
+                "- Grounded finding. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        valid_synth_markdown = self._valid_synth_markdown(primary_citation="src/app.py:2")
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [
+                            {"id": "01", "title": "API review", "focus": "api"},
+                            {"id": "02", "title": "Tests review", "focus": "tests"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "review.step-02.md").write_text(valid_step_markdown, encoding="utf-8")
+            review_md = session_dir / "review.md"
+            meta = {
+                "session_id": "session-1",
+                "status": "error",
+                "failed_at": "2026-03-10T01:00:00+00:00",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "step_states": [
+                        {
+                            "step_index": 1,
+                            "step_id": "01",
+                            "step_title": "API review",
+                            "status": "completed",
+                        },
+                        {
+                            "step_index": 2,
+                            "step_id": "02",
+                            "step_title": "Tests review",
+                            "status": "completed",
+                        },
+                    ],
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "API review", "reason": "bad cite"}
+                    ],
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                if output_path.name != "review.md":
+                    raise AssertionError(f"unexpected rerun during synth-only resume: {output_path.name}")
+                output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                return rf.LlmRunResult(resume=None, adapter_meta={"usage": {"input_tokens": 1, "output_tokens": 1}})
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="synth",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_enforce_chunkhound_tool_proof", return_value={}))
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(
+                refreshed["multipass"]["artifacts"]["synth_step_outputs"],
+                [str(session_dir / "review.step-02.md")],
+            )
+            self.assertNotIn(
+                "grounding_skipped_override",
+                refreshed["multipass"].get("resume", {}),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
     def test_prepare_synth_inputs_returns_outputs_and_skipped_text_when_valid_steps_remain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13116,6 +14450,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             work_dir = root / "work"
             work_dir.mkdir()
             review_md_path = session_dir / "review.md"
+            (root / "review.step-02.md").write_text("grounded step output\n", encoding="utf-8")
             entries = [
                 rf.MultipassStepEntry(
                     index=1,
@@ -13206,6 +14541,53 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertEqual(meta["status"], "error")
             self.assertEqual(meta["multipass"]["status"], "step_failed")
 
+    def test_prepare_synth_inputs_raises_when_non_skipped_step_output_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session"
+            session_dir.mkdir()
+            work_dir = root / "work"
+            work_dir.mkdir()
+            review_md_path = session_dir / "review.md"
+            missing_output = root / "review.step-01.md"
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="Safety",
+                step_focus="f",
+                output_path=missing_output,
+                prompt="p",
+                should_run=False,
+            )
+            meta: dict[str, Any] = {"session_id": "test-session", "multipass": {}}
+            emitted_playbook: list[dict[str, Any]] = []
+
+            def capture_playbook(**kwargs: Any) -> None:
+                emitted_playbook.append(dict(kwargs))
+
+            with (
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook", side_effect=capture_playbook),
+                self.assertRaisesRegex(
+                    rf.ReviewflowError,
+                    "Missing synth input artifacts prevent review synthesis from continuing",
+                ),
+            ):
+                rf._prepare_synth_inputs(
+                    meta=meta,
+                    step_entries=[entry],
+                    session_id="test-session",
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    review_md_path=review_md_path,
+                )
+
+            self.assertTrue(emitted_playbook, "Expected grounding failure playbook to be emitted")
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["multipass"]["status"], "step_failed")
+            validation = emitted_playbook[0]["validation"]
+            self.assertIn("Missing synth input artifacts", "\n".join(validation["errors"]))
+            self.assertEqual(meta["multipass"]["artifacts"]["synth_step_outputs"], [str(missing_output)])
+
     def test_persist_grounding_summary_prefers_current_step_state_over_stale_persisted_skip(self) -> None:
         entry = rf.MultipassStepEntry(
             index=1,
@@ -13231,3 +14613,1366 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
         self.assertEqual(synth_outputs, ["/tmp/review.step-01.md"])
         self.assertEqual(meta["multipass"]["grounding_skipped_steps"], [])
+
+    def test_strip_existing_synth_omission_footer_handles_offset_zero_heading(self) -> None:
+        heading = rf._SYNTH_OMISSION_FOOTER_HEADING
+        text = f"{heading}\n\nstub\n"
+
+        stripped = rf._strip_existing_synth_omission_footer(text)
+
+        self.assertEqual(stripped, "")
+
+    def test_strip_existing_synth_omission_footer_ignores_heading_inside_fenced_code(self) -> None:
+        heading = rf._SYNTH_OMISSION_FOOTER_HEADING
+        text = "\n".join(
+            [
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "```md",
+                heading,
+                "quoted inside fence",
+                "```",
+                "",
+                "### Reusability",
+                "- Still here. Sources: `pkg/module.py:1`",
+                "",
+            ]
+        )
+
+        stripped = rf._strip_existing_synth_omission_footer(text)
+
+        self.assertEqual(stripped, text)
+
+    def test_strip_existing_synth_omission_footer_is_idempotent_across_successive_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                }
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        self.assertEqual(rewritten.count(rf._SYNTH_OMISSION_FOOTER_HEADING), 1)
+
+    def test_rewrite_and_footer_agree_on_filtered_omission_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Reusable note. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                },
+                {
+                    "section_key": "",
+                    "bullet_index": 0,
+                    "section_label": "unattributed phantom",
+                    "bullet_text": "- phantom bullet",
+                    "critical": False,
+                    "reason": "should not appear",
+                },
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rewritten = review_md.read_text(encoding="utf-8")
+            footer = rf._format_synth_omission_footer(dropped)
+
+        self.assertIn(rf._SYNTH_OMISSION_FOOTER_HEADING, rewritten)
+        self.assertNotIn("phantom bullet", rewritten)
+        self.assertNotIn("unattributed phantom", rewritten)
+        self.assertIn("bullet #1", footer)
+        self.assertNotIn("bullet #0", footer)
+        self.assertNotIn("unattributed phantom", footer)
+
+    def test_rewrite_ignores_indented_markdown_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            review_md = Path(tmp) / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Drop me. Sources: `pkg/module.py:2`",
+                        "",
+                        "    ## Indented heading inside a code/quote block",
+                        "    - Not a section bullet. Sources: `pkg/module.py:9`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- None.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            dropped = [
+                {
+                    "section_key": "Business / Product Assessment|Strengths|4",
+                    "bullet_index": 1,
+                    "section_label": "'### Strengths' under '## Business / Product Assessment' (line 4)",
+                    "bullet_text": "- Drop me. Sources: `pkg/module.py:2`",
+                    "critical": False,
+                    "reason": "bad cite",
+                }
+            ]
+
+            rf._rewrite_review_md_dropping_bullets(review_md_path=review_md, dropped=dropped)
+            rewritten = review_md.read_text(encoding="utf-8")
+
+        body, _, footer = rewritten.partition(rf._SYNTH_OMISSION_FOOTER_HEADING)
+        self.assertNotIn("- Drop me.", body)
+        self.assertIn("    ## Indented heading inside a code/quote block", body)
+        self.assertIn("    - Not a section bullet.", body)
+        self.assertIn("dropped bullet text: Drop me.", footer)
+
+    def test_synth_grounding_error_list_uses_specific_citation_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `src/app.py:99`",
+                        "",
+                        "### In Scope Issues",
+                        "- None.",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `src/app.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Missing provenance hygiene. Sources: `src/app.py:2`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertFalse(validation["valid"])
+        joined_errors = "\n".join(validation["errors"])
+        self.assertIn("cites missing source line", joined_errors)
+        self.assertNotIn(
+            "must cite at least one valid primary-evidence line",
+            "\n".join(
+                e
+                for e in validation["errors"]
+                if "cites missing source line" not in e and "cites unsupported synth source" not in e
+            ),
+        )
+
+    def test_apply_synth_severity_finalization_refuses_when_all_critical_would_empty_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Good. Sources: `pkg/module.py:2`",
+                        "",
+                        "### In Scope Issues",
+                        "- Sole critical issue bullet. Sources: `pkg/module.py:99`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original_text = review_md.read_text(encoding="utf-8")
+            invalid_bullet = {
+                "section": "In Scope Issues",
+                "section_label": "'### In Scope Issues' under '## Business / Product Assessment' (line 7)",
+                "section_line": 7,
+                "section_key": "Business / Product Assessment|In Scope Issues|7",
+                "parent": "Business / Product Assessment",
+                "bullet_index": 1,
+                "bullet_text": "- Sole critical issue bullet. Sources: `pkg/module.py:99`",
+                "critical": True,
+                "reason": "cites missing source line",
+            }
+
+            finalized, result, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={"valid": False, "invalid_bullets": [invalid_bullet]},
+                ui_enabled=True,
+                allow_critical_omission=True,
+            )
+
+            self.assertFalse(finalized)
+            self.assertEqual(dropped, [])
+            self.assertEqual(review_md.read_text(encoding="utf-8"), original_text)
+
+    def test_synth_section_surviving_bullet_counts_ignores_indented_pseudo_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### In Scope Issues",
+                        "- Real issue bullet. Sources: `pkg/module.py:2`",
+                        "    - Indented pseudo-bullet. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            counts = rf._synth_section_surviving_bullet_counts(
+                artifact_path=review_md,
+                drop_keys={("Business / Product Assessment|In Scope Issues|4", 1)},
+            )
+
+        self.assertEqual(counts["Business / Product Assessment|In Scope Issues|4"], 0)
+
+    def test_ui_synth_retry_loop_enforces_ui_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-cap", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+            cap = rf._MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(
+                    rf,
+                    "prompt_synth_grounding_retry_choice",
+                    side_effect=["retry"] * (cap + 1) + ["abort"],
+                ) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-cap",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap + 2)
+            last_reprompt = retry_prompt.call_args_list[-1]
+            self.assertFalse(last_reprompt.kwargs.get("retry_available", True))
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), cap + 1)
+
+    def test_ui_synth_retry_cap_still_allows_finalize_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-cap-finalize", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            finalized_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+            cap = rf._MULTIPASS_SYNTH_GROUNDING_UI_MAX_RETRIES
+            prompt_choices = ["retry"] * cap + ["finalize"]
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    side_effect=[
+                        *((False, invalid_validation, []) for _ in range(cap + 1)),
+                        (True, finalized_validation, [{"section_key": "k", "bullet_index": 1}]),
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", side_effect=prompt_choices) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-cap-finalize",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": [],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            self.assertEqual(run_mock.call_count, cap + 1)
+            self.assertEqual(retry_prompt.call_count, cap + 1)
+            self.assertEqual(effort_prompt.call_count, cap)
+            self.assertTrue(finalize_mock.call_args_list[-1].kwargs["allow_critical_omission"])
+            playbook_mock.assert_not_called()
+
+    def test_synth_retry_finalize_choice_drops_critical_bullets_and_breaks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-finalize", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            finalized_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    side_effect=[
+                        # first-pass (allow_critical_omission=False) refuses
+                        (False, invalid_validation, []),
+                        # second-pass (allow_critical_omission=True) succeeds
+                        (True, finalized_validation, [{"section_key": "k", "bullet_index": 1}]),
+                    ],
+                ) as finalize_mock,
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="finalize") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                success_resume_command = rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-finalize",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": [],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            self.assertIsNone(success_resume_command)
+            # Only one LLM exec: finalize path must not rerun the synth LLM.
+            self.assertEqual(run_mock.call_count, 1)
+            retry_prompt.assert_called_once()
+            # "finalize" path must not ask for an effort override — that's a
+            # retry-only prompt.
+            effort_prompt.assert_not_called()
+            # Two finalize calls: first-pass (non-critical-only) then
+            # second-pass (allow_critical_omission=True after "finalize" choice).
+            self.assertEqual(finalize_mock.call_count, 2)
+            second_call_kwargs = finalize_mock.call_args_list[1].kwargs
+            self.assertTrue(second_call_kwargs["allow_critical_omission"])
+            # Terminal playbook must not fire on a successful finalization.
+            playbook_mock.assert_not_called()
+
+    def test_synth_retry_non_ui_auto_retries_once_then_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-non-ui", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice") as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-non-ui",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            # Single auto-retry: first attempt + one retry = 2 exec calls total.
+            self.assertEqual(run_mock.call_count, 2)
+            # UI prompts must never fire in non-UI mode.
+            retry_prompt.assert_not_called()
+            effort_prompt.assert_not_called()
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_ui_synth_retry_lost_tty_uses_non_ui_auto_retry_once_then_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-ui-lost-tty", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value=None) as retry_prompt,
+                mock.patch.object(rf, "prompt_grounding_retry_effort") as effort_prompt,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-ui-lost-tty",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, 2)
+            retry_prompt.assert_called_once()
+            effort_prompt.assert_not_called()
+            playbook_mock.assert_called_once()
+            run_entry = progress.meta["multipass"]["runs"][0]
+            self.assertTrue(run_entry["grounding_retried"])
+            self.assertEqual(len(run_entry["grounding_attempts"]), 2)
+
+    def test_non_ui_synth_retry_preserves_first_failed_artifact_and_validation_until_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-preserve", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            first_invalid = self._valid_synth_markdown(primary_citation="src/app.py:99").replace(
+                "Business value is clear.",
+                "First failed synth attempt.",
+                1,
+            )
+            second_invalid = self._valid_synth_markdown(primary_citation="src/app.py:999").replace(
+                "Business value is clear.",
+                "Second failed synth attempt.",
+                1,
+            )
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            attempt_outputs = [first_invalid, second_invalid]
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(attempt_outputs.pop(0), encoding="utf-8")
+                return llm_result
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec) as run_mock,
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaisesRegex(rf.ReviewflowError, "synth failed"):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        work_dir=work_dir,
+                        session_id="session-preserve",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm={
+                            "resolved": {
+                                "provider": "openai",
+                                "model": "gpt-5",
+                                "reasoning_effort": "medium",
+                            },
+                            "resolution_meta": {
+                                "resolved": {
+                                    "model": "gpt-5",
+                                    "reasoning_effort": "medium",
+                                    "reasoning_effort_source": "cli",
+                                    "reasoning_effort_source_detail": "cli",
+                                }
+                            },
+                            "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+                        },
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            self.assertEqual(run_mock.call_count, 2)
+            playbook_mock.assert_called_once()
+            review_text = review_md.read_text(encoding="utf-8")
+            self.assertIn("First failed synth attempt.", review_text)
+            self.assertNotIn("Second failed synth attempt.", review_text)
+            synth_entry = progress.meta["multipass"]["validation"]["artifacts"]["synth"]
+            self.assertEqual(synth_entry["artifact_path"], str(review_md))
+            self.assertEqual(synth_entry["artifact_sha256"], rf._artifact_sha256(review_md))
+
+    def test_synth_retry_none_effort_keeps_original_synth_llm_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-none", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            valid_validation = {"valid": True, "errors": [], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm: dict[str, Any] = {
+                "resolved": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "codex", "effective_reasoning_effort": "medium"},
+            }
+            # Snapshot the original resolved/resolution_meta/meta before the call.
+            original_resolved = dict(synth_llm["resolved"])
+            original_resolution_meta_resolved = dict(synth_llm["resolution_meta"]["resolved"])
+            original_meta = dict(synth_llm["meta"])
+
+            rebuild_mock = mock.MagicMock()
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result) as run_mock,
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    side_effect=[(False, invalid_validation), (True, valid_validation)],
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="retry"),
+                mock.patch.object(rf, "prompt_grounding_retry_effort", return_value=None) as effort_prompt,
+                mock.patch.object(rf, "_rebuild_multipass_retry_stage_state", rebuild_mock),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+            ):
+                rf._execute_multipass_synth_stage(
+                    progress=progress,
+                    repo_dir=root / "repo",
+                    work_dir=root / "work",
+                    session_id="session-none",
+                    review_md_path=review_md,
+                    synth_prompt="prompt",
+                    synth_llm=synth_llm,
+                    synth_runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    synth_step_outputs=[],
+                    grounding_mode="strict",
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    codex_meta=None,
+                    ui_enabled=True,
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    run_kind="synth",
+                    review_stage="multipass_synth",
+                    stage_label="multipass synth",
+                    failure_message="synth failed",
+                    multipass_cfg={},
+                )
+
+            # Retry happened (two exec calls, one picker prompt).
+            self.assertEqual(run_mock.call_count, 2)
+            effort_prompt.assert_called_once()
+            # None effort must NOT trigger a stage rebuild.
+            rebuild_mock.assert_not_called()
+            # Original synth_llm dict is untouched.
+            self.assertEqual(synth_llm["resolved"], original_resolved)
+            self.assertEqual(synth_llm["resolution_meta"]["resolved"], original_resolution_meta_resolved)
+            self.assertEqual(synth_llm["meta"], original_meta)
+
+    def test_apply_synth_severity_finalization_blocks_critical_incremental_finalization(self) -> None:
+        """Incremental resume path: a critical-section failure must not be dropped.
+
+        Mirrors the primary-synth critical-bullet survivor guard, covering the
+        call site routed from ``_validate_or_reuse_synth_artifact`` on the
+        incremental-resume path (tests/_reviewflow_unittest_grounding_impl.py's
+        earlier incremental finalization coverage is non-critical only).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "pkg").mkdir()
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "## Business / Product Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Good. Sources: `pkg/module.py:2`",
+                        "- Good2. Sources: `pkg/module.py:3`",
+                        "",
+                        "### In Scope Issues",
+                        "- Sole critical bullet. Sources: `pkg/module.py:99`",
+                        "",
+                        "### Out of Scope Issues",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "- Good2. Sources: `pkg/module.py:2`",
+                        "",
+                        "### Reusability",
+                        "- Good. Sources: `pkg/module.py:1`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original_text = review_md.read_text(encoding="utf-8")
+            critical_bullet = {
+                "section": "In Scope Issues",
+                "section_label": "'### In Scope Issues' under '## Business / Product Assessment' (line 7)",
+                "section_line": 7,
+                "section_key": "Business / Product Assessment|In Scope Issues|7",
+                "parent": "Business / Product Assessment",
+                "bullet_index": 1,
+                "bullet_text": "- Sole critical bullet. Sources: `pkg/module.py:99`",
+                "critical": True,
+                "reason": "cites missing source line",
+            }
+
+            # Non-UI incremental finalization (allow_critical_omission defaults
+            # to False): critical bullet must never be dropped — even if it is
+            # the only invalid bullet.
+            finalized, result, dropped = rf._apply_synth_severity_finalization(
+                meta={},
+                work_dir=work_dir,
+                grounding_mode="strict",
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                validation={"valid": False, "invalid_bullets": [critical_bullet]},
+                ui_enabled=False,
+                allow_critical_omission=False,
+            )
+
+            self.assertFalse(finalized)
+            self.assertEqual(dropped, [])
+            # Review markdown untouched.
+            self.assertEqual(review_md.read_text(encoding="utf-8"), original_text)
+
+    def test_step_grounding_retry_effort_picker_shows_last_override_as_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            entry = rf.MultipassStepEntry(
+                index=1,
+                step_id="01",
+                step_title="API review",
+                step_focus="grounding",
+                output_path=root / "review.step-01.md",
+                prompt="step prompt",
+                should_run=True,
+            )
+            progress.init({
+                "session_id": "session-default",
+                "multipass": {"step_workers": 1, "runs": []},
+                "llm": {},
+                "codex": {},
+            })
+            rf._ensure_multipass_run_entry(
+                progress.meta,
+                kind="step",
+                step_index=1,
+                step_id=entry.step_id,
+                step_title=entry.step_title,
+                output_path=entry.output_path,
+                template_id="builtin:step",
+                prompt=entry.prompt,
+                stage_llm_meta={"provider": "codex", "effective_reasoning_effort": "medium"},
+            )
+            raw_result = rf.MultipassStepRunResult(
+                entry=entry,
+                llm_result=rf.LlmRunResult(resume=None),
+                duration_seconds=1.25,
+            )
+
+            with (
+                mock.patch.object(rf, "_run_multipass_step_llm", side_effect=[raw_result, raw_result, raw_result]),
+                mock.patch.object(
+                    rf,
+                    "_finalize_multipass_step_result",
+                    side_effect=[
+                        rf.StepGroundingValidationError(
+                            "bad grounding",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        rf.StepGroundingValidationError(
+                            "bad grounding again",
+                            step_validation={"valid": False, "errors": ["missing citation"]},
+                        ),
+                        None,
+                    ],
+                ),
+                mock.patch.object(rf, "prompt_grounding_retry_skip", return_value="retry"),
+                mock.patch.object(
+                    rf,
+                    "prompt_grounding_retry_effort",
+                    side_effect=["high", "high"],
+                ) as effort_prompt,
+            ):
+                rf._execute_multipass_step_stage(
+                    progress=progress,
+                    work_dir=root / "work",
+                    repo_dir=root / "repo",
+                    session_id="session-default",
+                    grounding_mode="strict",
+                    step_entries=[entry],
+                    step_worker_count=1,
+                    llm_resolved={"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+                    llm_resolution_meta={
+                        "resolved": {
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            "reasoning_effort_source": "cli",
+                            "reasoning_effort_source_detail": "cli",
+                        }
+                    },
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    runtime_policy={
+                        "codex_flags": ['model_reasoning_effort="medium"'],
+                        "codex_config_overrides": [],
+                        "sandbox_mode": "workspace-write",
+                        "approval_policy": "never",
+                    },
+                    templates={"step": "mrereview_gh_local_big_step.md"},
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=True,
+                    multipass_cfg={},
+                )
+
+            self.assertEqual(effort_prompt.call_count, 2)
+            first_call_default = effort_prompt.call_args_list[0].kwargs.get("default_effort")
+            second_call_default = effort_prompt.call_args_list[1].kwargs.get("default_effort")
+            self.assertEqual(first_call_default, "medium")
+            self.assertEqual(second_call_default, "high")
+
+    def test_first_grounding_failure_validation_captures_pre_finalization_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({"session_id": "session-pre-final", "multipass": {"runs": []}, "llm": {}, "codex": {}})
+            review_md = root / "review.md"
+            raw_validation = {
+                "valid": False,
+                "errors": ["raw pre-finalization error"],
+                "invalid_bullets": [{"section_key": "k", "bullet_index": 1, "critical": False}],
+            }
+            post_finalization_validation = {
+                "valid": False,
+                "errors": ["post-finalization error after non-critical drop"],
+                "invalid_bullets": [],
+            }
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, raw_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, post_finalization_validation, [{"section_key": "k", "bullet_index": 1}]),
+                ),
+                mock.patch.object(rf, "prompt_synth_grounding_retry_choice", return_value="abort"),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook"),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-pre-final",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=True,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            run_entry = progress.meta["multipass"]["runs"][0]
+            first_failure = run_entry["first_grounding_failure_validation"]
+            self.assertIn("raw pre-finalization error", first_failure.get("errors", []))
+            self.assertNotIn("post-finalization error", str(first_failure.get("errors", [])))
+
+    def test_terminal_playbook_reports_candidate_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init({
+                "session_id": "session-candidate",
+                "multipass": {
+                    "runs": [],
+                    "validation": {"valid": False},
+                },
+                "llm": {},
+                "codex": {},
+            })
+            review_md = root / "review.md"
+            review_md.write_text("prior synth output")
+            invalid_validation = {"valid": False, "errors": ["missing citation"], "invalid_bullets": []}
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            synth_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {
+                    "resolved": {
+                        "model": "gpt-5",
+                        "reasoning_effort": "medium",
+                        "reasoning_effort_source": "cli",
+                        "reasoning_effort_source_detail": "cli",
+                    }
+                },
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "_validate_or_reuse_synth_artifact",
+                    return_value=(False, invalid_validation),
+                ),
+                mock.patch.object(
+                    rf,
+                    "_apply_synth_severity_finalization",
+                    return_value=(False, invalid_validation, []),
+                ),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_emit_multipass_grounding_failure_playbook") as playbook_mock,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=root / "repo",
+                        work_dir=root / "work",
+                        session_id="session-candidate",
+                        review_md_path=review_md,
+                        synth_prompt="prompt",
+                        synth_llm=synth_llm,
+                        synth_runtime_policy={
+                            "codex_flags": [],
+                            "codex_config_overrides": [],
+                            "sandbox_mode": "workspace-write",
+                            "approval_policy": "never",
+                        },
+                        synth_step_outputs=[],
+                        grounding_mode="strict",
+                        env={},
+                        stream=False,
+                        add_dirs=[],
+                        codex_meta=None,
+                        ui_enabled=False,
+                        prompt_template_name="mrereview_gh_local_big_synth.md",
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="synth failed",
+                        multipass_cfg={},
+                    )
+
+            playbook_mock.assert_called_once()
+            reported_path = playbook_mock.call_args.kwargs.get("artifact_path")
+            self.assertTrue(str(reported_path).endswith("review.candidate.md"))
+
+    def test_incremental_resume_synth_only_skips_grounding_skip_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta_path = root / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            step_01_output = root / "review.step-01.md"
+            step_01_output.write_text("step 01 output")
+            step_02_output = root / "review.step-02.md"
+            step_02_output.write_text("step 02 output")
+            review_md = root / "review.md"
+            review_md.write_text("old review")
+            progress.init({
+                "session_id": "session-synth-only",
+                "pr_url": "https://github.com/x/y/pull/1",
+                "number": 1,
+                "multipass": {
+                    "runs": [],
+                    "step_states": [
+                        {
+                            "step_index": 1,
+                            "step_id": "01",
+                            "step_title": "step one",
+                            "step_focus": "focus",
+                            "output_path": str(step_01_output),
+                            "status": "completed",
+                            "reusable": True,
+                        },
+                        {
+                            "step_index": 2,
+                            "step_id": "02",
+                            "step_title": "step two",
+                            "step_focus": "focus",
+                            "output_path": str(step_02_output),
+                            "status": "completed",
+                            "reusable": True,
+                        },
+                    ],
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "step one", "reason": "skipped"},
+                    ],
+                    "grounding_skipped_step_count": 1,
+                    "artifacts": {
+                        "step_outputs": [str(step_01_output), str(step_02_output)],
+                        "synth_step_outputs": [str(step_02_output)],
+                    },
+                },
+                "llm": {},
+                "codex": {},
+            })
+            step_entries = [
+                rf.MultipassStepEntry(
+                    index=1, step_id="01", step_title="step one",
+                    step_focus="focus", output_path=step_01_output,
+                    prompt="prompt", should_run=False,
+                ),
+                rf.MultipassStepEntry(
+                    index=2, step_id="02", step_title="step two",
+                    step_focus="focus", output_path=step_02_output,
+                    prompt="prompt", should_run=False,
+                ),
+            ]
+            skip_choice = rf._resolve_resume_grounding_skip_choice(
+                meta=progress.meta,
+                step_entries=step_entries,
+                ui_enabled=False,
+            )
+            self.assertEqual(skip_choice, "rerun")
+            synth_outputs, _ = rf._prepare_synth_inputs(
+                meta=progress.meta,
+                step_entries=step_entries,
+                session_id="session-synth-only",
+                session_dir=root,
+                work_dir=root,
+                review_md_path=review_md,
+                prefer_persisted_skips=True,
+            )
+            self.assertEqual(synth_outputs, [str(step_02_output)])
+            self.assertNotIn(str(step_01_output), synth_outputs)
+
+    def test_grounding_skipped_step_ids_can_prefer_persisted_records(self) -> None:
+        meta = {
+            "multipass": {
+                "step_states": [
+                    {
+                        "step_index": 1,
+                        "step_id": "01",
+                        "step_title": "step one",
+                        "status": "reused",
+                        "reusable": True,
+                    },
+                    {
+                        "step_index": 2,
+                        "step_id": "02",
+                        "step_title": "step two",
+                        "status": "reused",
+                        "reusable": True,
+                    },
+                ],
+                "grounding_skipped_steps": [
+                    {"step_id": "01", "step_title": "step one", "reason": "skipped"},
+                ],
+            }
+        }
+
+        self.assertEqual(rf._grounding_skipped_step_ids(meta), set())
+        self.assertEqual(
+            rf._grounding_skipped_step_ids(meta, prefer_persisted=True),
+            {"01"},
+        )

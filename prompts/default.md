@@ -20,7 +20,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
   - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
   - Use `search` to locate symbols, references, and similar patterns.
   - Use `research` for deeper cross-file/architecture questions.
-  - When reporting findings, cite `path:line` whenever possible.
+  - When reporting findings, cite `path:line` whenever possible, using the trailing `Sources:` suffix contract.
 - Requirement: use `search` at least once; use `research` at least once.
 - If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**Verdict**` lines to `REJECT`.
 - If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
@@ -40,6 +40,8 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 - The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
+- Trailing citation contract (shared across review prompts):
+$REVIEW_CITATION_CONTRACT
 
 ## Output format (Markdown)
 Provide exactly:

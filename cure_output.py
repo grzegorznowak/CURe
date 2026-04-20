@@ -1043,6 +1043,8 @@ def prompt_pr_model_and_effort_picker(
     try:
         selected_model = default_model
         selected_effort = default_effort
+        model_changed = False
+        effort_changed = False
         provider_name = str(provider or "").strip() or "unknown"
         writer.write(f"CURe review settings for {provider_name}\n")
         if fixed_model:
@@ -1069,24 +1071,33 @@ def prompt_pr_model_and_effort_picker(
                     selected_model = model_options[int(choice) - 1][1]
                 else:
                     selected_model = choice
+                model_changed = True
         if prompt_for_effort:
             writer.write(f"Press Enter to keep effort: {default_effort or '(unset)'}\n")
             for idx, value in enumerate(effort_options, start=1):
                 writer.write(f"  {idx}) {value}\n")
-            writer.write("Select effort number: ")
+            writer.write("Select effort number or name: ")
             writer.flush()
             response = reader.readline()
             if not response:
                 raise ReviewflowError("PR model/effort picker aborted: /dev/tty closed before effort selection.")
             choice = str(response).strip()
             if choice:
-                if not choice.isdigit() or not (1 <= int(choice) <= len(effort_options)):
-                    raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
-                selected_effort = effort_options[int(choice) - 1]
+                if choice.isdigit():
+                    if not (1 <= int(choice) <= len(effort_options)):
+                        raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
+                    selected_effort = effort_options[int(choice) - 1]
+                else:
+                    normalized = choice.lower()
+                    matched = next((value for value in effort_options if value.lower() == normalized), None)
+                    if matched is None:
+                        raise ReviewflowError(f"PR model/effort picker received an invalid effort selection: {choice!r}")
+                    selected_effort = matched
+                effort_changed = True
         result: dict[str, str] = {}
-        if prompt_for_model and selected_model:
+        if prompt_for_model and model_changed and selected_model:
             result["model"] = selected_model
-        if prompt_for_effort and selected_effort:
+        if prompt_for_effort and effort_changed and selected_effort:
             result["reasoning_effort"] = selected_effort
         if result:
             writer.write(
@@ -1134,6 +1145,81 @@ def prompt_grounding_retry_skip(
     return _run_tty_prompt(
         lines=lines,
         choices={"retry": "retry", "skip": "skip"},
+    )
+
+
+def prompt_grounding_retry_effort(
+    *,
+    provider: str,
+    default_effort: str | None,
+    effort_options: list[str],
+    stage_label: str,
+) -> str | None:
+    """TTY-only effort picker used on grounding retry.
+
+    Story 42: every interactive grounding retry reopens the effort picker so
+    operators can redirect thinking budget without re-running worker tokens
+    under a bad retry choice. Provider and model are fixed — only effort is
+    changeable.
+    """
+    if not effort_options:
+        return None
+    result = prompt_pr_model_and_effort_picker(
+        provider=provider,
+        default_model=None,
+        default_effort=default_effort,
+        model_options=[],
+        effort_options=list(effort_options),
+        prompt_for_model=False,
+        prompt_for_effort=True,
+        fixed_model=stage_label,
+        fixed_effort=None,
+    )
+    if not result:
+        return None
+    return result.get("reasoning_effort") or None
+
+
+def prompt_synth_grounding_retry_choice(
+    *,
+    attempt_count: int,
+    validation: dict[str, Any] | None,
+    retry_available: bool = True,
+) -> str | None:
+    """TTY prompt for synth grounding failure.
+
+    Returns ``retry`` to rerun synth with a different effort, ``finalize`` to
+    apply severity-aware finalization (drop invalid bullets, including
+    supportable issue bullets when the section stays grounded, and continue),
+    or ``abort`` to emit the playbook and fail.
+
+    When ``retry_available`` is False (e.g. at the retry cap), the ``retry``
+    option is suppressed and only ``finalize`` / ``abort`` are offered.
+    """
+    errors = validation.get("errors") if isinstance(validation, dict) else []
+    lines = [
+        "Synth artifact generated successfully; strict grounding rejected review.md.",
+        f"Attempt: {int(attempt_count)}",
+        "Errors:",
+    ]
+    listed = 0
+    if isinstance(errors, list):
+        for item in errors[:6]:
+            text = " ".join(str(item or "").strip().split())
+            if not text:
+                continue
+            lines.append(f"- {text}")
+            listed += 1
+    if listed == 0:
+        lines.append("- strict synth grounding validation failed")
+    choices: dict[str, str] = {}
+    if retry_available:
+        choices["retry"] = "rerun synth with a different effort"
+    choices["finalize"] = "drop invalid bullets, including issue bullets if the section keeps another grounded bullet, and continue"
+    choices["abort"] = "abort with the grounding playbook"
+    return _run_tty_prompt(
+        lines=lines,
+        choices=choices,
     )
 
 
