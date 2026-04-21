@@ -1351,7 +1351,7 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
             - For every concrete issue under `### In Scope Issues` or `### Out of Scope Issues`, format the finding as a collapsible card using this exact structure:
 
               ```
-              - <finding summary>
+              - <finding summary> Sources: `file:line`
 
                 <details open>
                 <summary><b>SEVERITY_LABEL</b> severity · <b>LIKELIHOOD_LABEL</b> likelihood</summary>
@@ -1362,8 +1362,7 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
 
                 **Downgrade Factors:** <what would reduce confidence or impact, or `None.`>
 
-                **Code Trail:** <grounded code-path explanation ending with a trailing `Sources:` line that follows the existing citation contract>
-                Sources: `file:line`, `file:line`
+                **Code Trail:** <grounded code-path explanation that explains how the cited files connect to the finding>
 
                 **Reproduction:** <brief reproduction narrative or simple text diagram>, or `Not applicable.`
 
@@ -1373,6 +1372,7 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
             - SEVERITY_LABEL must be one of: Critical, High, Medium, Low, Info.
             - LIKELIHOOD_LABEL must be one of: High, Medium, Low, Not Assessed.
             - Keep `Why` in simple operator-facing language and do not expose hidden chain-of-thought.
+            - The summary bullet's trailing `Sources:` suffix is mandatory; strict synth grounding validates the top-level bullet line, not nested card content.
             - Prefer `Likelihood: Not Assessed` over fake precision when the evidence is insufficient.
             - The `<details open>` tag ensures the card is expanded by default but collapsible by the reader.
             - Keep `### Strengths` and `### Reusability` as concise cited bullets (no cards needed).

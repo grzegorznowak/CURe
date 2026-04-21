@@ -6476,6 +6476,95 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_synth_grounding_accepts_verbose_card_with_top_level_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `src/app.py:1`",
+                        "",
+                        "### In Scope Issues",
+                        "- Card-shaped issue. Sources: `src/app.py:2`",
+                        "",
+                        "  <details open>",
+                        "  <summary><b>High</b> severity · <b>Medium</b> likelihood</summary>",
+                        "",
+                        "  **Why:** Operators need the request to be easy to inspect.",
+                        "",
+                        "  **Assumptions / Preconditions:** A verbose final review is requested.",
+                        "",
+                        "  **Downgrade Factors:** None.",
+                        "",
+                        "  **Code Trail:** The top-level bullet carries the grounding citation.",
+                        "",
+                        "  **Reproduction:** Not applicable.",
+                        "",
+                        "  </details>",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `src/app.py:1`",
+                        "",
+                        "### In Scope Issues",
+                        "- Technical card-shaped issue. Sources: `src/app.py:3`",
+                        "",
+                        "  <details open>",
+                        "  <summary><b>Medium</b> severity · <b>Low</b> likelihood</summary>",
+                        "",
+                        "  **Why:** The finding remains grounded by the parent bullet.",
+                        "",
+                        "  **Assumptions / Preconditions:** A verbose final review is requested.",
+                        "",
+                        "  **Downgrade Factors:** None.",
+                        "",
+                        "  **Code Trail:** The citation is on the validated summary bullet.",
+                        "",
+                        "  **Reproduction:** Not applicable.",
+                        "",
+                        "  </details>",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertTrue(validation["valid"], validation["errors"])
+
     def test_step_grounding_rejects_mixed_complete_and_incomplete_sources_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
