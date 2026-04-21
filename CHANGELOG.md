@@ -6,7 +6,9 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
-No entries yet.
+### Documentation
+
+- Added README guidance for the opt-in review output flags: `--wtf on` for verbose final finding detail and `--cod-ledger on` for multipass hypothesis-ledger triage.
 
 ## [0.5.0] - 2026-04-21
 

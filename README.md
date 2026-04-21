@@ -143,6 +143,10 @@ Once the first run is active, continue the same indexed session with `cure resum
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
+Review output toggles:
+- `--wtf on` enables verbose final finding cards with severity/impact, likelihood, assumptions, downgrade factors, code trail, and reproduction detail. It is available on `cure pr`, `cure resume`, and `cure followup`; omitted or `off` keeps the default concise review format.
+- `--cod-ledger on` enables the multipass Chain-of-Draft hypothesis ledger for `cure pr` and `cure resume`. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. It is default-off and intentionally not part of single-pass or follow-up prompt families.
+
 Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in CLI-provider contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
 
 Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
