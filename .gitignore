@@ -13,3 +13,4 @@ dist/
 .tmp*
 .tmp*/
 uv.lock
+public_release_evidence/

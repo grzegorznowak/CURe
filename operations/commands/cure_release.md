@@ -2,7 +2,7 @@
 
 This is the canonical repo-owned release command for CURe. It is the agent-consumable execution wrapper for the release policy in [RELEASING.md](../../RELEASING.md).
 
-If this file and [RELEASING.md](../../RELEASING.md) disagree, `RELEASING.md` wins. Treat [public_release_evidence/README.md](../../public_release_evidence/README.md) as the evidence schema that every release handoff must satisfy.
+If this file and [RELEASING.md](../../RELEASING.md) disagree, `RELEASING.md` wins.
 
 ## Command Name
 
@@ -22,7 +22,6 @@ If this file and [RELEASING.md](../../RELEASING.md) disagree, `RELEASING.md` win
 - Build changelog notes from merged PRs in the unreleased range. Use story or epic metadata only as internal drafting help, not as published labels by default.
 - `MODE="rerun"` is only for rerunning an existing matching tag. It must never be used to publish changed code under an old version.
 - Run the local prove-out gate before any tag push.
-- Write evidence in `public_release_evidence/` before handoff or tag push.
 - After tag push, watch `Publish Package`, report the workflow URL and result, confirm whether the GitHub release is visible, then run the documented public-package smoke.
 
 ## Required Inputs
@@ -89,7 +88,7 @@ Do not edit `pyproject.toml` or `CHANGELOG.md` until this checkpoint is approved
 1. In `MODE="normal"`:
    - update `project.version` in `pyproject.toml` to the target version
 2. Update `CHANGELOG.md` with the curated release entry before the release commit.
-3. If a small release-blocking fix is required on `main`, keep the scope targeted and record it in the evidence and changelog trail for the same release.
+3. If a small release-blocking fix is required on `main`, keep the scope targeted and record it in the changelog trail for the same release.
 
 ### 6. Run The Local Prove-Out Gate
 
@@ -112,15 +111,12 @@ Then run the isolated wheel smoke:
 5. Run `cure setup`.
 6. Run `cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json`.
 
-Write the local prove-out result to `public_release_evidence/YYYY-MM-DD-vX.Y.Z-local-artifact-smoke.md` using the schema from [public_release_evidence/README.md](../../public_release_evidence/README.md), including the changelog entry that shipped with the release. Normalize machine-local temp paths with placeholders such as `<temp-root>` unless the literal path is itself part of a blocker.
-
 ### 7. Explicit Checkpoint Before Commit, Tag, And Push
 
 Pause for maintainer confirmation after reporting:
 
 - exact files changed for the release
 - local prove-out commands and results
-- evidence file path
 - the final commit message and tag that will be created
 
 Do not commit, tag, or push until this checkpoint is approved.
@@ -131,7 +127,6 @@ Do not commit, tag, or push until this checkpoint is approved.
    - `pyproject.toml`
    - `CHANGELOG.md`
    - any approved release-blocking fix
-   - the local prove-out evidence file
 2. Create the matching final tag `vX.Y.Z`.
 3. Push `main` and the tag to `origin`.
 
@@ -155,8 +150,6 @@ Run the documented public smoke from [RELEASING.md](../../RELEASING.md):
 
 If the standalone release channel was produced for this tag, also verify the GitHub Release assets and `install-cure.sh` flow as described in [RELEASING.md](../../RELEASING.md).
 
-Write the post-publish result to a second evidence file under `public_release_evidence/`.
-
 ### 11. Explicit Checkpoint For Non-Happy-Path Recovery
 
 Pause before any recovery action that changes code, tags, or published state.
@@ -165,4 +158,4 @@ Pause before any recovery action that changes code, tags, or published state.
 - If the workflow or package index needs a rerun and the existing tag still matches the intended release, use `MODE="rerun"` with that exact tag only.
 - If a final release already reached PyPI but is broken, treat it as immutable and cut a new hotfix version instead of replacing artifacts.
 
-If the issue is not a narrow release-blocking fix, stop and hand off with the evidence files and exact blocker.
+If the issue is not a narrow release-blocking fix, stop and hand off with the exact blocker.

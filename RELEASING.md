@@ -107,8 +107,6 @@ Run the first public prove-out as an explicit evidence-gathering exercise, not a
    - `uvx --from cureview cure setup`
    - `uv tool install cureview`
    - `cure doctor --pr-url <public github PR> --json`
-5. Record what actually happened in `public_release_evidence/` before closing the release.
-
 The local artifact smoke is the pre-publish gate. The published-package smoke is the release proof that the public index matches the built artifact.
 
 ## Standalone Asset Verification
@@ -120,27 +118,6 @@ For the standalone follow-on channel, verify all of the following before closing
 3. `install-cure.sh --version v<version>` installs the expected binary on a supported platform
 4. the docs still present `uv tool install cureview` / `uvx --from cureview cure ...` as the primary path and the standalone installer as secondary
 5. the post-install bootstrap path remains `cure setup`, then `cure doctor --pr-url <public github PR> --json`
-
-## Evidence Capture
-
-Store every prove-out log in `public_release_evidence/` with a dated filename such as:
-
-- `public_release_evidence/2026-04-08-v0.3.0-local-artifact-smoke.md`
-- `public_release_evidence/2026-04-08-v0.3.0-pypi.md`
-
-Each evidence log should capture:
-
-- the exact version and tag
-- whether the run targeted local artifact smoke or PyPI
-- the commands run, written portably with placeholders for machine-local temp paths when needed
-- the changelog entry that shipped with the release
-- the observed package/install result
-- whether the verified public executable was `cure`
-- any blocker with the literal error text
-- the rollback or hotfix decision taken
-- the exact next operator action
-
-Treat the evidence file, not memory, as the handoff artifact for future sessions.
 
 ## Manual Rerun / Recovery
 
@@ -164,8 +141,7 @@ If a final release already reached PyPI but the package is not usable:
 
 1. Treat the published files as immutable.
 2. Do not overwrite or reuse the broken tag.
-3. Document the failure and affected commands in `public_release_evidence/`.
-4. Cut a new hotfix version, for example `v0.1.1`.
+3. Cut a new hotfix version, for example `v0.1.1`.
 5. Re-run local artifact smoke, then the publish flow, then the public install smoke.
 
 If the failure is only in the GitHub workflow or index-side configuration:
@@ -183,5 +159,4 @@ If the package publish succeeded but the standalone asset upload or checksum man
 If the uploaded standalone binary itself is wrong:
 
 1. Do not treat GitHub Release asset replacement as a silent fix for a bad public binary.
-2. Record the defect in `public_release_evidence/`.
-3. Cut a new hotfix version and rerun the full package + standalone verification sequence.
+2. Cut a new hotfix version and rerun the full package + standalone verification sequence.

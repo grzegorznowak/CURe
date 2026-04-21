@@ -77,8 +77,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('verify `python -c "import reviewflow"` fails', release_doc)
         self.assertIn("uvx --from cureview cure setup", release_doc)
         self.assertIn("cure doctor --pr-url <public github PR> --json", release_doc)
-        self.assertIn("## Evidence Capture", release_doc)
-        self.assertIn("public_release_evidence/", release_doc)
         self.assertIn("## Rollback And Hotfix Guidance", release_doc)
         self.assertIn("Do not overwrite or reuse the broken tag.", release_doc)
         self.assertIn("v0.1.1", release_doc)
@@ -93,7 +91,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertIn("python -m unittest discover -s tests -p 'test_release_workflow_unittest.py'", command_doc)
         self.assertNotIn("python -m unittest tests/test_release_workflow_unittest.py", command_doc)
-        self.assertIn("public_release_evidence/README.md", command_doc)
         self.assertIn("CHANGELOG.md", command_doc)
 
     def test_publish_workflow_builds_and_releases_standalone_assets(self) -> None:
@@ -178,46 +175,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(result.stdout.strip(), "cure smoke")
-
-    def test_public_release_evidence_location_exists_with_contract(self) -> None:
-        evidence_readme = (ROOT / "public_release_evidence" / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn("Store Story 05 prove-out logs here.", evidence_readme)
-        self.assertIn("Status", evidence_readme)
-        self.assertIn("Version / tag", evidence_readme)
-        self.assertIn("Commands run", evidence_readme)
-        self.assertIn("Changelog entry shipped", evidence_readme)
-        self.assertIn("Verified public command surface", evidence_readme)
-        self.assertIn("Rollback / hotfix decision", evidence_readme)
-        self.assertIn("Exact next operator action", evidence_readme)
-
-    def test_public_release_evidence_includes_a_real_proveout_log(self) -> None:
-        evidence_log = (ROOT / "public_release_evidence" / "2026-03-19-v0.1.0-local-artifact-smoke.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("- Status: partial", evidence_log)
-        self.assertIn("- Target: local artifact smoke before the first tag-driven publish", evidence_log)
-        self.assertIn("uv build --out-dir /tmp/cure-public-proveout-tm2DEn/dist --clear", evidence_log)
-        self.assertIn("installed executable: `cure`", evidence_log)
-        self.assertIn("verified absent: `/tmp/cure-public-proveout-tm2DEn/venv/bin/reviewflow`", evidence_log)
-        self.assertIn("cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json", evidence_log)
-        self.assertIn("public GitHub PR access worked without `gh auth login`", evidence_log)
-        self.assertIn("there is still no TestPyPI or PyPI publication evidence", evidence_log)
-
-    def test_public_release_evidence_records_publish_blocker_when_github_access_is_missing(self) -> None:
-        blocker_log = (ROOT / "public_release_evidence" / "2026-03-19-v0.1.0-publish-blocker.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("- Status: blocked", blocker_log)
-        self.assertIn("gh auth status", blocker_log)
-        self.assertIn("gh workflow list", blocker_log)
-        self.assertIn("git -C /workspaces/cure_workspace/projects/CURe ls-remote --heads origin", blocker_log)
-        self.assertIn("You are not logged into any GitHub hosts", blocker_log)
-        self.assertIn("Permission denied (publickey).", blocker_log)
-        self.assertIn("publish-package.yml", blocker_log)
-
 
 if __name__ == "__main__":
     unittest.main()
