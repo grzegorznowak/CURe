@@ -8,6 +8,16 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.5.0] - 2026-04-21
+
+### Added
+
+- Verbose findings mode (`--wtf on`): opt-in enriched review output that adds Severity/Impact, Likelihood, Why, Assumptions/Preconditions, Downgrade Factors, Code Trail, and Reproduction Story to each final finding. Default review output is unchanged when the flag is omitted or off.
+
+### Changed
+
+- Release process now explicitly requires the GitHub Release body to mirror the curated `CHANGELOG.md` entry, keeping the Releases page in sync with the repo changelog.
+
 ## [0.4.0] - 2026-04-20
 
 ### Added

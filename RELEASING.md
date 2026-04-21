@@ -46,7 +46,8 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
 5. Create and push the matching tag.
    - Production example: `git tag v0.3.0 && git push origin v0.3.0`
 6. Wait for `Publish Package` to finish.
-7. Verify the package page and install smoke:
+7. Update the GitHub Release body with the matching `CHANGELOG.md` entry for this version. The GitHub Release description must always mirror the curated changelog, not the auto-generated PR list.
+8. Verify the package page and install smoke:
    - `uvx --from cureview cure --help`
    - `uv tool install cureview`
 

@@ -142,6 +142,7 @@ After pushing:
 1. Watch the `Publish Package` workflow run for the new tag.
 2. Report the workflow URL and final status.
 3. Confirm whether the matching GitHub release is visible with the expected standalone assets.
+4. Update the GitHub Release body with the matching `CHANGELOG.md` entry for this version. The GitHub Release description must always mirror the curated changelog, not the auto-generated PR list. Preserve the `**Full Changelog**` compare link at the bottom.
 
 ### 10. Run Post-Publish Public-Package Smoke
 
