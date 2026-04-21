@@ -573,6 +573,102 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
             self.assertNotIn("<details open>", default_rendered)
 
+    def test_cod_hypothesis_ledger_guidance_is_gated_to_enabled_multipass_prompts(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        enabled_vars = {
+            "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.\n",
+            "MAX_STEPS": "4",
+            "PLAN_JSON_PATH": "/tmp/plan.json",
+            "RESUME_PLAN_JSON_PATH": "/tmp/resume-plan.json",
+            "STEP_ID": "01",
+            "STEP_TITLE": "Routing",
+            "STEP_FOCUS": "Inspect routing",
+            "PREVIOUS_REVIEW_MD": "/tmp/previous.md",
+            "PREVIOUS_REVIEW_HEAD_SHA": "abc123",
+            "CURRENT_REVIEW_HEAD_SHA": "def456",
+            "EXISTING_PLAN_JSON_PATH": "/tmp/existing-plan.json",
+            "EXISTING_STEP_CATALOG": "- 01 Routing",
+            "PRIOR_STEP_OUTPUT_PATH": "/tmp/prior-step.md",
+            "STEP_OUTPUT_PATHS": "- `/tmp/step-01.md`",
+            "GROUNDING_SKIPPED_STEPS": "- None.",
+            **rf.verbose_review_findings_prompt_vars(enabled=False),
+            **rf.cod_hypothesis_ledger_prompt_vars(enabled=True),
+        }
+        disabled_vars = dict(enabled_vars)
+        disabled_vars.update(rf.cod_hypothesis_ledger_prompt_vars(enabled=False))
+
+        for path in prompt_paths:
+            enabled = rf.render_prompt(
+                path.read_text(encoding="utf-8"),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars=enabled_vars,
+            )
+            self.assertIn("Hypothesis Ledger", enabled)
+            self.assertIn("suspicious surface", enabled)
+            self.assertIn("tentative issue", enabled)
+            self.assertIn("next proof target", enabled)
+            self.assertIn("### Steps taken", enabled)
+            self.assertNotIn("$COD_HYPOTHESIS_LEDGER", enabled)
+
+            disabled = rf.render_prompt(
+                path.read_text(encoding="utf-8"),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars=disabled_vars,
+            )
+            self.assertNotIn("Hypothesis Ledger", disabled)
+            self.assertNotIn("$COD_HYPOTHESIS_LEDGER", disabled)
+
+    def test_cod_hypothesis_ledger_guidance_stays_out_of_non_multipass_prompts(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+        ]
+        for path in prompt_paths:
+            rendered = rf.render_prompt(
+                path.read_text(encoding="utf-8"),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars={
+                    "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.\n",
+                    **rf.verbose_review_findings_prompt_vars(enabled=False),
+                    **rf.cod_hypothesis_ledger_prompt_vars(enabled=True),
+                },
+            )
+            self.assertNotIn("Hypothesis Ledger", rendered)
+
     def test_review_templates_emit_dual_axis_scope_split_format(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",

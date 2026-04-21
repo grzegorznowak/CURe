@@ -1380,6 +1380,46 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
         ).strip()
     return {"VERBOSE_FINDING_MODE_GUIDANCE": guidance}
 
+
+def cod_hypothesis_ledger_prompt_vars(*, enabled: bool) -> dict[str, str]:
+    plan_guidance = ""
+    step_guidance = ""
+    synth_guidance = ""
+    if enabled:
+        plan_guidance = textwrap.dedent(
+            """
+            Chain-of-Draft hypothesis triage is ENABLED for this multipass review.
+            - Use a compact Hypothesis Ledger mindset while planning: suspicious surface, tentative issue, next proof target.
+            - Before choosing retained plan steps, explore a broad candidate set of suspicious surfaces in compact draft form.
+            - Prune weak or duplicate candidates early, then retain only the few independent review steps most likely to produce grounded findings.
+            - Do not expose hidden chain-of-thought; keep the visible plan concise and grounded in reviewed surfaces.
+            """
+        ).strip()
+        step_guidance = textwrap.dedent(
+            """
+            Chain-of-Draft hypothesis triage is ENABLED for this multipass step.
+            - Add a visible `### Hypothesis Ledger` section before `### Findings`.
+            - Use compact bullets with this exact shape:
+              `- suspicious surface: <file/API/flow>; tentative issue: <possible failure>; next proof target: <specific source, test, or runtime contract to verify>`
+            - Include only candidate issue threads you actually inspected; prune weak candidates before promoting anything into `### Findings`.
+            - The ledger is triage evidence, not final proof. Findings still require the trailing `Sources:` citation contract.
+            """
+        ).strip()
+        synth_guidance = textwrap.dedent(
+            """
+            Chain-of-Draft hypothesis triage is ENABLED for final synthesis.
+            - Read any step `### Hypothesis Ledger` sections as candidate threads, not as findings; each candidate should identify suspicious surface, tentative issue, and next proof target.
+            - Prune weak, duplicate, or ungrounded hypotheses before writing the final review.
+            - Deepen only surviving candidates into full human-facing findings, and keep every surviving issue subject to the existing `Sources:` citation contract.
+            """
+        ).strip()
+    return {
+        "COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE": plan_guidance,
+        "COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE": step_guidance,
+        "COD_HYPOTHESIS_LEDGER_SYNTH_GUIDANCE": synth_guidance,
+    }
+
+
 def render_prompt(
     template_text: str,
     *,
@@ -3196,6 +3236,7 @@ __all__ = [
     'resolve_session_baseline_selection',
     'restore_session_chunkhound_db_from_baseline',
     'review_intelligence_prompt_vars',
+    'cod_hypothesis_ledger_prompt_vars',
     'verbose_review_findings_prompt_vars',
     'chunkhound_env',
     'same_device',

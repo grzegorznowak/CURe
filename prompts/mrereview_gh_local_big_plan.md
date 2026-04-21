@@ -45,6 +45,7 @@ If you must ABORT:
    - Avoid label-only fragmentation: do not split lifecycle, recovery, acceptance, caller-semantics, or background-flow checks into separate steps when they inspect the same code paths or invariants.
    - Each retained step must still be narrow enough to run independently without bloating context.
    - Each retained step must have a clear goal and focus area.
+$COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE
 
 # Output
 Provide:

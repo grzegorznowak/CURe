@@ -4534,7 +4534,7 @@ def _parse_on_off_bool(value: str) -> bool:
         return True
     if normalized in {"off", "0"}:
         return False
-    raise argparse.ArgumentTypeError("--wtf must be one of: on, off, 1, 0")
+    raise argparse.ArgumentTypeError("must be one of: on, off, 1, 0")
 
 
 def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
@@ -6388,6 +6388,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
     entries: list[MultipassStepEntry] = []
@@ -6411,6 +6412,7 @@ def _build_multipass_step_entries(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "PLAN_JSON_PATH": str(plan_json_path),
                 "STEP_ID": step_id,
                 "STEP_TITLE": step_title,
@@ -6469,6 +6471,7 @@ def _build_incremental_resume_step_entries(
     previous_review_md_path: Path,
     previous_review_head_sha: str,
     current_review_head_sha: str,
+    cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["resume_step"])
     entries: list[MultipassStepEntry] = []
@@ -6494,6 +6497,7 @@ def _build_incremental_resume_step_entries(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "PREVIOUS_REVIEW_MD": str(previous_review_md_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": previous_review_head_sha,
@@ -10071,6 +10075,9 @@ def _pr_flow_impl(
                                 review_intelligence_cfg,
                                 capability_summary=review_intelligence_capabilities,
                             ),
+                            **cod_hypothesis_ledger_prompt_vars(
+                                enabled=bool(getattr(args, "cod_ledger", False))
+                            ),
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
@@ -10201,6 +10208,7 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
+                        cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
                     )
                     for entry in step_entries:
                         _ensure_multipass_run_entry(
@@ -10284,6 +10292,9 @@ def _pr_flow_impl(
                                 ),
                                 **verbose_review_findings_prompt_vars(
                                     enabled=bool(getattr(args, "wtf", False))
+                                ),
+                                **cod_hypothesis_ledger_prompt_vars(
+                                    enabled=bool(getattr(args, "cod_ledger", False))
                                 ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
@@ -10499,6 +10510,7 @@ def _run_incremental_completed_multipass_resume(
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
     wtf_enabled: bool,
+    cod_ledger_enabled: bool,
 ) -> str | None:
     templates = incremental_resume_prompt_template_names()
     mp = progress.meta.setdefault("multipass", {})
@@ -10558,6 +10570,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -10675,6 +10688,7 @@ def _run_incremental_completed_multipass_resume(
         previous_review_md_path=previous_review_snapshot_path,
         previous_review_head_sha=str(previous_review_point.head_sha or "").strip(),
         current_review_head_sha=current_review_head_sha,
+        cod_ledger_enabled=cod_ledger_enabled,
     ):
         should_run = False
         if entry.step_id in reopen_step_ids or entry.index > base_step_count:
@@ -10847,6 +10861,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
@@ -11342,6 +11357,7 @@ def _resume_flow_impl(
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
                 wtf_enabled=bool(getattr(args, "wtf", False)),
+                cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
             )
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()
@@ -11422,6 +11438,9 @@ def _resume_flow_impl(
                         **review_intelligence_prompt_vars(
                             review_intelligence_cfg,
                             capability_summary=review_intelligence_capabilities,
+                        ),
+                        **cod_hypothesis_ledger_prompt_vars(
+                            enabled=bool(getattr(args, "cod_ledger", False))
                         ),
                         "MAX_STEPS": str(max_steps),
                     },
@@ -11551,6 +11570,7 @@ def _resume_flow_impl(
             agent_desc=agent_desc,
             review_intelligence_cfg=review_intelligence_cfg,
             review_intelligence_capabilities=review_intelligence_capabilities,
+            cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
         )
         step_entries: list[MultipassStepEntry] = []
         for entry in base_step_entries:
@@ -11750,6 +11770,9 @@ def _resume_flow_impl(
                         ),
                         **verbose_review_findings_prompt_vars(
                             enabled=bool(getattr(args, "wtf", False))
+                        ),
+                        **cod_hypothesis_ledger_prompt_vars(
+                            enabled=bool(getattr(args, "cod_ledger", False))
                         ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
@@ -15192,6 +15215,7 @@ from cure_runtime import (
 from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
+    cod_hypothesis_ledger_prompt_vars,
     compute_pr_stats,
     detect_multipass_plan_abort_contradiction,
     ensure_base_cache as shared_ensure_base_cache,
@@ -15372,6 +15396,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         metavar="{on,off,1,0}",
         help="Enable verbose finding explanations in the final review artifact (default: off)",
     )
+    prp.add_argument(
+        "--cod-ledger",
+        dest="cod_ledger",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
+    )
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     prp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
@@ -15440,6 +15472,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=False,
         metavar="{on,off,1,0}",
         help="Enable verbose finding explanations in the final review artifact (default: off)",
+    )
+    rp.add_argument(
+        "--cod-ledger",
+        dest="cod_ledger",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
     )
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     rp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
