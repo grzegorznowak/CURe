@@ -6,9 +6,13 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
+### Changed
+
+- Verbose finding cards are now the default review output for `cure pr`, `cure resume`, and `cure followup`; pass `--wtf off` to request the older concise finding format.
+
 ### Documentation
 
-- Added README guidance for the opt-in review output flags: `--wtf on` for verbose final finding detail and `--cod-ledger on` for multipass hypothesis-ledger triage.
+- Added README guidance for review output flags: default-on verbose finding detail via `--wtf`, the `--wtf off` concise-mode escape hatch, and `--cod-ledger on` for multipass hypothesis-ledger triage.
 
 ## [0.5.0] - 2026-04-21
 

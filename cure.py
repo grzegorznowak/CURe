@@ -15433,9 +15433,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--wtf",
         dest="wtf",
         type=_parse_on_off_bool,
-        default=False,
+        default=True,
         metavar="{on,off,1,0}",
-        help="Enable verbose finding explanations in the final review artifact (default: off)",
+        help="Toggle verbose finding explanations in the final review artifact (default: on; use off for concise)",
     )
     prp.add_argument(
         "--cod-ledger",
@@ -15510,9 +15510,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--wtf",
         dest="wtf",
         type=_parse_on_off_bool,
-        default=False,
+        default=True,
         metavar="{on,off,1,0}",
-        help="Enable verbose finding explanations in the final review artifact (default: off)",
+        help="Toggle verbose finding explanations in the final review artifact (default: on; use off for concise)",
     )
     rp.add_argument(
         "--cod-ledger",
@@ -15544,9 +15544,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--wtf",
         dest="wtf",
         type=_parse_on_off_bool,
-        default=False,
+        default=True,
         metavar="{on,off,1,0}",
-        help="Enable verbose finding explanations in the final review artifact (default: off)",
+        help="Toggle verbose finding explanations in the final review artifact (default: on; use off for concise)",
     )
     fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
     fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
