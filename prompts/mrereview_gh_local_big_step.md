@@ -57,6 +57,8 @@ $STEP_CITATION_CONTRACT
 ### Steps taken
 - ...
 
+$COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION
+
 ### Findings
 - [Issue, concern, or open question]. Brief supporting detail can continue here as prose — e.g. how the code reaches this state, or what the impact is. Sources: `path/to/file.py:123`, `path/to/other.py:45`
 - [Another issue or concern]. Sources: `path/to/file.py:10`

@@ -4922,6 +4922,7 @@ def validate_multipass_step_grounding(
     artifact_path: Path,
     repo_dir: Path,
     step_index: int,
+    require_hypothesis_ledger: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
     citations: list[dict[str, Any]] = []
@@ -4934,7 +4935,31 @@ def validate_multipass_step_grounding(
         errors.append("Missing '**Focus**:' line.")
 
     sections = _markdown_sections(text)
+    hypothesis_ledger = next((section for section in sections if section.get("title") == "Hypothesis Ledger"), None)
     findings = next((section for section in sections if section.get("title") == "Findings"), None)
+    if require_hypothesis_ledger:
+        if hypothesis_ledger is None:
+            errors.append("Missing '### Hypothesis Ledger' section.")
+        elif findings is not None and int(hypothesis_ledger.get("line") or 0) > int(findings.get("line") or 0):
+            errors.append("'### Hypothesis Ledger' must appear before '### Findings'.")
+        else:
+            ledger_bullets = _section_bullets(hypothesis_ledger)
+            if not ledger_bullets:
+                errors.append("'### Hypothesis Ledger' must include at least one compact bullet.")
+            for bullet_index, bullet in enumerate(ledger_bullets, start=1):
+                body = bullet[2:].strip()
+                if not all(
+                    label in body
+                    for label in (
+                        "suspicious surface:",
+                        "tentative issue:",
+                        "next proof target:",
+                    )
+                ):
+                    errors.append(
+                        "Hypothesis Ledger bullet "
+                        f"#{bullet_index} must include suspicious surface, tentative issue, and next proof target."
+                    )
     if findings is None:
         errors.append("Missing '### Findings' section.")
         return _build_grounding_result(
@@ -4943,6 +4968,7 @@ def validate_multipass_step_grounding(
             artifact_path=artifact_path,
             citations=citations,
             errors=errors,
+            extra={"required_hypothesis_ledger": bool(require_hypothesis_ledger)},
         )
 
     bullets = _section_bullets(findings)
@@ -5006,6 +5032,7 @@ def validate_multipass_step_grounding(
         artifact_path=artifact_path,
         citations=citations,
         errors=errors,
+        extra={"required_hypothesis_ledger": bool(require_hypothesis_ledger)},
     )
 
 
@@ -5976,16 +6003,21 @@ def _validate_or_reuse_step_artifact(
     artifact_path: Path,
     repo_dir: Path,
     step_index: int,
+    require_hypothesis_ledger: bool = False,
 ) -> tuple[bool, dict[str, Any] | None]:
     if grounding_mode == "off":
         return True, None
     entry = _validation_entry_for_stage(meta, _grounding_stage_key_for_step(step_index))
     if entry is not None and entry.get("valid") is True and _grounding_entry_matches_file(entry, artifact_path):
-        return True, entry
+        if require_hypothesis_ledger and entry.get("required_hypothesis_ledger") is not True:
+            entry = None
+        else:
+            return True, entry
     result = validate_multipass_step_grounding(
         artifact_path=artifact_path,
         repo_dir=repo_dir,
         step_index=step_index,
+        require_hypothesis_ledger=require_hypothesis_ledger,
     )
     _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
     return bool(result.get("valid")), result
@@ -6877,6 +6909,7 @@ def _finalize_multipass_step_result(
     codex_meta: dict[str, Any] | None,
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
+    require_hypothesis_ledger: bool = False,
 ) -> str | None:
     success_resume_command: str | None = None
     with progress.mutate():
@@ -6925,6 +6958,7 @@ def _finalize_multipass_step_result(
             artifact_path=entry.output_path,
             repo_dir=repo_dir,
             step_index=entry.index,
+            require_hypothesis_ledger=require_hypothesis_ledger,
         )
         if (
             grounding_mode == "strict"
@@ -6977,6 +7011,7 @@ def _execute_multipass_step_stage(
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
     multipass_cfg: dict[str, Any] | None = None,
+    require_hypothesis_ledger: bool = False,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
@@ -7101,6 +7136,7 @@ def _execute_multipass_step_stage(
                     codex_meta=codex_meta,
                     review_stage=review_stage,
                     prompt_template_name=prompt_template_name,
+                    require_hypothesis_ledger=require_hypothesis_ledger,
                 ) or success_resume_command
                 with progress.mutate():
                     if grounding_attempts:
@@ -10252,6 +10288,7 @@ def _pr_flow_impl(
                             quiet=quiet,
                             ui_enabled=ui_enabled,
                             multipass_cfg=multipass_defaults,
+                            require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
@@ -10703,6 +10740,7 @@ def _run_incremental_completed_multipass_resume(
                     artifact_path=entry.output_path,
                     repo_dir=repo_dir,
                     step_index=entry.index,
+                    require_hypothesis_ledger=cod_ledger_enabled,
                 )
                 progress.flush()
                 should_run = not reusable
@@ -10802,6 +10840,7 @@ def _run_incremental_completed_multipass_resume(
             review_stage="multipass_resume_step",
             prompt_template_name=templates["resume_step"],
             multipass_cfg=multipass_cfg,
+            require_hypothesis_ledger=cod_ledger_enabled,
         )
         success_resume_command = step_resume_command or success_resume_command
     else:
@@ -11588,6 +11627,7 @@ def _resume_flow_impl(
                             artifact_path=entry.output_path,
                             repo_dir=repo_dir,
                             step_index=entry.index,
+                            require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                         )
                         progress.flush()
                         should_run = not reusable
@@ -11687,6 +11727,7 @@ def _resume_flow_impl(
                     quiet=quiet,
                     ui_enabled=ui_enabled,
                     multipass_cfg=multipass_cfg,
+                    require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                 )
                 success_resume_command = step_resume_command or success_resume_command
         else:

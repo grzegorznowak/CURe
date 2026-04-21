@@ -56,6 +56,8 @@ $STEP_CITATION_CONTRACT
 ### Steps taken
 - ...
 
+$COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION
+
 ### Findings
 - [Issue or observation]. Sources: `path/to/file.py:123`
 

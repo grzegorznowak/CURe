@@ -162,9 +162,11 @@ class RenderPromptTests(unittest.TestCase):
         disabled = rf.cod_hypothesis_ledger_prompt_vars(enabled=False)
         self.assertIn("COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE", enabled)
         self.assertIn("COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE", enabled)
+        self.assertIn("COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION", enabled)
         self.assertIn("COD_HYPOTHESIS_LEDGER_SYNTH_GUIDANCE", enabled)
         self.assertIn("broad candidate set", enabled["COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE"])
         self.assertIn("Hypothesis Ledger", enabled["COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE"])
+        self.assertIn("### Hypothesis Ledger", enabled["COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION"])
         self.assertIn("suspicious surface", enabled["COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE"])
         self.assertIn("tentative issue", enabled["COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE"])
         self.assertIn("next proof target", enabled["COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE"])
@@ -174,6 +176,7 @@ class RenderPromptTests(unittest.TestCase):
             {
                 "COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE": "",
                 "COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE": "",
+                "COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION": "",
                 "COD_HYPOTHESIS_LEDGER_SYNTH_GUIDANCE": "",
             },
         )

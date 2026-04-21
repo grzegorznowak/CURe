@@ -1384,6 +1384,7 @@ def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
 def cod_hypothesis_ledger_prompt_vars(*, enabled: bool) -> dict[str, str]:
     plan_guidance = ""
     step_guidance = ""
+    step_output_section = ""
     synth_guidance = ""
     if enabled:
         plan_guidance = textwrap.dedent(
@@ -1405,6 +1406,12 @@ def cod_hypothesis_ledger_prompt_vars(*, enabled: bool) -> dict[str, str]:
             - The ledger is triage evidence, not final proof. Findings still require the trailing `Sources:` citation contract.
             """
         ).strip()
+        step_output_section = textwrap.dedent(
+            """
+            ### Hypothesis Ledger
+            - suspicious surface: ...; tentative issue: ...; next proof target: ...
+            """
+        ).strip()
         synth_guidance = textwrap.dedent(
             """
             Chain-of-Draft hypothesis triage is ENABLED for final synthesis.
@@ -1416,6 +1423,7 @@ def cod_hypothesis_ledger_prompt_vars(*, enabled: bool) -> dict[str, str]:
     return {
         "COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE": plan_guidance,
         "COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE": step_guidance,
+        "COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION": step_output_section,
         "COD_HYPOTHESIS_LEDGER_SYNTH_GUIDANCE": synth_guidance,
     }
 

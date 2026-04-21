@@ -624,6 +624,20 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("next proof target", enabled)
             self.assertIn("### Steps taken", enabled)
             self.assertNotIn("$COD_HYPOTHESIS_LEDGER", enabled)
+            if path.name in {
+                "mrereview_gh_local_big_step.md",
+                "mrereview_gh_local_big_resume_step.md",
+            }:
+                output_format = enabled.split("# Output format", 1)[1]
+                steps_index = output_format.index("### Steps taken")
+                ledger_index = output_format.index("### Hypothesis Ledger")
+                findings_index = output_format.index("### Findings")
+                self.assertLess(steps_index, ledger_index)
+                self.assertLess(ledger_index, findings_index)
+                self.assertIn(
+                    "- suspicious surface: ...; tentative issue: ...; next proof target: ...",
+                    output_format,
+                )
 
             disabled = rf.render_prompt(
                 path.read_text(encoding="utf-8"),
@@ -975,6 +989,70 @@ class MultipassGroundingValidationTests(unittest.TestCase):
             )
             self.assertFalse(result["valid"])
             self.assertIn("missing a trailing `Sources:` suffix", "\n".join(result["errors"]))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_step_grounding_requires_ledger_when_enabled(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_cod_ledger"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Findings",
+                        "- Input is unchecked. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+                require_hypothesis_ledger=True,
+            )
+            self.assertFalse(result["valid"])
+            self.assertIn("Missing '### Hypothesis Ledger' section.", "\n".join(result["errors"]))
+
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Hypothesis Ledger",
+                        "- suspicious surface: pkg/module.py; tentative issue: unchecked input; next proof target: pkg/module.py:2",
+                        "",
+                        "### Findings",
+                        "- Input is unchecked. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+                require_hypothesis_ledger=True,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
