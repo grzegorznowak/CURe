@@ -6,6 +6,14 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
+No entries yet.
+
+## [0.6.0] - 2026-04-21
+
+### Added
+
+- Chain-of-Draft hypothesis triage (`--cod-ledger on`): opt-in compact candidate exploration for multipass reviews. When enabled, each multipass step emits a `Hypothesis Ledger` of suspicious surfaces and tentative issues before synthesis prunes weak candidates and deepens only survivors into full grounded findings. Default-off; independent from `--wtf`.
+
 ### Changed
 
 - Verbose finding cards are now the default review output for `cure pr`, `cure resume`, and `cure followup`; pass `--wtf off` to request the older concise finding format.

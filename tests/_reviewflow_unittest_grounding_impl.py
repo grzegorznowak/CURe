@@ -16178,6 +16178,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     ),
                     current_review_head_sha="feedface",
                     wtf_enabled=True,
+                    cod_ledger_enabled=False,
                 )
 
             prompt = captured["prompt"]
