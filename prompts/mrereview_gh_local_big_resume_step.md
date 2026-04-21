@@ -44,6 +44,7 @@ Safety guardrail:
 4. Think step by step, but keep only a minimal visible draft:
    - Put these under `### Steps taken` (5 words max per line).
 5. Never speculate about code you haven't read.
+$COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE
 6. Trailing citation contract (shared across review prompts):
 $STEP_CITATION_CONTRACT
 
@@ -54,6 +55,8 @@ $STEP_CITATION_CONTRACT
 
 ### Steps taken
 - ...
+
+$COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION
 
 ### Findings
 - [Issue or observation]. Sources: `path/to/file.py:123`

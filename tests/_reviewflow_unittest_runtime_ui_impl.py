@@ -2636,22 +2636,28 @@ class TuiDashboardTests(unittest.TestCase):
                 "latest",
                 "--wtf",
                 "on",
+                "--cod-ledger",
+                "1",
             ]
         )
         self.assertEqual(args.if_reviewed, "latest")
         self.assertTrue(args.wtf)
+        self.assertTrue(args.cod_ledger)
 
         args2 = p.parse_args(["followup", "session-123", "--no-update", "--wtf", "0"])
         self.assertEqual(args2.session_id, "session-123")
         self.assertTrue(args2.no_update)
         self.assertFalse(args2.wtf)
+        self.assertFalse(hasattr(args2, "cod_ledger"))
 
-        args_resume = p.parse_args(["resume", "session-123", "--wtf", "1"])
+        args_resume = p.parse_args(["resume", "session-123", "--wtf", "1", "--cod-ledger", "on"])
         self.assertEqual(args_resume.session_id, "session-123")
         self.assertTrue(args_resume.wtf)
+        self.assertTrue(args_resume.cod_ledger)
 
         args_resume_default = p.parse_args(["resume", "session-456"])
         self.assertFalse(args_resume_default.wtf)
+        self.assertFalse(args_resume_default.cod_ledger)
 
         args_followup_default = p.parse_args(["followup", "session-789"])
         self.assertFalse(args_followup_default.wtf)
@@ -2707,11 +2713,14 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertRegex(pr_help, r"not\s+recommended")
         self.assertIn("Skip running the built-in review agent", pr_help)
         self.assertIn("--wtf {on,off,1,0}", pr_help)
+        self.assertIn("--cod-ledger {on,off,1,0}", pr_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", pr_help)
         self.assertNotIn("--no-index", resume_help)
         self.assertIn("--wtf {on,off,1,0}", resume_help)
+        self.assertIn("--cod-ledger {on,off,1,0}", resume_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", resume_help)
         self.assertIn("--wtf {on,off,1,0}", followup_help)
+        self.assertNotIn("--cod-ledger", followup_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", followup_help)
         self.assertIn("Do not stream review-agent output", zip_help)
         self.assertNotIn("codex review", pr_help.lower())

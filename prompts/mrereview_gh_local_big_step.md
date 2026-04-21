@@ -45,6 +45,7 @@ Safety guardrail:
      or multiple sentences).
    - Do not include positive observations or compliments here — those
      belong in the final synthesis step's `### Strengths` section.
+$COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE
 6. Trailing citation contract (shared across review prompts):
 $STEP_CITATION_CONTRACT
 
@@ -55,6 +56,8 @@ $STEP_CITATION_CONTRACT
 
 ### Steps taken
 - ...
+
+$COD_HYPOTHESIS_LEDGER_STEP_OUTPUT_SECTION
 
 ### Findings
 - [Issue, concern, or open question]. Brief supporting detail can continue here as prose — e.g. how the code reaches this state, or what the impact is. Sources: `path/to/file.py:123`, `path/to/other.py:45`

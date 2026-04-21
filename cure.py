@@ -4534,7 +4534,7 @@ def _parse_on_off_bool(value: str) -> bool:
         return True
     if normalized in {"off", "0"}:
         return False
-    raise argparse.ArgumentTypeError("--wtf must be one of: on, off, 1, 0")
+    raise argparse.ArgumentTypeError("must be one of: on, off, 1, 0")
 
 
 def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
@@ -4922,6 +4922,7 @@ def validate_multipass_step_grounding(
     artifact_path: Path,
     repo_dir: Path,
     step_index: int,
+    require_hypothesis_ledger: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
     citations: list[dict[str, Any]] = []
@@ -4934,7 +4935,31 @@ def validate_multipass_step_grounding(
         errors.append("Missing '**Focus**:' line.")
 
     sections = _markdown_sections(text)
+    hypothesis_ledger = next((section for section in sections if section.get("title") == "Hypothesis Ledger"), None)
     findings = next((section for section in sections if section.get("title") == "Findings"), None)
+    if require_hypothesis_ledger:
+        if hypothesis_ledger is None:
+            errors.append("Missing '### Hypothesis Ledger' section.")
+        elif findings is not None and int(hypothesis_ledger.get("line") or 0) > int(findings.get("line") or 0):
+            errors.append("'### Hypothesis Ledger' must appear before '### Findings'.")
+        else:
+            ledger_bullets = _section_bullets(hypothesis_ledger)
+            if not ledger_bullets:
+                errors.append("'### Hypothesis Ledger' must include at least one compact bullet.")
+            for bullet_index, bullet in enumerate(ledger_bullets, start=1):
+                body = bullet[2:].strip()
+                if not all(
+                    label in body
+                    for label in (
+                        "suspicious surface:",
+                        "tentative issue:",
+                        "next proof target:",
+                    )
+                ):
+                    errors.append(
+                        "Hypothesis Ledger bullet "
+                        f"#{bullet_index} must include suspicious surface, tentative issue, and next proof target."
+                    )
     if findings is None:
         errors.append("Missing '### Findings' section.")
         return _build_grounding_result(
@@ -4943,6 +4968,7 @@ def validate_multipass_step_grounding(
             artifact_path=artifact_path,
             citations=citations,
             errors=errors,
+            extra={"required_hypothesis_ledger": bool(require_hypothesis_ledger)},
         )
 
     bullets = _section_bullets(findings)
@@ -5006,6 +5032,7 @@ def validate_multipass_step_grounding(
         artifact_path=artifact_path,
         citations=citations,
         errors=errors,
+        extra={"required_hypothesis_ledger": bool(require_hypothesis_ledger)},
     )
 
 
@@ -5976,16 +6003,21 @@ def _validate_or_reuse_step_artifact(
     artifact_path: Path,
     repo_dir: Path,
     step_index: int,
+    require_hypothesis_ledger: bool = False,
 ) -> tuple[bool, dict[str, Any] | None]:
     if grounding_mode == "off":
         return True, None
     entry = _validation_entry_for_stage(meta, _grounding_stage_key_for_step(step_index))
     if entry is not None and entry.get("valid") is True and _grounding_entry_matches_file(entry, artifact_path):
-        return True, entry
+        if require_hypothesis_ledger and entry.get("required_hypothesis_ledger") is not True:
+            entry = None
+        else:
+            return True, entry
     result = validate_multipass_step_grounding(
         artifact_path=artifact_path,
         repo_dir=repo_dir,
         step_index=step_index,
+        require_hypothesis_ledger=require_hypothesis_ledger,
     )
     _update_grounding_state(meta=meta, work_dir=work_dir, grounding_mode=grounding_mode, result=result)
     return bool(result.get("valid")), result
@@ -6388,6 +6420,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
     entries: list[MultipassStepEntry] = []
@@ -6411,6 +6444,7 @@ def _build_multipass_step_entries(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "PLAN_JSON_PATH": str(plan_json_path),
                 "STEP_ID": step_id,
                 "STEP_TITLE": step_title,
@@ -6469,6 +6503,7 @@ def _build_incremental_resume_step_entries(
     previous_review_md_path: Path,
     previous_review_head_sha: str,
     current_review_head_sha: str,
+    cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["resume_step"])
     entries: list[MultipassStepEntry] = []
@@ -6494,6 +6529,7 @@ def _build_incremental_resume_step_entries(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "PREVIOUS_REVIEW_MD": str(previous_review_md_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": previous_review_head_sha,
@@ -6873,6 +6909,7 @@ def _finalize_multipass_step_result(
     codex_meta: dict[str, Any] | None,
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
+    require_hypothesis_ledger: bool = False,
 ) -> str | None:
     success_resume_command: str | None = None
     with progress.mutate():
@@ -6921,6 +6958,7 @@ def _finalize_multipass_step_result(
             artifact_path=entry.output_path,
             repo_dir=repo_dir,
             step_index=entry.index,
+            require_hypothesis_ledger=require_hypothesis_ledger,
         )
         if (
             grounding_mode == "strict"
@@ -6973,6 +7011,7 @@ def _execute_multipass_step_stage(
     review_stage: str = "multipass_step",
     prompt_template_name: str | None = None,
     multipass_cfg: dict[str, Any] | None = None,
+    require_hypothesis_ledger: bool = False,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
@@ -7097,6 +7136,7 @@ def _execute_multipass_step_stage(
                     codex_meta=codex_meta,
                     review_stage=review_stage,
                     prompt_template_name=prompt_template_name,
+                    require_hypothesis_ledger=require_hypothesis_ledger,
                 ) or success_resume_command
                 with progress.mutate():
                     if grounding_attempts:
@@ -10071,6 +10111,9 @@ def _pr_flow_impl(
                                 review_intelligence_cfg,
                                 capability_summary=review_intelligence_capabilities,
                             ),
+                            **cod_hypothesis_ledger_prompt_vars(
+                                enabled=bool(getattr(args, "cod_ledger", False))
+                            ),
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
@@ -10201,6 +10244,7 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
+                        cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
                     )
                     for entry in step_entries:
                         _ensure_multipass_run_entry(
@@ -10244,6 +10288,7 @@ def _pr_flow_impl(
                             quiet=quiet,
                             ui_enabled=ui_enabled,
                             multipass_cfg=multipass_defaults,
+                            require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
@@ -10284,6 +10329,9 @@ def _pr_flow_impl(
                                 ),
                                 **verbose_review_findings_prompt_vars(
                                     enabled=bool(getattr(args, "wtf", False))
+                                ),
+                                **cod_hypothesis_ledger_prompt_vars(
+                                    enabled=bool(getattr(args, "cod_ledger", False))
                                 ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
@@ -10499,6 +10547,7 @@ def _run_incremental_completed_multipass_resume(
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
     wtf_enabled: bool,
+    cod_ledger_enabled: bool,
 ) -> str | None:
     templates = incremental_resume_prompt_template_names()
     mp = progress.meta.setdefault("multipass", {})
@@ -10558,6 +10607,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -10675,6 +10725,7 @@ def _run_incremental_completed_multipass_resume(
         previous_review_md_path=previous_review_snapshot_path,
         previous_review_head_sha=str(previous_review_point.head_sha or "").strip(),
         current_review_head_sha=current_review_head_sha,
+        cod_ledger_enabled=cod_ledger_enabled,
     ):
         should_run = False
         if entry.step_id in reopen_step_ids or entry.index > base_step_count:
@@ -10689,6 +10740,7 @@ def _run_incremental_completed_multipass_resume(
                     artifact_path=entry.output_path,
                     repo_dir=repo_dir,
                     step_index=entry.index,
+                    require_hypothesis_ledger=cod_ledger_enabled,
                 )
                 progress.flush()
                 should_run = not reusable
@@ -10788,6 +10840,7 @@ def _run_incremental_completed_multipass_resume(
             review_stage="multipass_resume_step",
             prompt_template_name=templates["resume_step"],
             multipass_cfg=multipass_cfg,
+            require_hypothesis_ledger=cod_ledger_enabled,
         )
         success_resume_command = step_resume_command or success_resume_command
     else:
@@ -10847,6 +10900,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
@@ -11342,6 +11396,7 @@ def _resume_flow_impl(
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
                 wtf_enabled=bool(getattr(args, "wtf", False)),
+                cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
             )
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()
@@ -11422,6 +11477,9 @@ def _resume_flow_impl(
                         **review_intelligence_prompt_vars(
                             review_intelligence_cfg,
                             capability_summary=review_intelligence_capabilities,
+                        ),
+                        **cod_hypothesis_ledger_prompt_vars(
+                            enabled=bool(getattr(args, "cod_ledger", False))
                         ),
                         "MAX_STEPS": str(max_steps),
                     },
@@ -11551,6 +11609,7 @@ def _resume_flow_impl(
             agent_desc=agent_desc,
             review_intelligence_cfg=review_intelligence_cfg,
             review_intelligence_capabilities=review_intelligence_capabilities,
+            cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
         )
         step_entries: list[MultipassStepEntry] = []
         for entry in base_step_entries:
@@ -11568,6 +11627,7 @@ def _resume_flow_impl(
                             artifact_path=entry.output_path,
                             repo_dir=repo_dir,
                             step_index=entry.index,
+                            require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                         )
                         progress.flush()
                         should_run = not reusable
@@ -11667,6 +11727,7 @@ def _resume_flow_impl(
                     quiet=quiet,
                     ui_enabled=ui_enabled,
                     multipass_cfg=multipass_cfg,
+                    require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
                 )
                 success_resume_command = step_resume_command or success_resume_command
         else:
@@ -11750,6 +11811,9 @@ def _resume_flow_impl(
                         ),
                         **verbose_review_findings_prompt_vars(
                             enabled=bool(getattr(args, "wtf", False))
+                        ),
+                        **cod_hypothesis_ledger_prompt_vars(
+                            enabled=bool(getattr(args, "cod_ledger", False))
                         ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
@@ -15192,6 +15256,7 @@ from cure_runtime import (
 from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
+    cod_hypothesis_ledger_prompt_vars,
     compute_pr_stats,
     detect_multipass_plan_abort_contradiction,
     ensure_base_cache as shared_ensure_base_cache,
@@ -15372,6 +15437,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         metavar="{on,off,1,0}",
         help="Enable verbose finding explanations in the final review artifact (default: off)",
     )
+    prp.add_argument(
+        "--cod-ledger",
+        dest="cod_ledger",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
+    )
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     prp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
@@ -15440,6 +15513,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=False,
         metavar="{on,off,1,0}",
         help="Enable verbose finding explanations in the final review artifact (default: off)",
+    )
+    rp.add_argument(
+        "--cod-ledger",
+        dest="cod_ledger",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
     )
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     rp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")

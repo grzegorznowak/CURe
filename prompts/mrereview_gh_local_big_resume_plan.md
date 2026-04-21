@@ -49,6 +49,7 @@ Safety guardrail:
    - `synth_only`: only when the delta is limited enough that the previous review context plus a fresh final synthesis is sufficient.
    - `targeted`: when one or more existing steps should be reopened, and/or one or more new steps should be added to cover newly introduced change surfaces.
    - For broad deltas, prefer `targeted` with all relevant existing step ids reopened and any needed new steps added.
+$COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE
 
 # Output
 Provide:
