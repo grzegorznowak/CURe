@@ -4528,6 +4528,15 @@ def _singlepass_review_phase_name(*, provider: object) -> str:
     return "review"
 
 
+def _parse_on_off_bool(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"on", "1"}:
+        return True
+    if normalized in {"off", "0"}:
+        return False
+    raise argparse.ArgumentTypeError("--wtf must be one of: on, off, 1, 0")
+
+
 def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
     if verdicts is None:
         return False
@@ -10273,6 +10282,9 @@ def _pr_flow_impl(
                                     review_intelligence_cfg,
                                     capability_summary=review_intelligence_capabilities,
                                 ),
+                                **verbose_review_findings_prompt_vars(
+                                    enabled=bool(getattr(args, "wtf", False))
+                                ),
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
@@ -10342,6 +10354,11 @@ def _pr_flow_impl(
                         prompt_extra_vars = review_intelligence_prompt_vars(
                             review_intelligence_cfg,
                             capability_summary=review_intelligence_capabilities,
+                        )
+                        prompt_extra_vars.update(
+                            verbose_review_findings_prompt_vars(
+                                enabled=bool(getattr(args, "wtf", False))
+                            )
                         )
                         prompt_extra_vars["PR_CONTEXT_PATH"] = str(pr_context_path)
                         rendered = render_prompt(
@@ -10481,6 +10498,7 @@ def _run_incremental_completed_multipass_resume(
     ui_enabled: bool,
     previous_review_point: SessionReviewPoint,
     current_review_head_sha: str,
+    wtf_enabled: bool,
 ) -> str | None:
     templates = incremental_resume_prompt_template_names()
     mp = progress.meta.setdefault("multipass", {})
@@ -10829,6 +10847,7 @@ def _run_incremental_completed_multipass_resume(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
                 ),
+                **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -10903,6 +10922,7 @@ def _resume_flow_impl(
             codex_model=getattr(args, "codex_model", None),
             codex_effort=getattr(args, "codex_effort", None),
             codex_plan_effort=getattr(args, "codex_plan_effort", None),
+            wtf=bool(getattr(args, "wtf", False)),
             quiet=bool(getattr(args, "quiet", False)),
             no_stream=bool(getattr(args, "no_stream", False)),
             ui=str(getattr(args, "ui", "auto") or "auto"),
@@ -11321,6 +11341,7 @@ def _resume_flow_impl(
                 ui_enabled=ui_enabled,
                 previous_review_point=incremental_resume_review_point,
                 current_review_head_sha=incremental_resume_head_sha,
+                wtf_enabled=bool(getattr(args, "wtf", False)),
             )
             if persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None:
                 progress.flush()
@@ -11727,6 +11748,9 @@ def _resume_flow_impl(
                             review_intelligence_cfg,
                             capability_summary=review_intelligence_capabilities,
                         ),
+                        **verbose_review_findings_prompt_vars(
+                            enabled=bool(getattr(args, "wtf", False))
+                        ),
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
                         "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
@@ -12049,6 +12073,9 @@ def _followup_flow_impl(
                 **review_intelligence_prompt_vars(
                     review_intelligence_cfg,
                     capability_summary=review_intelligence_capabilities,
+                ),
+                **verbose_review_findings_prompt_vars(
+                    enabled=bool(getattr(args, "wtf", False))
                 ),
                 "PREVIOUS_REVIEW_MD": str(review_md_path),
                 "HEAD_SHA_BEFORE": head_before,
@@ -15178,6 +15205,7 @@ from cure_flows import (
     resolve_prompt_profile,
     restore_session_chunkhound_db_from_baseline,
     review_intelligence_prompt_vars,
+    verbose_review_findings_prompt_vars,
     validate_operator_chunkhound_seed_source,
     validate_and_record_chunkhound_tool_proof,
     validate_chunkhound_tool_proof,
@@ -15336,6 +15364,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Use deterministic staged-helper ChunkHound stub responses for `cure pr` without real ChunkHound calls",
     )
     prp.add_argument("--no-review", action="store_true", help="Skip running the built-in review agent")
+    prp.add_argument(
+        "--wtf",
+        dest="wtf",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable verbose finding explanations in the final review artifact (default: off)",
+    )
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     prp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     prp.add_argument("--ui", choices=["auto", "on", "off"], default="auto", help="Terminal UI dashboard mode")
@@ -15397,6 +15433,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     )
     rp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
     rp.add_argument("--no-index", action="store_true", help=argparse.SUPPRESS)
+    rp.add_argument(
+        "--wtf",
+        dest="wtf",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable verbose finding explanations in the final review artifact (default: off)",
+    )
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     rp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
@@ -15414,6 +15458,14 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         dest="codex_plan_effort",
         default=None,
         help=argparse.SUPPRESS,
+    )
+    fup.add_argument(
+        "--wtf",
+        dest="wtf",
+        type=_parse_on_off_bool,
+        default=False,
+        metavar="{on,off,1,0}",
+        help="Enable verbose finding explanations in the final review artifact (default: off)",
     )
     fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
     fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")

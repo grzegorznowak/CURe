@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -1338,6 +1339,46 @@ def review_intelligence_prompt_vars(
             capability_summary=capability_summary,
         )
     }
+
+
+def verbose_review_findings_prompt_vars(*, enabled: bool) -> dict[str, str]:
+    guidance = ""
+    if enabled:
+        guidance = textwrap.dedent(
+            """
+            Verbose finding explanation mode is ENABLED for this final review artifact.
+            - Keep the default top-level section layout unchanged.
+            - For every concrete issue under `### In Scope Issues` or `### Out of Scope Issues`, format the finding as a collapsible card using this exact structure:
+
+              ```
+              - <finding summary> Sources: `file:line`
+
+                <details open>
+                <summary><b>SEVERITY_LABEL</b> severity · <b>LIKELIHOOD_LABEL</b> likelihood</summary>
+
+                **Why:** <simple operator-facing explanation of why the change is being requested>
+
+                **Assumptions / Preconditions:** <required conditions, or `None.`>
+
+                **Downgrade Factors:** <what would reduce confidence or impact, or `None.`>
+
+                **Code Trail:** <grounded code-path explanation that explains how the cited files connect to the finding>
+
+                **Reproduction:** <brief reproduction narrative or simple text diagram>, or `Not applicable.`
+
+                </details>
+              ```
+
+            - SEVERITY_LABEL must be one of: Critical, High, Medium, Low, Info.
+            - LIKELIHOOD_LABEL must be one of: High, Medium, Low, Not Assessed.
+            - Keep `Why` in simple operator-facing language and do not expose hidden chain-of-thought.
+            - The summary bullet's trailing `Sources:` suffix is mandatory; strict synth grounding validates the top-level bullet line, not nested card content.
+            - Prefer `Likelihood: Not Assessed` over fake precision when the evidence is insufficient.
+            - The `<details open>` tag ensures the card is expanded by default but collapsible by the reader.
+            - Keep `### Strengths` and `### Reusability` as concise cited bullets (no cards needed).
+            """
+        ).strip()
+    return {"VERBOSE_FINDING_MODE_GUIDANCE": guidance}
 
 def render_prompt(
     template_text: str,
@@ -3155,6 +3196,7 @@ __all__ = [
     'resolve_session_baseline_selection',
     'restore_session_chunkhound_db_from_baseline',
     'review_intelligence_prompt_vars',
+    'verbose_review_findings_prompt_vars',
     'chunkhound_env',
     'same_device',
     'validate_operator_chunkhound_seed_source',

@@ -6476,6 +6476,95 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_synth_grounding_accepts_verbose_card_with_top_level_sources_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            repo_dir.mkdir()
+            work_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            review_md = root / "review.md"
+            review_md.write_text(
+                "\n".join(
+                    [
+                        "### Steps taken",
+                        "- Read step output",
+                        "",
+                        "**Summary**: ok",
+                        "",
+                        "## Business / Product Assessment",
+                        "**Verdict**: APPROVE",
+                        "",
+                        "### Strengths",
+                        "- Business value is clear. Sources: `src/app.py:1`",
+                        "",
+                        "### In Scope Issues",
+                        "- Card-shaped issue. Sources: `src/app.py:2`",
+                        "",
+                        "  <details open>",
+                        "  <summary><b>High</b> severity · <b>Medium</b> likelihood</summary>",
+                        "",
+                        "  **Why:** Operators need the request to be easy to inspect.",
+                        "",
+                        "  **Assumptions / Preconditions:** A verbose final review is requested.",
+                        "",
+                        "  **Downgrade Factors:** None.",
+                        "",
+                        "  **Code Trail:** The top-level bullet carries the grounding citation.",
+                        "",
+                        "  **Reproduction:** Not applicable.",
+                        "",
+                        "  </details>",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "## Technical Assessment",
+                        "**Verdict**: REQUEST CHANGES",
+                        "",
+                        "### Strengths",
+                        "- Technical read happened. Sources: `src/app.py:1`",
+                        "",
+                        "### In Scope Issues",
+                        "- Technical card-shaped issue. Sources: `src/app.py:3`",
+                        "",
+                        "  <details open>",
+                        "  <summary><b>Medium</b> severity · <b>Low</b> likelihood</summary>",
+                        "",
+                        "  **Why:** The finding remains grounded by the parent bullet.",
+                        "",
+                        "  **Assumptions / Preconditions:** A verbose final review is requested.",
+                        "",
+                        "  **Downgrade Factors:** None.",
+                        "",
+                        "  **Code Trail:** The citation is on the validated summary bullet.",
+                        "",
+                        "  **Reproduction:** Not applicable.",
+                        "",
+                        "  </details>",
+                        "",
+                        "### Out of Scope Issues",
+                        "- None.",
+                        "",
+                        "### Reusability",
+                        "- Artifact stays inspectable. Sources: `src/app.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = rf.validate_multipass_synth_grounding(
+                artifact_path=review_md,
+                step_outputs=[],
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+            )
+
+        self.assertTrue(validation["valid"], validation["errors"])
+
     def test_step_grounding_rejects_mixed_complete_and_incomplete_sources_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -15976,3 +16065,123 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             rf._grounding_skipped_step_ids(meta, prefer_persisted=True),
             {"01"},
         )
+
+    def test_incremental_completed_resume_threads_verbose_guidance_into_resume_synth_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text("previous final review\n", encoding="utf-8")
+            previous_review = root / "previous-review.md"
+            previous_review.write_text("previous snapshot\n", encoding="utf-8")
+            existing_plan = work_dir / "review_plan.json"
+            existing_plan.write_text(
+                json.dumps({"steps": [{"id": "01", "title": "step one", "focus": "focus"}]}),
+                encoding="utf-8",
+            )
+            step_output = session_dir / "review.step-01.md"
+            step_output.write_text("step output\n", encoding="utf-8")
+            meta_path = session_dir / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init(
+                {
+                    "session_id": "session-1",
+                    "pr_url": "https://github.com/acme/repo/pull/1",
+                    "number": 1,
+                    "multipass": {
+                        "runs": [],
+                        "plan_json_path": str(existing_plan),
+                        "resume": {},
+                        "artifacts": {},
+                    },
+                    "llm": {},
+                    "codex": {},
+                }
+            )
+
+            captured: dict[str, str] = {}
+
+            def fake_execute_multipass_synth_stage(**kwargs: Any) -> None:
+                captured["prompt"] = str(kwargs["synth_prompt"])
+                return None
+
+            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            stage_llm = {
+                "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
+                "resolution_meta": {"resolved": {"reasoning_effort": "medium"}},
+                "meta": {"provider": "openai", "effective_reasoning_effort": "medium"},
+            }
+            step_entries = [
+                rf.MultipassStepEntry(
+                    index=1,
+                    step_id="01",
+                    step_title="step one",
+                    step_focus="focus",
+                    output_path=step_output,
+                    prompt="step prompt",
+                    should_run=False,
+                )
+            ]
+
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "parse_incremental_resume_plan_json",
+                    return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
+                ),
+                mock.patch.object(rf, "_record_multipass_stage_llm"),
+                mock.patch.object(rf, "record_llm_usage"),
+                mock.patch.object(rf, "record_llm_resume", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
+                mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
+                mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
+            ):
+                rf._run_incremental_completed_multipass_resume(
+                    progress=progress,
+                    session_id="session-1",
+                    session_dir=session_dir,
+                    repo_dir=repo_dir,
+                    work_dir=work_dir,
+                    review_md_path=review_md,
+                    meta=progress.meta,
+                    pr=rf.parse_pr_url("https://github.com/acme/repo/pull/1"),
+                    base_ref_for_review="cure_base__main",
+                    agent_desc="",
+                    review_intelligence_cfg=_review_intelligence_cfg(),
+                    review_intelligence_capabilities=None,
+                    plan_llm=stage_llm,
+                    step_llm=stage_llm,
+                    synth_llm=stage_llm,
+                    plan_runtime_policy={},
+                    step_runtime_policy={},
+                    synth_runtime_policy={},
+                    multipass_cfg={},
+                    env={},
+                    stream=False,
+                    add_dirs=[],
+                    grounding_mode="off",
+                    codex_meta=None,
+                    quiet=True,
+                    ui_enabled=False,
+                    previous_review_point=rf.SessionReviewPoint(
+                        kind="complete",
+                        artifact_path=previous_review,
+                        head_sha="deadbeef",
+                        completed_at="2026-04-20T00:00:00+00:00",
+                    ),
+                    current_review_head_sha="feedface",
+                    wtf_enabled=True,
+                )
+
+            prompt = captured["prompt"]
+            self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", prompt)
+            self.assertIn("<details open>", prompt)
+            self.assertIn("SEVERITY_LABEL", prompt)
+            self.assertIn("LIKELIHOOD_LABEL", prompt)
