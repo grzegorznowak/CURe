@@ -8,6 +8,16 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.6.1] - 2026-04-22
+
+### Fixed
+
+- Review prompts now instruct the model to suppress duplicate findings that repeat across cross-assessment passes, reducing redundant noise in final review output.
+
+### Changed
+
+- Release process no longer commits evidence files to the repository.
+
 ## [0.6.0] - 2026-04-21
 
 ### Added
