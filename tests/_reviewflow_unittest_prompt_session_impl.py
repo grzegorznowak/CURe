@@ -723,15 +723,39 @@ class PromptTemplateTests(unittest.TestCase):
             ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
             ROOT / "prompts" / "mrereview_zip.md",
         ]
+        duplicate_suppression_prompt_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("For `Business / Product Assessment`, `In Scope` means", text)
             self.assertIn("For `Technical Assessment`, `In Scope` means", text)
+            self.assertNotIn("`In Scope` means the PR directly owns the behavior/code in question.", text)
+
+        for path in duplicate_suppression_prompt_paths:
+            text = path.read_text(encoding="utf-8")
             self.assertIn(
+                "Duplicate issue ownership: if the same underlying issue qualifies for both assessment sections "
+                "and has product, operator, user, acceptance, or review-verdict impact, report the canonical "
+                "issue block only under `Business / Product Assessment`.",
+                text,
+            )
+            self.assertIn(
+                "Do not restate the same defect or debt item as another issue block under "
+                "`Technical Assessment`; reserve Technical for distinct implementation issues, strengths, "
+                "constraints, or reusability observations.",
+                text,
+            )
+            self.assertNotIn(
                 "The same issue may be `In Scope` for business/product and `Out of Scope` for technical",
                 text,
             )
-            self.assertNotIn("`In Scope` means the PR directly owns the behavior/code in question.", text)
 
     def test_review_docs_explain_section_relative_scope(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

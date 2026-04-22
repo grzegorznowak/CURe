@@ -51,7 +51,8 @@ If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**V
 - For `Business / Product Assessment`, `In Scope` means the currently requested outcome as established by the ticket or product context first, then the PR description, plus clarifying discussion when present.
 - For `Technical Assessment`, `In Scope` means code paths, behavior, and implementation responsibilities the PR directly changes or owns.
 - `Out of Scope` means adjacent debt, follow-on work, or auxiliary improvements outside that section's scope basis.
-- The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
+- Duplicate issue ownership: if the same underlying issue qualifies for both assessment sections and has product, operator, user, acceptance, or review-verdict impact, report the canonical issue block only under `Business / Product Assessment`.
+- Do not restate the same defect or debt item as another issue block under `Technical Assessment`; reserve Technical for distinct implementation issues, strengths, constraints, or reusability observations.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
 - Trailing citation contract (shared across review prompts):
