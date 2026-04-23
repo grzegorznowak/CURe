@@ -364,6 +364,7 @@ If Jira context is required in a CURe session, keep auth local, prefer `~/.netrc
 
 Fast local check:
 
+
 ```bash
 ./selftest.sh
 ```
