@@ -1989,6 +1989,74 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_prepare_review_agent_runtime_injects_codex_model_context_window_override(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_codex_context_window"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive"),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+            self.assertIn("model_context_window=1000000", runtime["codex_config_overrides"])
+            self.assertIn("model_context_window=1000000", runtime["metadata"]["codex_config_overrides"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_does_not_inject_codex_context_window_for_claude(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_claude_context_window"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive"),
+                    resolved=self._llm_resolved("claude"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+            self.assertNotIn("model_context_window=1000000", runtime["codex_config_overrides"])
+            self.assertNotIn("model_context_window=1000000", runtime["metadata"].get("codex_config_overrides", []))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_prepare_review_agent_runtime_uses_permissive_claude_profile_and_stages_files(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_claude"
         try:

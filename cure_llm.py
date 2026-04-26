@@ -103,6 +103,7 @@ _LIVE_PROGRESS_TIMELINE_MAX = 12
 _CURE_CHUNKHOUND_HELPER_ENV = "CURE_CHUNKHOUND_HELPER"
 _CURE_CHUNKHOUND_DRY_RUN_ENV = "CURE_CHUNKHOUND_DRY_RUN"
 _CURE_CHUNKHOUND_ACCESS_MODE = "cli_helper_daemon"
+_CODEX_MODEL_CONTEXT_WINDOW_OVERRIDE = "model_context_window=1000000"
 
 
 def _looks_like_codex_review_artifact(text: str) -> bool:
@@ -3136,14 +3137,17 @@ def prepare_review_agent_runtime(
         if runtime["approval_policy"]:
             codex_flags.extend(["-a", str(runtime["approval_policy"])])
         runtime["codex_flags"] = codex_flags
-        runtime["codex_config_overrides"] = codex_mcp_overrides_for_reviewflow(
-            enable_sandbox_chunkhound=enable_mcp,
-            sandbox_repo_dir=repo_dir,
-            chunkhound_db_path=chunkhound_db_path,
-            chunkhound_cwd=chunkhound_cwd,
-            chunkhound_config_path=chunkhound_config_path,
-            paths=paths,
-        )
+        runtime["codex_config_overrides"] = [
+            _CODEX_MODEL_CONTEXT_WINDOW_OVERRIDE,
+            *codex_mcp_overrides_for_reviewflow(
+                enable_sandbox_chunkhound=enable_mcp,
+                sandbox_repo_dir=repo_dir,
+                chunkhound_db_path=chunkhound_db_path,
+                chunkhound_cwd=chunkhound_cwd,
+                chunkhound_config_path=chunkhound_config_path,
+                paths=paths,
+            ),
+        ]
     elif provider == "claude":
         claude_dir = work_dir / "claude"
         env["BASH_DEFAULT_TIMEOUT_MS"] = "600000"
@@ -3200,6 +3204,7 @@ def prepare_review_agent_runtime(
         "env_keys": sorted(env.keys()),
         "add_dirs": [str(path) for path in add_dirs],
         "staged_paths": dict(runtime["staged_paths"]),
+        "codex_config_overrides": list(runtime["codex_config_overrides"]),
     }
     return runtime
 

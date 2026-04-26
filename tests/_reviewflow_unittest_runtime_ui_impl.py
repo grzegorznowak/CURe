@@ -44,6 +44,18 @@ class CodexCommandTests(unittest.TestCase):
         self.assertIn("--json", cmd)
         self.assertLess(cmd.index("--json"), cmd.index("--output-last-message"))
 
+    def test_build_codex_exec_cmd_preserves_model_context_window_override_order(self) -> None:
+        cmd = rf.build_codex_exec_cmd(
+            repo_dir=ROOT,
+            codex_flags=["-m", "gpt-5.2"],
+            codex_config_overrides=["model_context_window=1000000"],
+            review_md_path=ROOT / ".tmp_test_review.md",
+            prompt="hello",
+        )
+        override_index = cmd.index("model_context_window=1000000")
+        self.assertEqual(cmd[override_index - 1], "-c")
+        self.assertLess(override_index, cmd.index("exec"))
+
     def test_codex_mcp_overrides_only_disable_global_chunkhound_server(self) -> None:
         repo = ROOT
         ch_cfg = ROOT / ".tmp_test_chunkhound_env.json"
