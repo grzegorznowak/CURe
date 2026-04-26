@@ -20,6 +20,11 @@ Read the previous review artifact, the resume plan JSON, and the listed step out
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
+# Claim Verification Rule
+Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.
+
+Do not resolve disagreements between steps by majority, confidence, or persuasiveness. Resolve them by inspecting primary evidence, and prefer the most conservative interpretation when evidence remains ambiguous.
+
 Safety guardrail:
 - Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
 - If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.
