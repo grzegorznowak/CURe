@@ -13093,6 +13093,24 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             "dangerously_bypass_approvals_and_sandbox": True,
         }
 
+    def test_runtime_policy_for_multipass_stage_preserves_codex_config_overrides(self) -> None:
+        runtime_policy = self._codex_runtime_policy()
+        runtime_policy["codex_config_overrides"] = ["model_context_window=1000000"]
+
+        stage_policy = rf._runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved={
+                "provider": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "medium",
+                "max_output_tokens": None,
+            },
+            llm_resolution_meta={"resolved": {}},
+        )
+
+        self.assertIn("model_context_window=1000000", stage_policy["codex_config_overrides"])
+        self.assertIn("-m", stage_policy["codex_flags"])
+
     def _fake_materialize_chunkhound_env_config(
         self,
         *,
