@@ -8,6 +8,13 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.6.2] - 2026-04-27
+
+### Changed
+
+- Codex review runs now apply a one-million-token model context window override and preserve it through multipass stages.
+- Synthesis prompts now require final review claims to be checked against primary evidence instead of treating intermediate step outputs as authoritative.
+
 ## [0.6.1] - 2026-04-22
 
 ### Fixed
