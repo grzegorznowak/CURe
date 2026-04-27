@@ -553,6 +553,34 @@ def build_llm_meta(
     }
 
 
+def build_utility_llm_meta(
+    *,
+    resolved: dict[str, Any],
+    resolution_meta: dict[str, Any],
+    env: dict[str, str],
+    adapter_meta: dict[str, Any] | None = None,
+    helpers: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = build_llm_meta(
+        resolved=resolved,
+        resolution_meta=resolution_meta,
+        env=env,
+        adapter_meta=adapter_meta,
+        helpers=helpers,
+    )
+    resolved_meta = resolution_meta.get("resolved") if isinstance(resolution_meta.get("resolved"), dict) else {}
+    for key in (
+        "preset_source",
+        "preset_source_detail",
+        "preset_inherited",
+        "model_inherited",
+        "reasoning_effort_inherited",
+    ):
+        if key in resolved_meta:
+            meta[key] = resolved_meta[key]
+    return meta
+
+
 def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
     name = str(provider or "").strip().lower()
     if name == "claude":
@@ -620,6 +648,145 @@ def resolve_multipass_stage_llm_config(
     stage_resolution_meta["resolved"] = stage_resolved_meta
     stage_resolution_meta["multipass_stage_reasoning"] = dict(stage_meta)
     return stage_resolved, stage_resolution_meta, stage_meta
+
+
+def _resolve_named_llm_preset(
+    *,
+    selected_name: str,
+    presets: dict[str, Any],
+    builtin_presets: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    if selected_name == "gemini-cli":
+        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    if selected_name in presets and isinstance(presets[selected_name], dict):
+        base_preset = dict(presets[selected_name])
+        resolved_preset_id = str(base_preset.get("preset") or selected_name).strip() or selected_name
+    elif selected_name in builtin_presets:
+        base_preset = dict(builtin_presets[selected_name])
+        base_preset["preset"] = selected_name
+        base_preset["_source_mode"] = "builtin_direct"
+        resolved_preset_id = selected_name
+    else:
+        available = sorted(set(presets.keys()) | set(builtin_presets.keys()))
+        raise ReviewflowError(
+            f"Unknown llm preset: {selected_name!r}. Available presets: {', '.join(available) or '(none)'}"
+        )
+
+    transport = str(base_preset.get("transport") or "").strip().lower()
+    provider = str(base_preset.get("provider") or "").strip().lower()
+    if transport not in LLM_TRANSPORT_CHOICES:
+        raise ReviewflowError(f"Invalid llm preset transport for {selected_name!r}: {transport!r}")
+    if transport == "http" and provider not in HTTP_LLM_PROVIDERS:
+        raise ReviewflowError(f"Invalid HTTP llm provider for {selected_name!r}: {provider!r}")
+    if transport == "cli" and provider not in CLI_LLM_PROVIDERS:
+        raise ReviewflowError(f"Invalid CLI llm provider for {selected_name!r}: {provider!r}")
+    return base_preset, resolved_preset_id
+
+
+def resolve_utility_llm_config(
+    *,
+    main_resolved: dict[str, Any],
+    main_resolution_meta: dict[str, Any],
+    reviewflow_config_path: Path | None,
+    utility_llm_preset: str | None = None,
+    utility_llm_model: str | None = None,
+    utility_llm_effort: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    llm_cfg, llm_meta = load_reviewflow_llm_config(config_path=reviewflow_config_path)
+    utility_cfg = llm_cfg.get("utility") if isinstance(llm_cfg.get("utility"), dict) else {}
+
+    def _utility_pick(field: str, caller_value: object) -> tuple[Any, str, str, bool]:
+        caller_text = str(caller_value or "").strip() if caller_value is not None else None
+        if caller_text:
+            return caller_text, "caller_override", "caller_override", False
+        toml_value = utility_cfg.get(field) if isinstance(utility_cfg, dict) else None
+        toml_text = str(toml_value or "").strip() if toml_value is not None else None
+        if toml_text:
+            return toml_text, "cure.toml", "[llm.utility]", False
+        return main_resolved.get(field), "inherited", "main_llm", True
+
+    selected_name, preset_source, preset_source_detail, preset_inherited = _utility_pick(
+        "preset", utility_llm_preset
+    )
+    model, model_source, model_source_detail, model_inherited = _utility_pick("model", utility_llm_model)
+    reasoning_effort, effort_source, effort_source_detail, effort_inherited = _utility_pick(
+        "reasoning_effort", utility_llm_effort
+    )
+
+    if preset_inherited:
+        resolved = dict(main_resolved)
+        resolved_preset_id = str(resolved.get("preset") or "").strip() or None
+        selected_name = str(resolved.get("selected_name") or resolved_preset_id or "").strip() or None
+    else:
+        selected_text = str(selected_name or "").strip()
+        base_preset, resolved_preset_id = _resolve_named_llm_preset(
+            selected_name=selected_text,
+            presets=llm_cfg.get("presets", {}) if isinstance(llm_cfg.get("presets"), dict) else {},
+            builtin_presets=builtin_llm_presets(),
+        )
+        transport = str(base_preset.get("transport") or "").strip().lower()
+        provider = str(base_preset.get("provider") or "").strip().lower()
+        resolved = {
+            "preset": resolved_preset_id,
+            "selected_name": selected_text,
+            "transport": transport,
+            "provider": provider,
+            "command": str(base_preset.get("command") or provider).strip() if transport == "cli" else None,
+            "endpoint": str(base_preset.get("endpoint") or "responses").strip() if transport == "http" else None,
+            "base_url": str(base_preset.get("base_url") or "").strip() or None,
+            "api_key": str(base_preset.get("api_key") or "").strip() or None,
+            "text_verbosity": base_preset.get("text_verbosity"),
+            "max_output_tokens": (
+                int(base_preset.get("max_output_tokens")) if isinstance(base_preset.get("max_output_tokens"), int) else None
+            ),
+            "store": base_preset.get("store") if isinstance(base_preset.get("store"), bool) else None,
+            "include": _string_list(base_preset.get("include")),
+            "metadata": _plain_dict(base_preset.get("metadata")),
+            "headers": _string_dict(base_preset.get("headers")),
+            "request": _plain_dict(base_preset.get("request")),
+            "env": _string_dict(base_preset.get("env")),
+            "capabilities": {"supports_resume": provider in LLM_RESUME_PROVIDERS},
+        }
+
+    provider = str(resolved.get("provider") or "").strip().lower()
+    reasoning_effort = _normalize_optional_reasoning_effort(
+        raw=reasoning_effort,
+        field_name="utility llm reasoning_effort",
+        provider=provider,
+    )
+    resolved["model"] = model
+    resolved["reasoning_effort"] = reasoning_effort
+    if preset_inherited:
+        resolved["preset"] = resolved_preset_id
+        resolved["selected_name"] = selected_name
+
+    meta: dict[str, Any] = {
+        "llm_config": llm_meta,
+        "main_llm": main_resolution_meta,
+        "selected_preset_source": preset_source,
+        "selected_name": selected_name,
+        "resolved_preset_id": resolved.get("preset"),
+        "resolved": {
+            "preset": resolved.get("preset"),
+            "preset_source": preset_source,
+            "preset_source_detail": preset_source_detail,
+            "preset_inherited": preset_inherited,
+            "model": model,
+            "model_source": model_source,
+            "model_source_detail": model_source_detail,
+            "model_inherited": model_inherited,
+            "reasoning_effort": reasoning_effort,
+            "reasoning_effort_source": effort_source,
+            "reasoning_effort_source_detail": effort_source_detail,
+            "reasoning_effort_inherited": effort_inherited,
+        },
+        "runtime_overrides": {
+            "preset": (str(utility_llm_preset).strip() if utility_llm_preset else None),
+            "model": (str(utility_llm_model).strip() if utility_llm_model else None),
+            "reasoning_effort": (str(utility_llm_effort).strip() if utility_llm_effort else None),
+        },
+    }
+    return resolved, meta
 
 
 def _raise_effort_migration_error(*, field_name: str, replacement: str) -> None:
@@ -1006,6 +1173,17 @@ def load_reviewflow_llm_config(
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    utility_raw = llm.get("utility", {})
+    if utility_raw in (None, ""):
+        utility_raw = {}
+    if utility_raw and not isinstance(utility_raw, dict):
+        raise ReviewflowError("[llm.utility] must be a table when configured.")
+    utility_section = utility_raw if isinstance(utility_raw, dict) else {}
+    utility = {
+        "preset": str(utility_section.get("preset") or "").strip() or None,
+        "model": str(utility_section.get("model") or "").strip() or None,
+        "reasoning_effort": str(utility_section.get("reasoning_effort") or "").strip() or None,
+    }
 
     presets_raw = raw.get("llm_presets", {}) if isinstance(raw, dict) else {}
     presets_raw = presets_raw if isinstance(presets_raw, dict) else {}
@@ -1055,11 +1233,12 @@ def load_reviewflow_llm_config(
             ),
         )
 
-    cfg = {"default_preset": default_preset, "presets": presets}
+    cfg = {"default_preset": default_preset, "presets": presets, "utility": utility}
     meta: dict[str, Any] = {
         "config_path": str(path),
         "loaded": bool(raw),
         "default_preset": default_preset,
+        "utility": dict(utility),
         "preset_names": sorted(presets.keys()),
         "builtin_preset_ids": list(BUILTIN_LLM_PRESET_IDS),
         "deprecated_explicit_presets": sorted(deprecated_explicit_presets),
@@ -1460,19 +1639,11 @@ def resolve_llm_config(
     if selected_name == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
     if selected_name:
-        if selected_name in presets:
-            base_preset = dict(presets[selected_name])
-            resolved_preset_id = str(base_preset.get("preset") or selected_name).strip() or selected_name
-        elif selected_name in builtin_presets:
-            base_preset = dict(builtin_presets[selected_name])
-            base_preset["preset"] = selected_name
-            base_preset["_source_mode"] = "builtin_direct"
-            resolved_preset_id = selected_name
-        else:
-            available = sorted(set(presets.keys()) | set(builtin_presets.keys()))
-            raise ReviewflowError(
-                f"Unknown llm preset: {selected_name!r}. Available presets: {', '.join(available) or '(none)'}"
-            )
+        base_preset, resolved_preset_id = _resolve_named_llm_preset(
+            selected_name=selected_name,
+            presets=presets,
+            builtin_presets=builtin_presets,
+        )
     else:
         selected_name = DEFAULT_IMPLICIT_CODEX_PRESET
         preset_source = IMPLICIT_CODEX_PRESET_SOURCE
@@ -1484,12 +1655,6 @@ def resolve_llm_config(
 
     transport = str(base_preset.get("transport") or "").strip().lower()
     provider = str(base_preset.get("provider") or "").strip().lower()
-    if transport not in LLM_TRANSPORT_CHOICES:
-        raise ReviewflowError(f"Invalid llm preset transport for {selected_name!r}: {transport!r}")
-    if transport == "http" and provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Invalid HTTP llm provider for {selected_name!r}: {provider!r}")
-    if transport == "cli" and provider not in CLI_LLM_PROVIDERS:
-        raise ReviewflowError(f"Invalid CLI llm provider for {selected_name!r}: {provider!r}")
 
     legacy_defaults, legacy_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
     base_codex_meta = _base_codex_runtime_defaults(base_codex_config_path)

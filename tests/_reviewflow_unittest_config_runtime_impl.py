@@ -1785,6 +1785,334 @@ class LlmPresetConfigTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
 
+class UtilityModelConfigTests(unittest.TestCase):
+    def _write_base_config(self, name: str = ".tmp_test_utility_base.toml") -> Path:
+        base = ROOT / name
+        base.write_text("", encoding="utf-8")
+        return base
+
+    def _resolve_main(
+        self,
+        *,
+        base: Path,
+        cfg: Path | None,
+        cli_preset: str | None = None,
+        cli_model: str | None = None,
+        cli_effort: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return rf.resolve_llm_config(
+            base_codex_config_path=base,
+            reviewflow_config_path=cfg,
+            cli_preset=cli_preset,
+            cli_model=cli_model,
+            cli_effort=cli_effort,
+            cli_plan_effort=None,
+            cli_verbosity=None,
+            cli_max_output_tokens=None,
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+
+    def _resolve_utility(
+        self,
+        *,
+        main_resolved: dict[str, Any],
+        main_meta: dict[str, Any],
+        cfg: Path | None,
+        utility_llm_preset: str | None = None,
+        utility_llm_model: str | None = None,
+        utility_llm_effort: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return rf.resolve_utility_llm_config(
+            main_resolved=main_resolved,
+            main_resolution_meta=main_meta,
+            reviewflow_config_path=cfg,
+            utility_llm_preset=utility_llm_preset,
+            utility_llm_model=utility_llm_model,
+            utility_llm_effort=utility_llm_effort,
+        )
+
+    def test_utility_model_config_loads_without_changing_main_llm(self) -> None:
+        base = self._write_base_config()
+        cfg = ROOT / ".tmp_test_utility_llm_load.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "main_codex"',
+                        "",
+                        "[llm.utility]",
+                        'preset = "utility_claude"',
+                        'model = "claude-sonnet-4-6"',
+                        'reasoning_effort = "low"',
+                        "",
+                        "[llm_presets.main_codex]",
+                        'preset = "codex-cli"',
+                        'model = "gpt-5.4"',
+                        'reasoning_effort = "high"',
+                        "",
+                        "[llm_presets.utility_claude]",
+                        'preset = "claude-cli"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            main_resolved, main_meta = self._resolve_main(base=base, cfg=cfg)
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+            )
+            self.assertEqual(main_resolved["provider"], "codex")
+            self.assertEqual(main_resolved["model"], "gpt-5.4")
+            self.assertEqual(main_resolved["reasoning_effort"], "high")
+            self.assertEqual(utility_resolved["provider"], "claude")
+            self.assertEqual(utility_resolved["model"], "claude-sonnet-4-6")
+            self.assertEqual(utility_resolved["reasoning_effort"], "low")
+            self.assertEqual(utility_meta["resolved"]["preset_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_utility_model_inherits_main_llm_when_unset(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_inherit_base.toml")
+        try:
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=None,
+                cli_preset="codex-cli",
+                cli_model="gpt-5.4",
+                cli_effort="medium",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=None,
+            )
+            self.assertEqual(utility_resolved["provider"], main_resolved["provider"])
+            self.assertEqual(utility_resolved["model"], main_resolved["model"])
+            self.assertEqual(utility_resolved["reasoning_effort"], main_resolved["reasoning_effort"])
+            self.assertEqual(utility_meta["resolved"]["preset_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "inherited")
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_utility_model_caller_override_wins_for_utility_stage_only(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_override_base.toml")
+        cfg = ROOT / ".tmp_test_utility_override.toml"
+        try:
+            cfg.write_text("[llm.utility]\nmodel = \"toml-utility-model\"\nreasoning_effort = \"low\"\n", encoding="utf-8")
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+                utility_llm_model="caller-model",
+            )
+            self.assertEqual(main_resolved["model"], "main-model")
+            self.assertEqual(utility_resolved["model"], "caller-model")
+            self.assertEqual(utility_resolved["reasoning_effort"], "low")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "caller_override")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_utility_model_resolution_preserves_source_metadata(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_source_base.toml")
+        cfg = ROOT / ".tmp_test_utility_source.toml"
+        try:
+            cfg.write_text("[llm.utility]\nmodel = \"utility-model\"\n", encoding="utf-8")
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            _, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+                utility_llm_effort="medium",
+            )
+            self.assertEqual(utility_meta["resolved"]["preset_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "cure.toml")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "caller_override")
+            self.assertTrue(utility_meta["resolved"]["preset_inherited"])
+            self.assertFalse(utility_meta["resolved"]["model_inherited"])
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_invalid_utility_model_config_fails_fast(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_invalid_base.toml")
+        cfg = ROOT / ".tmp_test_utility_invalid.toml"
+        try:
+            cfg.write_text("[llm.utility]\nreasoning_effort = \"not-real\"\n", encoding="utf-8")
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            with self.assertRaisesRegex(rf.ReviewflowError, "utility llm reasoning_effort"):
+                self._resolve_utility(main_resolved=main_resolved, main_meta=main_meta, cfg=cfg)
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_utility_model_can_use_different_supported_provider_preset(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_provider_base.toml")
+        cfg = ROOT / ".tmp_test_utility_provider.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm.utility]",
+                        'preset = "utility_openrouter"',
+                        'model = "x-ai/grok-4.1-fast"',
+                        'reasoning_effort = "medium"',
+                        "",
+                        "[llm_presets.utility_openrouter]",
+                        'preset = "openrouter-responses"',
+                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="gpt-5.4",
+                cli_effort="high",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+            )
+            self.assertEqual(main_resolved["provider"], "codex")
+            self.assertEqual(utility_resolved["provider"], "openrouter")
+            self.assertEqual(utility_resolved["transport"], "http")
+            self.assertEqual(utility_meta["resolved"]["preset_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_utility_model_fields_resolve_override_then_toml_then_inherited_default(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_precedence_base.toml")
+        cfg = ROOT / ".tmp_test_utility_precedence.toml"
+        try:
+            cfg.write_text("[llm.utility]\nmodel = \"toml-model\"\nreasoning_effort = \"low\"\n", encoding="utf-8")
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+                utility_llm_model="override-model",
+            )
+            self.assertEqual(utility_resolved["preset"], main_resolved["preset"])
+            self.assertEqual(utility_resolved["model"], "override-model")
+            self.assertEqual(utility_resolved["reasoning_effort"], "low")
+            self.assertEqual(utility_meta["resolved"]["preset_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "caller_override")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_partial_utility_model_toml_inherits_missing_fields(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_partial_toml_base.toml")
+        cfg = ROOT / ".tmp_test_utility_partial_toml.toml"
+        try:
+            cfg.write_text("[llm.utility]\nreasoning_effort = \"low\"\n", encoding="utf-8")
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=cfg,
+            )
+            self.assertEqual(utility_resolved["model"], "main-model")
+            self.assertEqual(utility_resolved["reasoning_effort"], "low")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "cure.toml")
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_partial_utility_model_caller_override_inherits_missing_fields(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_partial_override_base.toml")
+        try:
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=None,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="high",
+            )
+            utility_resolved, utility_meta = self._resolve_utility(
+                main_resolved=main_resolved,
+                main_meta=main_meta,
+                cfg=None,
+                utility_llm_effort="medium",
+            )
+            self.assertEqual(utility_resolved["model"], "main-model")
+            self.assertEqual(utility_resolved["reasoning_effort"], "medium")
+            self.assertEqual(utility_meta["resolved"]["model_source"], "inherited")
+            self.assertEqual(utility_meta["resolved"]["reasoning_effort_source"], "caller_override")
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_partial_utility_model_invalid_final_combination_fails_fast(self) -> None:
+        base = self._write_base_config(".tmp_test_utility_invalid_combo_base.toml")
+        cfg = ROOT / ".tmp_test_utility_invalid_combo.toml"
+        try:
+            cfg.write_text(
+                "[llm.utility]\npreset = \"utility_claude\"\n\n[llm_presets.utility_claude]\npreset = \"claude-cli\"\n",
+                encoding="utf-8",
+            )
+            main_resolved, main_meta = self._resolve_main(
+                base=base,
+                cfg=cfg,
+                cli_preset="codex-cli",
+                cli_model="main-model",
+                cli_effort="xhigh",
+            )
+            with self.assertRaisesRegex(rf.ReviewflowError, "utility llm reasoning_effort"):
+                self._resolve_utility(main_resolved=main_resolved, main_meta=main_meta, cfg=cfg)
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+
 class AgentRuntimeConfigTests(unittest.TestCase):
     def test_load_reviewflow_agent_runtime_config_rejects_gemini_backend_block(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_agent_runtime.toml"

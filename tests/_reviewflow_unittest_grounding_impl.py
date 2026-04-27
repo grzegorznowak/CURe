@@ -4,6 +4,93 @@ from typing import Any
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
+class UtilityModelProvenanceTests(unittest.TestCase):
+    def test_utility_model_provenance_is_separate_from_main_model(self) -> None:
+        main_llm = rf.build_llm_meta(
+            resolved={
+                "preset": "codex-cli",
+                "selected_name": "codex-cli",
+                "transport": "cli",
+                "provider": "codex",
+                "command": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "capabilities": {"supports_resume": True},
+            },
+            resolution_meta={
+                "resolved": {
+                    "model_source": "cli",
+                    "reasoning_effort_source": "cli",
+                },
+                "runtime_overrides": {},
+            },
+            env={},
+        )
+        utility_llm = rf.build_utility_llm_meta(
+            resolved={
+                "preset": "claude-cli",
+                "selected_name": "utility_claude",
+                "transport": "cli",
+                "provider": "claude",
+                "command": "claude",
+                "model": "claude-sonnet-4-6",
+                "reasoning_effort": "low",
+                "capabilities": {"supports_resume": True},
+            },
+            resolution_meta={
+                "resolved": {
+                    "model_source": "cure.toml",
+                    "reasoning_effort_source": "cure.toml",
+                },
+                "runtime_overrides": {},
+            },
+            env={},
+        )
+
+        payload = {"llm": main_llm, "utility_llm": utility_llm}
+
+        self.assertEqual(payload["llm"]["provider"], "codex")
+        self.assertEqual(payload["llm"]["model"], "gpt-5.4")
+        self.assertEqual(payload["utility_llm"]["provider"], "claude")
+        self.assertEqual(payload["utility_llm"]["model"], "claude-sonnet-4-6")
+        self.assertNotIn("utility_llm", payload["llm"])
+        self.assertNotIn("llm", payload["utility_llm"])
+
+    def test_build_utility_llm_metadata_block_from_resolved_config(self) -> None:
+        utility_llm = rf.build_utility_llm_meta(
+            resolved={
+                "preset": "codex-cli",
+                "selected_name": "codex-cli",
+                "transport": "cli",
+                "provider": "codex",
+                "command": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "medium",
+                "capabilities": {"supports_resume": True},
+            },
+            resolution_meta={
+                "resolved": {
+                    "preset_source": "inherited",
+                    "model_source": "inherited",
+                    "reasoning_effort_source": "caller_override",
+                    "model_inherited": True,
+                    "reasoning_effort_inherited": False,
+                },
+                "runtime_overrides": {"reasoning_effort": "medium"},
+            },
+            env={},
+        )
+
+        self.assertEqual(utility_llm["provider"], "codex")
+        self.assertEqual(utility_llm["model"], "gpt-5.4")
+        self.assertEqual(utility_llm["reasoning_effort"], "medium")
+        self.assertEqual(utility_llm["model_source"], "inherited")
+        self.assertEqual(utility_llm["reasoning_effort_source"], "caller_override")
+        self.assertEqual(utility_llm["preset_source"], "inherited")
+        self.assertTrue(utility_llm["model_inherited"])
+        self.assertTrue(utility_llm["config"]["resolved"]["model_inherited"])
+
+
 class LocalMarkdownNormalizationTests(unittest.TestCase):
     def test_normalize_markdown_local_refs_rewrites_local_links_and_paths(self) -> None:
         session_dir = ROOT / ".tmp_test_norm_session"
