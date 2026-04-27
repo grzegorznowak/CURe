@@ -1,5 +1,5 @@
 # ruff: noqa: F403, F405
-from typing import Any
+from typing import Any, Iterator
 
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
@@ -89,6 +89,410 @@ class UtilityModelProvenanceTests(unittest.TestCase):
         self.assertEqual(utility_llm["preset_source"], "inherited")
         self.assertTrue(utility_llm["model_inherited"])
         self.assertTrue(utility_llm["config"]["resolved"]["model_inherited"])
+
+
+class SharedWorkspaceReuseTests(unittest.TestCase):
+    def test_workspace_key_separates_sealed_sha_and_chunkhound_fingerprint(self) -> None:
+        base = dict(
+            host="github.com",
+            owner="octo",
+            repo="repo",
+            sealed_head_sha="a" * 40,
+            selected_baseline_ref="main",
+            chunkhound_config_fingerprint="cfg-1",
+            chunkhound_version="chunkhound 1.2.3",
+        )
+
+        key = rf.compute_shared_workspace_key(**base)
+        different_sha = rf.compute_shared_workspace_key(**{**base, "sealed_head_sha": "b" * 40})
+        different_cfg = rf.compute_shared_workspace_key(
+            **{**base, "chunkhound_config_fingerprint": "cfg-2"}
+        )
+
+        self.assertEqual(key.host, "github.com")
+        self.assertEqual(key.owner, "octo")
+        self.assertEqual(key.repo, "repo")
+        self.assertEqual(key.sealed_head_sha, "a" * 40)
+        self.assertNotEqual(key.digest, different_sha.digest)
+        self.assertNotEqual(key.digest, different_cfg.digest)
+        self.assertEqual(len(key.digest), 64)
+
+    def test_existing_same_sha_workspace_is_reused_without_session_repo_clone(self) -> None:
+        root = ROOT / ".tmp_test_shared_workspace_reuse"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            repo = root / "repo"
+            chunkhound = root / "chunkhound"
+            repo.mkdir(parents=True)
+            chunkhound.mkdir(parents=True)
+            db = chunkhound / ".chunkhound.db"
+            cfg = chunkhound / "chunkhound.json"
+            db.write_text("db", encoding="utf-8")
+            cfg.write_text("{}", encoding="utf-8")
+
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="octo",
+                repo="repo",
+                sealed_head_sha="a" * 40,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint="cfg-1",
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            workspace_root.mkdir(parents=True)
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=repo,
+                chunkhound_db=db,
+                chunkhound_config=cfg,
+            )
+
+            with mock.patch.object(rf, "resolve_git_head_sha", return_value="a" * 40):
+                lease = rf.acquire_shared_workspace_lease(paths=paths, key=key, quiet=True)
+
+            self.assertEqual(lease.result, "reused")
+            self.assertEqual(lease.repo_dir, repo.resolve(strict=False))
+            self.assertEqual(lease.chunkhound_db, db.resolve(strict=False))
+            self.assertEqual(lease.validation, "passed")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_workspace_validation_rejects_wrong_sealed_sha(self) -> None:
+        root = ROOT / ".tmp_test_shared_workspace_wrong_sha"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            repo = root / "repo"
+            chunkhound = root / "chunkhound"
+            repo.mkdir(parents=True)
+            chunkhound.mkdir(parents=True)
+            db = chunkhound / ".chunkhound.db"
+            cfg = chunkhound / "chunkhound.json"
+            db.write_text("db", encoding="utf-8")
+            cfg.write_text("{}", encoding="utf-8")
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="octo",
+                repo="repo",
+                sealed_head_sha="a" * 40,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint="cfg-1",
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            workspace_root.mkdir(parents=True)
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=repo,
+                chunkhound_db=db,
+                chunkhound_config=cfg,
+            )
+
+            with mock.patch.object(rf, "resolve_git_head_sha", return_value="b" * 40):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf.acquire_shared_workspace_lease(paths=paths, key=key, quiet=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_workspace_validation_rejects_mutated_chunkhound_config_or_db(self) -> None:
+        root = ROOT / ".tmp_test_shared_workspace_mutated_chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            repo = root / "repo"
+            chunkhound = root / "chunkhound"
+            repo.mkdir(parents=True)
+            chunkhound.mkdir(parents=True)
+            db = chunkhound / ".chunkhound.db"
+            cfg = chunkhound / "chunkhound.json"
+            db.write_text("db", encoding="utf-8")
+            cfg.write_text('{"indexing":{"exclude":[]}}\n', encoding="utf-8")
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="octo",
+                repo="repo",
+                sealed_head_sha="a" * 40,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint="cfg-1",
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            workspace_root.mkdir(parents=True)
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=repo,
+                chunkhound_db=db,
+                chunkhound_config=cfg,
+            )
+
+            with mock.patch.object(rf, "resolve_git_head_sha", return_value="a" * 40):
+                lease = rf.acquire_shared_workspace_lease(paths=paths, key=key, quiet=True)
+                self.assertEqual(lease.validation, "passed")
+
+                cfg.write_text('{"indexing":{"exclude":["**/tmp/**"]}}\n', encoding="utf-8")
+                with self.assertRaisesRegex(rf.ReviewflowError, "ChunkHound config fingerprint"):
+                    rf.acquire_shared_workspace_lease(paths=paths, key=key, quiet=True)
+
+                cfg.write_text('{"indexing":{"exclude":[]}}\n', encoding="utf-8")
+                db.write_text("mutated-db", encoding="utf-8")
+                with self.assertRaisesRegex(rf.ReviewflowError, "ChunkHound DB fingerprint"):
+                    rf.acquire_shared_workspace_lease(paths=paths, key=key, quiet=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_missing_same_sha_workspace_is_created_from_seed_cache_once(self) -> None:
+        root = ROOT / ".tmp_test_shared_workspace_create"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            source_repo = root / "source-repo"
+            source_repo.mkdir(parents=True)
+            seed_db = root / "seed.chunkhound.db"
+            seed_db.write_text("seed-db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="octo",
+                repo="repo",
+                sealed_head_sha="a" * 40,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint="cfg-1",
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            commands: list[list[str]] = []
+
+            class _Progress:
+                meta: dict[str, object] = {}
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    commands.append(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True)
+                    return _Result()
+                if cmd[:4] == ["git", "-C", str(rf.shared_workspace_root(paths, key) / "repo"), "rev-parse"]:
+                    return _Result("a" * 40 + "\n")
+                if cmd and cmd[0] == "git":
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+
+            def fake_index(**kwargs: object) -> None:
+                db_path = Path(str(kwargs["chunkhound_db_path"]))
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                db_path.write_text("indexed", encoding="utf-8")
+
+            progress = _Progress()
+            with (
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(rf, "same_device", return_value=True),
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=fake_materialize_chunkhound_env_config,
+                ),
+                mock.patch.object(
+                    rf,
+                    "_run_session_chunkhound_index_with_rebuild_fallback",
+                    side_effect=fake_index,
+                ) as index,
+            ):
+                lease = rf.acquire_or_create_shared_workspace_lease(
+                    paths=paths,
+                    key=key,
+                    source_repo_dir=source_repo,
+                    seed_source_db_path=seed_db,
+                    chunkhound_cfg=argparse.Namespace(base_config_path=base_cfg),
+                    resolved_chunkhound_config={},
+                    progress=progress,
+                    quiet=True,
+                    stream=False,
+                )
+
+            self.assertEqual(lease.result, "created")
+            self.assertEqual(lease.repo_dir, rf.shared_workspace_root(paths, key) / "repo")
+            self.assertTrue(lease.chunkhound_config.is_file())
+            index.assert_called_once()
+            self.assertEqual(index.call_args.kwargs["repo_dir"], lease.repo_dir)
+            self.assertEqual(index.call_args.kwargs["seed_source_db_path"], seed_db)
+            clone_commands = [cmd for cmd in commands if cmd[:2] == ["git", "clone"]]
+            self.assertEqual(len(clone_commands), 1)
+
+            with (
+                mock.patch.object(rf, "resolve_git_head_sha", return_value="a" * 40),
+                mock.patch.object(rf, "run_cmd", side_effect=AssertionError("clone should not rerun")),
+                mock.patch.object(
+                    rf,
+                    "_run_session_chunkhound_index_with_rebuild_fallback",
+                    side_effect=AssertionError("index should not rerun"),
+                ),
+            ):
+                reused = rf.acquire_or_create_shared_workspace_lease(
+                    paths=paths,
+                    key=key,
+                    source_repo_dir=source_repo,
+                    seed_source_db_path=seed_db,
+                    chunkhound_cfg=argparse.Namespace(base_config_path=base_cfg),
+                    resolved_chunkhound_config={},
+                    progress=progress,
+                    quiet=True,
+                    stream=False,
+                )
+            self.assertEqual(reused.result, "reused")
+            self.assertEqual(reused.repo_dir, lease.repo_dir)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_invalid_existing_workspace_is_rebuilt_under_same_key_lock(self) -> None:
+        root = ROOT / ".tmp_test_shared_workspace_rebuild"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            source_repo = root / "source-repo"
+            source_repo.mkdir(parents=True)
+            seed_db = root / "seed.chunkhound.db"
+            seed_db.write_text("seed-db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="octo",
+                repo="repo",
+                sealed_head_sha="a" * 40,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint="cfg-1",
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            stale_repo = workspace_root / "repo"
+            stale_chunkhound = workspace_root / "chunkhound"
+            stale_repo.mkdir(parents=True)
+            stale_chunkhound.mkdir(parents=True)
+            (stale_repo / "stale.txt").write_text("old", encoding="utf-8")
+            stale_db = stale_chunkhound / ".chunkhound.db"
+            stale_cfg = stale_chunkhound / "chunkhound.json"
+            stale_db.write_text("stale-db", encoding="utf-8")
+            stale_cfg.write_text("{}", encoding="utf-8")
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=stale_repo,
+                chunkhound_db=stale_db,
+                chunkhound_config=stale_cfg,
+            )
+            commands: list[list[str]] = []
+            lock_paths: list[Path] = []
+            resolved_heads = iter(["b" * 40, "a" * 40, "a" * 40])
+
+            class _Progress:
+                meta: dict[str, object] = {}
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    commands.append(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+
+            @contextlib.contextmanager
+            def fake_file_lock(lock_path: Path, *, quiet: bool) -> Iterator[None]:
+                lock_paths.append(lock_path)
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                yield
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    Path(str(cmd[-1])).mkdir(parents=True)
+                    return _Result()
+                if cmd[:4] == ["git", "-C", str(workspace_root / "repo"), "rev-parse"]:
+                    return _Result(next(resolved_heads) + "\n")
+                if cmd and cmd[0] == "git":
+                    return _Result()
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+
+            def fake_index(**kwargs: object) -> None:
+                db_path = Path(str(kwargs["chunkhound_db_path"]))
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                db_path.write_text("rebuilt", encoding="utf-8")
+
+            progress = _Progress()
+            with (
+                mock.patch.object(rf, "file_lock", side_effect=fake_file_lock),
+                mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd),
+                mock.patch.object(rf, "same_device", return_value=True),
+                mock.patch.object(
+                    rf,
+                    "materialize_chunkhound_env_config",
+                    side_effect=fake_materialize_chunkhound_env_config,
+                ),
+                mock.patch.object(
+                    rf,
+                    "_run_session_chunkhound_index_with_rebuild_fallback",
+                    side_effect=fake_index,
+                ),
+            ):
+                lease = rf.acquire_or_create_shared_workspace_lease(
+                    paths=paths,
+                    key=key,
+                    source_repo_dir=source_repo,
+                    seed_source_db_path=seed_db,
+                    chunkhound_cfg=argparse.Namespace(base_config_path=base_cfg),
+                    resolved_chunkhound_config={},
+                    progress=progress,
+                    quiet=True,
+                    stream=False,
+                )
+
+            self.assertEqual(lock_paths, [workspace_root / ".workspace.lock"])
+            self.assertEqual(lease.result, "rebuilt")
+            self.assertEqual(lease.repo_dir, workspace_root / "repo")
+            self.assertEqual(lease.chunkhound_db.read_text(encoding="utf-8"), "rebuilt")
+            self.assertFalse((workspace_root / "repo" / "stale.txt").exists())
+            quarantined = list((workspace_root / "invalid").glob("rebuild-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertTrue((quarantined[0] / "repo" / "stale.txt").is_file())
+            clone_commands = [cmd for cmd in commands if cmd[:2] == ["git", "clone"]]
+            self.assertEqual(len(clone_commands), 1)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class LocalMarkdownNormalizationTests(unittest.TestCase):
@@ -2735,7 +3139,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                                     "ref": "release/1.2",
                                     "repo": {"default_branch": "main"},
                                 },
-                                "head": {"sha": "1111111111111111111111111111111111111111"},
+                                "head": {"sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
                                 "title": "Baseline selection PR",
                             },
                             {
@@ -2972,7 +3376,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                         side_effect=[
                             {
                                 "base": {"ref": "main", "repo": {"default_branch": "main"}},
-                                "head": {"sha": "1111111111111111111111111111111111111111"},
+                                "head": {"sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
                                 "title": "Retry PR",
                             }
                         ],
@@ -3507,6 +3911,94 @@ class BaselineSelectionTests(unittest.TestCase):
         )
         return root, sandbox_root, cache_root, config_path
 
+    def _write_shared_workspace_session(
+        self,
+        *,
+        root: Path,
+        paths: rf.ReviewflowPaths,
+        session_id: str = "session-1",
+        status: str = "error",
+    ) -> tuple[Path, Path, Path, Path, Path, str]:
+        session_dir = root / session_id
+        work_dir = session_dir / "work"
+        session_repo_dir = session_dir / "repo"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        session_repo_dir.mkdir(parents=True, exist_ok=True)
+        review_md = session_dir / "review.md"
+        review_md.write_text("review", encoding="utf-8")
+        sealed_sha = "ab" * 20
+        key = rf.compute_shared_workspace_key(
+            host="github.com",
+            owner="acme",
+            repo="repo",
+            sealed_head_sha=sealed_sha,
+            selected_baseline_ref="main",
+            chunkhound_config_fingerprint="cfg-1",
+            chunkhound_version="chunkhound 1.0",
+        )
+        workspace_root = rf.shared_workspace_root(paths, key)
+        shared_repo_dir = workspace_root / "repo"
+        shared_chunkhound_dir = workspace_root / "chunkhound"
+        shared_repo_dir.mkdir(parents=True, exist_ok=True)
+        shared_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+        shared_db = shared_chunkhound_dir / ".chunkhound.db"
+        shared_cfg = shared_chunkhound_dir / "chunkhound.json"
+        shared_db.write_text("shared-db", encoding="utf-8")
+        shared_cfg.write_text("{}", encoding="utf-8")
+        rf.write_shared_workspace_metadata(
+            workspace_root=workspace_root,
+            key=key,
+            repo_dir=shared_repo_dir,
+            chunkhound_db=shared_db,
+            chunkhound_config=shared_cfg,
+        )
+        lease = rf.SharedWorkspaceLease(
+            key=key,
+            repo_dir=shared_repo_dir,
+            chunkhound_cwd=shared_chunkhound_dir,
+            chunkhound_db=shared_db,
+            chunkhound_config=shared_cfg,
+            workspace_root=workspace_root,
+            validation="passed",
+            result="created",
+        )
+        meta = {
+            "session_id": session_id,
+            "status": status,
+            "created_at": "2026-03-10T00:00:00+00:00",
+            "pr_url": "https://github.com/acme/repo/pull/9",
+            "host": "github.com",
+            "owner": "acme",
+            "repo": "repo",
+            "number": 9,
+            "base_ref": "release/1.2",
+            "base_ref_for_review": "cure_base__release_1_2",
+            "notes": {"no_index": False},
+            "llm": {"provider": "codex", "capabilities": {"supports_resume": True}},
+            "baseline_selection": {
+                "base_ref": "release/1.2",
+                "repo_default_ref": "main",
+                "selected_baseline_ref": "main",
+                "selection_reason": "default_within_threshold",
+            },
+            "paths": {
+                "session_dir": str(session_dir),
+                "session_repo_dir": str(session_repo_dir),
+                "repo_dir": str(shared_repo_dir),
+                "work_dir": str(work_dir),
+                "work_tmp_dir": str(work_dir / "tmp"),
+                "chunkhound_cwd": str(shared_chunkhound_dir),
+                "chunkhound_db": str(shared_db),
+                "chunkhound_config": str(shared_cfg),
+                "review_md": str(review_md),
+            },
+            "workspace": lease.to_metadata(),
+        }
+        if status == "done":
+            meta["completed_at"] = "2026-03-10T00:05:00+00:00"
+        (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        return session_dir, work_dir, shared_repo_dir, shared_chunkhound_dir, shared_cfg, sealed_sha
+
     def _patch_pr_flow_early_setup(
         self,
         stack: contextlib.ExitStack,
@@ -4004,7 +4496,7 @@ class BaselineSelectionTests(unittest.TestCase):
                                     "ref": "release/1.2",
                                     "repo": {"default_branch": "main"},
                                 },
-                                "head": {"sha": "1111111111111111111111111111111111111111"},
+                                "head": {"sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
                                 "title": "Baseline selection PR",
                             },
                             {
@@ -4137,6 +4629,183 @@ class BaselineSelectionTests(unittest.TestCase):
                     },
                 },
             )
+            workspace = meta["workspace"]
+            self.assertEqual(workspace["mode"], "shared_same_sha")
+            self.assertEqual(workspace["sealed_head_sha"], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            self.assertEqual(workspace["selected_baseline_ref"], "main")
+            self.assertEqual(workspace["validation"], "passed")
+            self.assertEqual(workspace["lease_result"], "created")
+            self.assertTrue(str(workspace["repo_dir"]).startswith(str(cache_root / "shared-workspaces")))
+            self.assertEqual(meta["paths"]["repo_dir"], workspace["repo_dir"])
+            self.assertEqual(meta["paths"]["chunkhound_db"], workspace["chunkhound_db"])
+            self.assertEqual(meta["paths"]["chunkhound_config"], workspace["chunkhound_config"])
+            self.assertNotIn("session_repo_dir", meta["paths"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_reuses_existing_shared_workspace_without_session_repo_clone(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix=".tmp_test_pr_shared_workspace_reuse_", dir=str(ROOT)))
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            sandbox_root = root / "sandboxes"
+            cache_root = root / "cache"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path = root / "reviewflow.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            sealed_sha = "d" * 40
+            chunkhound_meta = {"chunkhound": {"base_config_path": str(base_cfg)}}
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="acme",
+                repo="repo",
+                sealed_head_sha=sealed_sha,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint=rf.fingerprint_chunkhound_reviewflow_config(
+                    chunkhound_meta
+                ),
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            shared_repo = workspace_root / "repo"
+            shared_chunkhound = workspace_root / "chunkhound"
+            shared_repo.mkdir(parents=True, exist_ok=True)
+            shared_chunkhound.mkdir(parents=True, exist_ok=True)
+            shared_db = shared_chunkhound / ".chunkhound.db"
+            shared_cfg = shared_chunkhound / "chunkhound.json"
+            shared_db.write_text("db", encoding="utf-8")
+            shared_cfg.write_text("{}", encoding="utf-8")
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=shared_repo,
+                chunkhound_db=shared_db,
+                chunkhound_config=shared_cfg,
+            )
+
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    raise AssertionError("existing shared workspace should avoid session repo clone")
+                if cmd and cmd[0] == "git":
+                    return _Result()
+                if cmd == ["chunkhound", "--version"]:
+                    return _Result("chunkhound 1.2.3\n")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_write_pr_context_file(*, work_dir: Path, pr: rf.PullRequestRef, pr_meta: dict[str, object]) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {
+                                    "ref": "release/1.2",
+                                    "repo": {"default_branch": "main"},
+                                },
+                                "head": {"sha": sealed_sha},
+                                "title": "Shared workspace reuse PR",
+                            },
+                            {
+                                "ahead_by": 1,
+                                "behind_by": 0,
+                                "files": [{"filename": "a.py", "additions": 1, "deletions": 0}],
+                            },
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            chunkhound_meta,
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "ensure_base_cache",
+                        return_value={"db_path": str(base_db), "chunkhound_version": "chunkhound 1.2.3"},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "seed_dir",
+                        side_effect=AssertionError("seed clone should not be needed for shared reuse"),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_git_head_sha", return_value=sealed_sha))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(mock.patch.object(rf, "compute_pr_stats", return_value={"changed_files": 1, "changed_lines": 1}))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        side_effect=AssertionError("review setup should be skipped"),
+                    )
+                )
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+
+            self.assertEqual(rc, 0)
+            session_dir = Path(stdout.getvalue().strip())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["workspace"]["lease_result"], "reused")
+            self.assertEqual(meta["paths"]["repo_dir"], str(shared_repo.resolve(strict=False)))
+            self.assertNotIn("session_repo_dir", meta["paths"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -4449,6 +5118,305 @@ class BaselineSelectionTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
+
+    def test_resume_flow_uses_recorded_shared_workspace_paths_without_session_restore(self) -> None:
+        root, sandbox_root, cache_root, cfg = self._make_pr_flow_root(
+            ".tmp_test_resume_shared_workspace_routes_"
+        )
+        base_cfg = root / "chunkhound-base.json"
+        paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+        captured_runtime: dict[str, object] = {}
+        try:
+            session_dir, work_dir, shared_repo_dir, shared_chunkhound_dir, shared_cfg, sealed_sha = (
+                self._write_shared_workspace_session(root=sandbox_root, paths=paths)
+            )
+
+            def stop_after_runtime(**kwargs: object) -> dict[str, object]:
+                captured_runtime.update(kwargs)
+                raise RuntimeError("resume stopped after shared runtime")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="plan",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "resolve_git_head_sha", return_value=sealed_sha))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "restore_session_chunkhound_db_from_baseline",
+                        side_effect=AssertionError("shared workspace should not restore session db"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=AssertionError("shared workspace config should not be rewritten"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {"resolved": {"model_source": "cli", "reasoning_effort_source": "cli"}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=stop_after_runtime,
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "resume stopped after shared runtime"):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            self.assertEqual(captured_runtime["repo_dir"], shared_repo_dir)
+            self.assertEqual(captured_runtime["chunkhound_cwd"], shared_chunkhound_dir)
+            self.assertEqual(captured_runtime["chunkhound_config_path"], shared_cfg)
+            self.assertEqual(captured_runtime["visible_run_dirs"], [work_dir])
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed["workspace"]["lease_result"], "reused")
+            self.assertEqual(refreshed["paths"]["repo_dir"], str(shared_repo_dir))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_followup_flow_uses_recorded_shared_workspace_paths_without_session_restore(self) -> None:
+        root, sandbox_root, cache_root, cfg = self._make_pr_flow_root(
+            ".tmp_test_followup_shared_workspace_routes_"
+        )
+        base_cfg = root / "chunkhound-base.json"
+        paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+        captured_runtime: dict[str, object] = {}
+        try:
+            session_dir, work_dir, shared_repo_dir, shared_chunkhound_dir, shared_cfg, sealed_sha = (
+                self._write_shared_workspace_session(root=sandbox_root, paths=paths, status="done")
+            )
+
+            def stop_after_runtime(**kwargs: object) -> dict[str, object]:
+                captured_runtime.update(kwargs)
+                raise RuntimeError("followup stopped after shared runtime")
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                no_update=True,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "resolve_git_head_sha", return_value=sealed_sha))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "restore_session_chunkhound_db_from_baseline",
+                        side_effect=AssertionError("shared workspace should not restore session db"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=AssertionError("shared workspace config should not be rewritten"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {"resolved": {"model_source": "cli", "reasoning_effort_source": "cli"}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=stop_after_runtime,
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "followup stopped after shared runtime"):
+                    rf.followup_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            self.assertEqual(captured_runtime["repo_dir"], shared_repo_dir)
+            self.assertEqual(captured_runtime["chunkhound_cwd"], shared_chunkhound_dir)
+            self.assertEqual(captured_runtime["chunkhound_config_path"], shared_cfg)
+            self.assertEqual(captured_runtime["visible_run_dirs"], [work_dir])
+            refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed["workspace"]["lease_result"], "reused")
+            self.assertEqual(refreshed["paths"]["chunkhound_cwd"], str(shared_chunkhound_dir))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_zip_flow_uses_recorded_shared_workspace_paths_for_host_context(self) -> None:
+        root, sandbox_root, cache_root, cfg = self._make_pr_flow_root(
+            ".tmp_test_zip_shared_workspace_routes_"
+        )
+        paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+        captured_runtime: dict[str, object] = {}
+        try:
+            session_dir, work_dir, shared_repo_dir, shared_chunkhound_dir, shared_cfg, sealed_sha = (
+                self._write_shared_workspace_session(root=sandbox_root, paths=paths, status="done")
+            )
+            review_md = session_dir / "review.md"
+            review_md.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            meta_path = session_dir / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["head_sha"] = sealed_sha
+            meta["review_head_sha"] = sealed_sha
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+            def stop_after_runtime(**kwargs: object) -> dict[str, object]:
+                captured_runtime.update(kwargs)
+                raise RuntimeError("zip stopped after shared runtime")
+
+            args = argparse.Namespace(
+                pr_url="https://github.com/acme/repo/pull/9",
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        return_value={"head": {"sha": sealed_sha}, "title": "Zip me"},
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "resolve_git_head_sha", return_value=sealed_sha))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {"resolved": {"model_source": "cli", "reasoning_effort_source": "cli"}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        side_effect=stop_after_runtime,
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "zip stopped after shared runtime"):
+                    rf.zip_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            self.assertEqual(captured_runtime["repo_dir"], shared_repo_dir)
+            self.assertEqual(captured_runtime["chunkhound_cwd"], shared_chunkhound_dir)
+            self.assertEqual(captured_runtime["chunkhound_config_path"], shared_cfg)
+            visible_run_dirs = list(captured_runtime["visible_run_dirs"])
+            self.assertEqual(visible_run_dirs[0], work_dir)
+            self.assertEqual(len(visible_run_dirs), 2)
+            self.assertTrue(visible_run_dirs[1].is_dir())
+            self.assertTrue(str(visible_run_dirs[1]).startswith(str(session_dir / "zips" / "inputs")))
+            self.assertTrue(list(visible_run_dirs[1].glob("*.md")))
+            zip_meta_paths = sorted((session_dir / "zips").glob("zip-*.meta.json"))
+            self.assertEqual(len(zip_meta_paths), 1)
+            zip_meta = json.loads(zip_meta_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(zip_meta["workspace"]["lease_result"], "reused")
+            self.assertEqual(zip_meta["paths"]["repo_dir"], str(shared_repo_dir))
+            self.assertEqual(zip_meta["paths"]["chunkhound_cwd"], str(shared_chunkhound_dir))
+            self.assertEqual(zip_meta["paths"]["input_artifacts_dir"], str(visible_run_dirs[1]))
+            self.assertEqual(zip_meta["zip"]["inputs"][0]["visible_path"], str(next(visible_run_dirs[1].glob("*.md"))))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):

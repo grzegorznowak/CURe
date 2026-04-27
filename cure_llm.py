@@ -3053,6 +3053,7 @@ def prepare_review_agent_runtime(
     enable_mcp: bool,
     interactive: bool,
     paths: ReviewflowPaths,
+    visible_run_dirs: list[Path] | tuple[Path, ...] | None = None,
 ) -> dict[str, Any]:
     transport = str(resolved.get("transport") or "").strip().lower()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -3070,7 +3071,12 @@ def prepare_review_agent_runtime(
     chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     if chunkhound_dry_run:
         env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
-    add_dirs = _dedupe_paths([session_dir, work_dir])
+    if visible_run_dirs is None:
+        add_dirs = _dedupe_paths([session_dir, work_dir])
+        visible_path_mode = "legacy_session"
+    else:
+        add_dirs = _dedupe_paths([repo_dir, work_dir, *visible_run_dirs])
+        visible_path_mode = "explicit"
     runtime: dict[str, Any] = {
         "profile": profile,
         "profile_source": profile_source,
@@ -3094,6 +3100,7 @@ def prepare_review_agent_runtime(
             "profile_source": profile_source,
             "agent_runtime": runtime_meta.get("agent_runtime"),
             "chunkhound_dry_run": chunkhound_dry_run,
+            "visible_path_mode": visible_path_mode,
         },
     }
     if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
@@ -3106,6 +3113,7 @@ def prepare_review_agent_runtime(
             "supported": False,
             "detail": "agent runtime profiles apply only to CLI coding-agent providers",
             "chunkhound_dry_run": chunkhound_dry_run,
+            "visible_path_mode": visible_path_mode,
             "env_keys": sorted(env.keys()),
             "add_dirs": [str(path) for path in add_dirs],
             "staged_paths": dict(staged_paths),
@@ -3196,6 +3204,7 @@ def prepare_review_agent_runtime(
         "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
         "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
         "chunkhound_dry_run": chunkhound_dry_run,
+        "visible_path_mode": visible_path_mode,
         "chunkhound_access_mode": (
             _CURE_CHUNKHOUND_ACCESS_MODE
             if provider in {"codex", "claude"} and bool(runtime["staged_paths"].get("chunkhound_helper"))

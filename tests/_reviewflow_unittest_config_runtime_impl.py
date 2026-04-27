@@ -2496,6 +2496,50 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_runtime_visible_paths_exclude_private_run_artifacts(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_visible_paths"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            shared_repo = root / "shared" / "repo"
+            shared_work = root / "shared" / "chunkhound"
+            session = root / "session"
+            private_run = session / "private"
+            safe_run = session / "safe"
+            shared_repo.mkdir(parents=True, exist_ok=True)
+            shared_work.mkdir(parents=True, exist_ok=True)
+            private_run.mkdir(parents=True, exist_ok=True)
+            safe_run.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(profile="permissive"),
+                    resolved=self._llm_resolved("claude"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
+                    config_enabled=True,
+                    repo_dir=shared_repo,
+                    session_dir=session,
+                    work_dir=shared_work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=shared_work / "chunkhound.json",
+                    chunkhound_db_path=shared_work / ".chunkhound.db",
+                    chunkhound_cwd=shared_work,
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                    visible_run_dirs=[safe_run],
+                )
+
+            add_dirs = [Path(value) for value in runtime["add_dirs"]]
+            self.assertIn(safe_run, add_dirs)
+            self.assertIn(shared_work, add_dirs)
+            self.assertNotIn(session, add_dirs)
+            self.assertNotIn(private_run, add_dirs)
+            self.assertNotIn(str(session), runtime["metadata"]["add_dirs"])
+            self.assertNotIn(str(private_run), runtime["metadata"]["add_dirs"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_prepare_review_agent_runtime_rejects_removed_gemini_provider(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_gemini"
         try:
