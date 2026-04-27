@@ -195,6 +195,22 @@ def _load_shared_workspace_metadata(workspace_root: Path) -> dict[str, Any]:
     return data
 
 
+def _require_path_inside_shared_workspace_root(
+    *,
+    field: str,
+    path: Path,
+    workspace_root: Path,
+) -> None:
+    resolved_root = workspace_root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ReviewflowError(
+            f"Shared workspace {field} is outside shared workspace root: {resolved_path}"
+        ) from exc
+
+
 def _shared_workspace_key_from_metadata(raw_key: dict[str, Any]) -> SharedWorkspaceKey:
     return compute_shared_workspace_key(
         host=str(raw_key.get("host") or ""),
@@ -330,6 +346,17 @@ def _validate_shared_workspace_without_lock(
     if not str(paths_meta.get("chunkhound_cwd") or "").strip():
         chunkhound_cwd = chunkhound_db.parent
     chunkhound_config = Path(str(paths_meta.get("chunkhound_config") or "")).resolve(strict=False)
+    for field, path in (
+        ("repo_dir", repo_dir),
+        ("chunkhound_cwd", chunkhound_cwd),
+        ("chunkhound_db", chunkhound_db),
+        ("chunkhound_config", chunkhound_config),
+    ):
+        _require_path_inside_shared_workspace_root(
+            field=field,
+            path=path,
+            workspace_root=workspace_root,
+        )
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Shared workspace repo is missing: {repo_dir}")
     if not chunkhound_cwd.is_dir():
@@ -440,9 +467,15 @@ def acquire_or_create_shared_workspace_lease(
                         workspace_meta["rebuild_reason"] = str(exc)
 
         if repo_dir.exists() or chunkhound_cwd.exists():
-            raise ReviewflowError(
-                f"Shared workspace has partial state without metadata: {workspace_root}"
-            )
+            _quarantine_invalid_shared_workspace_state(workspace_root=workspace_root)
+            rebuilt = True
+            progress_meta = getattr(progress, "meta", None)
+            if isinstance(progress_meta, dict):
+                workspace_meta = progress_meta.setdefault("workspace", {})
+                if isinstance(workspace_meta, dict):
+                    workspace_meta["rebuild_reason"] = (
+                        f"Shared workspace has partial state without metadata: {workspace_root}"
+                    )
         workspace_root.mkdir(parents=True, exist_ok=True)
         clone_cmd = ["git", "clone"]
         if _reviewflow().same_device(source_repo_dir, workspace_root):

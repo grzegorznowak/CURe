@@ -2058,8 +2058,6 @@ def build_codex_exec_cmd(
         "codex",
         "-C",
         str(repo_dir),
-        "--add-dir",
-        "/tmp",
     ]
     for d in add_dirs or []:
         cmd.extend(["--add-dir", str(d)])
@@ -3243,9 +3241,9 @@ def build_codex_resume_command(
     resume_cmd: list[str] = [
         "codex",
         "resume",
-        "--add-dir",
-        "/tmp",
     ]
+    for add_dir in add_dirs or []:
+        resume_cmd.extend(["--add-dir", str(add_dir)])
     if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)
@@ -9753,11 +9751,12 @@ def _pr_flow_impl(
                             stream=stream,
                             prepare_repo=prepare_shared_pr_repo,
                         )
-                except ReviewflowError as exc:
-                    if "sealed SHA validation failed after checkout" not in str(exc):
+                except (ReviewflowError, ReviewflowSubprocessError) as exc:
+                    fallback_reason = _shared_workspace_direct_create_fallback_reason(exc)
+                    if fallback_reason is None:
                         raise
                     shared_workspace_lease = None
-                    progress.meta.setdefault("workspace", {})["direct_create_fallback_reason"] = str(exc)
+                    progress.meta.setdefault("workspace", {})["direct_create_fallback_reason"] = fallback_reason
                     progress.flush()
 
             if shared_workspace_lease is not None:
@@ -9772,7 +9771,15 @@ def _pr_flow_impl(
                 meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
                 meta_paths["chunkhound_db"] = str(chunkhound_db_path)
                 meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
-                progress.meta["workspace"] = shared_workspace_lease.to_metadata()
+                existing_workspace_meta = (
+                    progress.meta.get("workspace") if isinstance(progress.meta.get("workspace"), dict) else {}
+                )
+                workspace_meta = shared_workspace_lease.to_metadata()
+                if isinstance(existing_workspace_meta, dict) and "direct_create_fallback_reason" in existing_workspace_meta:
+                    workspace_meta["direct_create_fallback_reason"] = existing_workspace_meta[
+                        "direct_create_fallback_reason"
+                    ]
+                progress.meta["workspace"] = workspace_meta
                 progress.flush()
 
         if shared_workspace_lease is None:
@@ -9933,7 +9940,15 @@ def _pr_flow_impl(
             meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
             meta_paths["chunkhound_db"] = str(chunkhound_db_path)
             meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
-            progress.meta["workspace"] = shared_workspace_lease.to_metadata()
+            existing_workspace_meta = (
+                progress.meta.get("workspace") if isinstance(progress.meta.get("workspace"), dict) else {}
+            )
+            workspace_meta = shared_workspace_lease.to_metadata()
+            if isinstance(existing_workspace_meta, dict) and "direct_create_fallback_reason" in existing_workspace_meta:
+                workspace_meta["direct_create_fallback_reason"] = existing_workspace_meta[
+                    "direct_create_fallback_reason"
+                ]
+            progress.meta["workspace"] = workspace_meta
             progress.flush()
 
         with phase("detect_pr_size", progress=progress, quiet=quiet):
@@ -11140,6 +11155,44 @@ def _apply_recorded_shared_workspace_lease_to_meta(
     return lease
 
 
+def _raise_shared_workspace_mutation_error(*, operation: str) -> None:
+    raise ReviewflowError(
+        f"{operation} cannot mutate a shared workspace session. "
+        "Start a new PR review to refresh the shared checkout, or use a non-updating path."
+    )
+
+
+def _shared_workspace_direct_create_fallback_reason(exc: Exception) -> str | None:
+    if isinstance(exc, ReviewflowError):
+        text = str(exc)
+        if "sealed SHA validation failed after checkout" in text:
+            return text
+        return None
+    if not isinstance(exc, ReviewflowSubprocessError):
+        return None
+    cmd = list(getattr(exc, "cmd", []) or [])
+    is_pr_checkout = len(cmd) >= 3 and cmd[:3] == ["gh", "pr", "checkout"]
+    output = "\n".join(
+        part for part in (str(getattr(exc, "stdout", "") or ""), str(getattr(exc, "stderr", "") or "")) if part
+    )
+    lowered_output = output.lower()
+    looks_like_missing_checkout_target = any(
+        marker in lowered_output
+        for marker in (
+            "reference is not a tree",
+            "not our ref",
+            "couldn't find remote ref",
+            "could not parse object",
+        )
+    )
+    if is_pr_checkout and looks_like_missing_checkout_target:
+        detail = output.strip()
+        if detail:
+            return f"{exc}: {detail}"
+        return str(exc)
+    return None
+
+
 def _resume_flow_impl(
     args: argparse.Namespace,
     *,
@@ -11235,6 +11288,8 @@ def _resume_flow_impl(
             or bool(str(meta.get("completed_at") or "").strip())
         )
     )
+    if shared_workspace_lease is not None and from_phase == "auto" and completed_session:
+        _raise_shared_workspace_mutation_error(operation="resume --from auto")
     incremental_resume_review_point: SessionReviewPoint | None = None
     incremental_resume_head_sha: str | None = None
     if from_phase == "auto" and completed_session:
@@ -12151,6 +12206,8 @@ def _followup_flow_impl(
     if not pr_url:
         raise ReviewflowError("Session meta missing pr_url.")
     pr = parse_pr_url(pr_url)
+    if shared_workspace_lease is not None and not bool(getattr(args, "no_update", False)):
+        _raise_shared_workspace_mutation_error(operation="followup")
     ensure_review_config(paths, config_path=effective_config_path)
 
     work_tmp_dir.mkdir(parents=True, exist_ok=True)

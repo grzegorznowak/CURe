@@ -1068,7 +1068,7 @@ def build_codex_exec_cmd(
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    cmd = ["codex", "-C", str(repo_dir), "--add-dir", "/tmp"]
+    cmd = ["codex", "-C", str(repo_dir)]
     for add_dir in add_dirs or []:
         cmd.extend(["--add-dir", str(add_dir)])
     cmd.extend(codex_flags)
@@ -3329,14 +3329,15 @@ def build_codex_resume_command(
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
 ) -> str:
-    _ = add_dirs
     assignments: list[str] = []
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR", "CURE_CHUNKHOUND_DRY_RUN"):
         value = str(env.get(key) or "").strip()
         if value:
             assignments.append(f"{key}={shlex.quote(value)}")
-    resume_cmd: list[str] = ["codex", "resume", "--add-dir", "/tmp"]
+    resume_cmd: list[str] = ["codex", "resume"]
+    for add_dir in add_dirs or []:
+        resume_cmd.extend(["--add-dir", str(add_dir)])
     if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)
