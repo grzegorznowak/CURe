@@ -3177,7 +3177,10 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertEqual(pyproject["project"]["name"], "cureview")
         self.assertEqual(pyproject["project"]["scripts"]["cure"], "cure:console_main")
         self.assertNotIn("reviewflow", pyproject["project"]["scripts"])
-        self.assertIn("cure", pyproject["tool"]["setuptools"]["py-modules"])
+        packaged_modules = set(pyproject["tool"]["setuptools"]["py-modules"])
+        self.assertIn("cure", packaged_modules)
+        top_level_modules = {path.stem for path in ROOT.glob("*.py")}
+        self.assertLessEqual(top_level_modules, packaged_modules)
 
     def _runtime(self) -> rf.ReviewflowRuntime:
         return rf.ReviewflowRuntime(
