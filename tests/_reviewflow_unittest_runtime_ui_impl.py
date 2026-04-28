@@ -2652,9 +2652,10 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(summary["embeddings"], 0)
         self.assertEqual(summary["duration_text"], "0.07s")
 
-    def test_parser_accepts_if_reviewed_and_followup_flags(self) -> None:
+    def test_parser_accepts_if_reviewed_and_hides_disabled_resume_followup(self) -> None:
         p = rf.build_parser()
         help_text = p.format_help()
+        self.assertNotIn("resume", help_text)
         self.assertNotIn("followup", help_text)
         args = p.parse_args(
             [
@@ -2734,7 +2735,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertTrue(args9.yes)
         self.assertTrue(args9.json_output)
 
-    def test_parser_help_marks_pr_no_index_as_advanced_and_hides_resume_no_index(self) -> None:
+    def test_parser_help_marks_pr_no_index_as_advanced_and_hides_disabled_commands(self) -> None:
         parser = rf.build_parser()
         subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
         pr_help = subparsers.choices["pr"].format_help()
@@ -2751,6 +2752,8 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("default: on", pr_help)
         self.assertIn("--cod-ledger {on,off,1,0}", pr_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", pr_help)
+        self.assertNotIn("resume", parser.format_help())
+        self.assertNotIn("followup", parser.format_help())
         self.assertNotIn("--no-index", resume_help)
         self.assertIn("--wtf {on,off,1,0}", resume_help)
         self.assertIn("default: on", resume_help)
@@ -3317,49 +3320,35 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_main_runs_tty_bootstrap_wizard_before_dispatching_resume(self) -> None:
-        root = ROOT / ".tmp_story26_main_resume_gate"
-        config_path = root / "config" / "cure.toml"
-        custom_cfg = root / "custom-base.json"
-        runtime = rf.ReviewflowRuntime(
-            config_path=config_path,
-            config_source="cli",
-            config_enabled=True,
-            paths=rf.ReviewflowPaths(
-                sandbox_root=root / "state" / "sandboxes",
-                cache_root=root / "cache",
-            ),
-            sandbox_root_source="cli",
-            cache_root_source="cli",
-            codex_base_config_path=root / ".codex" / "config.toml",
-            codex_base_config_source="default",
-        )
-        stdin = _FakeTty(f"{custom_cfg}\ny\n")
-        stderr = _FakeTty()
-        stdout = StringIO()
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            custom_cfg.write_text("{}", encoding="utf-8")
-            with mock.patch.object(cure_runtime, "resolve_runtime", side_effect=[runtime, runtime]) as resolve_runtime, mock.patch.object(
-                cure_commands, "resume_flow", return_value=19
-            ) as resume_flow, mock.patch("sys.stdin", stdin), mock.patch("sys.stderr", stderr), mock.patch(
-                "sys.stdout", stdout
-            ), mock.patch.object(
-                cure_commands, "discover_repo_local_chunkhound_config", return_value={"candidate_state": "absent"}
-            ), mock.patch.object(
-                shutil,
-                "which",
-                side_effect=lambda name: f"/usr/bin/{name}" if name in {"chunkhound", "codex"} else None,
-            ):
-                rc = rf.main(["resume", "session-123"])
+    def test_main_rejects_disabled_resume_before_bootstrap_wizard(self) -> None:
+        runtime = self._runtime()
+        stderr = StringIO()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "ensure_chunkhound_bootstrap_ready", side_effect=AssertionError("disabled command should not bootstrap")
+        ), mock.patch.object(cure_commands, "resume_flow", side_effect=AssertionError("disabled command should not dispatch")), mock.patch(
+            "sys.stderr", stderr
+        ):
+            rc = rf.main(["resume", "session-123"])
 
-            self.assertEqual(rc, 19)
-            self.assertEqual(resolve_runtime.call_count, 2)
-            resume_flow.assert_called_once()
-            self.assertIn(str(custom_cfg), config_path.read_text(encoding="utf-8"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual(rc, 2)
+        resolve_runtime.assert_called_once()
+        self.assertIn("cure resume", stderr.getvalue())
+        self.assertIn("disabled", stderr.getvalue())
+
+    def test_main_rejects_disabled_followup_before_bootstrap_wizard(self) -> None:
+        runtime = self._runtime()
+        stderr = StringIO()
+        with mock.patch.object(cure_runtime, "resolve_runtime", return_value=runtime) as resolve_runtime, mock.patch.object(
+            cure_commands, "ensure_chunkhound_bootstrap_ready", side_effect=AssertionError("disabled command should not bootstrap")
+        ), mock.patch.object(cure_commands, "followup_flow", side_effect=AssertionError("disabled command should not dispatch")), mock.patch(
+            "sys.stderr", stderr
+        ):
+            rc = rf.main(["followup", "session-123"])
+
+        self.assertEqual(rc, 2)
+        resolve_runtime.assert_called_once()
+        self.assertIn("cure followup", stderr.getvalue())
+        self.assertIn("disabled", stderr.getvalue())
 
     def test_main_gates_cache_prime_before_dispatch_without_tty(self) -> None:
         runtime = self._runtime()
@@ -3957,17 +3946,17 @@ class InstallAndDoctorTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("That indexed ChunkHound-backed path is the default and recommended public review workflow.", readme)
-        self.assertIn("Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.", readme)
+        self.assertIn("For another pass on the same PR, start a fresh indexed review with `cure pr <PR_URL> --if-reviewed new`.", readme)
         self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", readme)
         self.assertIn("It is not the normal or recommended path.", readme)
         self.assertLess(readme.index("cure doctor --pr-url <PR_URL> --json"), readme.index("cure pr <PR_URL> --if-reviewed new"))
-        self.assertLess(readme.index("cure pr <PR_URL> --if-reviewed new"), readme.index("cure resume <session_id|PR_URL>"))
+        self.assertNotIn("cure resume <session_id|PR_URL>", readme)
 
         self.assertIn("That indexed ChunkHound-backed path is the default and recommended review workflow:", skill)
         self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", skill)
         self.assertIn("It is not the normal or recommended path.", skill)
         self.assertLess(skill.index("cure doctor --pr-url <PR_URL> --json"), skill.index("cure pr <PR_URL> --if-reviewed new"))
-        self.assertLess(skill.index("cure pr <PR_URL> --if-reviewed new"), skill.index("cure resume <session_id|PR_URL>"))
+        self.assertNotIn("cure resume <session_id|PR_URL>", skill)
 
     def test_docs_explain_chunkhound_helper_contract(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -162,23 +162,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 ],
             },
             {
-                "name": "resume",
-                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Human-readable progress only.",
-                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
-                "variants": [
-                    {
-                        "name": "pr_url_compatibility",
-                        "summary": "PR URL mode preserves the existing special behavior documented in the README.",
-                        "invocation": preferred_cli_invocation("resume <PR_URL>"),
-                    },
-                ],
-            },
-            {
                 "name": "zip",
                 "summary": "Synthesize a final arbiter review for the PR's current HEAD.",
                 "targets": ["PR_URL"],
@@ -1069,8 +1052,6 @@ def ensure_chunkhound_bootstrap_ready(
     command_name = str(getattr(args, "cmd", "") or "").strip()
     gated = {
         "pr",
-        "resume",
-        "followup",
         "interactive",
     }
     if command_name == "cache" and str(getattr(args, "cache_cmd", "") or "").strip() == "prime":

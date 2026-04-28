@@ -1,6 +1,6 @@
 ---
 name: cure
-description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure setup`, `cure pr`, `cure status`, `cure watch`, `resume`, and `zip`.
+description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure setup`, `cure pr`, `cure status`, `cure watch`, and `cure zip`.
 metadata:
   short-description: Review GitHub PRs in isolated sandboxes with CURe
 ---
@@ -214,14 +214,13 @@ cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli
 ```
 
-Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr`, `cure resume`, and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [JIRA.md](JIRA.md): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
+Use that target-aware readiness result as the preflight for the normal PR review lifecycle: `cure pr` and `cure zip`. Jira remains optional for those normal lifecycle commands and is only required for Jira-driven workflows. If Jira context is actually required, follow the generalized secure setup in [JIRA.md](JIRA.md): prefer `~/.netrc` on `api.atlassian.com`, use short-lived `JIRA_API_TOKEN` exports only when needed, and do not store tokens in repo files or chat. For public `github.com` PRs, `gh` authentication is optional when anonymous public fallback is sufficient. `git` is still required.
 
 That indexed ChunkHound-backed path is the default and recommended review workflow:
 
 ```bash
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
-cure resume <session_id|PR_URL>
 ```
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
@@ -258,7 +257,6 @@ Success means:
 Common next actions:
 
 ```bash
-cure resume <session_id|PR_URL>
 cure zip <PR_URL>
 cure clean closed --json
 ```
@@ -353,8 +351,8 @@ Required behavior:
 - If `VOYAGE_API_KEY` is present, let `cure setup` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure setup` configure OpenAI embeddings automatically.
 - If `chunkhound` is still missing on `PATH`, let `cure setup` or the setup wizard install it, or rerun `cure setup --chunkhound-source release|git-main`.
-- Commands that require bootstrap readiness (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
-- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr`, `resume`, and `zip`.
+- Commands that require bootstrap readiness (`pr`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
+- Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr` and `zip`.
 - If autodetect picks the wrong CLI provider, rerun `cure doctor` and `cure pr` with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex or Claude execution, treat internet / network access as a prerequisite for obtaining code-under-review context.

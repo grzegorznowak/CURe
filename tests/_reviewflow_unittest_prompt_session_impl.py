@@ -4795,7 +4795,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
-        self.assertEqual(names, ["pr", "resume", "zip", "clean", "status", "watch"])
+        self.assertEqual(names, ["pr", "zip", "clean", "status", "watch"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
@@ -4812,6 +4812,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cure clean closed --json", rendered)
         self.assertIn("cure status <session_id|PR_URL> --json", rendered)
         self.assertIn("cure watch <session_id|PR_URL>", rendered)
+        self.assertNotIn("resume", rendered)
         self.assertNotIn("reviewflow", rendered)
         self.assertNotIn("interactive", rendered)
 
@@ -4889,24 +4890,6 @@ class WorkflowContractTests(unittest.TestCase):
             (
                 "pr",
                 "pr_flow",
-                {
-                    "paths": mock.sentinel.paths,
-                    "config_path": Path("/tmp/reviewflow.toml"),
-                    "codex_base_config_path": Path("/tmp/codex.toml"),
-                },
-            ),
-            (
-                "resume",
-                "resume_flow",
-                {
-                    "paths": mock.sentinel.paths,
-                    "config_path": Path("/tmp/reviewflow.toml"),
-                    "codex_base_config_path": Path("/tmp/codex.toml"),
-                },
-            ),
-            (
-                "followup",
-                "followup_flow",
                 {
                     "paths": mock.sentinel.paths,
                     "config_path": Path("/tmp/reviewflow.toml"),

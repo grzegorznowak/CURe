@@ -4577,6 +4577,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 ]
             )
             paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            commands: list[list[str]] = []
 
             class _Result:
                 def __init__(self, stdout: str = "") -> None:
@@ -4585,6 +4586,7 @@ class BaselineSelectionTests(unittest.TestCase):
                     self.duration_seconds = 0.0
 
             def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                commands.append(cmd)
                 if cmd[:2] == ["git", "clone"]:
                     Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
                     return _Result()
@@ -4733,6 +4735,9 @@ class BaselineSelectionTests(unittest.TestCase):
                         side_effect=AssertionError("review execution should be skipped"),
                     )
                 )
+                compute_pr_stats = stack.enter_context(
+                    mock.patch.object(rf, "compute_pr_stats", return_value={"changed_files": 1, "changed_lines": 1})
+                )
                 stack.enter_context(mock.patch("sys.stdout", stdout))
                 rc = rf.pr_flow(
                     args,
@@ -4743,9 +4748,22 @@ class BaselineSelectionTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertEqual(ensure_base_cache.call_args.kwargs["base_ref"], "main")
+            self.assertEqual(compute_pr_stats.call_args.kwargs["base_ref"], "cure_base__main")
+            self.assertTrue(
+                any(cmd[:2] == ["git", "-C"] and cmd[3:6] == ["fetch", "origin", "main"] for cmd in commands)
+            )
+            self.assertIn(
+                ["branch", "-f", "cure_base__main", "origin/main"],
+                [cmd[3:] for cmd in commands if cmd[:2] == ["git", "-C"] and len(cmd) >= 7],
+            )
+            self.assertNotIn(
+                ["branch", "-f", "cure_base__release__1.2", "origin/release/1.2"],
+                [cmd[3:] for cmd in commands if cmd[:2] == ["git", "-C"] and len(cmd) >= 7],
+            )
             session_dir = Path(stdout.getvalue().strip())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["base_ref"], "release/1.2")
+            self.assertEqual(meta["base_ref_for_review"], "cure_base__main")
             self.assertEqual(
                 meta["baseline_selection"],
                 {
@@ -4820,6 +4838,7 @@ class BaselineSelectionTests(unittest.TestCase):
             )
             paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
             clone_targets: list[Path] = []
+            commands: list[list[str]] = []
 
             class _Result:
                 def __init__(self, stdout: str = "") -> None:
@@ -4828,6 +4847,7 @@ class BaselineSelectionTests(unittest.TestCase):
                     self.duration_seconds = 0.0
 
             def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                commands.append(cmd)
                 if cmd[:2] == ["git", "clone"]:
                     clone_targets.append(Path(str(cmd[-1])))
                     Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
@@ -4988,8 +5008,17 @@ class BaselineSelectionTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertTrue(any("pr14" in target.parent.name for target in clone_targets))
+            self.assertIn(
+                ["branch", "-f", "cure_base__main", "origin/main"],
+                [cmd[3:] for cmd in commands if cmd[:2] == ["git", "-C"] and len(cmd) >= 7],
+            )
+            self.assertNotIn(
+                ["branch", "-f", "cure_base__release__1.2", "origin/release/1.2"],
+                [cmd[3:] for cmd in commands if cmd[:2] == ["git", "-C"] and len(cmd) >= 7],
+            )
             session_dir = Path(stdout.getvalue().strip())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["base_ref_for_review"], "cure_base__main")
             self.assertIn("direct_create_fallback_reason", meta["workspace"])
             self.assertIn("gh pr checkout", meta["workspace"]["direct_create_fallback_reason"])
         finally:
@@ -5158,6 +5187,220 @@ class BaselineSelectionTests(unittest.TestCase):
             self.assertEqual(meta["workspace"]["lease_result"], "reused")
             self.assertEqual(meta["paths"]["repo_dir"], str(shared_repo.resolve(strict=False)))
             self.assertNotIn("session_repo_dir", meta["paths"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_rebuilds_stale_existing_shared_workspace_metadata(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix=".tmp_test_pr_shared_workspace_stale_rebuild_", dir=str(ROOT)))
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            sandbox_root = root / "sandboxes"
+            cache_root = root / "cache"
+            sandbox_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            seed = root / "seed"
+            seed.mkdir(parents=True, exist_ok=True)
+            base_db = root / "base.chunkhound.db"
+            base_db.write_text("db", encoding="utf-8")
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            config_path = root / "reviewflow.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[chunkhound]",
+                        f'base_config_path = "{base_cfg}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            sealed_sha = "e" * 40
+            chunkhound_meta = {"chunkhound": {"base_config_path": str(base_cfg)}}
+            key = rf.compute_shared_workspace_key(
+                host="github.com",
+                owner="acme",
+                repo="repo",
+                sealed_head_sha=sealed_sha,
+                selected_baseline_ref="main",
+                chunkhound_config_fingerprint=rf.fingerprint_chunkhound_reviewflow_config(chunkhound_meta),
+                chunkhound_version="chunkhound 1.2.3",
+            )
+            workspace_root = rf.shared_workspace_root(paths, key)
+            shared_repo = workspace_root / "repo"
+            shared_chunkhound = workspace_root / "chunkhound"
+            shared_repo.mkdir(parents=True, exist_ok=True)
+            shared_chunkhound.mkdir(parents=True, exist_ok=True)
+            shared_db = shared_chunkhound / ".chunkhound.db"
+            shared_cfg = shared_chunkhound / "chunkhound.json"
+            shared_db.write_text("db", encoding="utf-8")
+            shared_cfg.write_text("{}", encoding="utf-8")
+            (shared_repo / "stale.txt").write_text("old", encoding="utf-8")
+            rf.write_shared_workspace_metadata(
+                workspace_root=workspace_root,
+                key=key,
+                repo_dir=shared_repo,
+                chunkhound_db=shared_db,
+                chunkhound_config=shared_cfg,
+            )
+            shared_cfg.write_text('{"mutated": true}', encoding="utf-8")
+
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-review",
+                    "--ui",
+                    "off",
+                    "--quiet",
+                    "--no-stream",
+                ]
+            )
+            clone_targets: list[Path] = []
+
+            class _Result:
+                def __init__(self, stdout: str = "") -> None:
+                    self.stdout = stdout
+                    self.stderr = ""
+                    self.duration_seconds = 0.0
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> _Result:
+                if cmd[:2] == ["git", "clone"]:
+                    clone_targets.append(Path(str(cmd[-1])))
+                    Path(str(cmd[-1])).mkdir(parents=True, exist_ok=True)
+                    return _Result()
+                if cmd[:5] == ["git", "-C", str(seed), "remote", "get-url"]:
+                    return _Result("https://github.com/acme/repo.git\n")
+                if cmd[:4] == ["git", "-C", str(seed), "rev-parse"]:
+                    return _Result("true\n")
+                if cmd[:3] == ["gh", "pr", "checkout"]:
+                    return _Result()
+                if cmd and cmd[0] in {"git", "chunkhound"}:
+                    return _Result("chunkhound 1.2.3\n" if cmd == ["chunkhound", "--version"] else "")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_materialize_chunkhound_env_config(
+                *,
+                resolved_config: dict[str, object],
+                output_config_path: Path,
+                database_provider: str,
+                database_path: Path,
+            ) -> None:
+                output_config_path.parent.mkdir(parents=True, exist_ok=True)
+                output_config_path.write_text("{}", encoding="utf-8")
+                database_path.parent.mkdir(parents=True, exist_ok=True)
+
+            def fake_index(**kwargs: object) -> None:
+                db_path = Path(str(kwargs["chunkhound_db_path"]))
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                db_path.write_text("rebuilt", encoding="utf-8")
+
+            def fake_write_pr_context_file(*, work_dir: Path, pr: rf.PullRequestRef, pr_meta: dict[str, object]) -> Path:
+                context_path = work_dir / "pr-context.md"
+                context_path.write_text("context", encoding="utf-8")
+                return context_path
+
+            stdout = StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "gh_api_json",
+                        side_effect=[
+                            {
+                                "base": {
+                                    "ref": "release/1.2",
+                                    "repo": {"default_branch": "main"},
+                                },
+                                "head": {"sha": sealed_sha},
+                                "title": "Stale shared workspace rebuild PR",
+                            },
+                            {
+                                "ahead_by": 1,
+                                "behind_by": 0,
+                                "files": [{"filename": "a.py", "additions": 1, "deletions": 0}],
+                            },
+                        ],
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            chunkhound_meta,
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "write_pr_context_file", side_effect=fake_write_pr_context_file))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "ensure_base_cache",
+                        return_value={"db_path": str(base_db), "chunkhound_version": "chunkhound 1.2.3"},
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "seed_dir", return_value=seed))
+                stack.enter_context(mock.patch.object(rf, "ensure_clean_git_worktree"))
+                stack.enter_context(mock.patch.object(rf, "same_device", return_value=True))
+                stack.enter_context(mock.patch.object(rf, "resolve_git_head_sha", return_value=sealed_sha))
+                stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf.ReviewflowOutput,
+                        "run_logged_cmd",
+                        autospec=True,
+                        side_effect=lambda output, cmd, **kwargs: fake_run_cmd(cmd, **kwargs),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_run_session_chunkhound_index_with_rebuild_fallback",
+                        side_effect=fake_index,
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "compute_pr_stats", return_value={"changed_files": 1, "changed_lines": 1}))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        side_effect=AssertionError("review setup should be skipped"),
+                    )
+                )
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                rc = rf.pr_flow(
+                    args,
+                    paths=paths,
+                    config_path=config_path,
+                    codex_base_config_path=root / "codex.toml",
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertNotIn(root / "sandboxes" / Path(stdout.getvalue().strip()).name / "repo", clone_targets)
+            quarantined = list((workspace_root / "invalid").glob("rebuild-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertTrue((quarantined[0] / "repo" / "stale.txt").is_file())
+            session_dir = Path(stdout.getvalue().strip())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["workspace"]["lease_result"], "rebuilt")
+            self.assertIn("rebuild_reason", meta["workspace"])
+            self.assertEqual(meta["paths"]["repo_dir"], str((workspace_root / "repo").resolve(strict=False)))
+            self.assertEqual((workspace_root / "chunkhound" / ".chunkhound.db").read_text(encoding="utf-8"), "rebuilt")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

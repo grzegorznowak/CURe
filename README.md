@@ -25,10 +25,10 @@ If you are an agent, or you want to install CURe as a reusable skill, start with
 
 Use CURe when you want to:
 - review a GitHub PR from a disposable sandbox instead of the working repo
-- standardize how humans and agents start, observe, resume, and clean review runs
+- standardize how humans and agents start, observe, synthesize, and clean review runs
 - give an agent a single documented path from fresh install or existing local setup to "review in progress"
 
-CURe is different from an ad-hoc manual agent review because the project checkout stays untouched, the review state stays on disk, and the workflow is resumable instead of prompt-by-prompt improvisation.
+CURe is different from an ad-hoc manual agent review because the project checkout stays untouched, the review state stays on disk, and the workflow is repeatable instead of prompt-by-prompt improvisation.
 
 CURe is not for:
 - ad-hoc in-place repo review where the agent should work directly in the project checkout
@@ -127,7 +127,7 @@ Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-fi
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
-Commands that actually require bootstrap now fail or repair earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor`.
+Commands that actually require bootstrap now fail or repair earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor`.
 
 On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
 
@@ -136,16 +136,15 @@ That indexed ChunkHound-backed path is the default and recommended public review
 ```bash
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
-cure resume <session_id|PR_URL>
 ```
 
-Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.
+For another pass on the same PR, start a fresh indexed review with `cure pr <PR_URL> --if-reviewed new`.
 
 `cure pr --no-index` remains available only as an advanced opt-out for custom prompt flows that intentionally skip the built-in ChunkHound-backed prompts. It is not the normal or recommended path.
 
 Review output toggles:
-- Verbose final finding cards are now the default for `cure pr`, `cure resume`, and `cure followup`. They include severity/impact, likelihood, assumptions, downgrade factors, code trail, and reproduction detail. Use `--wtf off` when you need the older concise finding format.
-- `--cod-ledger on` enables the multipass Chain-of-Draft hypothesis ledger for `cure pr` and `cure resume`. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. It is default-off and intentionally not part of single-pass or follow-up prompt families.
+- Verbose final finding cards are now the default for `cure pr`. They include severity/impact, likelihood, assumptions, downgrade factors, code trail, and reproduction detail. Use `--wtf off` when you need the older concise finding format.
+- `--cod-ledger on` enables the multipass Chain-of-Draft hypothesis ledger for `cure pr`. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. It is default-off and intentionally not part of single-pass prompt families.
 
 Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in CLI-provider contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
 
@@ -173,7 +172,6 @@ Recommended indexed review loop:
 ```bash
 cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
-cure resume <session_id|PR_URL>
 ```
 
 Initialize or repair non-secret bootstrap files:
@@ -198,12 +196,6 @@ Watch a run:
 
 ```bash
 cure watch <session_id|PR_URL>
-```
-
-Resume a session:
-
-```bash
-cure resume <session_id|PR_URL>
 ```
 
 Synthesize a final review:
@@ -344,7 +336,7 @@ reasoning_effort = "high"
 
 On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in defaults are now explicit: `claude-cli` uses `claude-sonnet-4-6` with effort `high`, and `codex-cli` defaults to effort `high`.
 
-When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
+When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then start a fresh review with `cure pr <PR_URL> --if-reviewed new`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 
 If an embedding key is already present in the environment, `cure setup` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure setup` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure setup` writes the OpenAI embedding model into the active ChunkHound base config and continues.
 
