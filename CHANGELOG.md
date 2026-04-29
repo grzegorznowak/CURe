@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.7.1] - 2026-04-29
+
+### Fixed
+
+- Linux standalone release assets are now built on a glibc 2.31 baseline and the installer reports a clear package-install fallback on older Linux systems.
+
 ## [0.7.0] - 2026-04-29
 
 ### Added
