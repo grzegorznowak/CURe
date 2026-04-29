@@ -15776,9 +15776,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--cod-ledger",
         dest="cod_ledger",
         type=_parse_on_off_bool,
-        default=False,
+        default=True,
         metavar="{on,off,1,0}",
-        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
+        help="Toggle Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: on; use off to disable)",
     )
     prp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     prp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
@@ -15853,9 +15853,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--cod-ledger",
         dest="cod_ledger",
         type=_parse_on_off_bool,
-        default=False,
+        default=True,
         metavar="{on,off,1,0}",
-        help="Enable Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: off)",
+        help="Toggle Chain-of-Draft hypothesis-ledger triage for multipass reviews (default: on; use off to disable)",
     )
     rp.add_argument("--quiet", action="store_true", help="Suppress progress output")
     rp.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")

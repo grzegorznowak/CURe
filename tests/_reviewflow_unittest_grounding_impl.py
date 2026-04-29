@@ -7722,6 +7722,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                 "new",
                 "--ui",
                 "off",
+                "--cod-ledger",
+                "off",
                 "--quiet",
                 "--no-stream",
             ]
@@ -7924,6 +7926,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                 "--if-reviewed",
                 "new",
                 "--ui",
+                "off",
+                "--cod-ledger",
                 "off",
                 "--quiet",
                 "--no-stream",

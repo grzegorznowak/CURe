@@ -2675,10 +2675,14 @@ class TuiDashboardTests(unittest.TestCase):
 
         args_pr_default = p.parse_args(["pr", "https://github.com/acme/repo/pull/1"])
         self.assertTrue(args_pr_default.wtf)
-        self.assertFalse(args_pr_default.cod_ledger)
+        self.assertTrue(args_pr_default.cod_ledger)
 
         args_pr_concise = p.parse_args(["pr", "https://github.com/acme/repo/pull/1", "--wtf", "off"])
         self.assertFalse(args_pr_concise.wtf)
+        args_pr_no_cod_ledger = p.parse_args(
+            ["pr", "https://github.com/acme/repo/pull/1", "--cod-ledger", "off"]
+        )
+        self.assertFalse(args_pr_no_cod_ledger.cod_ledger)
 
         args2 = p.parse_args(["followup", "session-123", "--no-update", "--wtf", "0"])
         self.assertEqual(args2.session_id, "session-123")
@@ -2693,7 +2697,7 @@ class TuiDashboardTests(unittest.TestCase):
 
         args_resume_default = p.parse_args(["resume", "session-456"])
         self.assertTrue(args_resume_default.wtf)
-        self.assertFalse(args_resume_default.cod_ledger)
+        self.assertTrue(args_resume_default.cod_ledger)
 
         args_followup_default = p.parse_args(["followup", "session-789"])
         self.assertTrue(args_followup_default.wtf)
@@ -2751,6 +2755,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("--wtf {on,off,1,0}", pr_help)
         self.assertIn("default: on", pr_help)
         self.assertIn("--cod-ledger {on,off,1,0}", pr_help)
+        self.assertIn("use off to disable", pr_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", pr_help)
         self.assertNotIn("resume", parser.format_help())
         self.assertNotIn("followup", parser.format_help())
@@ -2758,6 +2763,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("--wtf {on,off,1,0}", resume_help)
         self.assertIn("default: on", resume_help)
         self.assertIn("--cod-ledger {on,off,1,0}", resume_help)
+        self.assertIn("use off to disable", resume_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", resume_help)
         self.assertIn("--wtf {on,off,1,0}", followup_help)
         self.assertIn("default: on", followup_help)

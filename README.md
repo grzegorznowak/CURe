@@ -144,7 +144,7 @@ For another pass on the same PR, start a fresh indexed review with `cure pr <PR_
 
 Review output toggles:
 - Verbose final finding cards are now the default for `cure pr`. They include severity/impact, likelihood, assumptions, downgrade factors, code trail, and reproduction detail. Use `--wtf off` when you need the older concise finding format.
-- `--cod-ledger on` enables the multipass Chain-of-Draft hypothesis ledger for `cure pr`. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. It is default-off and intentionally not part of single-pass prompt families.
+- Chain-of-Draft hypothesis ledger triage is enabled by default for multipass `cure pr` runs. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. Use `--cod-ledger off` to disable it; it remains intentionally outside single-pass prompt families.
 
 Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring. CURe exports that helper through `CURE_CHUNKHOUND_HELPER`; the built-in prompt/proof contract is successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it, and helper `research` satisfies the `code_research` requirement. Plain `chunkhound search`, `chunkhound research`, and `chunkhound mcp` shell usage are not the built-in CLI-provider contract. Historical sessions may still report legacy `mcp_tool_call` evidence.
 

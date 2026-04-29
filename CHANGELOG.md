@@ -24,6 +24,7 @@ No entries yet.
 ### Changed
 
 - Release process no longer commits evidence files to the repository.
+- Chain-of-Draft hypothesis ledger triage is now enabled by default for multipass `cure pr` and `cure resume` runs; pass `--cod-ledger off` to disable it.
 
 ## [0.6.0] - 2026-04-21
 
