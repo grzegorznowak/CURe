@@ -4034,6 +4034,23 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 ],
             },
             {
+                "name": "resume",
+                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
+                "targets": ["session_id", "PR_URL"],
+                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
+                "tty": "Optional TUI on stderr when running in a real terminal.",
+                "stdout": "Human-readable progress only.",
+                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
+                "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
+                "variants": [
+                    {
+                        "name": "pr_url_compatibility",
+                        "summary": "PR URL mode preserves the existing special behavior documented in the README.",
+                        "invocation": preferred_cli_invocation("resume <PR_URL>"),
+                    },
+                ],
+            },
+            {
                 "name": "zip",
                 "summary": "Synthesize a final arbiter review for the PR's current HEAD.",
                 "targets": ["PR_URL"],
@@ -9371,7 +9388,7 @@ def _pr_flow_impl(
         str(baseline_selection.get("selected_baseline_ref") or base_ref).strip() or base_ref
     )
 
-    base_ref_for_review = f"cure_base__{safe_ref_slug(selected_baseline_ref)}"
+    base_ref_for_review = f"cure_base__{safe_ref_slug(base_ref)}"
 
     if_reviewed = str(getattr(args, "if_reviewed", "prompt") or "prompt").strip().lower()
     if if_reviewed not in {"prompt", "new", "list", "latest"}:
@@ -9650,8 +9667,14 @@ def _pr_flow_impl(
                 chunkhound_version=chunkhound_version,
             )
             candidate_root = shared_workspace_root(paths, candidate_key)
-
-            def acquire_direct_shared_workspace_lease() -> SharedWorkspaceLease | None:
+            if shared_workspace_metadata_path(candidate_root).is_file():
+                with phase("shared_workspace_reuse", progress=progress, quiet=quiet):
+                    shared_workspace_lease = acquire_shared_workspace_lease(
+                        paths=paths,
+                        key=candidate_key,
+                        quiet=quiet,
+                    )
+            else:
                 assert seed_source_db_path is not None
                 if not seed_source_db_path.exists():
                     raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
@@ -9698,14 +9721,7 @@ def _pr_flow_impl(
                     progress.record_cmd(checkout_pr_cmd)
                     checkout_pr_in_repo(repo_dir=shared_repo_dir, pr=pr)
 
-                    fetch_base_cmd = [
-                        "git",
-                        "-C",
-                        str(shared_repo_dir),
-                        "fetch",
-                        "origin",
-                        selected_baseline_ref,
-                    ]
+                    fetch_base_cmd = ["git", "-C", str(shared_repo_dir), "fetch", "origin", base_ref]
                     progress.record_cmd(fetch_base_cmd)
                     run_cmd(fetch_base_cmd)
 
@@ -9716,7 +9732,7 @@ def _pr_flow_impl(
                         "branch",
                         "-f",
                         base_ref_for_review,
-                        f"origin/{selected_baseline_ref}",
+                        f"origin/{base_ref}",
                     ]
                     progress.record_cmd(branch_cmd)
                     run_cmd(branch_cmd)
@@ -9739,25 +9755,9 @@ def _pr_flow_impl(
                     fallback_reason = _shared_workspace_direct_create_fallback_reason(exc)
                     if fallback_reason is None:
                         raise
+                    shared_workspace_lease = None
                     progress.meta.setdefault("workspace", {})["direct_create_fallback_reason"] = fallback_reason
                     progress.flush()
-                    return None
-                return shared_workspace_lease
-
-            if shared_workspace_metadata_path(candidate_root).is_file():
-                with phase("shared_workspace_reuse", progress=progress, quiet=quiet):
-                    try:
-                        shared_workspace_lease = acquire_shared_workspace_lease(
-                            paths=paths,
-                            key=candidate_key,
-                            quiet=quiet,
-                        )
-                    except ReviewflowError as exc:
-                        progress.meta.setdefault("workspace", {})["rebuild_reason"] = str(exc)
-                        progress.flush()
-                        shared_workspace_lease = acquire_direct_shared_workspace_lease()
-            else:
-                shared_workspace_lease = acquire_direct_shared_workspace_lease()
 
             if shared_workspace_lease is not None:
                 review_head_sha = shared_workspace_lease.key.sealed_head_sha
@@ -9779,8 +9779,6 @@ def _pr_flow_impl(
                     workspace_meta["direct_create_fallback_reason"] = existing_workspace_meta[
                         "direct_create_fallback_reason"
                     ]
-                if isinstance(existing_workspace_meta, dict) and "rebuild_reason" in existing_workspace_meta:
-                    workspace_meta["rebuild_reason"] = existing_workspace_meta["rebuild_reason"]
                 progress.meta["workspace"] = workspace_meta
                 progress.flush()
 
@@ -9837,8 +9835,8 @@ def _pr_flow_impl(
                     str(repo_dir),
                     "checkout",
                     "-B",
-                    selected_baseline_ref,
-                    f"origin/{selected_baseline_ref}",
+                    base_ref,
+                    f"origin/{base_ref}",
                 ]
                 progress.record_cmd(checkout_base_cmd)
                 run_cmd(checkout_base_cmd)
@@ -9880,7 +9878,7 @@ def _pr_flow_impl(
                     progress.flush()
 
             with phase("prepare_base_ref", progress=progress, quiet=quiet):
-                fetch_base_cmd = ["git", "-C", str(repo_dir), "fetch", "origin", selected_baseline_ref]
+                fetch_base_cmd = ["git", "-C", str(repo_dir), "fetch", "origin", base_ref]
                 progress.record_cmd(fetch_base_cmd)
                 run_cmd(fetch_base_cmd)
 
@@ -9891,7 +9889,7 @@ def _pr_flow_impl(
                     "branch",
                     "-f",
                     base_ref_for_review,
-                    f"origin/{selected_baseline_ref}",
+                    f"origin/{base_ref}",
                 ]
                 progress.record_cmd(branch_cmd)
                 run_cmd(branch_cmd)
@@ -12791,8 +12789,10 @@ def _zip_flow_impl(
     if not sources:
         raise ReviewflowError(
             f"zip: no completed non-rejected review artifacts found for PR HEAD {head_sha[:12]}.\n"
-            "Run a fresh review first:\n"
-            f"  {PRIMARY_CLI_COMMAND} pr {pr_url} --if-reviewed new"
+            "Run a fresh review or follow-up first:\n"
+            f"  {PRIMARY_CLI_COMMAND} pr {pr_url}\n"
+            "  # or\n"
+            f"  {PRIMARY_CLI_COMMAND} followup <session_id>"
         )
 
     host_session_dir = sources[0].session_dir
@@ -15803,7 +15803,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     sub.add_parser("list", help="List existing review sandboxes", parents=[runtime_parent])
 
-    ip = sub.add_parser("interactive", help="Pick a past review for interactive inspection", parents=[runtime_parent])
+    ip = sub.add_parser("interactive", help="Pick a past review and resume it when supported", parents=[runtime_parent])
     ip.add_argument("target", nargs="?", help="Optional PR URL to filter the picker")
 
     cp = sub.add_parser(
@@ -15824,7 +15824,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     rp = sub.add_parser(
         "resume",
-        help=argparse.SUPPRESS,
+        help="Resume a multipass review session",
         parents=[runtime_parent],
     )
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
@@ -15974,7 +15974,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Evaluate readiness for starting a review of this PR URL",
     )
 
-    hidden_subcommands = {"resume", "followup"}
+    hidden_subcommands = {"followup"}
     sub._choices_actions = [
         action for action in sub._choices_actions if getattr(action, "dest", None) not in hidden_subcommands
     ]
@@ -16003,11 +16003,6 @@ def main(
             return command_surface.setup_flow(args, runtime=runtime)
         if args.cmd == "set-agent":
             return command_surface.set_agent_flow(args, runtime=runtime)
-        if args.cmd in {"resume", "followup"}:
-            raise ReviewflowError(
-                f"`{PRIMARY_CLI_COMMAND} {args.cmd}` is disabled. "
-                f"Start a fresh review with `{PRIMARY_CLI_COMMAND} pr <PR_URL> --if-reviewed new`."
-            )
         if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
             runtime = runtime_surface.resolve_runtime(args)
             paths = runtime.paths
