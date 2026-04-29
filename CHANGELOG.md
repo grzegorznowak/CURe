@@ -8,6 +8,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.7.2] - 2026-04-29
+
+### Fixed
+
+- Reverted shared same-SHA review workspace reuse so active PR reviews return to per-run repo and ChunkHound workspace isolation while the stability issues around cold ChunkHound initialization are investigated.
+
 ## [0.7.1] - 2026-04-29
 
 ### Fixed
