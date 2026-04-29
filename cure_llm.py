@@ -1068,7 +1068,7 @@ def build_codex_exec_cmd(
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    cmd = ["codex", "-C", str(repo_dir)]
+    cmd = ["codex", "-C", str(repo_dir), "--add-dir", "/tmp"]
     for add_dir in add_dirs or []:
         cmd.extend(["--add-dir", str(add_dir)])
     cmd.extend(codex_flags)
@@ -3053,7 +3053,6 @@ def prepare_review_agent_runtime(
     enable_mcp: bool,
     interactive: bool,
     paths: ReviewflowPaths,
-    visible_run_dirs: list[Path] | tuple[Path, ...] | None = None,
 ) -> dict[str, Any]:
     transport = str(resolved.get("transport") or "").strip().lower()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -3071,12 +3070,7 @@ def prepare_review_agent_runtime(
     chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     if chunkhound_dry_run:
         env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
-    if visible_run_dirs is None:
-        add_dirs = _dedupe_paths([session_dir, work_dir])
-        visible_path_mode = "legacy_session"
-    else:
-        add_dirs = _dedupe_paths([repo_dir, work_dir, *visible_run_dirs])
-        visible_path_mode = "explicit"
+    add_dirs = _dedupe_paths([session_dir, work_dir])
     runtime: dict[str, Any] = {
         "profile": profile,
         "profile_source": profile_source,
@@ -3100,7 +3094,6 @@ def prepare_review_agent_runtime(
             "profile_source": profile_source,
             "agent_runtime": runtime_meta.get("agent_runtime"),
             "chunkhound_dry_run": chunkhound_dry_run,
-            "visible_path_mode": visible_path_mode,
         },
     }
     if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
@@ -3113,7 +3106,6 @@ def prepare_review_agent_runtime(
             "supported": False,
             "detail": "agent runtime profiles apply only to CLI coding-agent providers",
             "chunkhound_dry_run": chunkhound_dry_run,
-            "visible_path_mode": visible_path_mode,
             "env_keys": sorted(env.keys()),
             "add_dirs": [str(path) for path in add_dirs],
             "staged_paths": dict(staged_paths),
@@ -3204,7 +3196,6 @@ def prepare_review_agent_runtime(
         "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
         "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
         "chunkhound_dry_run": chunkhound_dry_run,
-        "visible_path_mode": visible_path_mode,
         "chunkhound_access_mode": (
             _CURE_CHUNKHOUND_ACCESS_MODE
             if provider in {"codex", "claude"} and bool(runtime["staged_paths"].get("chunkhound_helper"))
@@ -3329,15 +3320,14 @@ def build_codex_resume_command(
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
 ) -> str:
+    _ = add_dirs
     assignments: list[str] = []
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC", "CURE_WORK_DIR", "CURE_CHUNKHOUND_DRY_RUN"):
         value = str(env.get(key) or "").strip()
         if value:
             assignments.append(f"{key}={shlex.quote(value)}")
-    resume_cmd: list[str] = ["codex", "resume"]
-    for add_dir in add_dirs or []:
-        resume_cmd.extend(["--add-dir", str(add_dir)])
+    resume_cmd: list[str] = ["codex", "resume", "--add-dir", "/tmp"]
     if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)

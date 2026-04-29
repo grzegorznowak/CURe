@@ -20,22 +20,6 @@ class CodexCommandTests(unittest.TestCase):
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertIn("shell_environment_policy.inherit=all", cmd)
 
-    def test_build_codex_exec_cmd_uses_only_explicit_add_dirs(self) -> None:
-        work_dir = ROOT / ".tmp_test_codex_visible_work"
-        cmd = rf.build_codex_exec_cmd(
-            repo_dir=ROOT,
-            codex_flags=["-m", "gpt-5.2"],
-            codex_config_overrides=[],
-            review_md_path=ROOT / ".tmp_test_review.md",
-            prompt="hello",
-            add_dirs=[work_dir],
-        )
-
-        add_dir_values = [
-            value for index, value in enumerate(cmd[1:], start=1) if cmd[index - 1] == "--add-dir"
-        ]
-        self.assertEqual(add_dir_values, [str(work_dir)])
-
     def test_build_codex_exec_cmd_does_not_duplicate_approval_flag(self) -> None:
         cmd = rf.build_codex_exec_cmd(
             repo_dir=ROOT,

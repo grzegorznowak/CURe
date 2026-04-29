@@ -2058,6 +2058,8 @@ def build_codex_exec_cmd(
         "codex",
         "-C",
         str(repo_dir),
+        "--add-dir",
+        "/tmp",
     ]
     for d in add_dirs or []:
         cmd.extend(["--add-dir", str(d)])
@@ -3241,9 +3243,9 @@ def build_codex_resume_command(
     resume_cmd: list[str] = [
         "codex",
         "resume",
+        "--add-dir",
+        "/tmp",
     ]
-    for add_dir in add_dirs or []:
-        resume_cmd.extend(["--add-dir", str(add_dir)])
     if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         resume_cmd.extend(["-a", approval_policy])
     resume_cmd.extend(codex_flags)
@@ -9549,8 +9551,6 @@ def _pr_flow_impl(
     base_cache_meta: dict[str, Any] | None = None
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
-    shared_workspace_lease: SharedWorkspaceLease | None = None
-    review_head_sha: str | None = None
     pr_stats: dict[str, Any] | None = None
     profile_resolved: str | None = None
     profile_reason: str | None = None
@@ -9625,7 +9625,7 @@ def _pr_flow_impl(
             )
             picker_completed = True
 
-        if (not args.no_index) and shared_workspace_lease is None:
+        if not args.no_index:
             with phase("ensure_base_cache", progress=progress, quiet=quiet):
                 base_cache_meta = ensure_base_cache(
                     paths=paths,
@@ -9648,308 +9648,116 @@ def _pr_flow_impl(
             progress.meta.setdefault("chunkhound", {})["seed_source"] = seed_source_meta
             progress.flush()
 
-        if (not args.no_index) and head_sha:
-            assert base_cache_meta is not None
-            chunkhound_version = str((base_cache_meta or {}).get("chunkhound_version") or "").strip()
-            if not chunkhound_version:
-                try:
-                    chunkhound_version = run_cmd(["chunkhound", "--version"]).stdout.strip()
-                except Exception:
-                    chunkhound_version = "unknown"
-            chunkhound_version = chunkhound_version or "unknown"
-            candidate_key = compute_shared_workspace_key(
-                host=pr.host,
-                owner=pr.owner,
-                repo=pr.repo,
-                sealed_head_sha=head_sha,
-                selected_baseline_ref=selected_baseline_ref,
-                chunkhound_config_fingerprint=fingerprint_chunkhound_reviewflow_config(chunkhound_meta),
-                chunkhound_version=chunkhound_version,
+        # Create sandbox repo by cloning from seed for speed + object reuse.
+        seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
+        if not seed.exists():
+            raise ReviewflowError(
+                f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {selected_baseline_ref}`."
             )
-            candidate_root = shared_workspace_root(paths, candidate_key)
-            if shared_workspace_metadata_path(candidate_root).is_file():
-                with phase("shared_workspace_reuse", progress=progress, quiet=quiet):
-                    shared_workspace_lease = acquire_shared_workspace_lease(
-                        paths=paths,
-                        key=candidate_key,
-                        quiet=quiet,
-                    )
+
+        with phase("seed_sanity", progress=progress, quiet=quiet):
+            # The seed repo is a cache. Keep it clean so operations like rsync + checkout are safe.
+            run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
+            ensure_clean_git_worktree(repo_dir=seed)
+
+        with phase("clone_seed", progress=progress, quiet=quiet):
+            # Prefer a local clone for speed. If the seed and sandbox are on different devices,
+            # hardlinks are not possible, so fall back to copying objects.
+            clone_cmd = ["git", "clone"]
+            if same_device(seed, session_dir):
+                # Hardlinks (fast, self-contained, safe for kept sandboxes).
+                clone_cmd.append("--local")
             else:
-                assert seed_source_db_path is not None
-                if not seed_source_db_path.exists():
-                    raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
-                seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
-                if not seed.exists():
-                    raise ReviewflowError(
-                        f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {selected_baseline_ref}`."
-                    )
+                clone_cmd.append("--no-hardlinks")
+            clone_cmd.extend([str(seed), str(repo_dir)])
+            progress.record_cmd(clone_cmd)
+            run_cmd(clone_cmd)
 
-                with phase("seed_sanity", progress=progress, quiet=quiet):
-                    run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
-                    ensure_clean_git_worktree(repo_dir=seed)
+            remote_url_cmd = ["git", "-C", str(seed), "remote", "get-url", "origin"]
+            progress.record_cmd(remote_url_cmd)
+            remote_url = run_cmd(remote_url_cmd).stdout.strip()
+            if remote_url:
+                set_remote_cmd = [
+                    "git",
+                    "-C",
+                    str(repo_dir),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    remote_url,
+                ]
+                progress.record_cmd(set_remote_cmd)
+                run_cmd(set_remote_cmd)
 
-                def prepare_shared_pr_repo(shared_repo_dir: Path) -> None:
-                    remote_url_cmd = ["git", "-C", str(seed), "remote", "get-url", "origin"]
-                    progress.record_cmd(remote_url_cmd)
-                    remote_url = run_cmd(remote_url_cmd).stdout.strip()
-                    if remote_url:
-                        set_remote_cmd = [
-                            "git",
-                            "-C",
-                            str(shared_repo_dir),
-                            "remote",
-                            "set-url",
-                            "origin",
-                            remote_url,
-                        ]
-                        progress.record_cmd(set_remote_cmd)
-                        run_cmd(set_remote_cmd)
+            fetch_cmd = ["git", "-C", str(repo_dir), "fetch", "--prune", "origin"]
+            progress.record_cmd(fetch_cmd)
+            run_cmd(fetch_cmd)
 
-                    fetch_cmd = ["git", "-C", str(shared_repo_dir), "fetch", "--prune", "origin"]
-                    progress.record_cmd(fetch_cmd)
-                    run_cmd(fetch_cmd)
+        with phase("rsync_mtimes", progress=progress, quiet=quiet):
+            checkout_base_cmd = [
+                "git",
+                "-C",
+                str(repo_dir),
+                "checkout",
+                "-B",
+                base_ref,
+                f"origin/{base_ref}",
+            ]
+            progress.record_cmd(checkout_base_cmd)
+            run_cmd(checkout_base_cmd)
 
-                    checkout_pr_cmd = [
-                        "gh",
-                        "pr",
-                        "checkout",
-                        str(pr.number),
-                        "-R",
-                        pr.gh_repo,
-                        "--force",
-                    ]
-                    progress.record_cmd(checkout_pr_cmd)
-                    checkout_pr_in_repo(repo_dir=shared_repo_dir, pr=pr)
+            rsync_cmd = [
+                "rsync",
+                "-a",
+                "--delete",
+                "--exclude",
+                ".git",
+                "--exclude",
+                ".DS_Store",
+                "--exclude",
+                "*/.DS_Store",
+                f"{seed}/",
+                f"{repo_dir}/",
+            ]
+            progress.record_cmd(rsync_cmd)
+            run_cmd(rsync_cmd)
+            ensure_clean_git_worktree(repo_dir=repo_dir)
 
-                    fetch_base_cmd = ["git", "-C", str(shared_repo_dir), "fetch", "origin", base_ref]
-                    progress.record_cmd(fetch_base_cmd)
-                    run_cmd(fetch_base_cmd)
-
-                    branch_cmd = [
-                        "git",
-                        "-C",
-                        str(shared_repo_dir),
-                        "branch",
-                        "-f",
-                        base_ref_for_review,
-                        f"origin/{base_ref}",
-                    ]
-                    progress.record_cmd(branch_cmd)
-                    run_cmd(branch_cmd)
-
-                try:
-                    with phase("shared_workspace", progress=progress, quiet=quiet):
-                        shared_workspace_lease = acquire_or_create_shared_workspace_lease(
-                            paths=paths,
-                            key=candidate_key,
-                            source_repo_dir=seed,
-                            seed_source_db_path=seed_source_db_path,
-                            chunkhound_cfg=chunkhound_cfg,
-                            resolved_chunkhound_config=resolved_chunkhound_cfg,
-                            progress=progress,
-                            quiet=quiet,
-                            stream=stream,
-                            prepare_repo=prepare_shared_pr_repo,
-                        )
-                except (ReviewflowError, ReviewflowSubprocessError) as exc:
-                    fallback_reason = _shared_workspace_direct_create_fallback_reason(exc)
-                    if fallback_reason is None:
-                        raise
-                    shared_workspace_lease = None
-                    progress.meta.setdefault("workspace", {})["direct_create_fallback_reason"] = fallback_reason
-                    progress.flush()
-
-            if shared_workspace_lease is not None:
-                review_head_sha = shared_workspace_lease.key.sealed_head_sha
+        with phase("checkout_pr", progress=progress, quiet=quiet):
+            checkout_pr_cmd = [
+                "gh",
+                "pr",
+                "checkout",
+                str(pr.number),
+                "-R",
+                pr.gh_repo,
+                "--force",
+            ]
+            progress.record_cmd(checkout_pr_cmd)
+            checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
+            review_head_sha_cmd = ["git", "-C", str(repo_dir), "rev-parse", "HEAD"]
+            progress.record_cmd(review_head_sha_cmd)
+            review_head_sha = run_cmd(review_head_sha_cmd).stdout.strip()
+            if review_head_sha:
                 progress.meta["review_head_sha"] = review_head_sha
-                meta_paths = progress.meta.setdefault("paths", {})
-                repo_dir = shared_workspace_lease.repo_dir
-                chunkhound_work_dir = shared_workspace_lease.chunkhound_cwd
-                chunkhound_db_path = shared_workspace_lease.chunkhound_db
-                chunkhound_cfg_path = shared_workspace_lease.chunkhound_config
-                meta_paths["repo_dir"] = str(repo_dir)
-                meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
-                meta_paths["chunkhound_db"] = str(chunkhound_db_path)
-                meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
-                existing_workspace_meta = (
-                    progress.meta.get("workspace") if isinstance(progress.meta.get("workspace"), dict) else {}
-                )
-                workspace_meta = shared_workspace_lease.to_metadata()
-                if isinstance(existing_workspace_meta, dict) and "direct_create_fallback_reason" in existing_workspace_meta:
-                    workspace_meta["direct_create_fallback_reason"] = existing_workspace_meta[
-                        "direct_create_fallback_reason"
-                    ]
-                progress.meta["workspace"] = workspace_meta
                 progress.flush()
 
-        if shared_workspace_lease is None:
-            # Create sandbox repo by cloning from seed for speed + object reuse.
-            seed = seed_dir(paths, pr.host, pr.owner, pr.repo)
-            if not seed.exists():
-                raise ReviewflowError(
-                    f"Seed clone missing at {seed}. Try `{PRIMARY_CLI_COMMAND} cache prime {pr.owner_repo} --base {selected_baseline_ref}`."
-                )
+        with phase("prepare_base_ref", progress=progress, quiet=quiet):
+            fetch_base_cmd = ["git", "-C", str(repo_dir), "fetch", "origin", base_ref]
+            progress.record_cmd(fetch_base_cmd)
+            run_cmd(fetch_base_cmd)
 
-            with phase("seed_sanity", progress=progress, quiet=quiet):
-                # The seed repo is a cache. Keep it clean so operations like rsync + checkout are safe.
-                run_cmd(["git", "-C", str(seed), "rev-parse", "--is-inside-work-tree"])
-                ensure_clean_git_worktree(repo_dir=seed)
-
-            with phase("clone_seed", progress=progress, quiet=quiet):
-                # Prefer a local clone for speed. If the seed and sandbox are on different devices,
-                # hardlinks are not possible, so fall back to copying objects.
-                clone_cmd = ["git", "clone"]
-                if same_device(seed, session_dir):
-                    # Hardlinks (fast, self-contained, safe for kept sandboxes).
-                    clone_cmd.append("--local")
-                else:
-                    clone_cmd.append("--no-hardlinks")
-                clone_cmd.extend([str(seed), str(repo_dir)])
-                progress.record_cmd(clone_cmd)
-                run_cmd(clone_cmd)
-
-                remote_url_cmd = ["git", "-C", str(seed), "remote", "get-url", "origin"]
-                progress.record_cmd(remote_url_cmd)
-                remote_url = run_cmd(remote_url_cmd).stdout.strip()
-                if remote_url:
-                    set_remote_cmd = [
-                        "git",
-                        "-C",
-                        str(repo_dir),
-                        "remote",
-                        "set-url",
-                        "origin",
-                        remote_url,
-                    ]
-                    progress.record_cmd(set_remote_cmd)
-                    run_cmd(set_remote_cmd)
-
-                fetch_cmd = ["git", "-C", str(repo_dir), "fetch", "--prune", "origin"]
-                progress.record_cmd(fetch_cmd)
-                run_cmd(fetch_cmd)
-
-            with phase("rsync_mtimes", progress=progress, quiet=quiet):
-                checkout_base_cmd = [
-                    "git",
-                    "-C",
-                    str(repo_dir),
-                    "checkout",
-                    "-B",
-                    base_ref,
-                    f"origin/{base_ref}",
-                ]
-                progress.record_cmd(checkout_base_cmd)
-                run_cmd(checkout_base_cmd)
-
-                rsync_cmd = [
-                    "rsync",
-                    "-a",
-                    "--delete",
-                    "--exclude",
-                    ".git",
-                    "--exclude",
-                    ".DS_Store",
-                    "--exclude",
-                    "*/.DS_Store",
-                    f"{seed}/",
-                    f"{repo_dir}/",
-                ]
-                progress.record_cmd(rsync_cmd)
-                run_cmd(rsync_cmd)
-                ensure_clean_git_worktree(repo_dir=repo_dir)
-
-            with phase("checkout_pr", progress=progress, quiet=quiet):
-                checkout_pr_cmd = [
-                    "gh",
-                    "pr",
-                    "checkout",
-                    str(pr.number),
-                    "-R",
-                    pr.gh_repo,
-                    "--force",
-                ]
-                progress.record_cmd(checkout_pr_cmd)
-                checkout_pr_in_repo(repo_dir=repo_dir, pr=pr)
-                review_head_sha_cmd = ["git", "-C", str(repo_dir), "rev-parse", "HEAD"]
-                progress.record_cmd(review_head_sha_cmd)
-                review_head_sha = run_cmd(review_head_sha_cmd).stdout.strip()
-                if review_head_sha:
-                    progress.meta["review_head_sha"] = review_head_sha
-                    progress.flush()
-
-            with phase("prepare_base_ref", progress=progress, quiet=quiet):
-                fetch_base_cmd = ["git", "-C", str(repo_dir), "fetch", "origin", base_ref]
-                progress.record_cmd(fetch_base_cmd)
-                run_cmd(fetch_base_cmd)
-
-                branch_cmd = [
-                    "git",
-                    "-C",
-                    str(repo_dir),
-                    "branch",
-                    "-f",
-                    base_ref_for_review,
-                    f"origin/{base_ref}",
-                ]
-                progress.record_cmd(branch_cmd)
-                run_cmd(branch_cmd)
-
-        if (not args.no_index) and shared_workspace_lease is None:
-            assert base_cache_meta is not None
-            assert seed_source_db_path is not None
-            if not seed_source_db_path.exists():
-                raise ReviewflowError(f"Session seed DB missing: {seed_source_db_path}")
-            if not review_head_sha:
-                raise ReviewflowError("Failed to resolve sealed local checkout SHA for shared workspace.")
-            chunkhound_version = str((base_cache_meta or {}).get("chunkhound_version") or "").strip()
-            if not chunkhound_version:
-                try:
-                    chunkhound_version = run_cmd(["chunkhound", "--version"]).stdout.strip()
-                except Exception:
-                    chunkhound_version = "unknown"
-            chunkhound_version = chunkhound_version or "unknown"
-            shared_workspace_key = compute_shared_workspace_key(
-                host=pr.host,
-                owner=pr.owner,
-                repo=pr.repo,
-                sealed_head_sha=review_head_sha,
-                selected_baseline_ref=selected_baseline_ref,
-                chunkhound_config_fingerprint=fingerprint_chunkhound_reviewflow_config(chunkhound_meta),
-                chunkhound_version=chunkhound_version,
-            )
-            with phase("shared_workspace", progress=progress, quiet=quiet):
-                shared_workspace_lease = acquire_or_create_shared_workspace_lease(
-                    paths=paths,
-                    key=shared_workspace_key,
-                    source_repo_dir=repo_dir,
-                    seed_source_db_path=seed_source_db_path,
-                    chunkhound_cfg=chunkhound_cfg,
-                    resolved_chunkhound_config=resolved_chunkhound_cfg,
-                    progress=progress,
-                    quiet=quiet,
-                    stream=stream,
-                    local_refs=[base_ref_for_review],
-                )
-            meta_paths = progress.meta.setdefault("paths", {})
-            meta_paths["session_repo_dir"] = str(repo_dir)
-            repo_dir = shared_workspace_lease.repo_dir
-            chunkhound_work_dir = shared_workspace_lease.chunkhound_cwd
-            chunkhound_db_path = shared_workspace_lease.chunkhound_db
-            chunkhound_cfg_path = shared_workspace_lease.chunkhound_config
-            meta_paths["repo_dir"] = str(repo_dir)
-            meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
-            meta_paths["chunkhound_db"] = str(chunkhound_db_path)
-            meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
-            existing_workspace_meta = (
-                progress.meta.get("workspace") if isinstance(progress.meta.get("workspace"), dict) else {}
-            )
-            workspace_meta = shared_workspace_lease.to_metadata()
-            if isinstance(existing_workspace_meta, dict) and "direct_create_fallback_reason" in existing_workspace_meta:
-                workspace_meta["direct_create_fallback_reason"] = existing_workspace_meta[
-                    "direct_create_fallback_reason"
-                ]
-            progress.meta["workspace"] = workspace_meta
-            progress.flush()
+            branch_cmd = [
+                "git",
+                "-C",
+                str(repo_dir),
+                "branch",
+                "-f",
+                base_ref_for_review,
+                f"origin/{base_ref}",
+            ]
+            progress.record_cmd(branch_cmd)
+            run_cmd(branch_cmd)
 
         with phase("detect_pr_size", progress=progress, quiet=quiet):
             try:
@@ -10074,7 +9882,7 @@ def _pr_flow_impl(
                         "or use a custom --prompt/--prompt-file that does not require ChunkHound."
                     )
 
-        if (not args.no_index) and shared_workspace_lease is None:
+        if not args.no_index:
             assert base_cache_meta is not None
             assert seed_source_db_path is not None
             if not seed_source_db_path.exists():
@@ -10136,7 +9944,6 @@ def _pr_flow_impl(
                 enable_mcp=(not bool(getattr(args, "no_index", False))),
                 interactive=False,
                 paths=paths,
-                visible_run_dirs=([work_dir] if shared_workspace_lease is not None else None),
             )
             env = dict(runtime_policy["env"])
             adapter_meta: dict[str, Any] = {
@@ -11135,64 +10942,6 @@ def _run_incremental_completed_multipass_resume(
     return success_resume_command
 
 
-def _apply_recorded_shared_workspace_lease_to_meta(
-    *,
-    meta: dict[str, Any],
-    paths: ReviewflowPaths,
-    quiet: bool,
-) -> SharedWorkspaceLease | None:
-    lease = acquire_recorded_shared_workspace_lease(meta=meta, paths=paths, quiet=quiet)
-    if lease is None:
-        return None
-    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-    meta_paths = dict(meta_paths or {})
-    meta_paths["repo_dir"] = str(lease.repo_dir)
-    meta_paths["chunkhound_cwd"] = str(lease.chunkhound_cwd)
-    meta_paths["chunkhound_db"] = str(lease.chunkhound_db)
-    meta_paths["chunkhound_config"] = str(lease.chunkhound_config)
-    meta["paths"] = meta_paths
-    meta["workspace"] = lease.to_metadata()
-    return lease
-
-
-def _raise_shared_workspace_mutation_error(*, operation: str) -> None:
-    raise ReviewflowError(
-        f"{operation} cannot mutate a shared workspace session. "
-        "Start a new PR review to refresh the shared checkout, or use a non-updating path."
-    )
-
-
-def _shared_workspace_direct_create_fallback_reason(exc: Exception) -> str | None:
-    if isinstance(exc, ReviewflowError):
-        text = str(exc)
-        if "sealed SHA validation failed after checkout" in text:
-            return text
-        return None
-    if not isinstance(exc, ReviewflowSubprocessError):
-        return None
-    cmd = list(getattr(exc, "cmd", []) or [])
-    is_pr_checkout = len(cmd) >= 3 and cmd[:3] == ["gh", "pr", "checkout"]
-    output = "\n".join(
-        part for part in (str(getattr(exc, "stdout", "") or ""), str(getattr(exc, "stderr", "") or "")) if part
-    )
-    lowered_output = output.lower()
-    looks_like_missing_checkout_target = any(
-        marker in lowered_output
-        for marker in (
-            "reference is not a tree",
-            "not our ref",
-            "couldn't find remote ref",
-            "could not parse object",
-        )
-    )
-    if is_pr_checkout and looks_like_missing_checkout_target:
-        detail = output.strip()
-        if detail:
-            return f"{exc}: {detail}"
-        return str(exc)
-    return None
-
-
 def _resume_flow_impl(
     args: argparse.Namespace,
     *,
@@ -11264,13 +11013,6 @@ def _resume_flow_impl(
 
     meta_paths = meta.get("paths") or {}
     meta_paths = meta_paths if isinstance(meta_paths, dict) else {}
-    shared_workspace_lease = _apply_recorded_shared_workspace_lease_to_meta(
-        meta=meta,
-        paths=paths,
-        quiet=quiet,
-    )
-    meta_paths = meta.get("paths") or {}
-    meta_paths = meta_paths if isinstance(meta_paths, dict) else {}
 
     repo_dir = Path(str((meta_paths.get("repo_dir")) or "")).resolve()
     review_md_raw = str((meta_paths.get("review_md")) or "").strip()
@@ -11288,8 +11030,6 @@ def _resume_flow_impl(
             or bool(str(meta.get("completed_at") or "").strip())
         )
     )
-    if shared_workspace_lease is not None and from_phase == "auto" and completed_session:
-        _raise_shared_workspace_mutation_error(operation="resume --from auto")
     incremental_resume_review_point: SessionReviewPoint | None = None
     incremental_resume_head_sha: str | None = None
     if from_phase == "auto" and completed_session:
@@ -11340,15 +11080,10 @@ def _resume_flow_impl(
         str(meta_paths.get("chunkhound_config") or (chunkhound_work_dir / "chunkhound.json"))
     ).resolve()
     work_tmp_dir.mkdir(parents=True, exist_ok=True)
-    if shared_workspace_lease is None:
-        chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
+    chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    if (
-        shared_workspace_lease is None
-        and (not chunkhound_db_path.exists())
-        and (repo_dir / ".chunkhound.db").exists()
-    ):
+    if (not chunkhound_db_path.exists()) and (repo_dir / ".chunkhound.db").exists():
         # Legacy sessions stored the DB under the sandbox repo.
         chunkhound_db_path = (repo_dir / ".chunkhound.db").resolve()
 
@@ -11360,30 +11095,28 @@ def _resume_flow_impl(
         )
 
     ensure_review_config(paths, config_path=effective_config_path)
-    if shared_workspace_lease is None:
-        restore_session_chunkhound_db_from_baseline(
-            meta=meta,
-            paths=paths,
-            config_path=effective_config_path,
-            pr=pr,
-            chunkhound_db_path=chunkhound_db_path,
-            quiet=quiet,
-            no_stream=no_stream,
-        )
+    restore_session_chunkhound_db_from_baseline(
+        meta=meta,
+        paths=paths,
+        config_path=effective_config_path,
+        pr=pr,
+        chunkhound_db_path=chunkhound_db_path,
+        quiet=quiet,
+        no_stream=no_stream,
+    )
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
         config_path=effective_config_path,
         require=True,
     )
     # Always refresh the session-local ChunkHound config so it tracks updates
     # from the configured base ChunkHound config on every resume run.
-    if shared_workspace_lease is None:
-        materialize_chunkhound_env_config(
-            resolved_config=resolved_chunkhound_cfg,
-            output_config_path=chunkhound_cfg_path,
-            database_provider="duckdb",
-            database_path=chunkhound_db_path,
-        )
-        meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
+    materialize_chunkhound_env_config(
+        resolved_config=resolved_chunkhound_cfg,
+        output_config_path=chunkhound_cfg_path,
+        database_provider="duckdb",
+        database_path=chunkhound_db_path,
+    )
+    meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
 
     progress = SessionProgress(meta_path, quiet=quiet)
@@ -11480,7 +11213,6 @@ def _resume_flow_impl(
             enable_mcp=(not no_index),
             interactive=True,
             paths=paths,
-            visible_run_dirs=([work_dir] if shared_workspace_lease is not None else None),
         )
         env = dict(runtime_policy["env"])
         adapter_meta: dict[str, Any] = {
@@ -12177,12 +11909,6 @@ def _followup_flow_impl(
         raise ReviewflowError(f"Failed to parse meta.json: {meta_path}")
 
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-    shared_workspace_lease = _apply_recorded_shared_workspace_lease_to_meta(
-        meta=meta,
-        paths=paths,
-        quiet=quiet,
-    )
-    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str((meta_paths or {}).get("repo_dir") or (session_dir / "repo"))).resolve()
     work_dir = Path(str((meta_paths or {}).get("work_dir") or (session_dir / "work"))).resolve()
     work_tmp_dir = Path(
@@ -12206,33 +11932,25 @@ def _followup_flow_impl(
     if not pr_url:
         raise ReviewflowError("Session meta missing pr_url.")
     pr = parse_pr_url(pr_url)
-    if shared_workspace_lease is not None and not bool(getattr(args, "no_update", False)):
-        _raise_shared_workspace_mutation_error(operation="followup")
     ensure_review_config(paths, config_path=effective_config_path)
 
     work_tmp_dir.mkdir(parents=True, exist_ok=True)
-    if shared_workspace_lease is None:
-        chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
+    chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    if (
-        shared_workspace_lease is None
-        and (not chunkhound_db_path.exists())
-        and (repo_dir / ".chunkhound.db").exists()
-    ):
+    if (not chunkhound_db_path.exists()) and (repo_dir / ".chunkhound.db").exists():
         # Legacy sessions stored the DB under the sandbox repo.
         chunkhound_db_path = (repo_dir / ".chunkhound.db").resolve()
-    if shared_workspace_lease is None:
-        restore_session_chunkhound_db_from_baseline(
-            meta=meta,
-            paths=paths,
-            config_path=effective_config_path,
-            pr=pr,
-            chunkhound_db_path=chunkhound_db_path,
-            quiet=quiet,
-            no_stream=no_stream,
-        )
+    restore_session_chunkhound_db_from_baseline(
+        meta=meta,
+        paths=paths,
+        config_path=effective_config_path,
+        pr=pr,
+        chunkhound_db_path=chunkhound_db_path,
+        quiet=quiet,
+        no_stream=no_stream,
+    )
 
     chunkhound_cfg, chunkhound_meta, resolved_chunkhound_cfg = load_chunkhound_runtime_config(
         config_path=effective_config_path,
@@ -12240,13 +11958,12 @@ def _followup_flow_impl(
     )
     # Always refresh the session-local ChunkHound config so it tracks updates
     # from the configured base ChunkHound config on every follow-up run.
-    if shared_workspace_lease is None:
-        materialize_chunkhound_env_config(
-            resolved_config=resolved_chunkhound_cfg,
-            output_config_path=chunkhound_cfg_path,
-            database_provider="duckdb",
-            database_path=chunkhound_db_path,
-        )
+    materialize_chunkhound_env_config(
+        resolved_config=resolved_chunkhound_cfg,
+        output_config_path=chunkhound_cfg_path,
+        database_provider="duckdb",
+        database_path=chunkhound_db_path,
+    )
     meta_paths = dict(meta_paths or {})
     meta_paths["work_dir"] = str(work_dir)
     meta_paths["work_tmp_dir"] = str(work_tmp_dir)
@@ -12318,7 +12035,6 @@ def _followup_flow_impl(
             enable_mcp=True,
             interactive=False,
             paths=paths,
-            visible_run_dirs=([work_dir] if shared_workspace_lease is not None else None),
         )
         env = dict(runtime_policy["env"])
         review_intelligence_capabilities = _review_intelligence_runtime_capabilities(
@@ -12800,25 +12516,9 @@ def _zip_flow_impl(
     host_meta = _load_session_meta(host_meta_path)
     if not host_meta:
         raise ReviewflowError(f"zip: failed to load host meta.json: {host_meta_path}")
-    shared_workspace_lease = _apply_recorded_shared_workspace_lease_to_meta(
-        meta=host_meta,
-        paths=paths,
-        quiet=quiet,
-    )
-    if shared_workspace_lease is not None:
-        write_redacted_json(host_meta_path, host_meta)
     host_paths = host_meta.get("paths") if isinstance(host_meta.get("paths"), dict) else {}
     host_repo_dir = Path(str((host_paths or {}).get("repo_dir") or (host_session_dir / "repo"))).resolve()
     host_work_dir = Path(str((host_paths or {}).get("work_dir") or (host_session_dir / "work"))).resolve()
-    host_chunkhound_work_dir = (
-        shared_workspace_lease.chunkhound_cwd if shared_workspace_lease is not None else None
-    )
-    host_chunkhound_db_path = (
-        shared_workspace_lease.chunkhound_db if shared_workspace_lease is not None else None
-    )
-    host_chunkhound_cfg_path = (
-        shared_workspace_lease.chunkhound_config if shared_workspace_lease is not None else None
-    )
     if not host_repo_dir.is_dir():
         raise ReviewflowError(f"zip: host repo_dir missing: {host_repo_dir}")
     host_work_dir.mkdir(parents=True, exist_ok=True)
@@ -12838,8 +12538,6 @@ def _zip_flow_impl(
     )
     zips_dir = host_session_dir / "zips"
     zips_dir.mkdir(parents=True, exist_ok=True)
-    zip_inputs_dir = zips_dir / "inputs" / f"zip-{zip_ts}"
-    zip_inputs_dir.mkdir(parents=True, exist_ok=True)
     output_md_path = zips_dir / f"zip-{zip_ts}.md"
     zip_meta_path = zips_dir / f"zip-{zip_ts}.meta.json"
     zip_logs_dir = zips_dir / "logs" / f"zip-{zip_ts}"
@@ -12859,67 +12557,51 @@ def _zip_flow_impl(
                 "target_head_sha": src.target_head_sha,
             }
         )
-        if not src.artifact_path.is_file():
-            raise ReviewflowError(f"zip: selected input artifact is missing: {src.artifact_path}")
-        safe_session = safe_ref_slug(src.session_id) or f"session-{len(inputs_meta)}"
-        safe_kind = safe_ref_slug(src.kind) or "artifact"
-        visible_artifact_path = zip_inputs_dir / f"{len(inputs_meta):02d}-{safe_session}-{safe_kind}.md"
-        shutil.copyfile(src.artifact_path, visible_artifact_path)
-        inputs_meta[-1]["visible_path"] = str(visible_artifact_path)
         when = src.completed_at or ""
         verdicts = format_review_verdicts_compact(src.verdicts)
         inputs_lines.append(
-            f"- {src.session_id} ({src.kind}, {when}, {verdicts})  `{visible_artifact_path}`"
+            f"- {src.session_id} ({src.kind}, {when}, {verdicts})  `{src.artifact_path}`"
         )
     zip_inputs_text = "\n".join(inputs_lines)
     zip_display_inputs = build_zip_input_display_lines(inputs_meta=inputs_meta)
 
-    zip_paths: dict[str, Any] = {
-        "host_session_dir": str(host_session_dir),
-        "repo_dir": str(host_repo_dir),
-        "work_dir": str(host_work_dir),
-        "input_artifacts_dir": str(zip_inputs_dir),
-        "logs_dir": str(zip_logs_dir),
-        "output_md": str(output_md_path),
-    }
-    if shared_workspace_lease is not None:
-        zip_paths["chunkhound_cwd"] = str(shared_workspace_lease.chunkhound_cwd)
-        zip_paths["chunkhound_db"] = str(shared_workspace_lease.chunkhound_db)
-        zip_paths["chunkhound_config"] = str(shared_workspace_lease.chunkhound_config)
-
-    zip_initial_meta: dict[str, Any] = {
-        "session_id": zip_run_id,
-        "created_at": zip_started_at,
-        "status": "running",
-        "phase": "init",
-        "kind": "zip",
-        "pr_url": pr_url,
-        "host": pr.host,
-        "owner": pr.owner,
-        "repo": pr.repo,
-        "number": pr.number,
-        "title": title,
-        "head_sha": head_sha,
-        "host_session_id": str(host_meta.get("session_id") or host_session_dir.name),
-        "paths": zip_paths,
-        "zip": {
-            "inputs": inputs_meta,
-            "display_inputs": zip_display_inputs,
-            "selected_input_count": len(inputs_meta),
-        },
-        "options": {
-            "quiet": quiet,
-            "no_stream": no_stream,
-            "ui": str(getattr(args, "ui", "auto") or "auto"),
-            "ui_enabled": bool(ui_enabled),
-            "verbosity": verbosity.value,
-        },
-    }
-    if shared_workspace_lease is not None:
-        zip_initial_meta["workspace"] = shared_workspace_lease.to_metadata()
-
     zip_progress = SessionProgress(zip_meta_path, quiet=quiet)
-    zip_progress.init(zip_initial_meta)
+    zip_progress.init(
+        {
+            "session_id": zip_run_id,
+            "created_at": zip_started_at,
+            "status": "running",
+            "phase": "init",
+            "kind": "zip",
+            "pr_url": pr_url,
+            "host": pr.host,
+            "owner": pr.owner,
+            "repo": pr.repo,
+            "number": pr.number,
+            "title": title,
+            "head_sha": head_sha,
+            "host_session_id": str(host_meta.get("session_id") or host_session_dir.name),
+            "paths": {
+                "host_session_dir": str(host_session_dir),
+                "repo_dir": str(host_repo_dir),
+                "work_dir": str(host_work_dir),
+                "logs_dir": str(zip_logs_dir),
+                "output_md": str(output_md_path),
+            },
+            "zip": {
+                "inputs": inputs_meta,
+                "display_inputs": zip_display_inputs,
+                "selected_input_count": len(inputs_meta),
+            },
+            "options": {
+                "quiet": quiet,
+                "no_stream": no_stream,
+                "ui": str(getattr(args, "ui", "auto") or "auto"),
+                "ui_enabled": bool(ui_enabled),
+                "verbosity": verbosity.value,
+            },
+        }
+    )
 
     out = ReviewflowOutput(
         ui_enabled=ui_enabled,
@@ -12963,15 +12645,12 @@ def _zip_flow_impl(
             session_dir=host_session_dir,
             work_dir=host_work_dir,
             base_env={},
-            chunkhound_config_path=host_chunkhound_cfg_path,
-            chunkhound_db_path=host_chunkhound_db_path,
-            chunkhound_cwd=host_chunkhound_work_dir,
+            chunkhound_config_path=None,
+            chunkhound_db_path=None,
+            chunkhound_cwd=None,
             enable_mcp=False,
             interactive=False,
             paths=paths,
-            visible_run_dirs=(
-                [host_work_dir, zip_inputs_dir] if shared_workspace_lease is not None else None
-            ),
         )
         env = dict(runtime_policy["env"])
         codex_flags = list(runtime_policy.get("codex_flags") or [])
@@ -15597,18 +15276,6 @@ from cure_flows import (
     validate_operator_chunkhound_seed_source,
     validate_and_record_chunkhound_tool_proof,
     validate_chunkhound_tool_proof,
-)
-from cure_workspaces import (
-    SharedWorkspaceKey,
-    SharedWorkspaceLease,
-    acquire_or_create_shared_workspace_lease,
-    acquire_recorded_shared_workspace_lease,
-    acquire_shared_workspace_lease,
-    compute_shared_workspace_key,
-    resolve_git_head_sha,
-    shared_workspace_metadata_path,
-    shared_workspace_root,
-    write_shared_workspace_metadata,
 )
 from cure_llm import (
     CodexResumeInfo,
