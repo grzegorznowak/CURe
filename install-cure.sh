@@ -2,6 +2,8 @@
 set -eu
 
 RELEASES_BASE_URL="https://github.com/grzegorznowak/CURe/releases"
+LINUX_MIN_GLIBC_MAJOR=2
+LINUX_MIN_GLIBC_MINOR=31
 
 usage() {
   cat <<'EOF'
@@ -29,6 +31,36 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+detect_glibc_version() {
+  if command -v getconf >/dev/null 2>&1; then
+    getconf GNU_LIBC_VERSION 2>/dev/null | awk '{ print $2 }'
+    return
+  fi
+  if command -v ldd >/dev/null 2>&1; then
+    ldd --version 2>&1 | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'
+    return
+  fi
+  printf '\n'
+}
+
+require_linux_glibc_floor() {
+  version="$(detect_glibc_version | head -n 1)"
+  [ -n "$version" ] || die "could not detect glibc; use 'uv tool install cureview' instead of the standalone Linux asset"
+  major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
+  case "$major:$minor" in
+    *[!0-9:]*|:*|*:)
+      die "could not parse glibc version '$version'; use 'uv tool install cureview' instead of the standalone Linux asset"
+      ;;
+  esac
+  if [ "$major" -lt "$LINUX_MIN_GLIBC_MAJOR" ] || {
+    [ "$major" -eq "$LINUX_MIN_GLIBC_MAJOR" ] && [ "$minor" -lt "$LINUX_MIN_GLIBC_MINOR" ]
+  }; then
+    die "Linux standalone assets require glibc ${LINUX_MIN_GLIBC_MAJOR}.${LINUX_MIN_GLIBC_MINOR} or newer; found $version. Use 'uv tool install cureview' instead."
+  fi
+}
+
 resolve_latest_version() {
   need_cmd curl
   tag="$(curl -fsSL https://api.github.com/repos/grzegorznowak/CURe/releases/latest | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
@@ -41,6 +73,7 @@ detect_target() {
   arch="$(uname -m 2>/dev/null || printf unknown)"
   case "$os:$arch" in
     Linux:x86_64|Linux:amd64)
+      require_linux_glibc_floor
       printf '%s\n' "linux-x86_64"
       ;;
     Darwin:x86_64)

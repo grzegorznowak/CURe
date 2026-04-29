@@ -127,7 +127,53 @@ jobs:
         with:
           skip-existing: ${{ github.event_name == 'workflow_dispatch' }}
 
-  build-standalone-assets:
+  build-linux-standalone-asset:
+    name: Build standalone asset (linux-x86_64)
+    needs: build
+    runs-on: ubuntu-24.04
+    container: python:3.12-bullseye
+
+    steps:
+      - name: Install container OS dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git tar gzip binutils
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Show Linux compatibility baseline
+        run: |
+          python --version
+          ldd --version | head -n 1
+
+      - name: Install standalone build dependencies
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build standalone release archive
+        run: python scripts/build_standalone_release.py --target-id linux-x86_64 --output-dir standalone-dist
+
+      - name: Smoke test standalone archive on build baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(ls standalone-dist/*.tar.gz)"
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tar -xzf "$archive" -C "$tmp_dir"
+          "$tmp_dir/cure" --help >/dev/null
+
+      - name: Upload standalone release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-assets-linux-x86_64
+          path: standalone-dist/*
+          if-no-files-found: error
+
+  build-macos-standalone-assets:
     name: Build standalone asset (${{ matrix.target_id }})
     needs: build
     runs-on: ${{ matrix.runner }}
@@ -135,8 +181,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
-            target_id: linux-x86_64
           - runner: macos-15-intel
             target_id: macos-x86_64
           - runner: macos-14
@@ -181,7 +225,8 @@ jobs:
     needs:
       - build
       - publish-pypi
-      - build-standalone-assets
+      - build-linux-standalone-asset
+      - build-macos-standalone-assets
     if: ${{ needs.publish-pypi.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:

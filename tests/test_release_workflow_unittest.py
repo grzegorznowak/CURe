@@ -96,11 +96,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_publish_workflow_builds_and_releases_standalone_assets(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 
-        self.assertIn("build-standalone-assets:", workflow)
-        self.assertIn("target_id: linux-x86_64", workflow)
+        self.assertIn("build-linux-standalone-asset:", workflow)
+        self.assertIn("container: python:3.12-bullseye", workflow)
+        self.assertIn("Show Linux compatibility baseline", workflow)
+        self.assertIn("build-macos-standalone-assets:", workflow)
+        self.assertIn("--target-id linux-x86_64", workflow)
         self.assertIn("target_id: macos-x86_64", workflow)
         self.assertIn("target_id: macos-arm64", workflow)
+        self.assertIn("python scripts/build_standalone_release.py --target-id linux-x86_64 --output-dir standalone-dist", workflow)
         self.assertIn("python scripts/build_standalone_release.py --target-id ${{ matrix.target_id }} --output-dir standalone-dist", workflow)
+        self.assertIn("standalone-assets-linux-x86_64", workflow)
         self.assertIn("standalone-assets-${{ matrix.target_id }}", workflow)
         self.assertIn("pattern: standalone-assets-*", workflow)
         self.assertIn("merge-multiple: true", workflow)
@@ -116,6 +121,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("https://api.github.com/repos/grzegorznowak/CURe/releases/latest", installer)
         self.assertIn("cureview-$VERSION-$TARGET_ID.tar.gz", installer)
         self.assertIn("linux-x86_64", installer)
+        self.assertIn("LINUX_MIN_GLIBC_MINOR=31", installer)
+        self.assertIn("standalone assets require glibc", installer)
         self.assertIn("macos-arm64", installer)
         self.assertIn("uv tool install cureview", installer)
         self.assertIn('awk -v asset="$asset_name"', installer)
@@ -175,6 +182,55 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(result.stdout.strip(), "cure smoke")
+
+    def test_installer_rejects_linux_glibc_below_standalone_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "uname").write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env sh",
+                        "case \"$1\" in",
+                        "  -s) printf 'Linux\\n' ;;",
+                        "  -m) printf 'x86_64\\n' ;;",
+                        "  *) printf 'Linux\\n' ;;",
+                        "esac",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (fake_bin / "getconf").write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env sh",
+                        "[ \"$1\" = GNU_LIBC_VERSION ] && { printf 'glibc 2.28\\n'; exit 0; }",
+                        "exit 1",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (fake_bin / "uname").chmod(0o755)
+            (fake_bin / "getconf").chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["CURE_INSTALL_BASE_URL"] = f"file://{tmp / 'release'}"
+            result = subprocess.run(
+                [str(ROOT / "install-cure.sh"), "--version", "v0.7.0", "--bin-dir", str(tmp / "install")],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("require glibc 2.31 or newer", result.stderr)
+            self.assertIn("uv tool install cureview", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

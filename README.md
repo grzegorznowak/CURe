@@ -226,7 +226,7 @@ uv tool install cureview
 ```
 
 Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient. The current secondary targets are:
-- Linux x86_64
+- Linux x86_64 with glibc 2.31 or newer
 - macOS x86_64
 - macOS arm64
 

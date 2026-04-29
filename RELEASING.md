@@ -56,7 +56,7 @@ The workflow uses GitHub OIDC with `pypa/gh-action-pypi-publish@release/v1`, so 
 Tagged releases also build a secondary standalone channel after the package publish target succeeds.
 
 - Supported standalone targets:
-  - Linux x86_64
+  - Linux x86_64 with glibc 2.31 or newer
   - macOS x86_64
   - macOS arm64
 - The same `publish-package.yml` workflow builds and uploads:
@@ -67,6 +67,7 @@ Tagged releases also build a secondary standalone channel after the package publ
 - GitHub Release assets are uploaded only after the matching PyPI publish succeeds.
 - The public install script is [`install-cure.sh`](install-cure.sh).
 - The installer remains a secondary path. Do not rewrite the README/SKILL contract to make it look equivalent to the package-first default.
+- Linux standalone assets are built in a Python 3.12 Debian Bullseye container to keep the glibc floor near Ubuntu 20.04-era systems instead of inheriting `ubuntu-latest`.
 
 Pinned standalone install example:
 
