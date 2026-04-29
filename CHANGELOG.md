@@ -8,6 +8,18 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.7.0] - 2026-04-29
+
+### Added
+
+- Added shared utility LLM configuration support for intermediate CURe tasks, with independent preset, model, effort, and provenance metadata.
+- Added shared same-SHA review workspaces so active PR reviews can reuse a validated repo and ChunkHound index for the same sealed checkout while keeping per-run artifacts isolated.
+
+### Changed
+
+- Chain-of-Draft hypothesis ledger triage is now enabled by default for multipass `cure pr` and `cure resume` runs; pass `--cod-ledger off` to disable it.
+- Hidden `resume` and `followup` command surfaces are rejected before bootstrap; repeat review work should start a fresh `cure pr <PR_URL> --if-reviewed new` run.
+
 ## [0.6.2] - 2026-04-27
 
 ### Changed
@@ -24,7 +36,6 @@ No entries yet.
 ### Changed
 
 - Release process no longer commits evidence files to the repository.
-- Chain-of-Draft hypothesis ledger triage is now enabled by default for multipass `cure pr` and `cure resume` runs; pass `--cod-ledger off` to disable it.
 
 ## [0.6.0] - 2026-04-21
 
