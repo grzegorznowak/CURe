@@ -3283,6 +3283,51 @@ class ClaudeLiveProgressTests(unittest.TestCase):
                 ),
             )
 
+    def test_handle_claude_stream_chunk_raises_when_helper_payload_lacks_bash_command_association(self) -> None:
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        stdout_text = json.dumps(
+            {
+                "ok": True,
+                "command": "search",
+                "tool_name": "search",
+                "query": "needle",
+                "helper_path": helper_path,
+                "result": {
+                    "results": [],
+                    "pagination": {"offset": 0, "total_results": 0},
+                },
+            }
+        )
+
+        cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+        with self.assertRaisesRegex(rf.ReviewflowError, "did not match a captured Bash command"):
+            cure_llm._handle_claude_stream_chunk(
+                progress=progress,
+                state=state,
+                chunk=json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_missing_command",
+                                    "content": stdout_text,
+                                    "is_error": False,
+                                }
+                            ],
+                        },
+                        "tool_use_result": {
+                            "stdout": stdout_text,
+                            "stderr": "",
+                        },
+                    }
+                ),
+            )
+
     def test_handle_claude_stream_chunk_extracts_helper_proof_entries_from_real_search_fixture(self) -> None:
         progress = self._StubProgress()
         fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
@@ -3862,6 +3907,49 @@ class ClaudeLiveProgressTests(unittest.TestCase):
             import os
 
             os.unlink(persisted_path)
+
+    def test_handle_claude_stream_chunk_background_output_file_with_helper_payload_requires_tool_use_id(self) -> None:
+        import tempfile
+
+        progress = self._StubProgress()
+        state = {"content": ""}
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        proof_json = json.dumps(
+            {
+                "ok": True,
+                "command": "research",
+                "tool_name": "code_research",
+                "query": "question",
+                "helper_path": helper_path,
+                "result": {"summary": "grounded answer"},
+                "execution_stage": "tools/call",
+                "execution_stage_status": "ok",
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(proof_json + "\n")
+            output_path = f.name
+
+        try:
+            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
+            with self.assertRaisesRegex(rf.ReviewflowError, "without a documented tool_use_id"):
+                cure_llm._handle_claude_stream_chunk(
+                    progress=progress,
+                    state=state,
+                    chunk=json.dumps(
+                        {
+                            "type": "system",
+                            "subtype": "task_notification",
+                            "status": "completed",
+                            "output_file": output_path,
+                        }
+                    ),
+                )
+        finally:
+            import os
+
+            os.unlink(output_path)
 
     def test_handle_claude_stream_chunk_persisted_output_top_level_stdout_no_proof_no_mismatch(self) -> None:
         """When tool_use_result.stdout carries a <persisted-output> wrapper but the
