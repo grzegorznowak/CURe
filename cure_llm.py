@@ -1772,7 +1772,7 @@ _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _REVIEW_PROVIDER = {json.dumps(provider)}
 _PREFLIGHT_STAGE_TIMEOUTS = {{
     "spawn": 3.0,
-    "initialize": 10.0,
+    "initialize": 30.0,
     "notifications/initialized": 5.0,
     "tools/list": 10.0,
     "daemon_metadata": 5.0,
