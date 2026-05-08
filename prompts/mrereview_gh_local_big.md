@@ -56,6 +56,9 @@ If you must ABORT:
 - `Out of Scope` means adjacent debt, follow-on work, or auxiliary improvements outside that section's scope basis.
 - Duplicate issue ownership: if the same underlying issue qualifies for both assessment sections and has product, operator, user, acceptance, or review-verdict impact, report the canonical issue block only under `Business / Product Assessment`.
 - Do not restate the same defect or debt item as another issue block under `Technical Assessment`; reserve Technical for distinct implementation issues, strengths, constraints, or reusability observations.
+- Every final review must include `### Input Boundary Shape Risk Assessment` under `Technical Assessment`.
+- Set that assessment to `Triggered` when raw persisted, external, framework, or generated input crosses into stricter application assumptions such as parsing, validation, classification, normalization, migration, aggregation, routing, import/export, or schema construction. If triggered, name the raw boundary and cite boundary proof, mitigation, or the missing-proof gap when possible.
+- Set it to `Not triggered` only when the changed code has no such boundary; state the rationale without inventing production facts.
 - Out-of-scope issues may still downgrade a verdict when materially important.
 - Use `- None.` when a scope bucket is empty.
 - Trailing citation contract (shared across review prompts):
@@ -72,6 +75,7 @@ $VERBOSE_FINDING_MODE_GUIDANCE
 - Are there any security considerations?
 - Are there any performance considerations?
 - Do the changes maintain established contracts?
+- If raw input crosses into stricter application assumptions, is the Input Boundary Shape Risk covered at the real boundary rather than only with already-normalized helper data?
 - Are there adequate tests covering new functions and features?
 - Are no new issues introduced?
 
@@ -110,6 +114,11 @@ $VERBOSE_FINDING_MODE_GUIDANCE
 
 ## Technical Assessment
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
+
+### Input Boundary Shape Risk Assessment
+Status: [Triggered/Not triggered]
+Boundary: [raw input source -> stricter assumption, or None]
+Evidence / mitigation: [proof, mitigated unknown, missing-proof issue, or not-triggered rationale]
 
 ### Strengths
 - ...

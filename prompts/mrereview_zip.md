@@ -29,7 +29,8 @@ $ZIP_INPUTS
 9. The same issue may be `In Scope` for business/product and `Out of Scope` for technical, or vice versa.
 10. Out-of-scope issues may still downgrade a verdict when materially important.
 11. Use `- None.` when a scope bucket is empty.
-12. Do not create, edit, or move any files. Do not use `apply_patch`. CURe will save your final response as the zip artifact.
+12. Include `### Input Boundary Shape Risk Assessment` under `Technical Assessment`, based only on the input review artifacts. Use `Status: Triggered`, `Status: Not triggered`, or `Status: Not assessed in inputs` when the inputs do not provide enough evidence to choose safely.
+13. Do not create, edit, or move any files. Do not use `apply_patch`. CURe will save your final response as the zip artifact.
 
 $REVIEW_CITATION_CONTRACT
 
@@ -53,6 +54,11 @@ Do not add any prose before or after the review body.
 
 ## Technical Assessment
 **Verdict**: [APPROVE/REQUEST CHANGES/REJECT]
+
+### Input Boundary Shape Risk Assessment
+Status: [Triggered/Not triggered/Not assessed in inputs]
+Boundary: [raw input source -> stricter assumption, None, or not assessed]
+Evidence / mitigation: [input-review evidence, mitigated unknown, or not assessed]
 
 ### Strengths
 - ...

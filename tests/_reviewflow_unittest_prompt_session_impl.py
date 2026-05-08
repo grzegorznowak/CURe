@@ -573,6 +573,44 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
             self.assertNotIn("<details open>", default_rendered)
 
+    def test_final_review_templates_require_input_boundary_shape_risk_assessment(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(
+                "Every final review must include `### Input Boundary Shape Risk Assessment`",
+                text,
+            )
+            self.assertIn("### Input Boundary Shape Risk Assessment", text)
+            self.assertIn("Status: [Triggered/Not triggered]", text)
+            self.assertIn("Boundary: [raw input source -> stricter assumption, or None]", text)
+            self.assertIn("Evidence / mitigation:", text)
+            self.assertIn("without inventing production facts", text)
+
+        zip_text = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
+        self.assertIn("### Input Boundary Shape Risk Assessment", zip_text)
+        self.assertIn("Status: [Triggered/Not triggered/Not assessed in inputs]", zip_text)
+
+    def test_multipass_prompts_route_input_boundary_shape_risk_to_real_boundary(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("Input Boundary Shape Risk", text)
+            self.assertIn("real raw-input boundary", text)
+
     def test_cod_hypothesis_ledger_guidance_is_gated_to_enabled_multipass_prompts(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
@@ -701,6 +739,7 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("### Strengths", text)
             self.assertIn("### In Scope Issues", text)
             self.assertIn("### Out of Scope Issues", text)
+            self.assertIn("### Input Boundary Shape Risk Assessment", text)
             self.assertIn("### Reusability", text)
             self.assertNotIn("**Strengths**:", text)
             self.assertNotIn("**Decision**:", text)

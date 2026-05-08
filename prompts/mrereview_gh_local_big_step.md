@@ -36,8 +36,9 @@ Safety guardrail:
    - If the staged ChunkHound helper is unavailable or fails, ABORT and stop (do not proceed with this step).
 3. Think step by step, but keep only a minimal visible draft:
    - Put these under `### Steps taken` (5 words max per line).
-4. Never speculate about code you haven't read — investigate files before commenting.
-5. `### Findings` lists issues, concerns, and open questions observed
+4. If this step touches an Input Boundary Shape Risk, where raw persisted, external, framework, or generated input crosses into stricter application assumptions, inspect the real raw-input boundary; do not treat already-normalized helper inputs as sufficient proof unless the narrowed proof is explicitly justified.
+5. Never speculate about code you haven't read — investigate files before commenting.
+6. `### Findings` lists issues, concerns, and open questions observed
    in this step's scope — not compliments or positive observations.
    Every finding goes on a single top-level bullet:
    - One bullet per finding. No nested bullets under a finding.
@@ -46,7 +47,7 @@ Safety guardrail:
    - Do not include positive observations or compliments here — those
      belong in the final synthesis step's `### Strengths` section.
 $COD_HYPOTHESIS_LEDGER_STEP_GUIDANCE
-6. Trailing citation contract (shared across review prompts):
+7. Trailing citation contract (shared across review prompts):
 $STEP_CITATION_CONTRACT
 
 # Output format

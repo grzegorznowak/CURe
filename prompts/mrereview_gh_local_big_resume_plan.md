@@ -48,6 +48,7 @@ Safety guardrail:
 5. Choose the cheapest thorough strategy:
    - `synth_only`: only when the delta is limited enough that the previous review context plus a fresh final synthesis is sufficient.
    - `targeted`: when one or more existing steps should be reopened, and/or one or more new steps should be added to cover newly introduced change surfaces.
+   - If the new delta may move raw persisted, external, framework, or generated input into stricter application assumptions, reopen or add a targeted Input Boundary Shape Risk step that inspects the real raw-input boundary.
    - For broad deltas, prefer `targeted` with all relevant existing step ids reopened and any needed new steps added.
 $COD_HYPOTHESIS_LEDGER_PLAN_GUIDANCE
 
