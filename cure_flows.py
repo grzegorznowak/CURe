@@ -832,6 +832,24 @@ def _chunkhound_helper_detail_for_report(
     return detail
 
 
+def _claude_rejected_chunkhound_proof_detail(
+    *,
+    entry_index: int | None,
+    entry: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    reason: str,
+) -> dict[str, Any]:
+    command = _first_nonempty_string((entry or {}).get("command")) if entry else None
+    return {
+        "entry_index": entry_index,
+        "tool_use_id": _first_nonempty_string((entry or {}).get("tool_use_id")) if entry else None,
+        "reason": reason,
+        "claimed_tool": _chunkhound_helper_declared_tool_name(payload or {}) if payload else None,
+        "helper_path": str((payload or {}).get("helper_path") or "").strip() or None,
+        "command_excerpt": _chunkhound_helper_command_excerpt(command) if command else None,
+    }
+
+
 def validate_chunkhound_tool_proof(
     *,
     provider: str,
@@ -867,6 +885,7 @@ def validate_chunkhound_tool_proof(
         "observed_failed_call_details": [],
         "observed_evidence_sources": [],
         "ignored_discovery_calls": [],
+        "rejected_entry_details": [],
         "valid": False,
         "failure_reason": None,
         "codex_events_path": raw_events_path or None,
@@ -880,6 +899,7 @@ def validate_chunkhound_tool_proof(
     ignored_discovery_calls: list[str] = []
     observed_evidence_sources: set[str] = set()
     latest_failed_helper_calls: dict[str, dict[str, Any]] = {}
+    rejected_entry_details: list[dict[str, Any]] = []
     if normalized_provider == "codex":
         if not raw_events_path:
             report["failure_reason"] = "missing Codex events path"
@@ -987,13 +1007,34 @@ def validate_chunkhound_tool_proof(
             return report
         entries = meta.get("chunkhound_tool_proof_entries")
         if not isinstance(entries, list):
-            entries = []
+            rejected_entry_details.append(
+                _claude_rejected_chunkhound_proof_detail(
+                    entry_index=None,
+                    reason="chunkhound_tool_proof_entries is not a list",
+                )
+            )
+            report["rejected_entry_details"] = rejected_entry_details
+            report["failure_reason"] = "malformed Claude ChunkHound proof: chunkhound_tool_proof_entries is not a list"
+            return report
         command_excerpt = f"claude tool_use_result via {helper_path}"
         for idx, entry in enumerate(entries):
             if not isinstance(entry, dict):
+                rejected_entry_details.append(
+                    _claude_rejected_chunkhound_proof_detail(
+                        entry_index=idx,
+                        reason="proof entry is not a dict",
+                    )
+                )
                 continue
             payload = entry.get("payload")
             if not isinstance(payload, dict):
+                rejected_entry_details.append(
+                    _claude_rejected_chunkhound_proof_detail(
+                        entry_index=idx,
+                        entry=entry,
+                        reason="proof entry payload is not a dict",
+                    )
+                )
                 continue
             item_id = _first_nonempty_string(entry.get("item_id")) or f"claude-tool-use-{idx}"
             command = _first_nonempty_string(entry.get("command"))
@@ -1005,6 +1046,14 @@ def validate_chunkhound_tool_proof(
                 helper_path=helper_path,
                 tool_name=expected_tool,
             ):
+                rejected_entry_details.append(
+                    _claude_rejected_chunkhound_proof_detail(
+                        entry_index=idx,
+                        entry=entry,
+                        payload=payload,
+                        reason="Claude Bash command did not invoke staged helper for the claimed tool",
+                    )
+                )
                 failure_detail = _chunkhound_helper_detail_for_report(
                     payload=payload,
                     item_id=item_id,
@@ -1017,13 +1066,22 @@ def validate_chunkhound_tool_proof(
                     latest_failed_helper_calls[declared_tool] = failure_detail
                 continue
             if payload_helper_path != helper_path:
+                mismatch_reason = (
+                    f"staged helper path mismatch: expected {helper_path}, observed {payload_helper_path or '<missing>'}"
+                )
+                rejected_entry_details.append(
+                    _claude_rejected_chunkhound_proof_detail(
+                        entry_index=idx,
+                        entry=entry,
+                        payload=payload,
+                        reason=mismatch_reason,
+                    )
+                )
                 failure_detail = _chunkhound_helper_detail_for_report(
                     payload=payload,
                     item_id=item_id,
                     command_excerpt=command_excerpt,
-                    detail_override=(
-                        f"staged helper path mismatch: expected {helper_path}, observed {payload_helper_path or '<missing>'}"
-                    ),
+                    detail_override=mismatch_reason,
                 )
                 if failure_detail not in observed_failed_call_details:
                     observed_failed_call_details.append(failure_detail)
@@ -1034,7 +1092,24 @@ def validate_chunkhound_tool_proof(
             if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
                 declared_tool = _chunkhound_helper_declared_tool_name(payload)
                 if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
+                    if declared_tool:
+                        rejected_entry_details.append(
+                            _claude_rejected_chunkhound_proof_detail(
+                                entry_index=idx,
+                                entry=entry,
+                                payload=payload,
+                                reason=f"unsupported claimed ChunkHound tool: {declared_tool}",
+                            )
+                        )
                     continue
+                rejected_entry_details.append(
+                    _claude_rejected_chunkhound_proof_detail(
+                        entry_index=idx,
+                        entry=entry,
+                        payload=payload,
+                        reason="helper payload did not include a successful required ChunkHound result",
+                    )
+                )
                 failure_detail = _chunkhound_helper_detail_for_report(
                     payload=payload,
                     item_id=item_id,
@@ -1064,6 +1139,13 @@ def validate_chunkhound_tool_proof(
     report["observed_failed_call_details"] = observed_failed_call_details
     report["observed_evidence_sources"] = sorted(observed_evidence_sources)
     report["ignored_discovery_calls"] = ignored_discovery_calls
+    report["rejected_entry_details"] = rejected_entry_details
+    if normalized_provider == "claude" and any(
+        detail.get("reason") in {"proof entry is not a dict", "proof entry payload is not a dict"}
+        for detail in rejected_entry_details
+    ):
+        report["failure_reason"] = "malformed Claude ChunkHound proof: invalid proof entry shape"
+        return report
     missing_tools = [tool for tool in required_tools if tool not in observed_successful_calls]
     if missing_tools:
         failure_reason = "missing successful ChunkHound execution(s): " + ", ".join(missing_tools)
