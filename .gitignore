@@ -10,6 +10,7 @@ dist/
 !.codex/prompts/
 .codex/prompts/*
 !.codex/prompts/cure_release.md
+.opencode/
 .tmp*
 .tmp*/
 uv.lock

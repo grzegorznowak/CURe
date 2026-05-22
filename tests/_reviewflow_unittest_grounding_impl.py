@@ -7700,6 +7700,145 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_chunkhound_tool_proof_helper_search_string_failures_stay_closed(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        search_results: dict[str, object] = {
+            "empty string": "",
+            "whitespace string": "   \n\t",
+            "isError dict": {"isError": True, "content": [{"type": "text", "text": "No results found."}]},
+            "error dict": {"error": {"type": "RuntimeError", "message": "boom"}},
+        }
+        for label, search_result in search_results.items():
+            with self.subTest(label=label):
+                root = ROOT / f".tmp_test_chunkhound_helper_tool_proof_string_failure_{label.replace(' ', '_')}"
+                try:
+                    shutil.rmtree(root, ignore_errors=True)
+                    root.mkdir(parents=True, exist_ok=True)
+                    report = rf.validate_chunkhound_tool_proof(
+                        provider="codex",
+                        review_stage="multipass_plan",
+                        prompt_template_name="mrereview_gh_local_big_plan.md",
+                        adapter_meta=self._write_helper_command_events(
+                            root=root,
+                            commands=["search", "research"],
+                            raw_outputs={
+                                "search": {
+                                    "ok": True,
+                                    "command": "search",
+                                    "tool_name": "search",
+                                    "query": "needle",
+                                    "helper_path": helper_path,
+                                    "result": search_result,
+                                    "execution_stage": "tools/call",
+                                    "execution_stage_status": "ok",
+                                },
+                                "research": {
+                                    "ok": True,
+                                    "command": "research",
+                                    "tool_name": "code_research",
+                                    "query": "cross-file question",
+                                    "helper_path": helper_path,
+                                    "result": {"summary": "grounded answer"},
+                                },
+                            },
+                        ),
+                    )
+
+                    self.assertIsNotNone(report)
+                    assert report is not None
+                    self.assertFalse(report["valid"])
+                    self.assertEqual(report["observed_successful_calls"], ["code_research"])
+                    self.assertEqual(report["observed_failed_call_details"][0]["tool_name"], "search")
+                    self.assertIn("search", str(report["failure_reason"]))
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_accepts_helper_search_markdown_text(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_markdown_text"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": "## `demo.py`\n\n```python\nneedle\n```",
+                            "execution_stage": "tools/call",
+                            "execution_stage_status": "ok",
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["observed_failed_call_details"], [])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_accepts_helper_search_no_results_text(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_no_results_text"
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_plan",
+                prompt_template_name="mrereview_gh_local_big_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search", "research"],
+                    raw_outputs={
+                        "search": {
+                            "ok": True,
+                            "command": "search",
+                            "tool_name": "search",
+                            "query": "needle",
+                            "helper_path": helper_path,
+                            "result": "No results found.",
+                        },
+                        "research": {
+                            "ok": True,
+                            "command": "research",
+                            "tool_name": "code_research",
+                            "query": "cross-file question",
+                            "helper_path": helper_path,
+                            "result": {"summary": "grounded answer"},
+                        },
+                    },
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_accepts_cli_shaped_helper_results(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_cli_payloads"
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
@@ -8243,6 +8382,46 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
                 f"claude tool_use_result via {helper_path}",
             ],
         )
+
+    def test_validate_chunkhound_tool_proof_accepts_claude_helper_search_markdown_text(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta=self._claude_helper_adapter_meta(
+                helper_path=helper_path,
+                payloads=[
+                    {
+                        "ok": True,
+                        "command": "search",
+                        "tool_name": "search",
+                        "query": "needle",
+                        "helper_path": helper_path,
+                        "result": "## `demo.py`\n\n```python\nneedle\n```",
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                    {
+                        "ok": True,
+                        "command": "research",
+                        "tool_name": "code_research",
+                        "query": "cross-file question",
+                        "helper_path": helper_path,
+                        "result": {"summary": "grounded answer"},
+                        "execution_stage": "tools/call",
+                        "execution_stage_status": "ok",
+                    },
+                ],
+            ),
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["provider"], "claude")
+        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
+        self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
 
     def test_validate_and_record_chunkhound_tool_proof_accepts_real_claude_background_task_success_fixture(self) -> None:
         root = ROOT / ".tmp_test_real_claude_background_task_success_report"

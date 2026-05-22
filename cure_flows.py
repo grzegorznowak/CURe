@@ -729,6 +729,8 @@ def _chunkhound_helper_result_succeeded(*, result: object, command_name: str) ->
             )
         )
     if command_name == "search":
+        if isinstance(result, str):
+            return bool(result.strip())
         return _chunkhound_helper_search_payload_succeeded(result) or _chunkhound_helper_search_payload_succeeded(
             _parse_chunkhound_helper_json_text(result)
         )

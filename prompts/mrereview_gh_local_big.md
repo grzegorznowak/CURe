@@ -32,8 +32,8 @@ If you must ABORT:
 3. Mandatory: use the staged ChunkHound helper at least once:
    - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
    - Treat helper `research` as satisfying the `code_research` requirement.
-   - Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.
-   - `research` legitimately takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step). The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query while a `research` call is still running; run one `research` invocation at a time and wait for its final JSON object (or a non-zero exit) before issuing another.
+   - Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
+   - `research` legitimately takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step). The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query while a `research` call is still running; run one `research` invocation at a time and wait for its final structured output (or a non-zero exit) before issuing another.
    - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query for a symbol/pattern relevant to the PR.
    - Run at least one `research` query for cross-file/architecture understanding.
@@ -83,7 +83,7 @@ $VERBOSE_FINDING_MODE_GUIDANCE
 - Prefer the staged ChunkHound helper for fast context (`search` + `research`).
 - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
 - Treat helper `research` as satisfying the `code_research` requirement.
-- Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.
+- Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
 - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
 - Code research protocol:
   - Use `search` to quickly find definitions, call sites, and similar patterns.

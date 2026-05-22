@@ -32,8 +32,8 @@ Safety guardrail:
 If you still need to confirm anything before deciding, use the staged ChunkHound helper (`search` / `research`) rather than guessing.
 The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
 Treat helper `research` as satisfying the `code_research` requirement.
-Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.
-`research` legitimately takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step). The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query while a `research` call is still running; run one `research` invocation at a time and wait for its final JSON object (or a non-zero exit) before issuing another.
+Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
+`research` legitimately takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step). The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query while a `research` call is still running; run one `research` invocation at a time and wait for its final structured output (or a non-zero exit) before issuing another.
 Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
 If the staged ChunkHound helper is unavailable or fails, ABORT and set both `**Verdict**` lines to `REJECT`.
 

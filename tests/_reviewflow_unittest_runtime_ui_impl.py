@@ -252,7 +252,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 10.0', '"initialize": 0.2')
+            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 120.0', '"initialize": 0.2')
             helper_path.write_text(helper_text, encoding="utf-8")
             env = os.environ.copy()
             env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
@@ -376,6 +376,104 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(payload["tool_name"], "search")
             self.assertEqual(payload["mcp_transport"], "json_line")
             self.assertEqual(payload["result"]["results"][0]["file_path"], "demo.py")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_generated_chunkhound_helper_search_supports_markdown_mcp_text(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_markdown_search"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            work_dir = root / "work"
+            helper_cwd = root / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_cwd.mkdir(parents=True, exist_ok=True)
+
+            fake_runtime = (root / "fake-python").resolve()
+            fake_chunkhound_dir = root / "fake-bin"
+            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
+
+            fake_runtime.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "import sys",
+                        "from pathlib import Path",
+                        "",
+                        "def read_message():",
+                        "    raw = sys.stdin.buffer.readline()",
+                        "    if not raw:",
+                        "        raise SystemExit(0)",
+                        "    return json.loads(raw.decode('utf-8'))",
+                        "",
+                        "def write_message(payload):",
+                        "    sys.stdout.write(json.dumps(payload) + '\\n')",
+                        "    sys.stdout.flush()",
+                        "",
+                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "    payload = {",
+                        "        'daemon_lock_path': '/tmp/chunkhound-markdown/daemon.lock',",
+                        "        'daemon_log_path': '/tmp/chunkhound-markdown/daemon.log',",
+                        "        'daemon_socket_path': '/tmp/chunkhound-markdown.sock',",
+                        "        'daemon_pid': 321,",
+                        "        'daemon_runtime_dir': '/tmp/chunkhound-markdown',",
+                        "        'daemon_registry_entry_path': '/tmp/chunkhound-markdown/registry/repo.json',",
+                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
+                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
+                        "    }",
+                        "    print(json.dumps(payload, sort_keys=True))",
+                        "    raise SystemExit(0)",
+                        "",
+                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
+                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "    init_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
+                        "    _ = read_message()",
+                        "    tools_msg = read_message()",
+                        "    write_message({'jsonrpc': '2.0', 'id': tools_msg.get('id'), 'result': {'tools': [{'name': 'search'}, {'name': 'code_research'}]}})",
+                        "    call_msg = read_message()",
+                        "    markdown = '## `demo.py`\\n\\n```python\\nneedle\\n```'",
+                        "    write_message({'jsonrpc': '2.0', 'id': call_msg.get('id'), 'result': {'content': [{'type': 'text', 'text': markdown}]}})",
+                        "    raise SystemExit(0)",
+                        "raise SystemExit(2)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_runtime.chmod(0o755)
+            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
+            fake_chunkhound.chmod(0o755)
+
+            helper_path = cure_llm.write_chunkhound_helper(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                chunkhound_config_path=helper_cwd / "chunkhound.json",
+                chunkhound_db_path=helper_cwd / ".chunkhound.db",
+                chunkhound_cwd=helper_cwd,
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [str(helper_path), "search", "needle"],
+                cwd=repo_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["tool_name"], "search")
+            self.assertEqual(payload["mcp_transport"], "json_line")
+            self.assertEqual(payload["result"], "## `demo.py`\n\n```python\nneedle\n```")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1274,7 +1372,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 10.0', '"initialize": 0.2')
+            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 120.0', '"initialize": 0.2')
             helper_path.write_text(helper_text, encoding="utf-8")
             env = os.environ.copy()
             env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
