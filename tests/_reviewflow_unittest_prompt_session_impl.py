@@ -331,7 +331,7 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final JSON object for that call, even if preflight/progress lines appear before it.",
+                "Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.",
                 text,
             )
             self.assertIn(
@@ -438,7 +438,11 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                'successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final JSON object for that call',
+                'successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final structured output for that call',
+                text,
+            )
+            self.assertIn(
+                "For `search`, that output may be a JSON object with a `results` list or a markdown/text block.",
                 text,
             )
             self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
