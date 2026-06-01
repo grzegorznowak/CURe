@@ -7631,12 +7631,13 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertIsNotNone(report)
             assert report is not None
             self.assertFalse(report["valid"])
+            self.assertEqual(report["required_tools"], ["search"])
             self.assertEqual(
                 report["ignored_discovery_calls"],
                 ["list_mcp_resources", "list_mcp_resource_templates"],
             )
             self.assertIn("search", str(report["failure_reason"]))
-            self.assertIn("code_research", str(report["failure_reason"]))
+            self.assertNotIn("code_research", str(report["failure_reason"]))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8000,9 +8001,10 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertIsNotNone(report)
             assert report is not None
             self.assertFalse(report["valid"])
+            self.assertEqual(report["required_tools"], ["search"])
             self.assertEqual(report["observed_successful_calls"], [])
             self.assertEqual(report["observed_evidence_sources"], [])
-            self.assertIn("code_research", str(report["failure_reason"]))
+            self.assertIn("search", str(report["failure_reason"]))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8147,8 +8149,8 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
-                review_stage="multipass_plan",
-                prompt_template_name="mrereview_gh_local_big_plan.md",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
                 adapter_meta=self._write_helper_command_events(
                     root=root,
                     commands=["search", "research"],
@@ -8193,8 +8195,8 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             report = rf.validate_chunkhound_tool_proof(
                 provider="codex",
-                review_stage="multipass_plan",
-                prompt_template_name="mrereview_gh_local_big_plan.md",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
                 adapter_meta=self._write_helper_command_events(
                     root=root,
                     commands=["search", "research"],
@@ -8264,8 +8266,8 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_validate_chunkhound_tool_proof_incomplete_helper_execution_fails_closed(self) -> None:
-        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_incomplete"
+    def test_validate_chunkhound_tool_proof_plan_accepts_search_without_research(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_plan_search_only"
         try:
             shutil.rmtree(root, ignore_errors=True)
             root.mkdir(parents=True, exist_ok=True)
@@ -8281,7 +8283,58 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
 
             self.assertIsNotNone(report)
             assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["required_tools"], ["search"])
+            self.assertEqual(report["observed_successful_calls"], ["search"])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertIsNone(report["failure_reason"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_resume_plan_accepts_search_without_research(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_resume_plan_search_only"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="multipass_resume_plan",
+                prompt_template_name="mrereview_gh_local_big_resume_plan.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search"],
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["required_tools"], ["search"])
+            self.assertEqual(report["observed_successful_calls"], ["search"])
+            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertIsNone(report["failure_reason"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_chunkhound_tool_proof_non_plan_helper_search_only_fails_closed(self) -> None:
+        root = ROOT / ".tmp_test_chunkhound_helper_tool_proof_non_plan_search_only"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            report = rf.validate_chunkhound_tool_proof(
+                provider="codex",
+                review_stage="singlepass_review",
+                prompt_template_name="mrereview_gh_local.md",
+                adapter_meta=self._write_helper_command_events(
+                    root=root,
+                    commands=["search"],
+                ),
+            )
+
+            self.assertIsNotNone(report)
+            assert report is not None
             self.assertFalse(report["valid"])
+            self.assertEqual(report["required_tools"], ["search", "code_research"])
             self.assertEqual(report["observed_successful_calls"], ["search"])
             self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
             self.assertIn("code_research", str(report["failure_reason"]))
@@ -9351,7 +9404,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_pr_flow_codex_helper_execution_incomplete_plan_proof_aborts(self) -> None:
+    def test_pr_flow_codex_helper_execution_missing_plan_search_proof_aborts(self) -> None:
         root = ROOT / ".tmp_test_codex_helper_tool_proof_plan_failure"
 
         def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
@@ -9376,7 +9429,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             )
             adapter_meta = self._write_helper_command_events(
                 work_dir=work_dir,
-                commands=["search"],
+                commands=["preflight"],
             )
             return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
 
@@ -9394,8 +9447,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(calls, ["review.plan.md"])
             self.assertEqual(meta["status"], "error")
             self.assertNotEqual(meta["multipass"]["mode"], "fallback_singlepass")
-            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search"])
-            self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], [])
+            self.assertEqual(report["runs"][0]["observed_evidence_sources"], [])
+            self.assertEqual(report["runs"][0]["required_tools"], ["search"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

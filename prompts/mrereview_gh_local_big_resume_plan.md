@@ -40,11 +40,12 @@ Safety guardrail:
    - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
    - Treat helper `research` as satisfying the `code_research` requirement.
    - Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
-   - `research` legitimately takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step). The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query while a `research` call is still running; run one `research` invocation at a time and wait for its final structured output (or a non-zero exit) before issuing another.
+   - `research` typically takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step); extreme valid calls may run until the configured helper timeout. The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query solely because it has exceeded five minutes while a `research` call is still running; run one `research` invocation at a time and wait for its final structured output (or a non-zero exit) before issuing another.
    - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
    - Run at least one `search` query relevant to the changed delta.
-   - Run at least one `research` query for cross-file/architecture understanding.
-   - In `Steps taken`, include the queries you used (1 line each).
+   - Build decomposition from review intelligence, PR metadata/context, branch diffs, source reads, and ChunkHound `search`.
+   - Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.
+   - In `Steps taken`, include the queries you used (1 line each), including any optional narrow `research` query.
 5. Choose the cheapest thorough strategy:
    - `synth_only`: only when the delta is limited enough that the previous review context plus a fresh final synthesis is sufficient.
    - `targeted`: when one or more existing steps should be reopened, and/or one or more new steps should be added to cover newly introduced change surfaces.

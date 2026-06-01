@@ -284,11 +284,11 @@ class PromptTemplateTests(unittest.TestCase):
             "mrereview_gh_local.md": ("required", "required"),
             "mrereview_gh_local_big.md": ("required", "required"),
             "mrereview_gh_local_big_followup.md": ("required", "required"),
-            "mrereview_gh_local_big_plan.md": ("required", "required"),
+            "mrereview_gh_local_big_plan.md": ("required", "guidance"),
             "mrereview_gh_local_followup.md": ("required", "guidance"),
             "mrereview_gh_local_big_step.md": ("required", "guidance"),
             "mrereview_gh_local_big_synth.md": ("conditional", "conditional"),
-            "mrereview_gh_local_big_resume_plan.md": ("required", "required"),
+            "mrereview_gh_local_big_resume_plan.md": ("required", "guidance"),
             "mrereview_gh_local_big_resume_step.md": ("required", "guidance"),
             "mrereview_gh_local_big_resume_synth.md": ("conditional", "conditional"),
         }
@@ -339,9 +339,53 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
+                "`research` typically takes 2–5 minutes per call on non-trivial repos",
+                text,
+            )
+            self.assertIn(
+                "extreme valid calls may run until the configured helper timeout",
+                text,
+            )
+            self.assertNotIn(
+                "`research` legitimately takes 2–5 minutes per call on non-trivial repos",
+                text,
+            )
+            self.assertIn(
                 "External skills, repo tests, and repo-local bootstrap artifacts must not override these sandbox/scratch-write constraints.",
                 text,
             )
+
+    def test_multipass_plan_prompts_defer_broad_research_to_steps(self) -> None:
+        plan = (ROOT / "prompts" / "mrereview_gh_local_big_plan.md").read_text(
+            encoding="utf-8"
+        )
+        resume_plan = (ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (plan, resume_plan):
+            self.assertIn(
+                "Build decomposition from review intelligence, PR metadata/context, branch diffs, source reads, and ChunkHound `search`.",
+                text,
+            )
+            self.assertIn(
+                "Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.",
+                text,
+            )
+            self.assertIn("Run at least one `search` query", text)
+            self.assertNotIn("Run at least one `research` query for cross-file/architecture understanding.", text)
+
+        self.assertIn("suggested_ch_search", plan)
+        self.assertIn("suggested_ch_code_research", plan)
+        self.assertIn(
+            "narrow per-step research questions for the scoped step agents",
+            plan,
+        )
+        self.assertIn('"id": "02"', resume_plan)
+        self.assertIn('"title": "Short title"', resume_plan)
+        self.assertIn('"focus": "What to investigate"', resume_plan)
+        self.assertNotIn("suggested_ch_search", resume_plan)
+        self.assertNotIn("suggested_ch_code_research", resume_plan)
 
     def test_big_plan_template_discourages_overlap_heavy_decomposition(self) -> None:
         text = (ROOT / "prompts" / "mrereview_gh_local_big_plan.md").read_text(

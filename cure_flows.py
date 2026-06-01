@@ -93,7 +93,7 @@ _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS: dict[str, ChunkHoundPromptContract] = {
     ),
     "mrereview_gh_local_big_plan.md": ChunkHoundPromptContract(
         search_requirement="required",
-        code_research_requirement="required",
+        code_research_requirement="guidance",
     ),
     "mrereview_gh_local_followup.md": ChunkHoundPromptContract(
         search_requirement="required",
@@ -109,7 +109,7 @@ _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS: dict[str, ChunkHoundPromptContract] = {
     ),
     "mrereview_gh_local_big_resume_plan.md": ChunkHoundPromptContract(
         search_requirement="required",
-        code_research_requirement="required",
+        code_research_requirement="guidance",
     ),
     "mrereview_gh_local_big_resume_step.md": ChunkHoundPromptContract(
         search_requirement="required",
