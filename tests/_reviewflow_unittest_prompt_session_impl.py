@@ -430,6 +430,9 @@ class PromptTemplateTests(unittest.TestCase):
             "mrereview_gh_local_big_plan.md": (
                 ROOT / "prompts" / "mrereview_gh_local_big_plan.md"
             ).read_text(encoding="utf-8"),
+            "mrereview_gh_local_big_resume_plan.md": (
+                ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md"
+            ).read_text(encoding="utf-8"),
             "mrereview_gh_local_big_step.md": (
                 ROOT / "prompts" / "mrereview_gh_local_big_step.md"
             ).read_text(encoding="utf-8"),
@@ -456,10 +459,19 @@ class PromptTemplateTests(unittest.TestCase):
             "Run at least one `research` query for cross-file/architecture understanding.",
             prompt_texts["mrereview_gh_local_big_followup.md"],
         )
-        self.assertIn(
-            "Run at least one `research` query for cross-file/architecture understanding.",
-            prompt_texts["mrereview_gh_local_big_plan.md"],
-        )
+        for plan_template in (
+            "mrereview_gh_local_big_plan.md",
+            "mrereview_gh_local_big_resume_plan.md",
+        ):
+            self.assertIn("Run at least one `search` query", prompt_texts[plan_template])
+            self.assertIn(
+                "Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.",
+                prompt_texts[plan_template],
+            )
+            self.assertNotIn(
+                "Run at least one `research` query for cross-file/architecture understanding.",
+                prompt_texts[plan_template],
+            )
         self.assertIn(
             "Use `research` for cross-file/architecture understanding when needed.",
             prompt_texts["mrereview_gh_local_followup.md"],
@@ -490,6 +502,14 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
+            self.assertIn(
+                "Per-template contracts decide whether helper `research` is required, guidance-only, or conditional.",
+                text,
+            )
+            self.assertIn(
+                "Initial plan and resume-plan prompts require helper `search` but treat helper `research`/`code_research` as guidance-only.",
+                text,
+            )
             self.assertNotIn("with JSON output", text)
 
     def test_zip_template_discourages_file_writes_and_fenced_output(self) -> None:
