@@ -74,9 +74,10 @@ class ChunkHoundPromptContract:
     resource_discovery_rule: str = "neutral_expected_empty"
 
 
-# Contracts are per template: initial plan and resume-plan prompts require helper
-# search, while helper research/code_research is guidance-only there. Other
-# built-in prompts may still require or conditionally request code_research.
+# Contracts are per template: initial plan and resume-plan proof gates require
+# successful helper search only; helper research/code_research is guidance-only
+# there. Other built-in prompts may still require or conditionally request
+# code_research.
 _BUILTIN_CHUNKHOUND_PROMPT_CONTRACTS: dict[str, ChunkHoundPromptContract] = {
     "default.md": ChunkHoundPromptContract(
         search_requirement="required",

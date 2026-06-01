@@ -320,20 +320,33 @@ class PromptTemplateTests(unittest.TestCase):
             ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
             ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
         ]
+        plan_templates = {"mrereview_gh_local_big_plan.md", "mrereview_gh_local_big_resume_plan.md"}
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
-            self.assertIn(
-                'The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.',
-                text,
-            )
-            self.assertIn(
-                "Treat helper `research` as satisfying the `code_research` requirement.",
-                text,
-            )
-            self.assertIn(
-                "Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.",
-                text,
-            )
+            if path.name in plan_templates:
+                self.assertIn(
+                    'The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` for at least one',
+                    text,
+                )
+                self.assertIn("proof requires successful helper `search` execution", text)
+                self.assertIn("Helper `research` is optional/guidance-only", text)
+                self.assertNotIn(
+                    "Availability is proven only by successful helper `search` or `research` execution",
+                    text,
+                )
+            else:
+                self.assertIn(
+                    'The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.',
+                    text,
+                )
+                self.assertIn(
+                    "Treat helper `research` as satisfying the `code_research` requirement.",
+                    text,
+                )
+                self.assertIn(
+                    "Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.",
+                    text,
+                )
             self.assertIn(
                 "Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.",
                 text,
@@ -372,7 +385,7 @@ class PromptTemplateTests(unittest.TestCase):
                 "Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.",
                 text,
             )
-            self.assertIn("Run at least one `search` query", text)
+            self.assertIn('run `"$CURE_CHUNKHOUND_HELPER" search ...` for at least one', text)
             self.assertNotIn("Run at least one `research` query for cross-file/architecture understanding.", text)
 
         self.assertIn("suggested_ch_search", plan)
@@ -463,7 +476,10 @@ class PromptTemplateTests(unittest.TestCase):
             "mrereview_gh_local_big_plan.md",
             "mrereview_gh_local_big_resume_plan.md",
         ):
-            self.assertIn("Run at least one `search` query", prompt_texts[plan_template])
+            self.assertIn(
+                'run `"$CURE_CHUNKHOUND_HELPER" search ...` for at least one',
+                prompt_texts[plan_template],
+            )
             self.assertIn(
                 "Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.",
                 prompt_texts[plan_template],
@@ -494,7 +510,15 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                'successful `"$CURE_CHUNKHOUND_HELPER" search ...` and `"$CURE_CHUNKHOUND_HELPER" research ...` execution whose captured output contains the final structured output for that call',
+                "the built-in prompt/proof contract is per-template successful helper execution",
+                text,
+            )
+            self.assertIn(
+                'A successful `"$CURE_CHUNKHOUND_HELPER" search ...` call proves the `search` requirement.',
+                text,
+            )
+            self.assertIn(
+                'A successful `"$CURE_CHUNKHOUND_HELPER" research ...` call proves `code_research` only for templates where that requirement is required or conditional',
                 text,
             )
             self.assertIn(
@@ -507,7 +531,7 @@ class PromptTemplateTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "Initial plan and resume-plan prompts require helper `search` but treat helper `research`/`code_research` as guidance-only.",
+                "Initial plan and resume-plan prompts require helper `search` but do not require helper `research`/`code_research`.",
                 text,
             )
             self.assertNotIn("with JSON output", text)

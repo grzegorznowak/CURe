@@ -9480,7 +9480,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
                 adapter_meta = self._write_helper_command_events(
                     work_dir=work_dir,
-                    commands=["search", "research"],
+                    commands=["search"],
                     raw_outputs={
                         "search": {
                             "ok": True,
@@ -9492,16 +9492,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                                 "results": [],
                                 "pagination": {"offset": 0, "total_results": 0},
                             },
-                            "execution_stage": "tools/call",
-                            "execution_stage_status": "ok",
-                        },
-                        "research": {
-                            "ok": True,
-                            "command": "research",
-                            "tool_name": "code_research",
-                            "query": "flow proof",
-                            "helper_path": helper_path,
-                            "result": {"summary": "grounded answer"},
                             "execution_stage": "tools/call",
                             "execution_stage_status": "ok",
                         },
@@ -9558,7 +9548,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
             self.assertEqual(meta["status"], "done")
             self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
-            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search", "code_research"])
+            self.assertEqual(report["runs"][0]["review_stage"], "multipass_plan")
+            self.assertEqual(report["runs"][0]["required_tools"], ["search"])
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search"])
             self.assertEqual(report["runs"][0]["observed_evidence_sources"], ["cli_helper_command_execution"])
             self.assertIn("<!-- CURE_REVIEW_FOOTER_START -->", review_md)
             self.assertIn("review generated with [CURe]", review_md)
@@ -11918,7 +11910,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     )
                     adapter_meta = self._write_helper_command_events(
                         work_dir=work_dir,
-                        commands=["search", "research"],
+                        commands=["search"],
                     )
                 elif output_path.name in {"review.md", "review.candidate.md"}:
                     output_path.write_text(valid_synth_markdown, encoding="utf-8")
@@ -12039,8 +12031,13 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
             self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
+            self.assertTrue(refreshed["chunkhound"]["tool_validation"]["latest_run_valid"])
+            self.assertEqual(report["runs"][0]["review_stage"], "multipass_resume_plan")
+            self.assertEqual(report["runs"][0]["required_tools"], ["search"])
+            self.assertEqual(report["runs"][0]["observed_successful_calls"], ["search"])
             self.assertEqual(refreshed["review_head_sha"], new_head)
             self.assertEqual(refreshed["head_sha"], new_head)
             self.assertEqual(refreshed["multipass"]["resume"]["decision"], "synth_only")

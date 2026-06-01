@@ -37,12 +37,11 @@ Safety guardrail:
    - `git diff <base>...HEAD --stat`
    - `git log --oneline --decorate <base>..HEAD`
 4. Mandatory: use the staged ChunkHound helper at least once:
-   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
-   - Treat helper `research` as satisfying the `code_research` requirement.
-   - Availability is proven only by successful helper `search` or `research` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
+   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` for at least one query relevant to the changed delta.
+   - Resume-plan proof requires successful helper `search` execution whose captured output contains the final structured output for that call, even if preflight/progress lines appear before it. For `search`, this may be a JSON object with a `results` list or a markdown/text block.
+   - Helper `research` is optional/guidance-only for this resume-plan template; if you use `"$CURE_CHUNKHOUND_HELPER" research ...`, CURe records it as `code_research` evidence, but it is not required to satisfy the resume-plan proof gate.
    - `research` typically takes 2–5 minutes per call on non-trivial repos (chunk retrieval plus an LLM synthesis step); extreme valid calls may run until the configured helper timeout. The helper streams `cure-chunkhound: tools/call waiting (Ns elapsed)` heartbeat lines while it works — these are **normal progress, not a hang**. Do not cancel, retry, or re-issue a narrower query solely because it has exceeded five minutes while a `research` call is still running; run one `research` invocation at a time and wait for its final structured output (or a non-zero exit) before issuing another.
    - Do not use plain `chunkhound search`, `chunkhound research`, or `chunkhound mcp` as substitutes.
-   - Run at least one `search` query relevant to the changed delta.
    - Build decomposition from review intelligence, PR metadata/context, branch diffs, source reads, and ChunkHound `search`.
    - Defer broad or costly architecture research to scoped step agents; use planning-time `research` only when a narrow decomposition question cannot be answered from lighter evidence.
    - In `Steps taken`, include the queries you used (1 line each), including any optional narrow `research` query.
