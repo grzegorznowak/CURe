@@ -8,6 +8,16 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 No entries yet.
 
+## [0.8.0] - 2026-06-02
+
+### Changed
+
+- Multipass planning now relies on lightweight ChunkHound search evidence and defers costly broad architecture research to scoped step agents, reducing planning-stage latency while preserving focused research during review steps.
+
+### Fixed
+
+- Chain-of-Draft Hypothesis Ledger validation now accepts capitalized ledger labels and `*` ledger bullets without weakening final Findings source-citation validation.
+
 ## [0.7.2] - 2026-04-29
 
 ### Fixed
