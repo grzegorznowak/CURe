@@ -4069,7 +4069,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn("`CURE_CHUNKHOUND_HELPER`", text)
             self.assertIn('`"$CURE_CHUNKHOUND_HELPER" search ...`', text)
             self.assertIn('`"$CURE_CHUNKHOUND_HELPER" research ...`', text)
-            self.assertIn("helper `research` satisfies the `code_research` requirement", text)
+            self.assertIn("call proves `code_research` only for templates", text)
             self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
             self.assertIn("`PYTHONSAFEPATH=1`", text)
             self.assertIn("helper preflight times out", text)
