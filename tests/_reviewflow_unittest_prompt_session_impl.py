@@ -1123,6 +1123,84 @@ class MultipassGroundingValidationTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_validate_multipass_step_grounding_accepts_capitalized_ledger_labels(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_cod_ledger_capitalized"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Hypothesis Ledger",
+                        "- Suspicious surface: pkg/module.py; Tentative issue: unchecked input; Next proof target: pkg/module.py:2",
+                        "",
+                        "### Findings",
+                        "- Input is unchecked. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+                require_hypothesis_ledger=True,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_multipass_step_grounding_accepts_star_ledger_bullet(self) -> None:
+        root = ROOT / ".tmp_test_step_grounding_cod_ledger_star_bullet"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pkg" / "module.py").write_text("a\nb\nc\n", encoding="utf-8")
+            artifact = root / "review.step-01.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "### Step Result: 01 — API review",
+                        "**Focus**: grounding",
+                        "",
+                        "### Steps taken",
+                        "- checked module",
+                        "",
+                        "### Hypothesis Ledger",
+                        "* suspicious surface: pkg/module.py; tentative issue: unchecked input; next proof target: pkg/module.py:2",
+                        "",
+                        "### Findings",
+                        "- Input is unchecked. Sources: `pkg/module.py:2`",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = rf.validate_multipass_step_grounding(
+                artifact_path=artifact,
+                repo_dir=repo_dir,
+                step_index=1,
+                require_hypothesis_ledger=True,
+            )
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["errors"], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_multipass_synth_grounding_accepts_primary_evidence_sources(self) -> None:
         root = ROOT / ".tmp_test_synth_grounding_valid"
         try:

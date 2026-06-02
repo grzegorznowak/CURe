@@ -4893,6 +4893,15 @@ def _section_bullets(section: dict[str, Any]) -> list[str]:
     return bullets
 
 
+def _hypothesis_ledger_bullets(section: dict[str, Any]) -> list[str]:
+    bullets: list[str] = []
+    for raw in section.get("lines", []):
+        raw_line = str(raw)
+        if raw_line.startswith(("- ", "* ")):
+            bullets.append(raw_line.strip())
+    return bullets
+
+
 def _build_grounding_result(
     *,
     stage_key: str,
@@ -4943,11 +4952,11 @@ def validate_multipass_step_grounding(
         elif findings is not None and int(hypothesis_ledger.get("line") or 0) > int(findings.get("line") or 0):
             errors.append("'### Hypothesis Ledger' must appear before '### Findings'.")
         else:
-            ledger_bullets = _section_bullets(hypothesis_ledger)
+            ledger_bullets = _hypothesis_ledger_bullets(hypothesis_ledger)
             if not ledger_bullets:
                 errors.append("'### Hypothesis Ledger' must include at least one compact bullet.")
             for bullet_index, bullet in enumerate(ledger_bullets, start=1):
-                body = bullet[2:].strip()
+                body = bullet[2:].strip().casefold()
                 if not all(
                     label in body
                     for label in (
