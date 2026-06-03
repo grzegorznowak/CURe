@@ -20,6 +20,139 @@ This example shows the behavior expected from future CURe subsequent-review supp
   - `prompts/mrereview_gh_local.md`
   - `tests/test_review_ledger.py`
 
+## User-Facing Scenario Setup
+
+This section mocks what an operator might see before CURe produces the final review. The command output and artifact names are proposed UX, not current behavior.
+
+### Existing CURe history discovered locally
+
+| Session | Reviewed head | Artifact | Outcome CURe would summarize |
+| --- | --- | --- | --- |
+| `session-a` | `abc1111` | `.cure/reviews/pr-9999/session-a/review.md` | 5 prior findings: A-01 through A-05. |
+| `session-b` | `def2222` | `.cure/reviews/pr-9999/session-b/review.md` | 6 prior findings: B-01 through B-06. |
+
+CURe should make it clear that both prior reviews are older than the current head `deadbeef9999`; they are inputs for retrospective verification, not final truth.
+
+### Existing GitHub discussion discovered remotely
+
+| Discussion source | Count in this simulation | User-facing note |
+| --- | ---: | --- |
+| Issue comments | 6 | Includes developer claims, maintainer scope decisions, and security-owner escalation. |
+| Review comments | 2 | Includes product-owner clarification and low-authority pushback. |
+| Review thread states | 2 | One resolved thread and one unresolved thread; thread state is a hint only. |
+| Review bodies | 0 | None in this scenario, but the fetch step reports that it checked. |
+| Timeline / external references | 1 | CURe-123 is linked from maintainer discussion C-04. |
+
+### Simulated GitHub timeline
+
+```text
+T+00  bob-dev opens PR #9999 at head abc1111.
+T+05  CURe review A is posted with A-01..A-05.
+T+12  bob-dev pushes def2222 and claims A-05 is fixed.
+T+15  cara-product clarifies JSON compatibility requirements.
+T+18  alice-reviewer moves GraphQL thread fetching to CURe-123.
+T+25  CURe review B is posted with B-01..B-06.
+T+31  alice-reviewer marks A-03 superseded by B-03 and leaves B-03 unresolved.
+T+33  bob-dev claims B-04 is accepted risk.
+T+34  security-owner rejects B-04 suppression.
+T+40  bob-dev pushes deadbeef9999 and asks for a fresh CURe review.
+```
+
+## Simulated CLI Interaction
+
+### Default interactive run
+
+```text
+$ cure pr https://github.com/grzegorznowak/CURe/pull/9999
+
+CURe found prior completed reviews for grzegorznowak/CURe#9999:
+  [1] session-a  head=abc1111  completed=2026-06-03T09:05Z  findings=5
+  [2] session-b  head=def2222  completed=2026-06-03T09:25Z  findings=6
+
+CURe also found existing PR discussion after the first CURe review:
+  issue comments: 6
+  review comments: 2
+  review threads: 2 (1 resolved, 1 unresolved)
+  linked external references: CURe-123
+
+How should this run proceed?
+  new     run a new review using prior-review and discussion context
+  latest  show the latest completed CURe review instead
+  list    list prior completed reviews and exit
+  cancel  exit without reviewing
+Choice [new/latest/list/cancel]: new
+```
+
+### Non-interactive policy examples
+
+```text
+$ cure pr https://github.com/grzegorznowak/CURe/pull/9999 --if-reviewed list
+Found 2 completed reviews for grzegorznowak/CURe#9999.
+- session-a  head=abc1111  review=.cure/reviews/pr-9999/session-a/review.md
+- session-b  head=def2222  review=.cure/reviews/pr-9999/session-b/review.md
+
+$ cure pr https://github.com/grzegorznowak/CURe/pull/9999 --if-reviewed latest
+Opening latest completed review: .cure/reviews/pr-9999/session-b/review.md
+
+$ cure pr https://github.com/grzegorznowak/CURe/pull/9999 --if-reviewed new
+Starting a new subsequent review at head deadbeef9999.
+```
+
+### Preflight context summary shown before analysis
+
+```text
+Subsequent-review context summary:
+- Prior CURe reviews loaded: 2
+- Prior findings extracted: 11
+- Potential duplicate/superseded groups: 1 (A-03 -> B-03)
+- Prior findings needing source verification: 11
+- PR discussion items linked to findings: 10
+- Developer claims requiring source verification: C-02, C-10
+- High-authority scope/product decisions: C-03, C-04, C-08
+- Ambiguous or low-authority pushback: C-05
+- High-severity conflicts: B-04 has author pushback C-07 and security-owner rejection C-08
+```
+
+### Progress output during the review
+
+```text
+[1/6] Fetching PR metadata and changed files... done (head=deadbeef9999)
+[2/6] Fetching PR discussion... done (10 relevant items, 1 external reference)
+[3/6] Loading prior CURe reviews... done (2 reviews, 11 findings)
+[4/6] Verifying prior findings against current source... done
+[5/6] Resolving discussion dispositions... done
+[6/6] Arbitrating final report actions... done
+
+Warnings:
+- Resolved GitHub threads are treated as hints only; they do not prove source resolution.
+- Developer "fixed" comments are claims only; C-10 was rejected by current source evidence.
+- GraphQL review-thread coverage is out of scope for this PR only because maintainer C-04 links CURe-123.
+- Critical finding B-04 remains visible because author accepted-risk pushback C-07 lacks security authority and is rejected by C-08.
+```
+
+### Generated context artifacts
+
+```text
+<session_dir>/work/
+  pr-context.json
+  pr-discussion-context.json
+  prior-cure-reviews.json
+  prior-finding-source-verification.md
+  comment-resolution-ledger.md
+  finding-disposition-ledger.json
+  review.subsequent-context.summary.md
+```
+
+| Artifact | Purpose |
+| --- | --- |
+| `pr-context.json` | PR metadata, refs, head SHA, changed files, and current review mode. |
+| `pr-discussion-context.json` | Normalized comments, reviews, thread states, authors, authority hints, and external references. |
+| `prior-cure-reviews.json` | Prior CURe sessions, artifact paths, heads reviewed, and extracted finding summaries. |
+| `prior-finding-source-verification.md` | Source-only verification ledger for prior findings. |
+| `comment-resolution-ledger.md` | Discussion-only disposition ledger. |
+| `finding-disposition-ledger.json` | Combined source/discussion arbitration data for prompts and future runs. |
+| `review.subsequent-context.summary.md` | Human-readable audit summary included beside the final review. |
+
 ## Prior CURe Review A
 
 Simulated artifact: `.cure/reviews/pr-9999/session-a/review.md`.
@@ -148,6 +281,99 @@ This ledger answers: "What did PR discussion establish about reportability, auth
 | B-06 / comment pagination | `developer_claim_fixed` | Author only | C-10 | Do not suppress from C-10; source shows first-page-only pagination in S-08, so re-report. |
 | Low-authority duplicate pushback | `ambiguous_low_authority_pushback` | Low-authority, stale after C-06 | C-05 | No suppression. |
 
+## Finding Matching And Deduplication Mockup
+
+When multiple CURe reviews already exist, CURe should explain which old findings are distinct, which are repeated, and which newer finding supersedes an older one.
+
+| Prior finding group | Match reason | Canonical issue for final review | User-visible action |
+| --- | --- | --- | --- |
+| A-01 | Same source area now has an explicit source/discussion split. | A-01 | Confirm resolved from source; do not re-report. |
+| A-02, B-01 | Same JSON schema compatibility concern; product clarification C-03 retargets the expected behavior. | A-02/B-01 compatibility group | Confirm resolved after source verifies dual-field compatibility. |
+| A-03, B-03 | Same defect family; C-09 says B-03 supersedes A-03, and source S-05 proves the remaining line-movement defect. | B-03 | Suppress A-03 as duplicate; report B-03 once. |
+| A-04, B-02 | Same GraphQL thread coverage concern; C-04 moves it to CURe-123. | A-04/B-02 external-work group | Mark out of scope for this PR while noting source is only partially covered. |
+| A-05 | Developer claim C-02 maps to the same comment-trust defect. | A-05 | Confirm resolved only after source S-02 proves comments no longer set source state. |
+| B-04 | No duplicate; high-severity conflict with author pushback. | B-04 | Re-report with security-owner authority context. |
+| B-05 | Same general provenance theme as A-01's resolved-thread comment, but a narrower remaining citation model defect. | B-05 | Reword as a smaller remaining technical issue. |
+| B-06 | Developer says fixed in C-10, but source S-08 rejects the claim. | B-06 | Re-report; explain the rejected claim. |
+
+## Conflict Resolution UX
+
+CURe should surface comment conflicts instead of silently choosing one side.
+
+```text
+Conflict detected: B-04 high-severity suppression
+
+Evidence from discussion:
+  C-07 bob-dev / author: "accepted risk because this is internal-only"
+  C-08 security-owner / security authority: "Do not suppress without coded allowlist and audit trail"
+
+Evidence from source:
+  S-06 suppression still triggers on any /accepted risk/i comment.
+
+Decision:
+  Keep B-04 visible as Critical. Author pushback is recorded but rejected for insufficient authority and later security-owner contradiction.
+```
+
+```text
+Conflict detected: B-06 developer fixed claim
+
+Evidence from discussion:
+  C-10 bob-dev / author: "I added pagination handling"
+
+Evidence from source:
+  S-08 fetch still stops after the first page of 100 comments.
+
+Decision:
+  Re-report B-06. Comments alone cannot mark the finding resolved_from_source.
+```
+
+## Simulated GitHub Output Behavior
+
+The final CURe run should avoid flooding the PR with duplicate comments. In this mockup CURe posts one new summary review and does not reopen resolved threads.
+
+```text
+GitHub posting plan:
+- Post one new CURe review summary comment for head deadbeef9999.
+- Include a "Prior CURe Finding Confirmations" section for resolved old findings.
+- Include a "Suppressed / Out Of Scope" section with citations for C-03, C-04, and C-09.
+- Include four current reportable issues under normal Business / Product and Technical headings.
+- Do not post inline comments for A-01, A-02/B-01, A-03, A-04/B-02, or A-05.
+- Do not mark any GitHub thread resolved from source unless source verification independently proves it.
+```
+
+Example GitHub summary comment:
+
+```markdown
+CURe subsequent review for `deadbeef9999`
+
+Loaded prior CURe context:
+- Review A: 5 findings at `abc1111`
+- Review B: 6 findings at `def2222`
+- PR discussion items linked: 10
+
+Disposition summary:
+- Confirmed resolved from source: A-01, A-05
+- Confirmed resolved after product retarget: A-02/B-01
+- Suppressed duplicate: A-03 -> B-03
+- Out of scope with maintainer citation: A-04/B-02 -> CURe-123
+- Re-reported: B-03, B-04, B-05, B-06
+
+See the full review artifact for source and discussion citations.
+```
+
+## Visible Fallbacks And Limitations
+
+A thorough user interaction should also show degraded modes. These messages keep failures explicit instead of letting CURe pretend it has complete context.
+
+| Situation | User-visible behavior | Safe default |
+| --- | --- | --- |
+| GitHub comments API unavailable | Warn that PR discussion was not loaded and mark discussion dispositions `not_available`. | Do not suppress findings based on missing discussion. |
+| Review threads unavailable without GraphQL | Load REST comments/reviews, mark thread-resolution state incomplete. | Treat resolved-thread claims as unverified hints. |
+| Prior review artifact cannot be parsed | Report the artifact path and continue with parseable reviews only. | Do not claim full prior-review coverage. |
+| Comment pagination incomplete | Warn that only a prefix of discussion was fetched. | Avoid final suppression decisions that depend on unseen later comments. |
+| Author authority is unknown | Classify as `ambiguous` or `author_claim`. | Require source proof or maintainer/security confirmation. |
+| External ticket reference is missing or ambiguous | Show the text that mentioned it and mark `external_reference_unverified`. | Keep source-open findings visible unless an authority explicitly scopes them out. |
+
 ## Final Simulated CURe Response With New Engines Enabled
 
 ```markdown
@@ -211,3 +437,10 @@ No product-blocking issues remain after applying the product-owner compatibility
 - Ambiguous or low-authority pushback: C-05.
 - Resolved thread treated as hint, not proof: C-01 and A-01.
 - High-severity pushback edge: B-04 / C-07 / C-08 / S-06.
+- User-facing prior-review discovery and `--if-reviewed` interactions.
+- Preflight summary of loaded prior reviews, linked comments, authority hints, and high-severity conflicts.
+- Progress output for metadata fetch, discussion fetch, prior-review loading, source verification, comment resolution, and final arbitration.
+- Auditable generated context artifacts under `work/`.
+- Deduplication explanation for overlapping prior CURe findings.
+- GitHub posting behavior that avoids duplicate comments while preserving suppressed/out-of-scope provenance.
+- Visible degraded-mode fallbacks for missing comments, threads, prior artifacts, pagination, authority, and external references.
