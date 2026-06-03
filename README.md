@@ -13,6 +13,7 @@ If you are an agent, or you want to install CURe as a reusable skill, start with
 - [Why CURe](#why-cure)
 - [Install And First Review](#install-and-first-review)
 - [Example Flows](#example-flows)
+- [Synthetic Design Examples](docs/README.md)
 - [Agent And Setup Notes](#agent-and-setup-notes)
 - [Core Commands](#core-commands)
 - [Secondary Standalone Install](#secondary-standalone-install)
@@ -58,6 +59,8 @@ uvx --from cureview cure pr <PR_URL> --if-reviewed new
 Keep the README focused on the landing page and first success. For the full agent bootstrap contract, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
 
 ## Example Flows
+
+For non-executable design fixtures, see [Synthetic Design Examples](docs/README.md), including the [subsequent review simulation](docs/examples/subsequent-review-simulation.md).
 
 ### Example 1: clean public package install to first review
 
