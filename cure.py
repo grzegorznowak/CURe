@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, Sequence, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -4022,7 +4022,7 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "name": "pr",
                 "summary": "Create a new review session for a PR.",
                 "targets": ["PR_URL"],
-                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics.",
+                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics; subsequent-review intake is automatic by default and `--no-subsequent-review` opts out.",
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Prints the created session directory path on success.",
                 "exit_codes": {"0": "review started", "2": "usage or runtime error"},
@@ -4030,8 +4030,13 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 "variants": [
                     {
                         "name": "compatibility",
-                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
+                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior with automatic subsequent-review detection.",
                         "invocation": preferred_cli_invocation("pr <PR_URL>"),
+                    },
+                    {
+                        "name": "opt_out_subsequent_review",
+                        "summary": "Create a new sandbox but skip automatic subsequent-review intake.",
+                        "invocation": preferred_cli_invocation("pr <PR_URL> --if-reviewed new --no-subsequent-review"),
                     },
                 ],
             },
@@ -7478,8 +7483,15 @@ def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) ->
     return payload
 
 
+def _subsequent_review_command_mode(args: argparse.Namespace) -> str:
+    value = str(getattr(args, "subsequent_review_mode", "auto") or "auto").strip().lower()
+    if value not in {"auto", "disabled"}:
+        raise ReviewflowError("subsequent-review command mode must be one of: auto, disabled")
+    return value
+
+
 def _subsequent_review_enabled(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "subsequent_review", False))
+    return _subsequent_review_command_mode(args) != "disabled"
 
 
 def _subsequent_review_evidence_policy(args: argparse.Namespace) -> str:
@@ -9578,11 +9590,34 @@ def _pr_flow_impl(
     agent_desc_path = session_dir / "agent_desc.txt"
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
-    if _subsequent_review_enabled(args):
-        from cure_subsequent_review.contracts import EvidencePolicy
-        from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
+    from cure_subsequent_review.contracts import EvidencePolicy
+    from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
+    from cure_subsequent_review.decision import (
+        decision_meta_json,
+        decide_subsequent_review,
+        summarize_decision,
+        write_decision_artifact,
+    )
 
-        policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
+    policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
+    subsequent_decision = decide_subsequent_review(
+        pr=pr,
+        completed_sessions=completed,
+        mode=_subsequent_review_command_mode(args),
+        evidence_policy=policy,
+        fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
+    )
+    subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
+    progress.meta.setdefault("paths", {})["subsequent_review_decision"] = str(subsequent_decision_path)
+    progress.meta["subsequent_review"] = decision_meta_json(
+        decision=subsequent_decision,
+        decision_path=subsequent_decision_path,
+        artifact_dir=subsequent_decision_path.parent,
+        manifest_path=None,
+    )
+    progress.flush()
+    _eprint(summarize_decision(subsequent_decision))
+    if subsequent_decision.enabled:
         intake_result = run_subsequent_review_intake(
             pr=pr,
             work_dir=work_dir,
@@ -9593,12 +9628,12 @@ def _pr_flow_impl(
         )
         if intake_result is not None:
             progress.meta.setdefault("paths", {})["subsequent_review_manifest"] = str(intake_result.manifest_path)
-            progress.meta["subsequent_review"] = {
-                "enabled": True,
-                "evidence_policy": policy.value,
-                "manifest_path": str(intake_result.manifest_path),
-                "artifact_dir": str(intake_result.artifact_dir),
-            }
+            progress.meta["subsequent_review"] = decision_meta_json(
+                decision=subsequent_decision,
+                decision_path=subsequent_decision_path,
+                artifact_dir=intake_result.artifact_dir,
+                manifest_path=intake_result.manifest_path,
+            )
             progress.flush()
     progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
     progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
@@ -15451,6 +15486,25 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _RejectSubsequentReviewForceEnable(argparse.Action):
+    def __init__(self, option_strings: Sequence[str], dest: str, **kwargs: Any) -> None:
+        super().__init__(option_strings=option_strings, dest=dest, nargs=0, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        _ = namespace, values, option_string
+        parser.error(
+            "--subsequent-review is no longer supported as a force-enable flag; "
+            "omit --subsequent-review for automatic subsequent-review detection or pass "
+            "--no-subsequent-review to opt out"
+        )
+
+
 def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     add_runtime_args(runtime_parent)
@@ -15470,16 +15524,17 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     subsequent_group = prp.add_mutually_exclusive_group()
     subsequent_group.add_argument(
         "--subsequent-review",
-        dest="subsequent_review",
-        action="store_true",
-        default=False,
-        help="Enable subsequent-review intake artifacts for a new PR sandbox",
+        dest="subsequent_review_mode",
+        action=_RejectSubsequentReviewForceEnable,
+        default="auto",
+        help=argparse.SUPPRESS,
     )
     subsequent_group.add_argument(
         "--no-subsequent-review",
-        dest="subsequent_review",
-        action="store_false",
-        help="Disable subsequent-review intake artifacts (default)",
+        dest="subsequent_review_mode",
+        action="store_const",
+        const="disabled",
+        help="Disable automatic subsequent-review intake artifacts for this new PR sandbox",
     )
     prp.add_argument(
         "--subsequent-review-evidence-policy",

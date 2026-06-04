@@ -19,6 +19,7 @@ from cure_subsequent_review.contracts import (
     SubsequentReviewModule,
 )
 from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
+from cure_subsequent_review.decision import SubsequentReviewCommandMode, decide_subsequent_review
 from cure_subsequent_review.finding_identity import reconcile_findings
 from cure_subsequent_review.github_history import collect_pr_discussion
 from cure_subsequent_review.prior_corpus import build_prior_review_corpus
@@ -49,6 +50,93 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual([item.value for item in EvidencePolicy], ["trusted", "untrusted"])
         self.assertEqual(ModuleStatus.DISABLED.value, "disabled")
         self.assertIn(SubsequentReviewModule.PRIOR_FINDING_EXTRACTOR, set(SubsequentReviewModule))
+
+    def test_parser_defaults_to_auto_opt_out_disables_and_force_enable_is_rejected(self) -> None:
+        parser = rf.build_parser()
+        default_args = parser.parse_args(["pr", "https://github.com/acme/repo/pull/14"])
+        self.assertEqual(rf._subsequent_review_command_mode(default_args), "auto")
+        self.assertEqual(rf._subsequent_review_evidence_policy(default_args), "untrusted")
+
+        disabled_args = parser.parse_args(["pr", "https://github.com/acme/repo/pull/14", "--no-subsequent-review"])
+        self.assertEqual(rf._subsequent_review_command_mode(disabled_args), "disabled")
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit):
+            parser.parse_args(["pr", "https://github.com/acme/repo/pull/14", "--subsequent-review"])
+        self.assertIn("omit --subsequent-review", stderr.getvalue())
+        self.assertIn("--no-subsequent-review", stderr.getvalue())
+
+    def test_decision_service_auto_modes_and_explicit_disabled(self) -> None:
+        pr = PR()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "review.md"
+            review.write_text("prior\n", encoding="utf-8")
+            session = Session("s1", root, review)
+            local = decide_subsequent_review(
+                pr=pr,
+                completed_sessions=[session],
+                mode=SubsequentReviewCommandMode.AUTO,
+                evidence_policy=EvidencePolicy.UNTRUSTED,
+                fetch_json=lambda _path: (_ for _ in ()).throw(AssertionError("remote probe not needed with local sessions")),
+            )
+        self.assertTrue(local.enabled)
+        self.assertIn("completed_sessions_found", local.reasons)
+        self.assertEqual(local.signal_counts["completed_sessions"], 1)
+
+        remote = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.TRUSTED,
+            fetch_json=lambda path: [
+                {"id": 1, "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}
+            ] if path.endswith("/issues/9999/comments") else [],
+        )
+        self.assertTrue(remote.enabled)
+        self.assertIn("cure_pr_discussion_found", remote.reasons)
+        self.assertEqual(remote.signal_counts["remote_cure_markers"], 1)
+        self.assertEqual(remote.evidence_policy, EvidencePolicy.TRUSTED)
+
+        first_run = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=lambda path: [
+                {"id": 2, "user": {"login": "human"}, "body": "looks good"}
+            ] if path.endswith("/issues/9999/comments") else [],
+        )
+        self.assertFalse(first_run.enabled)
+        self.assertIn("no_prior_review_signals", first_run.reasons)
+
+        degraded = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=lambda _path: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        self.assertTrue(degraded.enabled)
+        self.assertIn("remote_probe_degraded", degraded.reasons)
+        self.assertIn("discussion_unavailable", degraded.degraded_reasons)
+
+        explicit = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[object()],
+            mode=SubsequentReviewCommandMode.DISABLED,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=lambda _path: (_ for _ in ()).throw(AssertionError("disabled mode must not probe remote")),
+        )
+        self.assertFalse(explicit.enabled)
+        self.assertEqual(explicit.reasons, ("operator_disabled",))
+
+    def test_command_catalog_documents_auto_default_and_opt_out_without_force_enable(self) -> None:
+        payload = rf.build_commands_catalog_payload()
+        pr_entry = next(command for command in payload["commands"] if command["name"] == "pr")
+        text = json.dumps(pr_entry)
+        self.assertIn("automatic", text)
+        self.assertIn("--no-subsequent-review", text)
+        self.assertNotIn("--subsequent-review ", text)
 
     def test_fixture_pack_contains_story_01_raw_ids_without_later_dispositions(self) -> None:
         root = Path(__file__).parent / "fixtures" / "subsequent_review"
@@ -213,7 +301,7 @@ class SubsequentReviewTests(unittest.TestCase):
                 verdicts=None,
             )
             args = rf.build_parser().parse_args(
-                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list", "--subsequent-review"]
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list"]
             )
             paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
@@ -226,7 +314,7 @@ class SubsequentReviewTests(unittest.TestCase):
             self.assertIn("prior", stdout.getvalue())
             self.assertFalse(paths.sandbox_root.exists())
 
-    def test_if_reviewed_new_runs_intake_after_work_dir_exists(self) -> None:
+    def test_if_reviewed_new_default_auto_writes_decision_and_runs_intake_after_work_dir_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             review = root / "prior.md"
@@ -245,7 +333,6 @@ class SubsequentReviewTests(unittest.TestCase):
                     "https://github.com/acme/repo/pull/14",
                     "--if-reviewed",
                     "new",
-                    "--subsequent-review",
                     "--no-index",
                     "--no-review",
                 ]
@@ -257,7 +344,10 @@ class SubsequentReviewTests(unittest.TestCase):
                 work_dir = kwargs["work_dir"]
                 self.assertTrue(work_dir.is_dir())
                 intake_calls.append(work_dir)
-                return type("Result", (), {"manifest_path": work_dir / "subsequent" / "run_manifest.json", "artifact_dir": work_dir / "subsequent"})()
+                manifest_path = work_dir / "subsequent" / "run_manifest.json"
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text("{}\n", encoding="utf-8")
+                return type("Result", (), {"manifest_path": manifest_path, "artifact_dir": work_dir / "subsequent"})()
 
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
@@ -273,6 +363,104 @@ class SubsequentReviewTests(unittest.TestCase):
                     rf._pr_flow_impl(args, paths=paths)
             self.assertEqual(len(intake_calls), 1)
             self.assertEqual(intake_calls[0].name, "work")
+            decision_path = intake_calls[0] / "subsequent" / "decision.json"
+            self.assertTrue(decision_path.is_file())
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            self.assertEqual(decision["mode"], "auto")
+            self.assertTrue(decision["enabled"])
+            self.assertIn("completed_sessions_found", decision["reasons"])
+            meta = json.loads((intake_calls[0].parent / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["paths"]["subsequent_review_decision"], str(decision_path))
+            self.assertEqual(meta["paths"]["subsequent_review_manifest"], str(intake_calls[0] / "subsequent" / "run_manifest.json"))
+            self.assertTrue(meta["subsequent_review"]["enabled"])
+            self.assertEqual(meta["subsequent_review"]["mode"], "auto")
+
+    def test_new_sandbox_auto_disabled_writes_decision_meta_and_skips_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch.object(
+                rf, "gh_api_list", return_value=[]
+            ), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for auto-disabled decisions"),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._pr_flow_impl(args, paths=paths)
+            sessions = list(paths.sandbox_root.iterdir())
+            self.assertEqual(len(sessions), 1)
+            work_dir = sessions[0] / "work"
+            decision_path = work_dir / "subsequent" / "decision.json"
+            self.assertTrue(decision_path.is_file())
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            self.assertFalse(decision["enabled"])
+            self.assertIn("no_prior_review_signals", decision["reasons"])
+            self.assertFalse((work_dir / "subsequent" / "run_manifest.json").exists())
+            meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["subsequent_review"]["mode"], "auto")
+            self.assertFalse(meta["subsequent_review"]["enabled"])
+            self.assertEqual(meta["subsequent_review"]["manifest_path"], None)
+            self.assertEqual(meta["paths"]["subsequent_review_decision"], str(decision_path))
+
+    def test_new_sandbox_explicit_disabled_writes_decision_meta_and_skips_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-subsequent-review",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch.object(
+                rf, "gh_api_list", side_effect=AssertionError("disabled mode must not probe remote")
+            ), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for explicit-disabled decisions"),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._pr_flow_impl(args, paths=paths)
+            sessions = list(paths.sandbox_root.iterdir())
+            self.assertEqual(len(sessions), 1)
+            work_dir = sessions[0] / "work"
+            decision_path = work_dir / "subsequent" / "decision.json"
+            self.assertTrue(decision_path.is_file())
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            self.assertEqual(decision["mode"], "disabled")
+            self.assertFalse(decision["enabled"])
+            self.assertEqual(decision["reasons"], ["operator_disabled"])
+            self.assertFalse((work_dir / "subsequent" / "run_manifest.json").exists())
+            meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["subsequent_review"]["mode"], "disabled")
+            self.assertFalse(meta["subsequent_review"]["enabled"])
+            self.assertEqual(meta["subsequent_review"]["manifest_path"], None)
 
     def test_control_plane_writes_story_01_artifacts_only_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
