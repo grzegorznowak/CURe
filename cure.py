@@ -7385,7 +7385,7 @@ def _public_github_repo_clone_url(*, host: str, owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
-def _github_public_api_json(*, path: str) -> dict[str, Any]:
+def _github_public_api_payload(*, path: str) -> Any:
     normalized = path if path.startswith("/") else f"/{path}"
     req = urllib.request.Request(
         f"https://api.github.com{normalized}",
@@ -7407,12 +7407,30 @@ def _github_public_api_json(*, path: str) -> dict[str, Any]:
     except urllib.error.URLError as e:
         raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
     try:
-        payload = json.loads(body)
+        return json.loads(body)
     except Exception as e:
         raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
+
+
+def _github_public_api_json(*, path: str) -> dict[str, Any]:
+    normalized = path if path.startswith("/") else f"/{path}"
+    payload = _github_public_api_payload(path=path)
     if not isinstance(payload, dict):
         raise ReviewflowError(f"Public GitHub API returned unexpected payload for {normalized}")
     return payload
+
+
+def _github_public_api_list(*, path: str) -> dict[str, Any]:
+    normalized = path if path.startswith("/") else f"/{path}"
+    payload = _github_public_api_payload(path=path)
+    if not isinstance(payload, list):
+        raise ReviewflowError(f"Public GitHub API returned unexpected list payload for {normalized}")
+    return {
+        "items": payload,
+        "complete": False,
+        "status": "discussion_incomplete",
+        "detail": f"public fallback for {normalized} does not prove REST pagination completeness",
+    }
 
 
 def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) -> dict[str, Any]:
@@ -7433,6 +7451,42 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
     if not isinstance(payload, dict):
         raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
     return payload
+
+
+def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any] | dict[str, Any]:
+    cmd = ["gh", "api", "--hostname", host, path, "--paginate", "--slurp"]
+    try:
+        result = run_cmd(cmd)
+    except ReviewflowSubprocessError as e:
+        if _looks_like_gh_auth_error(e):
+            if allow_public_fallback and _supports_public_github_fallback(host):
+                _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
+                return _github_public_api_list(path=path)
+            _raise_gh_auth_error(host=host, error=e)
+        raise
+    try:
+        payload = json.loads(result.stdout)
+    except Exception as e:
+        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
+    if not isinstance(payload, list):
+        raise ReviewflowError(f"`gh api` returned unexpected list payload for {path}")
+    if all(isinstance(page, list) for page in payload):
+        flattened: list[Any] = []
+        for page in payload:
+            flattened.extend(page)
+        return flattened
+    return payload
+
+
+def _subsequent_review_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "subsequent_review", False))
+
+
+def _subsequent_review_evidence_policy(args: argparse.Namespace) -> str:
+    value = str(getattr(args, "subsequent_review_evidence_policy", "untrusted") or "untrusted").strip().lower()
+    if value not in {"trusted", "untrusted"}:
+        raise ReviewflowError("--subsequent-review-evidence-policy must be one of: trusted, untrusted")
+    return value
 
 
 def write_pr_context_file(
@@ -9524,6 +9578,28 @@ def _pr_flow_impl(
     agent_desc_path = session_dir / "agent_desc.txt"
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
+    if _subsequent_review_enabled(args):
+        from cure_subsequent_review.contracts import EvidencePolicy
+        from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
+
+        policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
+        intake_result = run_subsequent_review_intake(
+            pr=pr,
+            work_dir=work_dir,
+            completed_sessions=completed,
+            config=SubsequentReviewConfig(enabled=True, evidence_policy=policy),
+            fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
+            summary_writer=_eprint,
+        )
+        if intake_result is not None:
+            progress.meta.setdefault("paths", {})["subsequent_review_manifest"] = str(intake_result.manifest_path)
+            progress.meta["subsequent_review"] = {
+                "enabled": True,
+                "evidence_policy": policy.value,
+                "manifest_path": str(intake_result.manifest_path),
+                "artifact_dir": str(intake_result.artifact_dir),
+            }
+            progress.flush()
     progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
     progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
@@ -15390,6 +15466,26 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         choices=["prompt", "new", "list", "latest"],
         default="prompt",
         help="If a completed review exists for this PR, prompt (TTY), create new, list, or show latest (default: prompt)",
+    )
+    subsequent_group = prp.add_mutually_exclusive_group()
+    subsequent_group.add_argument(
+        "--subsequent-review",
+        dest="subsequent_review",
+        action="store_true",
+        default=False,
+        help="Enable subsequent-review intake artifacts for a new PR sandbox",
+    )
+    subsequent_group.add_argument(
+        "--no-subsequent-review",
+        dest="subsequent_review",
+        action="store_false",
+        help="Disable subsequent-review intake artifacts (default)",
+    )
+    prp.add_argument(
+        "--subsequent-review-evidence-policy",
+        choices=["trusted", "untrusted"],
+        default="untrusted",
+        help="Evidence policy recorded in subsequent-review intake artifacts (default: untrusted)",
     )
     prp.add_argument("--prompt", help="Inline review prompt", default=None)
     prp.add_argument("--prompt-file", help="Path to prompt file", default=None)

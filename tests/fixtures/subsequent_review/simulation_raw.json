@@ -1,0 +1,238 @@
+{
+  "pr": {
+    "host": "github.com",
+    "owner": "grzegorznowak",
+    "repo": "CURe",
+    "number": 9999
+  },
+  "prior_review_a": [
+    {
+      "id": "A-01",
+      "severity": "medium",
+      "section": "Business / Product Assessment",
+      "title": "Resolved GitHub threads are treated as proof that findings are fixed."
+    },
+    {
+      "id": "A-02",
+      "severity": "low",
+      "section": "Business / Product Assessment",
+      "title": "Product says CLI JSON output must remain stable, but the PR renames `review_id` to `finding_id` without compatibility handling."
+    },
+    {
+      "id": "A-03",
+      "severity": "high",
+      "section": "Technical Assessment",
+      "title": "Prior findings are de-duplicated only by their rendered title."
+    },
+    {
+      "id": "A-04",
+      "severity": "medium",
+      "section": "Technical Assessment",
+      "title": "Review comments are fetched but review bodies are ignored."
+    },
+    {
+      "id": "A-05",
+      "severity": "medium",
+      "section": "Technical Assessment",
+      "title": "Source verification trusts developer comments that say \"fixed\"."
+    }
+  ],
+  "prior_review_b": [
+    {
+      "id": "B-01",
+      "severity": "medium",
+      "section": "Business / Product Assessment",
+      "title": "`--json` still emits unstable ledger field names in follow-up summaries.",
+      "supersedes": [
+        "A-02"
+      ]
+    },
+    {
+      "id": "B-02",
+      "severity": "low",
+      "section": "Business / Product Assessment",
+      "title": "The report re-requests work that maintainers explicitly moved to CURe-123."
+    },
+    {
+      "id": "B-03",
+      "severity": "high",
+      "section": "Technical Assessment",
+      "title": "Duplicate detection now uses title plus file, but still misses line movement.",
+      "supersedes": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "B-04",
+      "severity": "critical",
+      "section": "Technical Assessment",
+      "title": "High-severity secret-leak warnings can be dismissed by any comment containing \"accepted risk\"."
+    },
+    {
+      "id": "B-05",
+      "severity": "medium",
+      "section": "Technical Assessment",
+      "title": "Retrospective verification cannot cite the source lines used to confirm resolution."
+    },
+    {
+      "id": "B-06",
+      "severity": "medium",
+      "section": "Technical Assessment",
+      "title": "REST comment pagination can miss later PR discussion."
+    }
+  ],
+  "raw_prior_reviews": {
+    "session_a_review_md": "**Summary**: The PR starts a persisted review ledger, but the first version conflates comment disposition with source truth.\n\n## Business / Product Assessment\n### In Scope Issues\n\n- [A-01][Medium] Resolved GitHub threads are treated as proof that findings are fixed.\n  Evidence: `cure.py:4120-4167` sets `source_state=\"resolved\"` when `thread.isResolved` is true.\n  Impact: A reviewer can click Resolve Conversation while the defect still exists.\n\n- [A-02][Low] Product says CLI JSON output must remain stable, but the PR renames `review_id` to `finding_id` without compatibility handling.\n  Evidence: `cure_flows.py:821-846` writes only `finding_id`.\n\n## Technical Assessment\n### In Scope Issues\n\n- [A-03][High] Prior findings are de-duplicated only by their rendered title.\n  Evidence: `cure.py:4294-4310` uses `normalized_title` as the dictionary key.\n  Impact: two different defects with similar headings collapse into one ledger row.\n\n- [A-04][Medium] Review comments are fetched but review bodies are ignored.\n  Evidence: `cure.py:4017-4044` calls `/pulls/comments` but not `/pulls/{number}/reviews`.\n\n- [A-05][Medium] Source verification trusts developer comments that say \"fixed\".\n  Evidence: `cure.py:4172-4188` maps `/fixed/i` to `resolved_from_source` without reading the patched file.\n",
+    "session_b_review_md": "**Summary**: The second pass sees partial progress, but important threading and arbitration gaps remain.\n\n## Business / Product Assessment\n### In Scope Issues\n\n- [B-01][Medium] `--json` still emits unstable ledger field names in follow-up summaries.\n  Evidence: `cure_flows.py:913-934` emits `review_id` in one path and `finding_id` in another.\n  Supersedes: A-02\n\n- [B-02][Low] The report re-requests work that maintainers explicitly moved to CURe-123.\n  Evidence: PR discussion says GraphQL resolved-thread fetching is split to CURe-123, but the review still lists it as required for this PR.\n\n## Technical Assessment\n### In Scope Issues\n\n- [B-03][High] Duplicate detection now uses title plus file, but still misses line movement.\n  Evidence: `cure.py:4315-4349` hashes `title:file:line`.\n  Supersedes: A-03\n\n- [B-04][Critical] High-severity secret-leak warnings can be dismissed by any comment containing \"accepted risk\".\n  Evidence: `cure.py:4388-4406` does not check commenter authority or source state before suppressing the finding.\n\n- [B-05][Medium] Retrospective verification cannot cite the source lines used to confirm resolution.\n  Evidence: `cure_flows.py:1001-1039` writes status but no provenance.\n\n- [B-06][Medium] REST comment pagination can miss later PR discussion.\n  Evidence: `cure.py:4079-4092` reads only the first page of comments.\n",
+    "parse_degraded_prior_artifact_md": "### CURE-99: Parseable degraded fixture finding\nSeverity: low\nSection: Testing\nEvidence: tests/fixtures/subsequent_review/simulation_raw.json:1 parseable prior finding\n\n### CURE-100: Malformed degraded fixture finding\nSection: Testing\nEvidence: tests/fixtures/subsequent_review/simulation_raw.json:2 missing severity\n"
+  },
+  "discussion": [
+    {
+      "id": "C-01",
+      "kind": "issue_comment",
+      "author": "cure-bot",
+      "body": "CURe review A posted with A-01 through A-05."
+    },
+    {
+      "id": "C-02",
+      "kind": "issue_comment",
+      "author": "developer",
+      "body": "Fixed A-01 by resolving the thread."
+    },
+    {
+      "id": "C-03",
+      "kind": "review",
+      "author": "maintainer",
+      "body": "Please keep the JSON field compatibility concerns visible."
+    },
+    {
+      "id": "C-04",
+      "kind": "review_comment",
+      "author": "developer",
+      "body": "Resolved this conversation.",
+      "thread_state": "resolved",
+      "path": "cure.py",
+      "line": 4167
+    },
+    {
+      "id": "C-05",
+      "kind": "review_comment",
+      "author": "reviewer",
+      "body": "This line still needs source verification.",
+      "thread_state": "unresolved",
+      "path": "cure.py",
+      "line": 4188
+    },
+    {
+      "id": "C-06",
+      "kind": "issue_comment",
+      "author": "product-owner",
+      "body": "Move the external GraphQL thread work to CURe-123."
+    },
+    {
+      "id": "C-07",
+      "kind": "review_comment",
+      "author": "developer",
+      "body": "Thread state unavailable on this host.",
+      "thread_state": "unknown",
+      "path": "cure_flows.py",
+      "line": 934
+    },
+    {
+      "id": "C-08",
+      "kind": "issue_comment",
+      "author": "security-owner",
+      "body": "Accepted risk requires authority checks and source state."
+    },
+    {
+      "id": "C-09",
+      "kind": "review",
+      "author": "cure-bot",
+      "body": "CURe review B posted with B-01 through B-06."
+    },
+    {
+      "id": "C-10",
+      "kind": "issue_comment",
+      "author": "maintainer",
+      "body": "REST pagination must not silently miss later discussion."
+    }
+  ],
+  "source_facts": [
+    {
+      "id": "S-01",
+      "path": "cure.py",
+      "raw": "cure.py:4120-4167 thread.isResolved is mapped into source_state."
+    },
+    {
+      "id": "S-02",
+      "path": "cure_flows.py",
+      "raw": "cure_flows.py:821-846 writes only finding_id."
+    },
+    {
+      "id": "S-03",
+      "path": "cure.py",
+      "raw": "cure.py:4294-4310 uses normalized_title as a dictionary key."
+    },
+    {
+      "id": "S-04",
+      "path": "cure.py",
+      "raw": "cure.py:4017-4044 fetches pull comments without review bodies."
+    },
+    {
+      "id": "S-05",
+      "path": "cure.py",
+      "raw": "cure.py:4172-4188 maps fixed comments to source resolution."
+    },
+    {
+      "id": "S-06",
+      "path": "cure.py",
+      "raw": "cure.py:4315-4349 hashes title:file:line."
+    },
+    {
+      "id": "S-07",
+      "path": "cure.py",
+      "raw": "cure.py:4388-4406 accepts accepted-risk comments without authority/source checks."
+    },
+    {
+      "id": "S-08",
+      "path": "cure_flows.py",
+      "raw": "cure_flows.py:1001-1039 writes status without provenance."
+    }
+  ],
+  "degraded_inputs": {
+    "discussion_unavailable": {
+      "exception": "boom"
+    },
+    "thread_state_unavailable": {
+      "review_comment": {
+        "id": 707,
+        "body": "missing thread state",
+        "thread_state": "not-available"
+      }
+    },
+    "discussion_incomplete": {
+      "items": [],
+      "complete": false,
+      "status": "discussion_incomplete"
+    },
+    "parse_degraded": "raw_prior_reviews.parse_degraded_prior_artifact_md"
+  },
+  "story_01_goldens": {
+    "degraded_paths": [
+      "discussion_unavailable",
+      "thread_state_unavailable",
+      "discussion_incomplete",
+      "parse_degraded"
+    ],
+    "reconciliation_groups": [
+      [
+        "A-02",
+        "B-01"
+      ],
+      [
+        "A-03",
+        "B-03"
+      ]
+    ]
+  }
+}
