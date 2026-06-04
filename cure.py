@@ -7434,7 +7434,40 @@ def _github_public_api_list(*, path: str) -> dict[str, Any]:
         "items": payload,
         "complete": False,
         "status": "discussion_incomplete",
+        "endpoint": path,
+        "fetch": "public_github_api",
         "detail": f"public fallback for {normalized} does not prove REST pagination completeness",
+    }
+
+
+def _classify_gh_list_error(error: ReviewflowSubprocessError) -> str:
+    text = f"{error.stderr}\n{error.stdout}".lower()
+    if "unknown flag" in text or "unknown option" in text or "invalid option" in text:
+        return "cli_unsupported_flag"
+    if _looks_like_gh_auth_error(error):
+        return "auth"
+    if "api rate limit" in text or "rate limit" in text:
+        return "api_rate_limit"
+    if "http" in text or "status" in text:
+        return "api_status"
+    if "timed out" in text or "connection" in text or "network" in text:
+        return "transport"
+    return "fetch_error"
+
+
+def _degraded_gh_list_payload(*, path: str, error: ReviewflowSubprocessError, status: str, detail: str) -> dict[str, Any]:
+    return {
+        "items": [],
+        "complete": False,
+        "status": status,
+        "endpoint": path,
+        "fetch": "gh_api_list",
+        "cause": _classify_gh_list_error(error),
+        "exit_code": error.exit_code,
+        "stderr": error.stderr,
+        "stdout": error.stdout,
+        "command": list(error.cmd),
+        "detail": detail,
     }
 
 
@@ -7463,10 +7496,35 @@ def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) ->
     try:
         result = run_cmd(cmd)
     except ReviewflowSubprocessError as e:
-        if _looks_like_gh_auth_error(e):
-            if allow_public_fallback and _supports_public_github_fallback(host):
+        if allow_public_fallback and _supports_public_github_fallback(host):
+            if _looks_like_gh_auth_error(e):
                 _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
-                return _github_public_api_list(path=path)
+            else:
+                _eprint(f"`gh api --paginate --slurp` failed for {path}; falling back to the public GitHub API.")
+            try:
+                payload = _github_public_api_list(path=path)
+            except Exception as fallback_error:  # noqa: BLE001 - degraded artifact carries both causes
+                return _degraded_gh_list_payload(
+                    path=path,
+                    error=e,
+                    status="discussion_unavailable",
+                    detail=f"gh list failed ({_classify_gh_list_error(e)}); public fallback failed: {fallback_error}",
+                )
+            payload.update(
+                {
+                    "cause": _classify_gh_list_error(e),
+                    "exit_code": e.exit_code,
+                    "stderr": e.stderr,
+                    "stdout": e.stdout,
+                    "command": list(e.cmd),
+                    "detail": (
+                        f"gh list failed ({_classify_gh_list_error(e)}); "
+                        f"public fallback used for {path} but pagination completeness is unproven"
+                    ),
+                }
+            )
+            return payload
+        if _looks_like_gh_auth_error(e):
             _raise_gh_auth_error(host=host, error=e)
         raise
     try:

@@ -62,11 +62,32 @@ class PaginationMarker:
     complete: bool
     status: str = "complete"
     detail: str | None = None
+    endpoint: str | None = None
+    fetch: str | None = None
+    cause: str | None = None
+    exit_code: int | None = None
+    stderr: str | None = None
+    stdout: str | None = None
+    command: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"source": self.source, "complete": self.complete, "status": self.status}
         if self.detail:
             payload["detail"] = self.detail
+        if self.endpoint:
+            payload["endpoint"] = self.endpoint
+        if self.fetch:
+            payload["fetch"] = self.fetch
+        if self.cause:
+            payload["cause"] = self.cause
+        if self.exit_code is not None:
+            payload["exit_code"] = self.exit_code
+        if self.stderr:
+            payload["stderr"] = self.stderr
+        if self.stdout:
+            payload["stdout"] = self.stdout
+        if self.command:
+            payload["command"] = list(self.command)
         return payload
 
 
@@ -220,6 +241,9 @@ class ReconciledFindingGroup:
     fingerprint: str
     provenance: tuple[FindingProvenance, ...]
     supersedes: tuple[str, ...] = ()
+    local_findings: tuple[dict[str, Any], ...] = ()
+    supersedes_edges: tuple[dict[str, Any], ...] = ()
+    ambiguous_supersedes: tuple[dict[str, Any], ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -229,6 +253,9 @@ class ReconciledFindingGroup:
             "fingerprint": self.fingerprint,
             "provenance": [item.to_json() for item in self.provenance],
             "supersedes": list(self.supersedes),
+            "local_findings": list(self.local_findings),
+            "supersedes_edges": list(self.supersedes_edges),
+            "ambiguous_supersedes": list(self.ambiguous_supersedes),
         }
 
 

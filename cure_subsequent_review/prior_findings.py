@@ -23,7 +23,9 @@ _FINDING_BULLET_RE = re.compile(
 _SECTION_HEADING_RE = re.compile(r"^##\s+(?P<section>[^#].*)$")
 _INLINE_ID_RE = re.compile(r"\b(?P<id>[A-Z]+-\d{2,4}|[AB]-\d{2})\b")
 _FIELD_RE = re.compile(r"^(?P<key>Severity|Section|Evidence|Source|Supersedes)\s*:\s*(?P<value>.*)$", re.IGNORECASE)
-_SOURCE_REF_RE = re.compile(r"\b[\w./-]+:\d+\b")
+_SOURCE_REF_RE = re.compile(r"\b[\w./-]+:\d+(?:-\d+)?\b")
+_GENERATED_SEVERITY_RE = re.compile(r"<summary>.*?<b>(?P<severity>[^<]+)</b>\s+severity", re.IGNORECASE)
+_GENERATED_SOURCES_RE = re.compile(r"\bSources:\s*(?P<sources>.*)$", re.IGNORECASE)
 
 
 def _stable_hint(*parts: str) -> str:
@@ -89,6 +91,89 @@ def _candidate_from_block(
     )
 
 
+def _source_refs(text: str) -> list[str]:
+    return [match.group(0).strip("`.,") for match in _SOURCE_REF_RE.finditer(text)]
+
+
+def _strip_generated_sources(title: str) -> tuple[str, list[str]]:
+    match = _GENERATED_SOURCES_RE.search(title)
+    if not match:
+        return title.strip(), []
+    refs = _source_refs(match.group("sources"))
+    return title[: match.start()].strip().rstrip(".:- "), refs
+
+
+def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindingCandidate], list[dict[str, Any]]]:
+    findings: list[PriorFindingCandidate] = []
+    current_section = "unknown"
+    in_scope_issues = False
+    current_title = ""
+    current_block: list[str] = []
+    current_sources: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_title, current_block, current_sources
+        if not current_title:
+            return
+        severity = ""
+        evidence = list(current_sources)
+        for line in current_block:
+            severity_match = _GENERATED_SEVERITY_RE.search(line)
+            if severity_match and not severity:
+                severity = severity_match.group("severity").strip().lower()
+            evidence.extend(_source_refs(line))
+        if severity:
+            index = len(findings) + 1
+            block = [f"Severity: {severity}", f"Section: {current_section}"]
+            block.extend(f"Evidence: {item}" for item in dict.fromkeys(evidence))
+            candidate, _status = _candidate_from_block(
+                entry=entry,
+                finding_id=f"CURE-{index:03d}",
+                title=current_title,
+                block_lines=block,
+            )
+            if candidate is not None:
+                findings.append(candidate)
+        current_title = ""
+        current_block = []
+        current_sources = []
+
+    for line in entry.body.splitlines():
+        stripped = line.strip()
+        h2 = _SECTION_HEADING_RE.match(stripped)
+        if h2:
+            flush()
+            current_section = h2.group("section").strip()
+            in_scope_issues = False
+            continue
+        if stripped.startswith("### "):
+            flush()
+            in_scope_issues = stripped.lower().startswith("### in scope issues")
+            continue
+        if not in_scope_issues:
+            continue
+        if line.startswith("- "):
+            flush()
+            current_title, current_sources = _strip_generated_sources(stripped[2:].strip())
+            current_block = [line]
+        elif current_title:
+            current_block.append(line)
+    flush()
+
+    statuses: list[dict[str, Any]] = []
+    if not findings and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body):
+        statuses.append(
+            {
+                "entry_id": entry.entry_id,
+                "status": "parse_degraded",
+                "reason": "generated_review_without_parseable_findings",
+                "source_type": entry.source_type,
+                "artifact_path": str(entry.artifact_path) if entry.artifact_path is not None else None,
+            }
+        )
+    return findings, statuses
+
+
 def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindingCandidate], list[dict[str, Any]]]:
     findings: list[PriorFindingCandidate] = []
     statuses: list[dict[str, Any]] = []
@@ -136,6 +221,10 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
             block.append(line)
     flush()
 
+    if not findings:
+        generated_findings, generated_statuses = _extract_generated_review_issues(entry)
+        findings.extend(generated_findings)
+        statuses.extend(generated_statuses)
     if not findings and not statuses and _INLINE_ID_RE.search(entry.body):
         statuses.append({"entry_id": entry.entry_id, "status": "parse_degraded", "reason": "finding_id_without_parseable_heading"})
     return findings, statuses

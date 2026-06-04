@@ -13,7 +13,9 @@ import cure as rf
 
 from cure_subsequent_review.contracts import (
     EvidencePolicy,
+    FindingProvenance,
     ModuleStatus,
+    PriorFindingCandidate,
     PriorReviewCorpus,
     PriorReviewCorpusEntry,
     SubsequentReviewModule,
@@ -286,6 +288,165 @@ class SubsequentReviewTests(unittest.TestCase):
             grouped_ids = [set(group.finding_ids) for group in ledger.groups]
             self.assertTrue(any({"A-01", "B-01"}.issubset(ids) for ids in grouped_ids))
             self.assertTrue(any("A-01" in group.supersedes for group in ledger.groups))
+
+    def test_reconciliation_namespaces_duplicate_ids_ambiguous_and_transitive_supersedes(self) -> None:
+        def candidate(
+            *,
+            entry_id: str,
+            finding_id: str,
+            title: str,
+            supersedes: tuple[str, ...] = (),
+        ) -> PriorFindingCandidate:
+            return PriorFindingCandidate(
+                finding_id=finding_id,
+                severity="medium",
+                section="Business / Product Assessment",
+                title=title,
+                source_evidence_snippets=(f"{entry_id}.py:1",),
+                reviewed_head=f"sha-{entry_id}",
+                provenance=FindingProvenance(
+                    corpus_entry_id=entry_id,
+                    source_type="session_review",
+                    artifact_path=f"/tmp/{entry_id}/review.md",
+                    reviewed_head=f"sha-{entry_id}",
+                ),
+                supersedes=supersedes,
+            )
+
+        ledger = reconcile_findings(
+            findings=(
+                candidate(entry_id="session-a", finding_id="CURE-01", title="Cache grows forever"),
+                candidate(entry_id="session-b", finding_id="CURE-01", title="SQL injection risk"),
+                candidate(entry_id="session-c", finding_id="CURE-02", title="SQL injection still possible", supersedes=("CURE-01",)),
+                candidate(entry_id="session-d", finding_id="CURE-03", title="SQL injection remains exploitable", supersedes=("CURE-02",)),
+            )
+        )
+
+        payload = ledger.to_json()
+        all_local = [item for group in payload["groups"] for item in group["local_findings"]]
+        duplicate_origins = [item["origin_key"] for item in all_local if item["finding_id"] == "CURE-01"]
+        self.assertEqual(set(duplicate_origins), {"session-a:CURE-01", "session-b:CURE-01"})
+        self.assertTrue(
+            any(
+                marker["source_origin_key"] == "session-c:CURE-02"
+                and marker["target_display_id"] == "CURE-01"
+                and set(marker["target_origin_keys"]) == {"session-a:CURE-01", "session-b:CURE-01"}
+                for group in payload["groups"]
+                for marker in group["ambiguous_supersedes"]
+            )
+        )
+        self.assertTrue(
+            any(
+                {"CURE-02", "CURE-03"}.issubset(set(group["finding_ids"]))
+                and any(edge["target_origin_key"] == "session-c:CURE-02" for edge in group["supersedes_edges"])
+                for group in payload["groups"]
+            )
+        )
+
+    def test_github_list_slurp_failure_public_fallback_preserves_cause_detail(self) -> None:
+        slurp_error = rf.ReviewflowSubprocessError(
+            cmd=["gh", "api", "--paginate", "--slurp"],
+            cwd=None,
+            exit_code=1,
+            stdout="",
+            stderr="unknown flag: --slurp",
+        )
+
+        def public_payload(*, path: str) -> list[dict[str, Any]]:
+            return [{"id": path.rsplit("/", 1)[-1], "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}]
+
+        with mock.patch.object(rf, "run_cmd", side_effect=slurp_error), mock.patch.object(
+            rf, "_github_public_api_payload", side_effect=public_payload
+        ):
+            discussion = collect_pr_discussion(
+                pr=PR(),
+                fetch_json=lambda path: rf.gh_api_list(host="github.com", path=path, allow_public_fallback=True),
+            )
+
+        self.assertEqual(discussion.status, ModuleStatus.DEGRADED)
+        self.assertIn("discussion_incomplete", discussion.status_reasons)
+        self.assertEqual(len(discussion.events), 3)
+        marker_payloads = [marker.to_json() for marker in discussion.pagination]
+        self.assertTrue(all(marker["endpoint"].endswith(("/comments", "/reviews")) for marker in marker_payloads))
+        self.assertTrue(all(marker["cause"] == "cli_unsupported_flag" for marker in marker_payloads))
+        self.assertTrue(all("unknown flag" in marker["stderr"] for marker in marker_payloads))
+
+    def test_github_list_slurp_command_does_not_mask_api_rate_or_transport_failures(self) -> None:
+        cases = (
+            ("HTTP 500 Internal Server Error", "api_status"),
+            ("API rate limit exceeded", "api_rate_limit"),
+            ("connection timed out", "transport"),
+        )
+
+        def public_payload(*, path: str) -> list[dict[str, Any]]:
+            return [{"id": path.rsplit("/", 1)[-1], "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}]
+
+        for stderr, expected_cause in cases:
+            with self.subTest(stderr=stderr):
+                error = rf.ReviewflowSubprocessError(
+                    cmd=["gh", "api", "--hostname", "github.com", "repos/example/demo/issues/9999/comments", "--paginate", "--slurp"],
+                    cwd=None,
+                    exit_code=1,
+                    stdout="",
+                    stderr=stderr,
+                )
+                with mock.patch.object(rf, "run_cmd", side_effect=error), mock.patch.object(
+                    rf, "_github_public_api_payload", side_effect=public_payload
+                ):
+                    payload = rf.gh_api_list(
+                        host="github.com",
+                        path="repos/example/demo/issues/9999/comments",
+                        allow_public_fallback=True,
+                    )
+                self.assertIsInstance(payload, dict)
+                self.assertEqual(payload["cause"], expected_cause)
+                self.assertIn("--slurp", payload["command"])
+
+                discussion = collect_pr_discussion(pr=PR(), fetch_json=lambda _path, err=error: (_ for _ in ()).throw(err))
+                marker_payloads = [marker.to_json() for marker in discussion.pagination]
+                self.assertEqual({marker["cause"] for marker in marker_payloads}, {expected_cause})
+                self.assertTrue(all("--slurp" in marker["command"] for marker in marker_payloads))
+
+    def test_real_generated_review_markdown_extracts_in_scope_issues(self) -> None:
+        corpus = PriorReviewCorpus(
+            status=ModuleStatus.SUCCESS,
+            entries=(
+                PriorReviewCorpusEntry(
+                    entry_id="real-run:review-md",
+                    source_type="session_review",
+                    provenance={},
+                    body="""## Business / Product Assessment
+**Verdict**: REQUEST CHANGES
+
+### In Scope Issues
+- Enabled intake can lose recoverable PR discussion evidence when `gh api` list collection fails for a non-auth reason. Sources: `cure.py:7456`, `cure_subsequent_review/github_history.py:66`
+
+  <details open>
+  <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+  **Why:** Story 01 is meant to preserve PR discussion history.
+
+  **Code Trail:** `_pr_flow_impl` passes `allow_public_fallback=True` through `gh_api_list`.
+
+  </details>
+""",
+                    reviewed_head="sha-real",
+                    artifact_path=Path("/tmp/prior/review.md"),
+                ),
+            ),
+        )
+
+        ledger = extract_prior_findings(corpus=corpus)
+
+        self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
+        self.assertEqual(len(ledger.findings), 1)
+        finding = ledger.findings[0]
+        self.assertEqual(finding.finding_id, "CURE-001")
+        self.assertEqual(finding.severity, "medium")
+        self.assertEqual(finding.section, "Business / Product Assessment")
+        self.assertIn("gh api", finding.title)
+        self.assertIn("cure.py:7456", finding.source_evidence_snippets)
+        self.assertEqual(finding.provenance.artifact_path, "/tmp/prior/review.md")
 
     def test_if_reviewed_historical_list_exits_before_sandbox_or_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
