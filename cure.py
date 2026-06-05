@@ -9657,42 +9657,64 @@ def _pr_flow_impl(
         write_decision_artifact,
     )
 
-    policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
-    subsequent_decision = decide_subsequent_review(
-        pr=pr,
-        completed_sessions=completed,
-        mode=_subsequent_review_command_mode(args),
-        evidence_policy=policy,
-        fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
-    )
-    subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
-    progress.meta.setdefault("paths", {})["subsequent_review_decision"] = str(subsequent_decision_path)
-    progress.meta["subsequent_review"] = decision_meta_json(
-        decision=subsequent_decision,
-        decision_path=subsequent_decision_path,
-        artifact_dir=subsequent_decision_path.parent,
-        manifest_path=None,
-    )
-    progress.flush()
-    _eprint(summarize_decision(subsequent_decision))
-    if subsequent_decision.enabled:
-        intake_result = run_subsequent_review_intake(
+    try:
+        policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
+        subsequent_decision = decide_subsequent_review(
             pr=pr,
-            work_dir=work_dir,
             completed_sessions=completed,
-            config=SubsequentReviewConfig(enabled=True, evidence_policy=policy),
+            mode=_subsequent_review_command_mode(args),
+            evidence_policy=policy,
             fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
-            summary_writer=_eprint,
         )
-        if intake_result is not None:
-            progress.meta.setdefault("paths", {})["subsequent_review_manifest"] = str(intake_result.manifest_path)
-            progress.meta["subsequent_review"] = decision_meta_json(
-                decision=subsequent_decision,
-                decision_path=subsequent_decision_path,
-                artifact_dir=intake_result.artifact_dir,
-                manifest_path=intake_result.manifest_path,
+        subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
+        progress.meta.setdefault("paths", {})["subsequent_review_decision"] = str(subsequent_decision_path)
+        progress.meta["subsequent_review"] = decision_meta_json(
+            decision=subsequent_decision,
+            decision_path=subsequent_decision_path,
+            artifact_dir=subsequent_decision_path.parent,
+            manifest_path=None,
+        )
+        progress.flush()
+        _eprint(summarize_decision(subsequent_decision))
+        if subsequent_decision.enabled:
+            intake_result = run_subsequent_review_intake(
+                pr=pr,
+                work_dir=work_dir,
+                completed_sessions=completed,
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=policy),
+                fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
+                summary_writer=_eprint,
             )
-            progress.flush()
+            if intake_result is not None:
+                progress.meta.setdefault("paths", {})["subsequent_review_manifest"] = str(intake_result.manifest_path)
+                progress.meta["subsequent_review"] = decision_meta_json(
+                    decision=subsequent_decision,
+                    decision_path=subsequent_decision_path,
+                    artifact_dir=intake_result.artifact_dir,
+                    manifest_path=intake_result.manifest_path,
+                )
+                progress.flush()
+    except ReviewflowSubprocessError as e:
+        progress.error(
+            {
+                "type": "subprocess",
+                "message": str(e),
+                "cmd": safe_cmd_for_meta(e.cmd),
+                "cwd": str(e.cwd) if e.cwd else None,
+                "exit_code": e.exit_code,
+                "stdout_tail": e.stdout,
+                "stderr_tail": e.stderr,
+            }
+        )
+        raise
+    except Exception as e:
+        progress.error(
+            {
+                "type": "exception",
+                "message": str(e),
+            }
+        )
+        raise
     progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
     progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
     progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)

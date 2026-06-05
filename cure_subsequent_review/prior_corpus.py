@@ -17,9 +17,13 @@ _CURE_BODY_RE = re.compile(r"\b(CURe|CURE|Reviewflow)\s+(review|finding|findings
 
 
 def _looks_cure_authored(*, author: str | None, body: str) -> bool:
-    if author and _CURE_AUTHOR_RE.search(author):
-        return True
-    return bool(_CURE_BODY_RE.search(body))
+    """Return true only for trusted CURe-authored review markers.
+
+    Body text alone is not enough: a human can mention ``CURe review`` in a
+    generic GitHub discussion without that being evidence of a prior CURe run.
+    """
+
+    return bool(author and _CURE_AUTHOR_RE.search(author) and _CURE_BODY_RE.search(body))
 
 
 def build_prior_review_corpus(

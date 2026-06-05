@@ -132,6 +132,63 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertFalse(explicit.enabled)
         self.assertEqual(explicit.reasons, ("operator_disabled",))
 
+    def test_decision_service_rejects_false_positive_remote_markers(self) -> None:
+        pr = PR()
+        cases: tuple[tuple[str, dict[str, Any], bool, str], ...] = (
+            (
+                "human_cure_looking_issue_comment",
+                {"id": 10, "user": {"login": "human"}, "body": "CURe review found this", "created_at": "2026-01-01T00:00:00Z"},
+                False,
+                "no_prior_review_signals",
+            ),
+            (
+                "missing_author_cure_looking_issue_comment",
+                {"id": 11, "body": "<!-- cure --> CURe review", "created_at": "2026-01-01T00:00:00Z"},
+                False,
+                "no_prior_review_signals",
+            ),
+            (
+                "resolved_thread_metadata_only",
+                {"id": 12, "user": {"login": "human"}, "body": "CURe review", "resolved": True, "path": "a.py", "line": 1},
+                False,
+                "no_prior_review_signals",
+            ),
+            (
+                "unresolved_thread_metadata_only",
+                {"id": 13, "user": {"login": "human"}, "body": "CURe review", "resolved": False, "path": "a.py", "line": 1},
+                False,
+                "no_prior_review_signals",
+            ),
+            (
+                "missing_thread_state_metadata",
+                {"id": 14, "user": {"login": "human"}, "body": "CURe review", "path": "a.py", "line": 1},
+                True,
+                "remote_probe_degraded",
+            ),
+        )
+        for name, payload, expected_enabled, expected_reason in cases:
+            with self.subTest(name=name):
+                def fetch(path: str) -> Any:
+                    if path.endswith("/issues/9999/comments") and "issue_comment" in name:
+                        return [payload]
+                    if path.endswith("/pulls/9999/comments") and "thread" in name:
+                        return [payload]
+                    return []
+
+                decision = decide_subsequent_review(
+                    pr=pr,
+                    completed_sessions=[],
+                    mode=SubsequentReviewCommandMode.AUTO,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    fetch_json=fetch,
+                )
+                self.assertEqual(decision.enabled, expected_enabled)
+                self.assertEqual(decision.signal_counts["remote_cure_markers"], 0)
+                self.assertNotIn("cure_pr_discussion_found", decision.reasons)
+                self.assertIn(expected_reason, decision.reasons)
+                if name == "missing_thread_state_metadata":
+                    self.assertIn("thread_state_unavailable", decision.degraded_reasons)
+
     def test_command_catalog_documents_auto_default_and_opt_out_without_force_enable(self) -> None:
         payload = rf.build_commands_catalog_payload()
         pr_entry = next(command for command in payload["commands"] if command["name"] == "pr")
@@ -578,6 +635,114 @@ class SubsequentReviewTests(unittest.TestCase):
             self.assertFalse(meta["subsequent_review"]["enabled"])
             self.assertEqual(meta["subsequent_review"]["manifest_path"], None)
             self.assertEqual(meta["paths"]["subsequent_review_decision"], str(decision_path))
+
+    def test_preflight_decision_failure_marks_meta_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch(
+                "cure_subsequent_review.decision.decide_subsequent_review",
+                side_effect=RuntimeError("decision boom"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "decision boom"):
+                    rf._pr_flow_impl(args, paths=paths)
+            sessions = list(paths.sandbox_root.iterdir())
+            self.assertEqual(len(sessions), 1)
+            meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "error")
+            self.assertIn("decision boom", meta["error"]["message"])
+
+    def test_preflight_decision_artifact_write_failure_marks_meta_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch.object(
+                rf, "gh_api_list", return_value=[]
+            ), mock.patch(
+                "cure_subsequent_review.decision.write_json",
+                side_effect=OSError("decision write boom"),
+            ):
+                with self.assertRaisesRegex(OSError, "decision write boom"):
+                    rf._pr_flow_impl(args, paths=paths)
+            sessions = list(paths.sandbox_root.iterdir())
+            self.assertEqual(len(sessions), 1)
+            meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "error")
+            self.assertIn("decision write boom", meta["error"]["message"])
+
+    def test_preflight_enabled_intake_failure_marks_meta_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "prior.md"
+            review.write_text("### A-01: Prior\nSeverity: high\nSection: Security\nEvidence: app.py:1\n", encoding="utf-8")
+            completed = rf.HistoricalReviewSession(
+                session_id="prior",
+                session_dir=root,
+                review_md_path=review,
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+            )
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=RuntimeError("intake boom"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "intake boom"):
+                    rf._pr_flow_impl(args, paths=paths)
+            sessions = list(paths.sandbox_root.iterdir())
+            self.assertEqual(len(sessions), 1)
+            meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "error")
+            self.assertIn("intake boom", meta["error"]["message"])
 
     def test_new_sandbox_explicit_disabled_writes_decision_meta_and_skips_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
