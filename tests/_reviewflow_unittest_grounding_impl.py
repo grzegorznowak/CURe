@@ -8882,6 +8882,114 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing staged helper path", str(report["failure_reason"]))
 
+    def test_validate_chunkhound_tool_proof_claude_malformed_entries_container_fails_fast(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_helper_path": helper_path,
+                "chunkhound_tool_proof_entries": {"payload": "not-a-list"},
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("malformed Claude ChunkHound proof", str(report["failure_reason"]))
+        self.assertEqual(
+            report["rejected_entry_details"],
+            [
+                {
+                    "entry_index": None,
+                    "tool_use_id": None,
+                    "reason": "chunkhound_tool_proof_entries is not a list",
+                    "claimed_tool": None,
+                    "helper_path": None,
+                    "command_excerpt": None,
+                }
+            ],
+        )
+
+    def test_validate_chunkhound_tool_proof_claude_malformed_entry_shapes_fail_fast(self) -> None:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        report = rf.validate_chunkhound_tool_proof(
+            provider="claude",
+            review_stage="singlepass_review",
+            prompt_template_name="mrereview_gh_local.md",
+            adapter_meta={
+                "provider": "claude",
+                "chunkhound_helper_path": helper_path,
+                "chunkhound_tool_proof_entries": [
+                    "not-a-dict",
+                    {"payload": "not-a-dict", "tool_use_id": "toolu_bad", "command": "helper command"},
+                ],
+            },
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertFalse(report["valid"])
+        self.assertIn("malformed Claude ChunkHound proof", str(report["failure_reason"]))
+        self.assertEqual(
+            report["rejected_entry_details"],
+            [
+                {
+                    "entry_index": 0,
+                    "tool_use_id": None,
+                    "reason": "proof entry is not a dict",
+                    "claimed_tool": None,
+                    "helper_path": None,
+                    "command_excerpt": None,
+                },
+                {
+                    "entry_index": 1,
+                    "tool_use_id": "toolu_bad",
+                    "reason": "proof entry payload is not a dict",
+                    "claimed_tool": None,
+                    "helper_path": None,
+                    "command_excerpt": "helper command",
+                },
+            ],
+        )
+
+    def test_enforce_chunkhound_tool_proof_aborts_on_malformed_claude_proof(self) -> None:
+        root = ROOT / ".tmp_test_malformed_claude_proof_enforcement"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            work_dir = root / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+
+            with self.assertRaisesRegex(rf.ReviewflowError, "malformed Claude ChunkHound proof"):
+                rf._enforce_chunkhound_tool_proof(
+                    meta={},
+                    work_dir=work_dir,
+                    provider="claude",
+                    review_stage="multipass_synth",
+                    prompt_template_name="mrereview_gh_local_big_synth.md",
+                    adapter_meta={
+                        "provider": "claude",
+                        "chunkhound_helper_path": helper_path,
+                        "chunkhound_tool_proof_entries": [
+                            {
+                                "payload": "not-a-dict",
+                                "tool_use_id": "toolu_bad",
+                                "command": '"$CURE_CHUNKHOUND_HELPER" search needle',
+                            }
+                        ],
+                    },
+                )
+
+            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
+            self.assertFalse(persisted["valid"])
+            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_synth")
+            self.assertEqual(persisted["runs"][0]["rejected_entry_details"][0]["tool_use_id"], "toolu_bad")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_validate_chunkhound_tool_proof_rejected_claude_entries_remain_visible_when_valid(self) -> None:
         helper_path = "/tmp/cure/work/bin/cure-chunkhound"
         report = rf.validate_chunkhound_tool_proof(
@@ -8935,6 +9043,10 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
         self.assertTrue(
             any("path mismatch" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
         )
+        rejected = report["rejected_entry_details"]
+        self.assertTrue(any(detail["reason"].startswith("staged helper path mismatch") for detail in rejected))
+        self.assertTrue(any(detail["helper_path"] == "/tmp/other/cure-chunkhound" for detail in rejected))
+        self.assertTrue(any("CURE_CHUNKHOUND_HELPER" in str(detail["command_excerpt"]) for detail in rejected))
 
     def test_validate_and_record_chunkhound_tool_proof_mixed_provider_report_uses_latest_provider(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_tool_proof_mixed_provider_report"
