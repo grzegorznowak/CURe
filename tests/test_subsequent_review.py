@@ -284,6 +284,8 @@ class SubsequentReviewTests(unittest.TestCase):
 
         discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
         corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
+        self.assertEqual(corpus.status, ModuleStatus.SUCCESS)
+        self.assertNotIn("no_prior_reviews", corpus.status_reasons)
         review_entries = [entry for entry in corpus.entries if entry.source_type == "pr_review"]
         self.assertEqual(len(review_entries), 1)
         entry = review_entries[0]
@@ -295,10 +297,48 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(entry.provenance["state"], "COMMENTED")
 
         findings = extract_prior_findings(corpus=corpus)
+        self.assertEqual(findings.status, ModuleStatus.SUCCESS)
+        self.assertNotIn("no_prior_reviews", findings.status_reasons)
         self.assertIn("CURE-77", {item.finding_id for item in findings.findings})
         pull_review_finding = next(item for item in findings.findings if item.finding_id == "CURE-77")
         self.assertEqual(pull_review_finding.provenance.source_type, "pr_review")
         self.assertEqual(pull_review_finding.provenance.comment_url, "review-url")
+
+    def test_trusted_issue_comment_remote_only_corpus_status_is_success(self) -> None:
+        pr = PR()
+        comment_body = (
+            "CURe Review\n"
+            "### CURE-78: Issue comment finding\n"
+            "Severity: medium\n"
+            "Section: Reliability\n"
+            "Evidence: app/jobs.py:9 retries missing\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/9999/comments"):
+                return [
+                    {
+                        "id": 801,
+                        "html_url": "comment-url",
+                        "user": {"login": "cure-bot"},
+                        "body": comment_body,
+                        "created_at": "2026-01-04T00:00:00Z",
+                    }
+                ]
+            if path.endswith(("/pulls/9999/reviews", "/pulls/9999/comments")):
+                return []
+            raise AssertionError(path)
+
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
+        self.assertEqual(corpus.status, ModuleStatus.SUCCESS)
+        self.assertNotIn("no_prior_reviews", corpus.status_reasons)
+        self.assertEqual([entry.source_type for entry in corpus.entries], ["pr_comment"])
+
+        findings = extract_prior_findings(corpus=corpus)
+        self.assertEqual(findings.status, ModuleStatus.SUCCESS)
+        self.assertNotIn("no_prior_reviews", findings.status_reasons)
+        self.assertIn("CURE-78", {item.finding_id for item in findings.findings})
 
     def test_prior_corpus_rejects_untrusted_pull_review_bodies(self) -> None:
         pr = PR()

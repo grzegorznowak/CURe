@@ -63,9 +63,6 @@ def build_prior_review_corpus(
             )
         )
 
-    if not sessions:
-        reasons.append("no_prior_reviews")
-
     remote_corpus_sources = {
         "issue_comment": ("pr_comment", "comment_id"),
         "review": ("pr_review", "review_id"),
@@ -104,9 +101,10 @@ def build_prior_review_corpus(
                     }
                 )
 
+    if not sessions and not entries:
+        reasons.append("no_prior_reviews")
+
     status = ModuleStatus.SUCCESS if entries and not reasons else ModuleStatus.DEGRADED
-    if not entries and reasons == ["no_prior_reviews"]:
-        status = ModuleStatus.DEGRADED
     return PriorReviewCorpus(
         status=status,
         entries=tuple(entries),
