@@ -66,30 +66,39 @@ def build_prior_review_corpus(
     if not sessions:
         reasons.append("no_prior_reviews")
 
+    remote_corpus_sources = {
+        "issue_comment": ("pr_comment", "comment_id"),
+        "review": ("pr_review", "review_id"),
+    }
     if discussion is not None:
         for event in discussion.events:
-            if event.kind != "issue_comment":
+            remote_source = remote_corpus_sources.get(event.kind)
+            if remote_source is None:
                 continue
+            source_type, id_field = remote_source
+            provenance = {
+                id_field: event.event_id,
+                "url": event.url,
+                "author": event.author,
+                "created_at": event.created_at,
+            }
+            if event.kind == "review":
+                provenance["state"] = event.review_state
             if _looks_cure_authored(author=event.author, body=event.body):
                 entries.append(
                     PriorReviewCorpusEntry(
-                        entry_id=f"pr_comment:{event.event_id}",
-                        source_type="pr_comment",
+                        entry_id=f"{source_type}:{event.event_id}",
+                        source_type=source_type,
                         body=event.body,
                         reviewed_head=None,
-                        provenance={
-                            "comment_id": event.event_id,
-                            "url": event.url,
-                            "author": event.author,
-                            "created_at": event.created_at,
-                        },
+                        provenance=provenance,
                     )
                 )
             else:
                 ignored.append(
                     {
-                        "source_type": "pr_comment",
-                        "comment_id": event.event_id,
+                        "source_type": source_type,
+                        id_field: event.event_id,
                         "author": event.author,
                         "reason": "cure_authorship_not_established",
                     }

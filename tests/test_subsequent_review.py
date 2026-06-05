@@ -243,6 +243,94 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(incomplete.status, ModuleStatus.DEGRADED)
         self.assertIn("discussion_incomplete", incomplete.status_reasons)
 
+    def test_trusted_pull_review_body_enables_and_enters_prior_corpus(self) -> None:
+        pr = PR()
+        review_body = (
+            "CURe Review\n"
+            "### CURE-77: Pull review finding\n"
+            "Severity: high\n"
+            "Section: Security\n"
+            "Evidence: app/auth.py:42 missing check\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/9999/comments"):
+                return []
+            if path.endswith("/pulls/9999/reviews"):
+                return [
+                    {
+                        "id": 901,
+                        "html_url": "review-url",
+                        "user": {"login": "cure-bot"},
+                        "body": review_body,
+                        "state": "COMMENTED",
+                        "submitted_at": "2026-01-05T00:00:00Z",
+                    }
+                ]
+            if path.endswith("/pulls/9999/comments"):
+                return []
+            raise AssertionError(path)
+
+        decision = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+        )
+        self.assertTrue(decision.enabled)
+        self.assertIn("cure_pr_discussion_found", decision.reasons)
+        self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
+
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
+        review_entries = [entry for entry in corpus.entries if entry.source_type == "pr_review"]
+        self.assertEqual(len(review_entries), 1)
+        entry = review_entries[0]
+        self.assertEqual(entry.entry_id, "pr_review:901")
+        self.assertEqual(entry.body, review_body)
+        self.assertEqual(entry.provenance["review_id"], "901")
+        self.assertEqual(entry.provenance["url"], "review-url")
+        self.assertEqual(entry.provenance["author"], "cure-bot")
+        self.assertEqual(entry.provenance["state"], "COMMENTED")
+
+        findings = extract_prior_findings(corpus=corpus)
+        self.assertIn("CURE-77", {item.finding_id for item in findings.findings})
+        pull_review_finding = next(item for item in findings.findings if item.finding_id == "CURE-77")
+        self.assertEqual(pull_review_finding.provenance.source_type, "pr_review")
+        self.assertEqual(pull_review_finding.provenance.comment_url, "review-url")
+
+    def test_prior_corpus_rejects_untrusted_pull_review_bodies(self) -> None:
+        pr = PR()
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/9999/comments"):
+                return []
+            if path.endswith("/pulls/9999/reviews"):
+                return [
+                    {"id": 902, "user": {"login": "human"}, "body": "CURe Review\n### CURE-88: Human text"},
+                    {"id": 903, "body": "<!-- cure --> CURe review\n### CURE-89: Missing author"},
+                ]
+            if path.endswith("/pulls/9999/comments"):
+                return [
+                    {
+                        "id": 904,
+                        "user": {"login": "cure-bot"},
+                        "body": "CURe Review\n### CURE-90: Review comment text",
+                        "path": "a.py",
+                        "line": 1,
+                        "thread_state": "unresolved",
+                    }
+                ]
+            raise AssertionError(path)
+
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
+        self.assertFalse(corpus.entries)
+        ignored = {(item.get("source_type"), item.get("review_id"), item.get("reason")) for item in corpus.ignored_pr_comments}
+        self.assertIn(("pr_review", "902", "cure_authorship_not_established"), ignored)
+        self.assertIn(("pr_review", "903", "cure_authorship_not_established"), ignored)
+
     def test_simulation_bullet_prior_reviews_extract_and_degrade_partially(self) -> None:
         root = Path(__file__).parent / "fixtures" / "subsequent_review"
         fixture = json.loads((root / "simulation_raw.json").read_text(encoding="utf-8"))
