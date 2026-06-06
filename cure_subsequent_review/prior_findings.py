@@ -75,7 +75,7 @@ def _candidate_from_block(
             if key == "supersedes":
                 supersedes.extend(item.group("id").upper() for item in _INLINE_ID_RE.finditer(value))
             continue
-        if _SOURCE_REF_RE.search(line):
+        if _source_refs(line):
             evidence.append(line.strip())
     severity = " ".join(fields.get("severity", [])).strip().lower()
     section = " ".join(fields.get("section", [])).strip() or (default_section or "unknown")
@@ -120,8 +120,14 @@ def _candidate_from_block(
     )
 
 
+def _looks_like_source_ref(ref: str) -> bool:
+    location = ref.rsplit(":", 1)[0]
+    return "/" in location or "." in location
+
+
 def _source_refs(text: str) -> list[str]:
-    return [match.group(0).strip("`.,") for match in _SOURCE_REF_RE.finditer(text)]
+    refs = [match.group(0).strip("`.,") for match in _SOURCE_REF_RE.finditer(text)]
+    return [ref for ref in refs if _looks_like_source_ref(ref)]
 
 
 def _strip_generated_sources(title: str) -> tuple[str, list[str]]:
@@ -254,9 +260,6 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
 
     for line in entry.body.splitlines():
         stripped = line.strip()
-        section_heading = _SECTION_HEADING_RE.match(stripped)
-        if section_heading:
-            current_section = section_heading.group("section").strip()
         heading = _FINDING_HEADING_RE.match(stripped)
         bullet = _FINDING_BULLET_RE.match(stripped)
         if heading:
@@ -274,8 +277,12 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
             severity = str(bullet.group("severity") or "").strip()
             if severity:
                 block.append(f"Severity: {severity}")
-        elif current_id is not None:
-            block.append(line)
+        else:
+            section_heading = _SECTION_HEADING_RE.match(stripped)
+            if section_heading:
+                current_section = section_heading.group("section").strip()
+            if current_id is not None:
+                block.append(line)
     flush()
 
     if not findings:

@@ -7390,6 +7390,32 @@ def _public_github_repo_clone_url(*, host: str, owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+class _PublicGitHubListPayload(list[Any]):
+    def __init__(self, items: list[Any], *, next_path: str | None = None) -> None:
+        super().__init__(items)
+        self.next_path = next_path
+
+
+def _github_public_api_next_path(link_header: str | None) -> str | None:
+    if not link_header:
+        return None
+    for item in link_header.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        if len(parts) < 2 or not any(part.lower() == 'rel="next"' for part in parts[1:]):
+            continue
+        url_part = parts[0]
+        if not (url_part.startswith("<") and url_part.endswith(">")):
+            continue
+        parsed = urlparse(url_part[1:-1])
+        if parsed.netloc and parsed.netloc.lower() != "api.github.com":
+            continue
+        path = parsed.path or ""
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        return path.lstrip("/") or None
+    return None
+
+
 def _github_public_api_payload(*, path: str) -> Any:
     normalized = path if path.startswith("/") else f"/{path}"
     req = urllib.request.Request(
@@ -7401,9 +7427,11 @@ def _github_public_api_payload(*, path: str) -> Any:
         },
         method="GET",
     )
+    link_header: str | None = None
     try:
         with urllib.request.urlopen(req) as resp:
             body = resp.read().decode("utf-8", errors="replace")
+            link_header = str(resp.headers.get("Link") or "") or None
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         raise ReviewflowError(
@@ -7412,9 +7440,12 @@ def _github_public_api_payload(*, path: str) -> Any:
     except urllib.error.URLError as e:
         raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
     try:
-        return json.loads(body)
+        payload = json.loads(body)
     except Exception as e:
         raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
+    if isinstance(payload, list):
+        return _PublicGitHubListPayload(payload, next_path=_github_public_api_next_path(link_header))
+    return payload
 
 
 def _github_public_api_json(*, path: str) -> dict[str, Any]:
@@ -7427,11 +7458,23 @@ def _github_public_api_json(*, path: str) -> dict[str, Any]:
 
 def _github_public_api_list(*, path: str) -> dict[str, Any]:
     normalized = path if path.startswith("/") else f"/{path}"
-    payload = _github_public_api_payload(path=path)
-    if not isinstance(payload, list):
-        raise ReviewflowError(f"Public GitHub API returned unexpected list payload for {normalized}")
+    current_path = path
+    seen_paths: set[str] = set()
+    items: list[Any] = []
+    while True:
+        if current_path in seen_paths:
+            raise ReviewflowError(f"Public GitHub API pagination loop detected for {normalized}")
+        seen_paths.add(current_path)
+        payload = _github_public_api_payload(path=current_path)
+        if not isinstance(payload, list):
+            raise ReviewflowError(f"Public GitHub API returned unexpected list payload for {normalized}")
+        items.extend(payload)
+        next_path = str(getattr(payload, "next_path", None) or "").strip()
+        if not next_path:
+            break
+        current_path = next_path
     return {
-        "items": payload,
+        "items": items,
         "complete": False,
         "status": "discussion_incomplete",
         "endpoint": path,
@@ -9579,34 +9622,40 @@ def _pr_flow_impl(
         for session in completed_for_intake
         if str(getattr(session, "review_artifact_status", "available") or "available") != "unavailable"
     ]
-    if completed:
+    if completed_for_intake:
         _eprint(
-            f"Found {len(completed)} completed prior review session(s) for "
+            f"Found {len(completed_for_intake)} completed prior review session(s) for "
             f"{pr.owner}/{pr.repo}#{pr.number}."
         )
-        if if_reviewed == "prompt" and (not sys.stdin.isatty()):
-            if_reviewed = "new"
-
         if if_reviewed == "list":
-            _print_historical_sessions(completed)
+            _print_historical_sessions(completed_for_intake)
             return 0
         if if_reviewed == "latest":
-            latest = completed[0]
+            latest = completed_for_intake[0]
+            artifact_status = str(getattr(latest, "review_artifact_status", "available") or "available")
+            if artifact_status == "unavailable":
+                reason = str(getattr(latest, "review_artifact_reason", None) or artifact_status)
+                raise ReviewflowError(
+                    f"Latest prior review artifact is unavailable for {latest.session_id}: {reason}"
+                )
             text = latest.review_md_path.read_text(encoding="utf-8")
             sys.stdout.write(text)
             if not text.endswith("\n"):
                 sys.stdout.write("\n")
             sys.stdout.flush()
             return 0
-        if if_reviewed == "prompt" and sys.stdin.isatty():
-            selected = _choose_historical_session_tty(completed)
-            if selected is not None:
-                text = selected.review_md_path.read_text(encoding="utf-8")
-                sys.stdout.write(text)
-                if not text.endswith("\n"):
-                    sys.stdout.write("\n")
-                sys.stdout.flush()
-                return 0
+        if completed:
+            if if_reviewed == "prompt" and (not sys.stdin.isatty()):
+                if_reviewed = "new"
+            if if_reviewed == "prompt" and sys.stdin.isatty():
+                selected = _choose_historical_session_tty(completed)
+                if selected is not None:
+                    text = selected.review_md_path.read_text(encoding="utf-8")
+                    sys.stdout.write(text)
+                    if not text.endswith("\n"):
+                        sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return 0
         _eprint("Proceeding with a new sandbox review.")
 
     session_root = paths.sandbox_root
@@ -13733,7 +13782,12 @@ def scan_cleanup_sessions(*, sandbox_root: Path) -> list[CleanupSession]:
 def _print_historical_sessions(sessions: list[HistoricalReviewSession]) -> None:
     for idx, s in enumerate(sessions, start=1):
         when = s.completed_at or s.created_at or ""
-        verdicts = format_review_verdicts_compact(s.verdicts)
+        artifact_status = str(getattr(s, "review_artifact_status", "available") or "available")
+        if artifact_status == "unavailable":
+            reason = str(getattr(s, "review_artifact_reason", None) or artifact_status)
+            verdicts = f"unavailable({reason})"
+        else:
+            verdicts = format_review_verdicts_compact(s.verdicts)
         print(f"{idx:02d}  {when}  {verdicts}  {s.codex_summary}  {s.session_id}")
 
 

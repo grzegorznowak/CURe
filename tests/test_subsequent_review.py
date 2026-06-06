@@ -778,7 +778,11 @@ Section: Security
 Severity: Medium
 Evidence: cache.py:10
 
-### A-02: Explicit section wins
+## A-02: H2 cache issue
+Severity: Medium
+Evidence: cache.py:11
+
+### A-03: Explicit section wins
 Severity: Low
 Section: Reliability
 Evidence: worker.py:20
@@ -791,7 +795,37 @@ Evidence: worker.py:20
 
         by_id = {item.finding_id: item for item in ledger.findings}
         self.assertEqual(by_id["A-01"].section, "Technical Assessment")
-        self.assertEqual(by_id["A-02"].section, "Reliability")
+        self.assertEqual(by_id["A-02"].section, "Technical Assessment")
+        self.assertEqual(by_id["A-03"].section, "Reliability")
+
+    def test_prior_findings_ignore_incidental_word_colon_digits_as_source_evidence(self) -> None:
+        ledger = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="fixture:incidental-source",
+                        source_type="fixture",
+                        provenance={},
+                        body="""## Technical Assessment
+
+### A-01: Incidental token
+Severity: Medium
+Section: Technical Assessment
+This prose mentions ratio:16 and port:443 but no source location.
+""",
+                        reviewed_head="sha-incidental",
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertEqual(ledger.findings, ())
+        status = ledger.artifact_statuses[0]
+        self.assertEqual(status.get("finding_id"), "A-01")
+        self.assertEqual(status.get("reason"), "missing_evidence")
+        self.assertEqual(status.get("source_evidence_snippets"), [])
 
     def test_generated_review_parser_degrades_malformed_sibling_and_ignores_clean_none(self) -> None:
         mixed = extract_prior_findings(
@@ -925,6 +959,25 @@ Evidence: worker.py:20
         self.assertIn("discussion_incomplete", discussion.status_reasons)
         self.assertTrue(discussion.events)
         self.assertTrue(all(not marker.complete for marker in discussion.pagination))
+
+    def test_public_fallback_list_follows_rest_next_links_but_remains_degraded(self) -> None:
+        class Page(list[dict[str, Any]]):
+            next_path: str | None = None
+
+        first = Page([{"id": 101}])
+        first.next_path = "repos/example/demo/issues/9999/comments?page=2"
+        second = Page([{"id": 102}])
+
+        with mock.patch.object(rf, "_github_public_api_payload", side_effect=[first, second]) as payload:
+            result = rf._github_public_api_list(path="repos/example/demo/issues/9999/comments")
+
+        self.assertEqual([item["id"] for item in result["items"]], [101, 102])
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["status"], "discussion_incomplete")
+        self.assertEqual(
+            [call.kwargs["path"] for call in payload.call_args_list],
+            ["repos/example/demo/issues/9999/comments", "repos/example/demo/issues/9999/comments?page=2"],
+        )
 
     def test_corpus_extraction_and_reconciliation_preserve_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1080,6 +1133,33 @@ Evidence: worker.py:20
         self.assertIn("supersedes_target_not_found", ledger.status_reasons)
         edges = [edge for group in ledger.to_json()["groups"] for edge in group["supersedes_edges"]]
         self.assertTrue(any(edge.get("target_display_id") == "CURE-01" and edge.get("status") == "target_not_found" for edge in edges))
+
+    def test_reconciliation_keeps_same_title_findings_with_distinct_evidence_separate(self) -> None:
+        def candidate(*, finding_id: str, evidence: str, entry_id: str) -> PriorFindingCandidate:
+            return PriorFindingCandidate(
+                finding_id=finding_id,
+                severity="high",
+                section="Security",
+                title="Shared title",
+                source_evidence_snippets=(evidence,),
+                reviewed_head=f"sha-{entry_id}",
+                provenance=FindingProvenance(
+                    corpus_entry_id=entry_id,
+                    source_type="session_review",
+                    artifact_path=f"/tmp/{entry_id}/review.md",
+                    reviewed_head=f"sha-{entry_id}",
+                ),
+            )
+
+        ledger = reconcile_findings(
+            findings=(
+                candidate(finding_id="A-01", evidence="app/auth.py:42", entry_id="session-a"),
+                candidate(finding_id="B-01", evidence="app/billing.py:77", entry_id="session-b"),
+            )
+        )
+
+        grouped_ids = [set(group.finding_ids) for group in ledger.groups]
+        self.assertEqual(grouped_ids, [{"A-01"}, {"B-01"}])
 
     def test_reconciliation_preserves_same_entry_duplicate_finding_ids(self) -> None:
         def candidate(title: str) -> PriorFindingCandidate:
@@ -1340,6 +1420,60 @@ Evidence: worker.py:20
             ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 self.assertEqual(rf._pr_flow_impl(args, paths=paths), 0)
             self.assertIn("prior", stdout.getvalue())
+            self.assertFalse(paths.sandbox_root.exists())
+
+    def test_if_reviewed_list_reports_unavailable_sessions_without_new_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unavailable = rf.HistoricalReviewSession(
+                session_id="prior-missing",
+                session_dir=root / "prior-missing",
+                review_md_path=root / "prior-missing" / "missing-review.md",
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+                review_artifact_status="unavailable",
+                review_artifact_reason="review_md_missing",
+            )
+            args = rf.build_parser().parse_args(
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list"]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[unavailable]), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for historical exits"),
+            ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(rf._pr_flow_impl(args, paths=paths), 0)
+            self.assertIn("prior-missing", stdout.getvalue())
+            self.assertIn("unavailable(review_md_missing)", stdout.getvalue())
+            self.assertFalse(paths.sandbox_root.exists())
+
+    def test_if_reviewed_latest_unavailable_session_fails_before_new_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unavailable = rf.HistoricalReviewSession(
+                session_id="prior-missing",
+                session_dir=root / "prior-missing",
+                review_md_path=root / "prior-missing" / "missing-review.md",
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+                review_artifact_status="unavailable",
+                review_artifact_reason="review_md_missing",
+            )
+            args = rf.build_parser().parse_args(
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "latest"]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[unavailable]), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for historical exits"),
+            ), self.assertRaisesRegex(rf.ReviewflowError, "review_md_missing"):
+                rf._pr_flow_impl(args, paths=paths)
             self.assertFalse(paths.sandbox_root.exists())
 
     def test_if_reviewed_new_default_auto_writes_decision_and_runs_intake_after_work_dir_exists(self) -> None:

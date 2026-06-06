@@ -22,8 +22,20 @@ def _normalized_title(title: str) -> str:
     return " ".join(words)
 
 
+def _normalized_evidence(finding: PriorFindingCandidate) -> str:
+    snippets = (" ".join(snippet.lower().split()) for snippet in finding.source_evidence_snippets)
+    return "\n".join(sorted(dict.fromkeys(snippet for snippet in snippets if snippet)))
+
+
 def finding_fingerprint(finding: PriorFindingCandidate) -> str:
-    raw = "\n".join((finding.severity.lower(), finding.section.lower(), _normalized_title(finding.title)))
+    raw = "\n".join(
+        (
+            finding.severity.lower(),
+            finding.section.lower(),
+            _normalized_title(finding.title),
+            _normalized_evidence(finding),
+        )
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
