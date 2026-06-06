@@ -371,6 +371,136 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertIn(("pr_review", "902", "cure_authorship_not_established"), ignored)
         self.assertIn(("pr_review", "903", "cure_authorship_not_established"), ignored)
 
+    def test_completed_session_artifact_boundary_and_missing_reviews_are_degraded_corpus_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_root = root / "sandboxes"
+            outside = root / "unrelated-review.md"
+            outside.write_text(
+                "### CURE-OUT: unrelated source truth\nSeverity: high\nSection: Security\nEvidence: unrelated.py:1\n",
+                encoding="utf-8",
+            )
+
+            outside_session = sandbox_root / "outside-session"
+            outside_session.mkdir(parents=True)
+            (outside_session / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "outside-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "example",
+                        "repo": "demo",
+                        "number": 9999,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "completed_at": "2026-01-02T00:00:00Z",
+                        "paths": {"review_md": str(outside)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            missing_session = sandbox_root / "missing-session"
+            missing_session.mkdir(parents=True)
+            (missing_session / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "missing-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "example",
+                        "repo": "demo",
+                        "number": 9999,
+                        "created_at": "2026-01-03T00:00:00Z",
+                        "completed_at": "2026-01-04T00:00:00Z",
+                        "paths": {"review_md": "missing-review.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            historical = rf.scan_completed_sessions_for_pr(sandbox_root=sandbox_root, pr=PR())
+            self.assertEqual(historical, [])
+
+            corpus_candidates = rf.scan_completed_sessions_for_pr(
+                sandbox_root=sandbox_root,
+                pr=PR(),
+                include_unavailable=True,
+            )
+            self.assertEqual({item.session_id for item in corpus_candidates}, {"outside-session", "missing-session"})
+            reasons = {item.session_id: getattr(item, "review_artifact_reason", None) for item in corpus_candidates}
+            self.assertEqual(reasons["outside-session"], "review_md_outside_session")
+            self.assertEqual(reasons["missing-session"], "review_md_missing")
+
+            corpus = build_prior_review_corpus(pr=PR(), sessions=corpus_candidates)
+            self.assertEqual(corpus.status, ModuleStatus.DEGRADED)
+            self.assertEqual(corpus.entries, ())
+            self.assertIn("prior_review_artifact_unavailable", corpus.status_reasons)
+            ignored = {item.get("session_id"): item for item in corpus.ignored_pr_comments}
+            self.assertEqual(ignored["outside-session"].get("reason"), "review_md_outside_session")
+            self.assertEqual(ignored["missing-session"].get("reason"), "review_md_missing")
+            self.assertEqual(ignored["outside-session"].get("review_md_path"), str(outside))
+
+    def test_new_sandbox_intake_receives_unavailable_completed_sessions_for_degradation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            prior_session = paths.sandbox_root / "prior-missing"
+            prior_session.mkdir(parents=True)
+            (prior_session / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "prior-missing",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 14,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "completed_at": "2026-01-02T00:00:00Z",
+                        "paths": {"review_md": "missing-review.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = rf.build_parser().parse_args(
+                [
+                    "pr",
+                    "https://github.com/acme/repo/pull/14",
+                    "--if-reviewed",
+                    "new",
+                    "--no-index",
+                    "--no-review",
+                ]
+            )
+            intake_sessions: list[Any] = []
+
+            def fake_intake(**kwargs: Any) -> Any:
+                intake_sessions.extend(kwargs["completed_sessions"])
+                work_dir = kwargs["work_dir"]
+                manifest_path = work_dir / "subsequent" / "run_manifest.json"
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text("{}\n", encoding="utf-8")
+                return type("Result", (), {"manifest_path": manifest_path, "artifact_dir": work_dir / "subsequent"})()
+
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch.object(
+                rf, "gh_api_list", return_value=[]
+            ), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=fake_intake,
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._pr_flow_impl(args, paths=paths)
+
+            self.assertEqual([item.session_id for item in intake_sessions], ["prior-missing"])
+            self.assertEqual(getattr(intake_sessions[0], "review_artifact_reason", None), "review_md_missing")
+
     def test_simulation_bullet_prior_reviews_extract_and_degrade_partially(self) -> None:
         root = Path(__file__).parent / "fixtures" / "subsequent_review"
         fixture = json.loads((root / "simulation_raw.json").read_text(encoding="utf-8"))

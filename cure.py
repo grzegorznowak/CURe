@@ -9529,7 +9529,16 @@ def _pr_flow_impl(
     if if_reviewed not in {"prompt", "new", "list", "latest"}:
         raise ReviewflowError("--if-reviewed must be one of: prompt, new, list, latest")
 
-    completed = scan_completed_sessions_for_pr(sandbox_root=paths.sandbox_root, pr=pr)
+    completed_for_intake = scan_completed_sessions_for_pr(
+        sandbox_root=paths.sandbox_root,
+        pr=pr,
+        include_unavailable=True,
+    )
+    completed = [
+        session
+        for session in completed_for_intake
+        if str(getattr(session, "review_artifact_status", "available") or "available") != "unavailable"
+    ]
     if completed:
         _eprint(
             f"Found {len(completed)} completed prior review session(s) for "
@@ -9661,7 +9670,7 @@ def _pr_flow_impl(
         policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
         subsequent_decision = decide_subsequent_review(
             pr=pr,
-            completed_sessions=completed,
+            completed_sessions=completed_for_intake,
             mode=_subsequent_review_command_mode(args),
             evidence_policy=policy,
             fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
@@ -9680,7 +9689,7 @@ def _pr_flow_impl(
             intake_result = run_subsequent_review_intake(
                 pr=pr,
                 work_dir=work_dir,
-                completed_sessions=completed,
+                completed_sessions=completed_for_intake,
                 config=SubsequentReviewConfig(enabled=True, evidence_policy=policy),
                 fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
                 summary_writer=_eprint,

@@ -848,14 +848,35 @@ def append_zip_inputs_provenance(*, markdown_path: Path, inputs_meta: list[dict[
     markdown_path.write_text(body + "\n" + section, encoding="utf-8")
 
 
-def _resolve_session_review_md_path(*, session_dir: Path, meta: dict[str, Any]) -> Path | None:
+def _is_relative_to_path(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_session_review_md_candidate(*, session_dir: Path, meta: dict[str, Any]) -> tuple[Path, str | None, str | None]:
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-    raw_review_md = str((meta_paths or {}).get("review_md") or (session_dir / "review.md")).strip()
-    review_md_path = Path(raw_review_md) if raw_review_md else (session_dir / "review.md")
-    review_md_path = (
-        (session_dir / review_md_path).resolve() if not review_md_path.is_absolute() else review_md_path.resolve()
-    )
-    return review_md_path if review_md_path.is_file() else None
+    raw_value = (meta_paths or {}).get("review_md")
+    raw_review_md = str(raw_value).strip() if raw_value else ""
+    display_raw = raw_review_md or str(session_dir / "review.md")
+    raw_path = Path(raw_review_md) if raw_review_md else (session_dir / "review.md")
+    candidate = (session_dir / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+
+    boundary = session_dir.resolve()
+    if not _is_relative_to_path(candidate, boundary):
+        return (session_dir / "review.md").resolve(), "review_md_outside_session", display_raw
+    if not candidate.is_file():
+        return candidate, "review_md_missing", display_raw
+    return candidate, None, display_raw
+
+
+def _resolve_session_review_md_path(*, session_dir: Path, meta: dict[str, Any]) -> Path | None:
+    review_md_path, reason, _raw_review_md = _resolve_session_review_md_candidate(session_dir=session_dir, meta=meta)
+    if reason is not None:
+        return None
+    return review_md_path
 
 
 def _resolve_session_verdicts(*, meta_path: Path, meta: dict[str, Any], review_md_path: Path) -> ReviewVerdicts | None:
@@ -940,6 +961,9 @@ class HistoricalReviewSession:
     verdicts: ReviewVerdicts | None
     codex_summary: str = "codex=?"
     review_head_sha: str | None = None
+    review_artifact_status: str = "available"
+    review_artifact_reason: str | None = None
+    review_md_metadata_path: str | None = None
 
     def sort_dt(self) -> datetime:
         return _parse_iso_dt(self.completed_at) or _parse_iso_dt(self.created_at) or datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -1023,7 +1047,9 @@ def _cleanup_dir_size_bytes(path: Path) -> int:
     return total
 
 
-def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) -> list[HistoricalReviewSession]:
+def scan_completed_sessions_for_pr(
+    *, sandbox_root: Path, pr: PullRequestRef, include_unavailable: bool = False
+) -> list[HistoricalReviewSession]:
     if not sandbox_root.is_dir():
         return []
     sessions: list[HistoricalReviewSession] = []
@@ -1034,9 +1060,12 @@ def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) ->
         meta = _load_session_meta(meta_path)
         if not meta or str(meta.get("status") or "") != "done" or (not _meta_matches_pr(meta=meta, pr=pr)):
             continue
-        review_md_path = _resolve_session_review_md_path(session_dir=entry, meta=meta)
-        if review_md_path is None:
+        review_md_path, unavailable_reason, raw_review_md = _resolve_session_review_md_candidate(session_dir=entry, meta=meta)
+        if unavailable_reason is not None and not include_unavailable:
             continue
+        verdicts = None
+        if unavailable_reason is None:
+            verdicts = _resolve_session_verdicts(meta_path=meta_path, meta=meta, review_md_path=review_md_path)
         sessions.append(
             HistoricalReviewSession(
                 session_id=str(meta.get("session_id") or entry.name),
@@ -1044,9 +1073,12 @@ def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) ->
                 review_md_path=review_md_path,
                 created_at=str(meta.get("created_at") or "").strip() or None,
                 completed_at=str(meta.get("completed_at") or "").strip() or None,
-                verdicts=_resolve_session_verdicts(meta_path=meta_path, meta=meta, review_md_path=review_md_path),
+                verdicts=verdicts,
                 codex_summary=resolve_codex_summary(meta),
                 review_head_sha=_resolve_session_review_head_sha(meta=meta),
+                review_artifact_status="unavailable" if unavailable_reason is not None else "available",
+                review_artifact_reason=unavailable_reason,
+                review_md_metadata_path=raw_review_md,
             )
         )
     sessions.sort(key=lambda item: item.sort_dt(), reverse=True)

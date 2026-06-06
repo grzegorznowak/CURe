@@ -39,13 +39,34 @@ def build_prior_review_corpus(
 
     for session in sessions:
         path = getattr(session, "review_md_path", None)
+        session_id = str(getattr(session, "session_id", "") or getattr(path, "name", "review"))
+        artifact_status = str(getattr(session, "review_artifact_status", "available") or "available")
+        if artifact_status != "available":
+            reasons.append("prior_review_artifact_unavailable")
+            ignored.append(
+                {
+                    "source_type": "session",
+                    "session_id": session_id,
+                    "reason": str(getattr(session, "review_artifact_reason", None) or artifact_status),
+                    "review_md_path": str(getattr(session, "review_md_metadata_path", None) or path or ""),
+                    "session_dir": str(getattr(session, "session_dir", "")),
+                }
+            )
+            continue
         try:
             body = path.read_text(encoding="utf-8") if path is not None else ""
         except Exception as exc:  # noqa: BLE001 - malformed/missing artifact is degraded corpus input
             reasons.append("prior_review_artifact_unavailable")
-            ignored.append({"source_type": "session", "session_id": str(getattr(session, "session_id", "")), "reason": str(exc)})
+            ignored.append(
+                {
+                    "source_type": "session",
+                    "session_id": session_id,
+                    "reason": str(exc),
+                    "review_md_path": str(path or ""),
+                    "session_dir": str(getattr(session, "session_dir", "")),
+                }
+            )
             continue
-        session_id = str(getattr(session, "session_id", "") or getattr(path, "name", "review"))
         entries.append(
             PriorReviewCorpusEntry(
                 entry_id=f"session:{session_id}",
