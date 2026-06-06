@@ -9746,6 +9746,12 @@ def _pr_flow_impl(
     agent_desc_path = session_dir / "agent_desc.txt"
     agent_desc_path.write_text(agent_desc, encoding="utf-8")
     pr_context_path = write_pr_context_file(work_dir=work_dir, pr=pr, pr_meta=pr_meta)
+    progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
+    progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
+    progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
+    progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
+    progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
+    progress.flush()
     from cure_subsequent_review.contracts import EvidencePolicy
     from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
     from cure_subsequent_review.decision import (
@@ -9813,12 +9819,6 @@ def _pr_flow_impl(
             }
         )
         raise
-    progress.meta["chunkhound"] = dict(chunkhound_meta["chunkhound"])
-    progress.meta["chunkhound"]["dry_run"] = chunkhound_dry_run
-    progress.meta.setdefault("paths", {})["agent_desc"] = str(agent_desc_path)
-    progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
-    progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
-    progress.flush()
     # TUI/logging is started after meta.json exists (so the dashboard has something to read).
     out = ReviewflowOutput(
         ui_enabled=ui_enabled,

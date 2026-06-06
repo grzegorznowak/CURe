@@ -85,7 +85,7 @@ def _is_positive_remote_marker(event: Any) -> bool:
     return _looks_cure_authored(author=event.author, body=event.body)
 
 
-_NON_ENABLING_REMOTE_METADATA_REASONS = {"thread_state_unavailable"}
+_NON_ENABLING_REMOTE_METADATA_REASONS = {"discussion_incomplete", "thread_state_unavailable"}
 
 
 def _degraded_remote_probe_requires_intake(degraded_reasons: tuple[str, ...]) -> bool:

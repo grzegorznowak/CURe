@@ -114,6 +114,23 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertFalse(first_run.enabled)
         self.assertIn("no_prior_review_signals", first_run.reasons)
 
+        public_fallback_empty = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=lambda _path: {
+                "items": [],
+                "complete": False,
+                "status": "discussion_incomplete",
+                "fetch": "public_github_api",
+            },
+        )
+        self.assertFalse(public_fallback_empty.enabled)
+        self.assertEqual(public_fallback_empty.reasons, ("no_prior_review_signals",))
+        self.assertEqual(public_fallback_empty.signal_counts["remote_cure_markers"], 0)
+        self.assertIn("discussion_incomplete", public_fallback_empty.degraded_reasons)
+
         degraded = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
@@ -826,6 +843,44 @@ This prose mentions ratio:16 and port:443 but no source location.
         self.assertEqual(status.get("finding_id"), "A-01")
         self.assertEqual(status.get("reason"), "missing_evidence")
         self.assertEqual(status.get("source_evidence_snippets"), [])
+
+    def test_generated_review_parser_accepts_mixed_legacy_and_extensionless_sources(self) -> None:
+        mixed = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="real-run:mixed-legacy-generated",
+                        source_type="session_review",
+                        provenance={},
+                        body="""## Technical Assessment
+
+### A-01: Legacy finding
+Severity: Medium
+Evidence: cure.py:10
+
+**Verdict**: REQUEST CHANGES
+
+### In Scope Issues
+- Generated issue cites a root file. Sources: `LICENSE:1`
+
+  <details open>
+  <summary><b>Low</b> severity · <b>Medium</b> likelihood</summary>
+
+  **Why:** This issue is parseable alongside legacy findings.
+
+  </details>
+""",
+                        reviewed_head="sha-mixed",
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(mixed.status, ModuleStatus.SUCCESS)
+        by_id = {item.finding_id: item for item in mixed.findings}
+        self.assertEqual(set(by_id), {"A-01", "CURE-001"})
+        self.assertEqual(by_id["CURE-001"].source_evidence_snippets, ("LICENSE:1",))
 
     def test_generated_review_parser_degrades_malformed_sibling_and_ignores_clean_none(self) -> None:
         mixed = extract_prior_findings(
@@ -1611,6 +1666,11 @@ This prose mentions ratio:16 and port:443 but no source location.
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "error")
             self.assertIn("decision boom", meta["error"]["message"])
+            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
+            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
+            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
+            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
+            self.assertIn("chunkhound", meta)
 
     def test_preflight_decision_artifact_write_failure_marks_meta_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1645,6 +1705,11 @@ This prose mentions ratio:16 and port:443 but no source location.
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "error")
             self.assertIn("decision write boom", meta["error"]["message"])
+            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
+            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
+            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
+            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
+            self.assertIn("chunkhound", meta)
 
     def test_preflight_enabled_intake_failure_marks_meta_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1687,6 +1752,11 @@ This prose mentions ratio:16 and port:443 but no source location.
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "error")
             self.assertIn("intake boom", meta["error"]["message"])
+            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
+            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
+            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
+            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
+            self.assertIn("chunkhound", meta)
 
     def test_new_sandbox_explicit_disabled_writes_decision_meta_and_skips_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

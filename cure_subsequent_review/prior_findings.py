@@ -120,21 +120,21 @@ def _candidate_from_block(
     )
 
 
-def _looks_like_source_ref(ref: str) -> bool:
+def _looks_like_source_ref(ref: str, *, allow_extensionless_root_path: bool = False) -> bool:
     location = ref.rsplit(":", 1)[0]
-    return "/" in location or "." in location
+    return "/" in location or "." in location or allow_extensionless_root_path
 
 
-def _source_refs(text: str) -> list[str]:
+def _source_refs(text: str, *, allow_extensionless_root_paths: bool = False) -> list[str]:
     refs = [match.group(0).strip("`.,") for match in _SOURCE_REF_RE.finditer(text)]
-    return [ref for ref in refs if _looks_like_source_ref(ref)]
+    return [ref for ref in refs if _looks_like_source_ref(ref, allow_extensionless_root_path=allow_extensionless_root_paths)]
 
 
 def _strip_generated_sources(title: str) -> tuple[str, list[str]]:
     match = _GENERATED_SOURCES_RE.search(title)
     if not match:
         return title.strip(), []
-    refs = _source_refs(match.group("sources"))
+    refs = _source_refs(match.group("sources"), allow_extensionless_root_paths=True)
     return title[: match.start()].strip().rstrip(".:- "), refs
 
 
@@ -147,6 +147,7 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
     current_block: list[str] = []
     current_sources: list[str] = []
     saw_clean_none = False
+    saw_legacy_finding_bullet = False
 
     def status_payload(*, title: str, reason: str, evidence: list[str]) -> dict[str, Any]:
         return {
@@ -168,7 +169,9 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             severity_match = _GENERATED_SEVERITY_RE.search(line)
             if severity_match and not severity:
                 severity = severity_match.group("severity").strip().lower()
-            evidence.extend(_source_refs(line))
+            evidence.extend(
+                _source_refs(line, allow_extensionless_root_paths=_GENERATED_SOURCES_RE.search(line) is not None)
+            )
         if severity and evidence:
             index = len(findings) + 1
             block = [f"Severity: {severity}", f"Section: {current_section}"]
@@ -206,6 +209,12 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
         if line.startswith("- "):
             flush()
             bullet_text = stripped[2:].strip()
+            if _FINDING_BULLET_RE.match(stripped):
+                saw_legacy_finding_bullet = True
+                current_title = ""
+                current_block = []
+                current_sources = []
+                continue
             if bullet_text.lower().rstrip(".") == "none":
                 saw_clean_none = True
                 current_title = ""
@@ -218,7 +227,13 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             current_block.append(line)
     flush()
 
-    if not findings and not statuses and not saw_clean_none and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body):
+    if (
+        not findings
+        and not statuses
+        and not saw_clean_none
+        and not saw_legacy_finding_bullet
+        and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body)
+    ):
         statuses.append(
             {
                 **_status_provenance(entry),
@@ -285,7 +300,7 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
                 block.append(line)
     flush()
 
-    if not findings:
+    if not findings or "### In Scope Issues" in entry.body:
         generated_findings, generated_statuses = _extract_generated_review_issues(entry)
         findings.extend(generated_findings)
         statuses.extend(generated_statuses)
