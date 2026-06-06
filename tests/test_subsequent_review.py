@@ -16,6 +16,7 @@ from cure_subsequent_review.contracts import (
     FindingProvenance,
     ModuleStatus,
     PriorFindingCandidate,
+    PriorFindingLedger,
     PriorReviewCorpus,
     PriorReviewCorpusEntry,
     SubsequentReviewModule,
@@ -49,6 +50,91 @@ class Session:
 class SubsequentReviewTests(unittest.TestCase):
     def setUp(self) -> None:
         rf._GH_API_SLURP_SUPPORTED = None
+
+    def _extract_ledger_from_body(
+        self,
+        body: str,
+        *,
+        entry_id: str = "fixture:entry",
+        source_type: str = "fixture",
+        reviewed_head: str = "sha-fixture",
+        artifact_path: Path | None = None,
+    ) -> PriorFindingLedger:
+        entry_kwargs: dict[str, Any] = {
+            "entry_id": entry_id,
+            "source_type": source_type,
+            "provenance": {},
+            "body": body,
+            "reviewed_head": reviewed_head,
+        }
+        if artifact_path is not None:
+            entry_kwargs["artifact_path"] = artifact_path
+        return extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(PriorReviewCorpusEntry(**entry_kwargs),),
+            )
+        )
+
+    def _finding_candidate(
+        self,
+        *,
+        finding_id: str,
+        title: str,
+        entry_id: str = "session-a",
+        severity: str = "medium",
+        section: str = "Technical Assessment",
+        evidence: str = "app.py:1",
+        reviewed_head: str | None = None,
+        supersedes: tuple[str, ...] = (),
+    ) -> PriorFindingCandidate:
+        head = reviewed_head or f"sha-{entry_id}"
+        return PriorFindingCandidate(
+            finding_id=finding_id,
+            severity=severity,
+            section=section,
+            title=title,
+            source_evidence_snippets=(evidence,),
+            reviewed_head=head,
+            provenance=FindingProvenance(
+                corpus_entry_id=entry_id,
+                source_type="session_review",
+                artifact_path=f"/tmp/{entry_id}/review.md",
+                reviewed_head=head,
+            ),
+            supersedes=supersedes,
+        )
+
+    def _new_pr_args(self, *, subsequent_review_disabled: bool = False) -> Any:
+        args = [
+            "pr",
+            "https://github.com/acme/repo/pull/14",
+            "--if-reviewed",
+            "new",
+            "--no-index",
+            "--no-review",
+        ]
+        if subsequent_review_disabled:
+            args.insert(5, "--no-subsequent-review")
+        return rf.build_parser().parse_args(args)
+
+    def _reviewflow_paths(self, root: Path) -> Any:
+        return rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+
+    def _assert_error_meta_preserves_common_artifacts(
+        self,
+        *,
+        meta: dict[str, Any],
+        session_dir: Path,
+        message: str,
+    ) -> None:
+        self.assertEqual(meta["status"], "error")
+        self.assertIn(message, meta["error"]["message"])
+        self.assertEqual(meta["paths"]["agent_desc"], str(session_dir / "agent_desc.txt"))
+        self.assertEqual(meta["paths"]["pr_context"], str(session_dir / "work" / "pr_context.json"))
+        self.assertTrue((session_dir / "agent_desc.txt").is_file())
+        self.assertTrue((session_dir / "work" / "pr_context.json").is_file())
+        self.assertIn("chunkhound", meta)
 
     def test_contracts_expose_story_modules_and_two_policy_modes(self) -> None:
         self.assertEqual(len(SubsequentReviewModule), 13)
@@ -642,7 +728,7 @@ class SubsequentReviewTests(unittest.TestCase):
     def test_new_sandbox_intake_receives_unavailable_completed_sessions_for_degradation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            paths = self._reviewflow_paths(root)
             prior_session = paths.sandbox_root / "prior-missing"
             prior_session.mkdir(parents=True)
             (prior_session / "meta.json").write_text(
@@ -661,16 +747,7 @@ class SubsequentReviewTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
+            args = self._new_pr_args()
             intake_sessions: list[Any] = []
 
             def fake_intake(**kwargs: Any) -> Any:
@@ -727,19 +804,10 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(by_id["B-03"].supersedes, ("A-03",))
 
         degraded_entry = fixture["raw_prior_reviews"]["parse_degraded_prior_artifact_md"]
-        degraded = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="fixture:degraded",
-                        source_type="fixture",
-                        provenance={},
-                        body=degraded_entry,
-                        reviewed_head="sha-degraded",
-                    ),
-                ),
-            )
+        degraded = self._extract_ledger_from_body(
+            degraded_entry,
+            entry_id="fixture:degraded",
+            reviewed_head="sha-degraded",
         )
         self.assertEqual(degraded.status, ModuleStatus.DEGRADED)
         self.assertIn("CURE-99", {item.finding_id for item in degraded.findings})
@@ -752,24 +820,15 @@ class SubsequentReviewTests(unittest.TestCase):
         )
 
     def test_heading_style_prior_findings_missing_evidence_degrades_artifact(self) -> None:
-        ledger = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="fixture:missing-evidence",
-                        source_type="fixture",
-                        provenance={},
-                        body="""## Security
+        ledger = self._extract_ledger_from_body(
+            """## Security
 
 ### A-01: Missing evidence
 Severity: Medium
 Section: Security
 """,
-                        reviewed_head="sha-missing-evidence",
-                    ),
-                ),
-            )
+            entry_id="fixture:missing-evidence",
+            reviewed_head="sha-missing-evidence",
         )
 
         self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
@@ -781,15 +840,8 @@ Section: Security
         self.assertEqual(status.get("source_evidence_snippets"), [])
 
     def test_heading_style_prior_findings_inherit_surrounding_section(self) -> None:
-        ledger = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="fixture:heading-section",
-                        source_type="fixture",
-                        provenance={},
-                        body="""## Technical Assessment
+        ledger = self._extract_ledger_from_body(
+            """## Technical Assessment
 
 ### A-01: Cache issue
 Severity: Medium
@@ -804,10 +856,8 @@ Severity: Low
 Section: Reliability
 Evidence: worker.py:20
 """,
-                        reviewed_head="sha-section",
-                    ),
-                ),
-            )
+            entry_id="fixture:heading-section",
+            reviewed_head="sha-section",
         )
 
         by_id = {item.finding_id: item for item in ledger.findings}
@@ -816,25 +866,16 @@ Evidence: worker.py:20
         self.assertEqual(by_id["A-03"].section, "Reliability")
 
     def test_prior_findings_ignore_incidental_word_colon_digits_as_source_evidence(self) -> None:
-        ledger = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="fixture:incidental-source",
-                        source_type="fixture",
-                        provenance={},
-                        body="""## Technical Assessment
+        ledger = self._extract_ledger_from_body(
+            """## Technical Assessment
 
 ### A-01: Incidental token
 Severity: Medium
 Section: Technical Assessment
 This prose mentions ratio:16 and port:443 but no source location.
 """,
-                        reviewed_head="sha-incidental",
-                    ),
-                ),
-            )
+            entry_id="fixture:incidental-source",
+            reviewed_head="sha-incidental",
         )
 
         self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
@@ -845,15 +886,8 @@ This prose mentions ratio:16 and port:443 but no source location.
         self.assertEqual(status.get("source_evidence_snippets"), [])
 
     def test_generated_review_parser_accepts_mixed_legacy_and_extensionless_sources(self) -> None:
-        mixed = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="real-run:mixed-legacy-generated",
-                        source_type="session_review",
-                        provenance={},
-                        body="""## Technical Assessment
+        mixed = self._extract_ledger_from_body(
+            """## Technical Assessment
 
 ### A-01: Legacy finding
 Severity: Medium
@@ -871,10 +905,9 @@ Evidence: cure.py:10
 
   </details>
 """,
-                        reviewed_head="sha-mixed",
-                    ),
-                ),
-            )
+            entry_id="real-run:mixed-legacy-generated",
+            source_type="session_review",
+            reviewed_head="sha-mixed",
         )
 
         self.assertEqual(mixed.status, ModuleStatus.SUCCESS)
@@ -883,15 +916,8 @@ Evidence: cure.py:10
         self.assertEqual(by_id["CURE-001"].source_evidence_snippets, ("LICENSE:1",))
 
     def test_generated_review_parser_degrades_malformed_sibling_and_ignores_clean_none(self) -> None:
-        mixed = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="real-run:mixed-generated",
-                        source_type="session_review",
-                        provenance={},
-                        body="""## Business / Product Assessment
+        mixed = self._extract_ledger_from_body(
+            """## Business / Product Assessment
 **Verdict**: REQUEST CHANGES
 
 ### In Scope Issues
@@ -913,11 +939,10 @@ Evidence: cure.py:10
 
   </details>
 """,
-                        reviewed_head="sha-real",
-                        artifact_path=Path("/tmp/prior/review.md"),
-                    ),
-                ),
-            )
+            entry_id="real-run:mixed-generated",
+            source_type="session_review",
+            reviewed_head="sha-real",
+            artifact_path=Path("/tmp/prior/review.md"),
         )
 
         self.assertEqual(mixed.status, ModuleStatus.DEGRADED)
@@ -933,15 +958,8 @@ Evidence: cure.py:10
             )
         )
 
-        missing_sources = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="real-run:missing-sources",
-                        source_type="session_review",
-                        provenance={},
-                        body="""## Technical Assessment
+        missing_sources = self._extract_ledger_from_body(
+            """## Technical Assessment
 **Verdict**: REQUEST CHANGES
 
 ### In Scope Issues
@@ -954,11 +972,10 @@ Evidence: cure.py:10
 
   </details>
 """,
-                        reviewed_head="sha-missing-sources",
-                        artifact_path=Path("/tmp/prior/missing-sources.md"),
-                    ),
-                ),
-            )
+            entry_id="real-run:missing-sources",
+            source_type="session_review",
+            reviewed_head="sha-missing-sources",
+            artifact_path=Path("/tmp/prior/missing-sources.md"),
         )
         self.assertEqual(missing_sources.status, ModuleStatus.DEGRADED)
         self.assertEqual(missing_sources.findings, ())
@@ -970,24 +987,16 @@ Evidence: cure.py:10
         self.assertEqual(missing_source_status.get("artifact_path"), "/tmp/prior/missing-sources.md")
         self.assertIn("Generated issue with severity", str(missing_source_status.get("title")))
 
-        clean_none = extract_prior_findings(
-            corpus=PriorReviewCorpus(
-                status=ModuleStatus.SUCCESS,
-                entries=(
-                    PriorReviewCorpusEntry(
-                        entry_id="real-run:none-generated",
-                        source_type="session_review",
-                        provenance={},
-                        body="""## Business / Product Assessment
+        clean_none = self._extract_ledger_from_body(
+            """## Business / Product Assessment
 **Verdict**: APPROVE
 
 ### In Scope Issues
 - None.
 """,
-                        reviewed_head="sha-real",
-                    ),
-                ),
-            )
+            entry_id="real-run:none-generated",
+            source_type="session_review",
+            reviewed_head="sha-real",
         )
         self.assertEqual(clean_none.status, ModuleStatus.SUCCESS)
         self.assertEqual(clean_none.findings, ())
@@ -1070,35 +1079,38 @@ Evidence: cure.py:10
             self.assertTrue(any("A-01" in group.supersedes for group in ledger.groups))
 
     def test_reconciliation_namespaces_duplicate_ids_ambiguous_and_transitive_supersedes(self) -> None:
-        def candidate(
-            *,
-            entry_id: str,
-            finding_id: str,
-            title: str,
-            supersedes: tuple[str, ...] = (),
-        ) -> PriorFindingCandidate:
-            return PriorFindingCandidate(
-                finding_id=finding_id,
-                severity="medium",
-                section="Business / Product Assessment",
-                title=title,
-                source_evidence_snippets=(f"{entry_id}.py:1",),
-                reviewed_head=f"sha-{entry_id}",
-                provenance=FindingProvenance(
-                    corpus_entry_id=entry_id,
-                    source_type="session_review",
-                    artifact_path=f"/tmp/{entry_id}/review.md",
-                    reviewed_head=f"sha-{entry_id}",
-                ),
-                supersedes=supersedes,
-            )
-
         ledger = reconcile_findings(
             findings=(
-                candidate(entry_id="session-a", finding_id="CURE-01", title="Cache grows forever"),
-                candidate(entry_id="session-b", finding_id="CURE-01", title="SQL injection risk"),
-                candidate(entry_id="session-c", finding_id="CURE-02", title="SQL injection still possible", supersedes=("CURE-01",)),
-                candidate(entry_id="session-d", finding_id="CURE-03", title="SQL injection remains exploitable", supersedes=("CURE-02",)),
+                self._finding_candidate(
+                    entry_id="session-a",
+                    finding_id="CURE-01",
+                    title="Cache grows forever",
+                    section="Business / Product Assessment",
+                    evidence="session-a.py:1",
+                ),
+                self._finding_candidate(
+                    entry_id="session-b",
+                    finding_id="CURE-01",
+                    title="SQL injection risk",
+                    section="Business / Product Assessment",
+                    evidence="session-b.py:1",
+                ),
+                self._finding_candidate(
+                    entry_id="session-c",
+                    finding_id="CURE-02",
+                    title="SQL injection still possible",
+                    section="Business / Product Assessment",
+                    evidence="session-c.py:1",
+                    supersedes=("CURE-01",),
+                ),
+                self._finding_candidate(
+                    entry_id="session-d",
+                    finding_id="CURE-03",
+                    title="SQL injection remains exploitable",
+                    section="Business / Product Assessment",
+                    evidence="session-d.py:1",
+                    supersedes=("CURE-02",),
+                ),
             )
         )
 
@@ -1126,33 +1138,23 @@ Evidence: cure.py:10
         )
 
     def test_reconciliation_prefers_superseding_canonical_and_serializes_local_details(self) -> None:
-        older = PriorFindingCandidate(
+        older = self._finding_candidate(
+            entry_id="session-a",
             finding_id="A-01",
+            title="Zulu vulnerability",
             severity="high",
             section="Security",
-            title="Zulu vulnerability",
-            source_evidence_snippets=("app/auth.py:42",),
+            evidence="app/auth.py:42",
             reviewed_head="sha-older",
-            provenance=FindingProvenance(
-                corpus_entry_id="session-a",
-                source_type="session_review",
-                artifact_path="/tmp/session-a/review.md",
-                reviewed_head="sha-older",
-            ),
         )
-        newer = PriorFindingCandidate(
+        newer = self._finding_candidate(
+            entry_id="session-b",
             finding_id="A-02",
+            title="Alpha vulnerability",
             severity="medium",
             section="Reliability",
-            title="Alpha vulnerability",
-            source_evidence_snippets=("app/auth.py:99",),
+            evidence="app/auth.py:99",
             reviewed_head="sha-newer",
-            provenance=FindingProvenance(
-                corpus_entry_id="session-b",
-                source_type="session_review",
-                artifact_path="/tmp/session-b/review.md",
-                reviewed_head="sha-newer",
-            ),
             supersedes=("A-01",),
         )
 
@@ -1166,19 +1168,9 @@ Evidence: cure.py:10
         self.assertEqual(local_by_id["A-02"]["source_evidence_snippets"], ["app/auth.py:99"])
 
     def test_reconciliation_degrades_missing_supersedes_target(self) -> None:
-        finding = PriorFindingCandidate(
+        finding = self._finding_candidate(
             finding_id="CURE-02",
-            severity="medium",
-            section="Technical Assessment",
             title="Missing superseded target",
-            source_evidence_snippets=("app.py:1",),
-            reviewed_head="sha-session-a",
-            provenance=FindingProvenance(
-                corpus_entry_id="session-a",
-                source_type="session_review",
-                artifact_path="/tmp/session-a/review.md",
-                reviewed_head="sha-session-a",
-            ),
             supersedes=("CURE-01",),
         )
 
@@ -1190,26 +1182,24 @@ Evidence: cure.py:10
         self.assertTrue(any(edge.get("target_display_id") == "CURE-01" and edge.get("status") == "target_not_found" for edge in edges))
 
     def test_reconciliation_keeps_same_title_findings_with_distinct_evidence_separate(self) -> None:
-        def candidate(*, finding_id: str, evidence: str, entry_id: str) -> PriorFindingCandidate:
-            return PriorFindingCandidate(
-                finding_id=finding_id,
-                severity="high",
-                section="Security",
-                title="Shared title",
-                source_evidence_snippets=(evidence,),
-                reviewed_head=f"sha-{entry_id}",
-                provenance=FindingProvenance(
-                    corpus_entry_id=entry_id,
-                    source_type="session_review",
-                    artifact_path=f"/tmp/{entry_id}/review.md",
-                    reviewed_head=f"sha-{entry_id}",
-                ),
-            )
-
         ledger = reconcile_findings(
             findings=(
-                candidate(finding_id="A-01", evidence="app/auth.py:42", entry_id="session-a"),
-                candidate(finding_id="B-01", evidence="app/billing.py:77", entry_id="session-b"),
+                self._finding_candidate(
+                    entry_id="session-a",
+                    finding_id="A-01",
+                    title="Shared title",
+                    severity="high",
+                    section="Security",
+                    evidence="app/auth.py:42",
+                ),
+                self._finding_candidate(
+                    entry_id="session-b",
+                    finding_id="B-01",
+                    title="Shared title",
+                    severity="high",
+                    section="Security",
+                    evidence="app/billing.py:77",
+                ),
             )
         )
 
@@ -1217,26 +1207,10 @@ Evidence: cure.py:10
         self.assertEqual(grouped_ids, [{"A-01"}, {"B-01"}])
 
     def test_reconciliation_preserves_same_entry_duplicate_finding_ids(self) -> None:
-        def candidate(title: str) -> PriorFindingCandidate:
-            return PriorFindingCandidate(
-                finding_id="CURE-01",
-                severity="medium",
-                section="Technical Assessment",
-                title=title,
-                source_evidence_snippets=("app.py:1",),
-                reviewed_head="sha-session-a",
-                provenance=FindingProvenance(
-                    corpus_entry_id="session-a",
-                    source_type="session_review",
-                    artifact_path="/tmp/session-a/review.md",
-                    reviewed_head="sha-session-a",
-                ),
-            )
-
         ledger = reconcile_findings(
             findings=(
-                candidate("Cache grows without bounds"),
-                candidate("SQL query is constructed unsafely"),
+                self._finding_candidate(finding_id="CURE-01", title="Cache grows without bounds"),
+                self._finding_candidate(finding_id="CURE-01", title="SQL query is constructed unsafely"),
             )
         )
 
@@ -1410,14 +1384,8 @@ Evidence: cure.py:10
                 self.assertTrue(all("--slurp" in marker["command"] for marker in marker_payloads))
 
     def test_real_generated_review_markdown_extracts_in_scope_issues(self) -> None:
-        corpus = PriorReviewCorpus(
-            status=ModuleStatus.SUCCESS,
-            entries=(
-                PriorReviewCorpusEntry(
-                    entry_id="real-run:review-md",
-                    source_type="session_review",
-                    provenance={},
-                    body="""## Business / Product Assessment
+        ledger = self._extract_ledger_from_body(
+            """## Business / Product Assessment
 **Verdict**: REQUEST CHANGES
 
 ### In Scope Issues
@@ -1432,13 +1400,11 @@ Evidence: cure.py:10
 
   </details>
 """,
-                    reviewed_head="sha-real",
-                    artifact_path=Path("/tmp/prior/review.md"),
-                ),
-            ),
+            entry_id="real-run:review-md",
+            source_type="session_review",
+            reviewed_head="sha-real",
+            artifact_path=Path("/tmp/prior/review.md"),
         )
-
-        ledger = extract_prior_findings(corpus=corpus)
 
         self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
         self.assertEqual(len(ledger.findings), 1)
@@ -1466,7 +1432,7 @@ Evidence: cure.py:10
             args = rf.build_parser().parse_args(
                 ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list"]
             )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch(
@@ -1493,7 +1459,7 @@ Evidence: cure.py:10
             args = rf.build_parser().parse_args(
                 ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list"]
             )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[unavailable]), mock.patch(
@@ -1521,7 +1487,7 @@ Evidence: cure.py:10
             args = rf.build_parser().parse_args(
                 ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "latest"]
             )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[unavailable]), mock.patch(
@@ -1544,17 +1510,8 @@ Evidence: cure.py:10
                 completed_at="2026-01-02T00:00:00Z",
                 verdicts=None,
             )
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args()
+            paths = self._reviewflow_paths(root)
             intake_calls: list[Path] = []
 
             def fake_intake(**kwargs: Any) -> Any:
@@ -1595,17 +1552,8 @@ Evidence: cure.py:10
     def test_new_sandbox_auto_disabled_writes_decision_meta_and_skips_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args()
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
@@ -1638,17 +1586,8 @@ Evidence: cure.py:10
     def test_preflight_decision_failure_marks_meta_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args()
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
@@ -1664,28 +1603,17 @@ Evidence: cure.py:10
             sessions = list(paths.sandbox_root.iterdir())
             self.assertEqual(len(sessions), 1)
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(meta["status"], "error")
-            self.assertIn("decision boom", meta["error"]["message"])
-            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
-            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
-            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
-            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
-            self.assertIn("chunkhound", meta)
+            self._assert_error_meta_preserves_common_artifacts(
+                meta=meta,
+                session_dir=sessions[0],
+                message="decision boom",
+            )
 
     def test_preflight_decision_artifact_write_failure_marks_meta_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args()
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
@@ -1703,13 +1631,11 @@ Evidence: cure.py:10
             sessions = list(paths.sandbox_root.iterdir())
             self.assertEqual(len(sessions), 1)
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(meta["status"], "error")
-            self.assertIn("decision write boom", meta["error"]["message"])
-            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
-            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
-            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
-            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
-            self.assertIn("chunkhound", meta)
+            self._assert_error_meta_preserves_common_artifacts(
+                meta=meta,
+                session_dir=sessions[0],
+                message="decision write boom",
+            )
 
     def test_preflight_enabled_intake_failure_marks_meta_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1724,17 +1650,8 @@ Evidence: cure.py:10
                 completed_at="2026-01-02T00:00:00Z",
                 verdicts=None,
             )
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args()
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch.object(
@@ -1750,29 +1667,17 @@ Evidence: cure.py:10
             sessions = list(paths.sandbox_root.iterdir())
             self.assertEqual(len(sessions), 1)
             meta = json.loads((sessions[0] / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(meta["status"], "error")
-            self.assertIn("intake boom", meta["error"]["message"])
-            self.assertEqual(meta["paths"]["agent_desc"], str(sessions[0] / "agent_desc.txt"))
-            self.assertEqual(meta["paths"]["pr_context"], str(sessions[0] / "work" / "pr_context.json"))
-            self.assertTrue((sessions[0] / "agent_desc.txt").is_file())
-            self.assertTrue((sessions[0] / "work" / "pr_context.json").is_file())
-            self.assertIn("chunkhound", meta)
+            self._assert_error_meta_preserves_common_artifacts(
+                meta=meta,
+                session_dir=sessions[0],
+                message="intake boom",
+            )
 
     def test_new_sandbox_explicit_disabled_writes_decision_meta_and_skips_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = rf.build_parser().parse_args(
-                [
-                    "pr",
-                    "https://github.com/acme/repo/pull/14",
-                    "--if-reviewed",
-                    "new",
-                    "--no-subsequent-review",
-                    "--no-index",
-                    "--no-review",
-                ]
-            )
-            paths = rf.ReviewflowPaths(sandbox_root=root / "sandboxes", cache_root=root / "cache")
+            args = self._new_pr_args(subsequent_review_disabled=True)
+            paths = self._reviewflow_paths(root)
             with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
                 rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
             ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]), mock.patch.object(
