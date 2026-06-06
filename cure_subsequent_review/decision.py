@@ -79,6 +79,12 @@ def _ordered_unique(items: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in items if item))
 
 
+def _is_positive_remote_marker(event: Any) -> bool:
+    if event.kind not in {"issue_comment", "review"}:
+        return False
+    return _looks_cure_authored(author=event.author, body=event.body)
+
+
 def decide_subsequent_review(
     *,
     pr: Any,
@@ -134,7 +140,7 @@ def decide_subsequent_review(
 
     discussion = collect_pr_discussion(pr=pr, fetch_json=fetch_json)
     signal_counts["remote_events"] = len(discussion.events)
-    remote_cure_markers = sum(1 for event in discussion.events if _looks_cure_authored(author=event.author, body=event.body))
+    remote_cure_markers = sum(1 for event in discussion.events if _is_positive_remote_marker(event))
     signal_counts["remote_cure_markers"] = remote_cure_markers
     degraded_reasons = list(discussion.status_reasons)
     for marker in discussion.pagination:

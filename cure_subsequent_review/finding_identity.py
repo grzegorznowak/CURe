@@ -50,9 +50,9 @@ class _DisjointSet:
         self.parent[loser] = winner
 
 
-def _local_finding_payload(finding: PriorFindingCandidate) -> dict[str, Any]:
+def _local_finding_payload(finding: PriorFindingCandidate, *, origin_key: str) -> dict[str, Any]:
     return {
-        "origin_key": _origin_key(finding),
+        "origin_key": origin_key,
         "finding_id": finding.finding_id,
         "corpus_entry_id": finding.provenance.corpus_entry_id,
         "source_type": finding.provenance.source_type,
@@ -62,31 +62,45 @@ def _local_finding_payload(finding: PriorFindingCandidate) -> dict[str, Any]:
     }
 
 
+def _indexed_origin_items(findings: list[PriorFindingCandidate]) -> tuple[list[tuple[str, PriorFindingCandidate]], tuple[str, ...]]:
+    base_keys = [_origin_key(finding) for finding in findings]
+    duplicate_base_keys = {key for key in base_keys if base_keys.count(key) > 1}
+    seen: dict[str, int] = defaultdict(int)
+    indexed: list[tuple[str, PriorFindingCandidate]] = []
+    for base_key, finding in zip(base_keys, findings, strict=True):
+        if base_key in duplicate_base_keys:
+            seen[base_key] += 1
+            indexed.append((f"{base_key}#{seen[base_key]}", finding))
+        else:
+            indexed.append((base_key, finding))
+    return indexed, tuple(sorted(duplicate_base_keys))
+
+
 def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFindingCandidate, ...]) -> ReconciliationLedger:
     ordered_findings = list(findings)
-    origin_keys = [_origin_key(finding) for finding in ordered_findings]
+    indexed_findings, duplicate_origin_keys = _indexed_origin_items(ordered_findings)
+    origin_keys = [key for key, _finding in indexed_findings]
     dsu = _DisjointSet(origin_keys)
 
-    by_fingerprint: dict[str, list[PriorFindingCandidate]] = defaultdict(list)
-    by_display_id: dict[str, list[PriorFindingCandidate]] = defaultdict(list)
-    by_origin_key = {_origin_key(finding): finding for finding in ordered_findings}
-    for finding in ordered_findings:
-        by_fingerprint[finding_fingerprint(finding)].append(finding)
-        by_display_id[finding.finding_id].append(finding)
+    by_fingerprint: dict[str, list[tuple[str, PriorFindingCandidate]]] = defaultdict(list)
+    by_display_id: dict[str, list[tuple[str, PriorFindingCandidate]]] = defaultdict(list)
+    by_origin_key = dict(indexed_findings)
+    for origin_key, finding in indexed_findings:
+        by_fingerprint[finding_fingerprint(finding)].append((origin_key, finding))
+        by_display_id[finding.finding_id].append((origin_key, finding))
 
     for grouped in by_fingerprint.values():
-        first = _origin_key(grouped[0])
-        for finding in grouped[1:]:
-            dsu.union(first, _origin_key(finding))
+        first_key = grouped[0][0]
+        for origin_key, _finding in grouped[1:]:
+            dsu.union(first_key, origin_key)
 
     supersedes_edges: list[dict[str, Any]] = []
     ambiguous_supersedes: list[dict[str, Any]] = []
-    for finding in ordered_findings:
-        source_key = _origin_key(finding)
+    for source_key, finding in indexed_findings:
         for superseded_id in finding.supersedes:
             targets = by_display_id.get(superseded_id, [])
             if len(targets) == 1:
-                target_key = _origin_key(targets[0])
+                target_key = targets[0][0]
                 dsu.union(source_key, target_key)
                 supersedes_edges.append(
                     {
@@ -102,7 +116,7 @@ def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFin
                         "source_origin_key": source_key,
                         "source_display_id": finding.finding_id,
                         "target_display_id": superseded_id,
-                        "target_origin_keys": [_origin_key(target) for target in targets],
+                        "target_origin_keys": [target_key for target_key, _target in targets],
                         "reason": "ambiguous_local_display_id",
                     }
                 )
@@ -117,9 +131,9 @@ def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFin
                     }
                 )
 
-    grouped_by_root: dict[str, list[PriorFindingCandidate]] = defaultdict(list)
+    grouped_by_root: dict[str, list[tuple[str, PriorFindingCandidate]]] = defaultdict(list)
     for key, finding in by_origin_key.items():
-        grouped_by_root[dsu.find(key)].append(finding)
+        grouped_by_root[dsu.find(key)].append((key, finding))
 
     edge_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edge in supersedes_edges:
@@ -130,23 +144,25 @@ def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFin
 
     groups: list[ReconciledFindingGroup] = []
     for index, (_root, grouped) in enumerate(sorted(grouped_by_root.items()), start=1):
-        grouped.sort(key=lambda item: (_normalized_title(item.title), item.finding_id, _origin_key(item)))
-        canonical = grouped[-1]
+        grouped.sort(key=lambda item: (_normalized_title(item[1].title), item[1].finding_id, item[0]))
+        canonical = grouped[-1][1]
         supersedes: list[str] = []
-        for finding in grouped:
+        for _origin_key_value, finding in grouped:
             supersedes.extend(finding.supersedes)
-        root = dsu.find(_origin_key(grouped[0]))
+        root = dsu.find(grouped[0][0])
         groups.append(
             ReconciledFindingGroup(
                 group_id=f"G-{index:04d}",
                 canonical_id=canonical.finding_id,
-                finding_ids=tuple(item.finding_id for item in grouped),
+                finding_ids=tuple(item.finding_id for _origin_key_value, item in grouped),
                 fingerprint=finding_fingerprint(canonical),
-                provenance=tuple(item.provenance for item in grouped),
+                provenance=tuple(item.provenance for _origin_key_value, item in grouped),
                 supersedes=tuple(dict.fromkeys(supersedes)),
-                local_findings=tuple(_local_finding_payload(item) for item in grouped),
+                local_findings=tuple(_local_finding_payload(item, origin_key=origin_key_value) for origin_key_value, item in grouped),
                 supersedes_edges=tuple(edge_group.get(root, ())),
                 ambiguous_supersedes=tuple(ambiguity_group.get(root, ())),
             )
         )
-    return ReconciliationLedger(status=ModuleStatus.SUCCESS, groups=tuple(groups))
+    status_reasons = ("duplicate_origin_keys",) if duplicate_origin_keys else ()
+    status = ModuleStatus.DEGRADED if status_reasons else ModuleStatus.SUCCESS
+    return ReconciliationLedger(status=status, groups=tuple(groups), status_reasons=status_reasons)

@@ -165,6 +165,30 @@ class SubsequentReviewTests(unittest.TestCase):
                 True,
                 "remote_probe_degraded",
             ),
+            (
+                "cure_looking_review_comment_thread_excluded_from_auto_markers",
+                {
+                    "id": 15,
+                    "user": {"login": "cure-bot"},
+                    "body": "CURe Review\n### CURE-90: line comment text",
+                    "path": "a.py",
+                    "line": 1,
+                    "thread_state": "unresolved",
+                },
+                False,
+                "no_prior_review_signals",
+            ),
+            (
+                "spoofed_cure_login_issue_comment",
+                {
+                    "id": 16,
+                    "user": {"login": "cure-fake"},
+                    "body": "CURe Review\n### CURE-91: spoofed",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                False,
+                "no_prior_review_signals",
+            ),
         )
         for name, payload, expected_enabled, expected_reason in cases:
             with self.subTest(name=name):
@@ -345,11 +369,22 @@ class SubsequentReviewTests(unittest.TestCase):
 
         def fetch(path: str) -> Any:
             if path.endswith("/issues/9999/comments"):
-                return []
+                return [
+                    {
+                        "id": 901,
+                        "user": {"login": "cure-fake"},
+                        "body": "CURe Review\n### CURE-87: Spoofed issue comment",
+                    }
+                ]
             if path.endswith("/pulls/9999/reviews"):
                 return [
                     {"id": 902, "user": {"login": "human"}, "body": "CURe Review\n### CURE-88: Human text"},
                     {"id": 903, "body": "<!-- cure --> CURe review\n### CURE-89: Missing author"},
+                    {
+                        "id": 905,
+                        "user": {"login": "cure-fake"},
+                        "body": "CURe Review\n### CURE-91: Spoofed review",
+                    },
                 ]
             if path.endswith("/pulls/9999/comments"):
                 return [
@@ -367,9 +402,14 @@ class SubsequentReviewTests(unittest.TestCase):
         discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
         corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
         self.assertFalse(corpus.entries)
-        ignored = {(item.get("source_type"), item.get("review_id"), item.get("reason")) for item in corpus.ignored_pr_comments}
-        self.assertIn(("pr_review", "902", "cure_authorship_not_established"), ignored)
-        self.assertIn(("pr_review", "903", "cure_authorship_not_established"), ignored)
+        ignored = {
+            (item.get("source_type"), item.get("comment_id"), item.get("review_id"), item.get("reason"))
+            for item in corpus.ignored_pr_comments
+        }
+        self.assertIn(("pr_comment", "901", None, "cure_authorship_not_established"), ignored)
+        self.assertIn(("pr_review", None, "902", "cure_authorship_not_established"), ignored)
+        self.assertIn(("pr_review", None, "903", "cure_authorship_not_established"), ignored)
+        self.assertIn(("pr_review", None, "905", "cure_authorship_not_established"), ignored)
 
     def test_completed_session_artifact_boundary_and_missing_reviews_are_degraded_corpus_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,6 +480,52 @@ class SubsequentReviewTests(unittest.TestCase):
             self.assertEqual(ignored["outside-session"].get("reason"), "review_md_outside_session")
             self.assertEqual(ignored["missing-session"].get("reason"), "review_md_missing")
             self.assertEqual(ignored["outside-session"].get("review_md_path"), str(outside))
+
+    def test_completed_session_scan_rejects_symlink_session_dirs_outside_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_root = root / "sandboxes"
+            sandbox_root.mkdir()
+            outside_session = root / "outside-session"
+            outside_session.mkdir()
+            outside_review = outside_session / "review.md"
+            outside_review.write_text(
+                "### CURE-LINK: symlinked session should not be read\n"
+                "Severity: high\n"
+                "Section: Security\n"
+                "Evidence: outside.py:1\n",
+                encoding="utf-8",
+            )
+            (outside_session / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "outside-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "example",
+                        "repo": "demo",
+                        "number": 9999,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "completed_at": "2026-01-02T00:00:00Z",
+                        "paths": {"review_md": "review.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (sandbox_root / "linked-session").symlink_to(outside_session, target_is_directory=True)
+
+            historical = rf.scan_completed_sessions_for_pr(sandbox_root=sandbox_root, pr=PR())
+            corpus_candidates = rf.scan_completed_sessions_for_pr(
+                sandbox_root=sandbox_root,
+                pr=PR(),
+                include_unavailable=True,
+            )
+
+            self.assertEqual(historical, [])
+            self.assertEqual(corpus_candidates, [])
+            corpus = build_prior_review_corpus(pr=PR(), sessions=corpus_candidates)
+            ledger = extract_prior_findings(corpus=corpus)
+            self.assertNotIn("CURE-LINK", {item.finding_id for item in ledger.findings})
 
     def test_new_sandbox_intake_receives_unavailable_completed_sessions_for_degradation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -546,6 +632,80 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(degraded.status, ModuleStatus.DEGRADED)
         self.assertIn("CURE-99", {item.finding_id for item in degraded.findings})
         self.assertTrue(any(status.get("finding_id") == "CURE-100" for status in degraded.artifact_statuses))
+
+    def test_generated_review_parser_degrades_malformed_sibling_and_ignores_clean_none(self) -> None:
+        mixed = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="real-run:mixed-generated",
+                        source_type="session_review",
+                        provenance={},
+                        body="""## Business / Product Assessment
+**Verdict**: REQUEST CHANGES
+
+### In Scope Issues
+- Well formed generated issue. Sources: `cure.py:10`
+
+  <details open>
+  <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+  **Why:** This issue is parseable.
+
+  </details>
+
+- Malformed generated issue missing severity markup. Sources: `cure.py:20`
+
+  <details open>
+  <summary><b>Medium</b> likelihood only</summary>
+
+  **Why:** This issue should be represented as degraded provenance.
+
+  </details>
+""",
+                        reviewed_head="sha-real",
+                        artifact_path=Path("/tmp/prior/review.md"),
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(mixed.status, ModuleStatus.DEGRADED)
+        self.assertEqual([item.finding_id for item in mixed.findings], ["CURE-001"])
+        self.assertIn("parse_degraded", mixed.status_reasons)
+        self.assertTrue(
+            any(
+                status.get("entry_id") == "real-run:mixed-generated"
+                and status.get("status") == "parse_degraded"
+                and status.get("reason") == "missing_generated_severity"
+                and "Malformed generated issue" in str(status.get("title"))
+                for status in mixed.artifact_statuses
+            )
+        )
+
+        clean_none = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="real-run:none-generated",
+                        source_type="session_review",
+                        provenance={},
+                        body="""## Business / Product Assessment
+**Verdict**: APPROVE
+
+### In Scope Issues
+- None.
+""",
+                        reviewed_head="sha-real",
+                    ),
+                ),
+            )
+        )
+        self.assertEqual(clean_none.status, ModuleStatus.SUCCESS)
+        self.assertEqual(clean_none.findings, ())
+        self.assertEqual(clean_none.artifact_statuses, ())
 
     def test_public_fallback_list_payload_marks_discussion_incomplete(self) -> None:
         auth_error = rf.ReviewflowSubprocessError(
@@ -657,6 +817,39 @@ class SubsequentReviewTests(unittest.TestCase):
                 for group in payload["groups"]
             )
         )
+
+    def test_reconciliation_preserves_same_entry_duplicate_finding_ids(self) -> None:
+        def candidate(title: str) -> PriorFindingCandidate:
+            return PriorFindingCandidate(
+                finding_id="CURE-01",
+                severity="medium",
+                section="Technical Assessment",
+                title=title,
+                source_evidence_snippets=("app.py:1",),
+                reviewed_head="sha-session-a",
+                provenance=FindingProvenance(
+                    corpus_entry_id="session-a",
+                    source_type="session_review",
+                    artifact_path="/tmp/session-a/review.md",
+                    reviewed_head="sha-session-a",
+                ),
+            )
+
+        ledger = reconcile_findings(
+            findings=(
+                candidate("Cache grows without bounds"),
+                candidate("SQL query is constructed unsafely"),
+            )
+        )
+
+        payload = ledger.to_json()
+        all_local = [item for group in payload["groups"] for item in group["local_findings"]]
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("duplicate_origin_keys", ledger.status_reasons)
+        self.assertEqual(len(all_local), 2)
+        self.assertEqual({item["finding_id"] for item in all_local}, {"CURE-01"})
+        self.assertEqual(len({item["origin_key"] for item in all_local}), 2)
+        self.assertTrue(all(item["origin_key"].startswith("session-a:CURE-01") for item in all_local))
 
     def test_github_list_slurp_failure_public_fallback_preserves_cause_detail(self) -> None:
         slurp_error = rf.ReviewflowSubprocessError(

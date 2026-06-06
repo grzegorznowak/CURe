@@ -1052,9 +1052,19 @@ def scan_completed_sessions_for_pr(
 ) -> list[HistoricalReviewSession]:
     if not sandbox_root.is_dir():
         return []
+    try:
+        sandbox_boundary = sandbox_root.resolve()
+    except Exception:
+        return []
     sessions: list[HistoricalReviewSession] = []
     for entry in sandbox_root.iterdir():
         if not entry.is_dir():
+            continue
+        try:
+            resolved_entry = entry.resolve()
+        except Exception:
+            continue
+        if not _is_relative_to_path(resolved_entry, sandbox_boundary):
             continue
         meta_path = entry / "meta.json"
         meta = _load_session_meta(meta_path)

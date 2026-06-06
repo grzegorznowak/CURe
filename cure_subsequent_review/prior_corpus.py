@@ -12,18 +12,33 @@ from cure_subsequent_review.contracts import (
     PriorReviewCorpusEntry,
 )
 
-_CURE_AUTHOR_RE = re.compile(r"\b(cure|cureview|reviewflow)(?:\b|-|_)", re.IGNORECASE)
 _CURE_BODY_RE = re.compile(r"\b(CURe|CURE|Reviewflow)\s+(review|finding|findings)\b|<!--\s*cure", re.IGNORECASE)
+_TRUSTED_CURE_AUTHOR_LOGINS = frozenset(
+    {
+        "cure-bot",
+        "cure-bot[bot]",
+        "cure-review-bot",
+        "cure-review-bot[bot]",
+        "reviewflow-bot",
+        "reviewflow-bot[bot]",
+    }
+)
+
+
+def _trusted_cure_author_login(author: str | None) -> bool:
+    return bool(author and author.strip().lower() in _TRUSTED_CURE_AUTHOR_LOGINS)
 
 
 def _looks_cure_authored(*, author: str | None, body: str) -> bool:
-    """Return true only for trusted CURe-authored review markers.
+    """Return true only for configured trusted CURe-authored review markers.
 
     Body text alone is not enough: a human can mention ``CURe review`` in a
     generic GitHub discussion without that being evidence of a prior CURe run.
+    Broad login regexes are also not enough because names like ``cure-fake``
+    are user-spoofable; remote corpus trust uses a small durable author allowlist.
     """
 
-    return bool(author and _CURE_AUTHOR_RE.search(author) and _CURE_BODY_RE.search(body))
+    return bool(_trusted_cure_author_login(author) and _CURE_BODY_RE.search(body))
 
 
 def build_prior_review_corpus(

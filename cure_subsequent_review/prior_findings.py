@@ -105,11 +105,25 @@ def _strip_generated_sources(title: str) -> tuple[str, list[str]]:
 
 def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindingCandidate], list[dict[str, Any]]]:
     findings: list[PriorFindingCandidate] = []
+    statuses: list[dict[str, Any]] = []
     current_section = "unknown"
     in_scope_issues = False
     current_title = ""
     current_block: list[str] = []
     current_sources: list[str] = []
+    saw_clean_none = False
+
+    def status_payload(*, title: str, reason: str, evidence: list[str]) -> dict[str, Any]:
+        return {
+            "entry_id": entry.entry_id,
+            "status": "parse_degraded",
+            "reason": reason,
+            "source_type": entry.source_type,
+            "artifact_path": str(entry.artifact_path) if entry.artifact_path is not None else None,
+            "title": title,
+            "section": current_section,
+            "source_evidence_snippets": list(dict.fromkeys(evidence)),
+        }
 
     def flush() -> None:
         nonlocal current_title, current_block, current_sources
@@ -134,6 +148,8 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             )
             if candidate is not None:
                 findings.append(candidate)
+        else:
+            statuses.append(status_payload(title=current_title, reason="missing_generated_severity", evidence=evidence))
         current_title = ""
         current_block = []
         current_sources = []
@@ -154,14 +170,20 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             continue
         if line.startswith("- "):
             flush()
-            current_title, current_sources = _strip_generated_sources(stripped[2:].strip())
+            bullet_text = stripped[2:].strip()
+            if bullet_text.lower().rstrip(".") == "none":
+                saw_clean_none = True
+                current_title = ""
+                current_block = []
+                current_sources = []
+                continue
+            current_title, current_sources = _strip_generated_sources(bullet_text)
             current_block = [line]
         elif current_title:
             current_block.append(line)
     flush()
 
-    statuses: list[dict[str, Any]] = []
-    if not findings and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body):
+    if not findings and not statuses and not saw_clean_none and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body):
         statuses.append(
             {
                 "entry_id": entry.entry_id,
