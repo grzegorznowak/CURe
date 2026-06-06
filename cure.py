@@ -7491,16 +7491,68 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
     return payload
 
 
-def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any] | dict[str, Any]:
-    cmd = ["gh", "api", "--hostname", host, path, "--paginate", "--slurp"]
+_GH_API_SLURP_SUPPORTED: bool | None = None
+
+
+def _decode_gh_api_list_stdout(*, stdout: str, path: str) -> list[Any]:
+    text = stdout.strip()
+    if not text:
+        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: empty response")
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    idx = 0
     try:
-        result = run_cmd(cmd)
+        while idx < len(text):
+            value, end = decoder.raw_decode(text, idx)
+            values.append(value)
+            idx = end
+            while idx < len(text) and text[idx].isspace():
+                idx += 1
+    except Exception as e:
+        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
+
+    payload: Any
+    if len(values) == 1:
+        payload = values[0]
+    else:
+        payload = values
+    if not isinstance(payload, list):
+        raise ReviewflowError(f"`gh api` returned unexpected list payload for {path}")
+    if all(isinstance(page, list) for page in payload):
+        flattened: list[Any] = []
+        for page in payload:
+            flattened.extend(page)
+        return flattened
+    return payload
+
+
+def _run_gh_api_list(*, host: str, path: str, use_slurp: bool) -> list[Any]:
+    cmd = ["gh", "api", "--hostname", host, path, "--paginate"]
+    if use_slurp:
+        cmd.append("--slurp")
+    result = run_cmd(cmd)
+    return _decode_gh_api_list_stdout(stdout=result.stdout, path=path)
+
+
+def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any] | dict[str, Any]:
+    global _GH_API_SLURP_SUPPORTED
+
+    use_slurp = _GH_API_SLURP_SUPPORTED is not False
+    try:
+        return _run_gh_api_list(host=host, path=path, use_slurp=use_slurp)
     except ReviewflowSubprocessError as e:
+        if use_slurp and _classify_gh_list_error(e) == "cli_unsupported_flag":
+            _GH_API_SLURP_SUPPORTED = False
+            try:
+                return _run_gh_api_list(host=host, path=path, use_slurp=False)
+            except ReviewflowSubprocessError as retry_error:
+                e = retry_error
+        label = "gh api --paginate" if _GH_API_SLURP_SUPPORTED is False else "gh api --paginate --slurp"
         if allow_public_fallback and _supports_public_github_fallback(host):
             if _looks_like_gh_auth_error(e):
                 _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
             else:
-                _eprint(f"`gh api --paginate --slurp` failed for {path}; falling back to the public GitHub API.")
+                _eprint(f"`{label}` failed for {path}; falling back to the public GitHub API.")
             try:
                 payload = _github_public_api_list(path=path)
             except Exception as fallback_error:  # noqa: BLE001 - degraded artifact carries both causes
@@ -7527,18 +7579,6 @@ def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) ->
         if _looks_like_gh_auth_error(e):
             _raise_gh_auth_error(host=host, error=e)
         raise
-    try:
-        payload = json.loads(result.stdout)
-    except Exception as e:
-        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
-    if not isinstance(payload, list):
-        raise ReviewflowError(f"`gh api` returned unexpected list payload for {path}")
-    if all(isinstance(page, list) for page in payload):
-        flattened: list[Any] = []
-        for page in payload:
-            flattened.extend(page)
-        return flattened
-    return payload
 
 
 def _subsequent_review_command_mode(args: argparse.Namespace) -> str:

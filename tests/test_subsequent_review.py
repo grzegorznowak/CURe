@@ -47,6 +47,9 @@ class Session:
 
 
 class SubsequentReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        rf._GH_API_SLURP_SUPPORTED = None
+
     def test_contracts_expose_story_modules_and_two_policy_modes(self) -> None:
         self.assertEqual(len(SubsequentReviewModule), 13)
         self.assertEqual([item.value for item in EvidencePolicy], ["trusted", "untrusted"])
@@ -1090,6 +1093,53 @@ Evidence: worker.py:20
         self.assertEqual(manifest["modules"]["prior_finding_extractor"]["status"], "degraded")
         self.assertEqual(manifest["modules"]["finding_reconciler"]["status"], "degraded")
         self.assertIn("discussion_incomplete", manifest["modules"]["finding_reconciler"]["reasons"])
+
+    def test_github_list_unsupported_slurp_retries_authenticated_paginate_without_public_fallback(self) -> None:
+        slurp_error = rf.ReviewflowSubprocessError(
+            cmd=["gh", "api", "--hostname", "github.com", "repos/example/demo/issues/9999/comments", "--paginate", "--slurp"],
+            cwd=None,
+            exit_code=1,
+            stdout="",
+            stderr="unknown flag: --slurp",
+        )
+        no_slurp_result = rf.CommandResult(
+            cmd=["gh", "api", "--hostname", "github.com", "repos/example/demo/issues/9999/comments", "--paginate"],
+            cwd=None,
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout='[{"id": 1}]\n[{"id": 2}]\n',
+            stderr="",
+        )
+        calls: list[list[str]] = []
+
+        def run(cmd: list[str], **_kwargs: Any) -> rf.CommandResult:
+            calls.append(cmd)
+            if "--slurp" in cmd:
+                raise slurp_error
+            return no_slurp_result
+
+        with mock.patch.object(rf, "run_cmd", side_effect=run), mock.patch.object(
+            rf, "_github_public_api_payload", side_effect=AssertionError("public fallback should not be used")
+        ):
+            previous = getattr(rf, "_GH_API_SLURP_SUPPORTED", None)
+            try:
+                rf._GH_API_SLURP_SUPPORTED = None
+                payload = rf.gh_api_list(
+                    host="github.com",
+                    path="repos/example/demo/issues/9999/comments",
+                    allow_public_fallback=True,
+                )
+                second_payload = rf.gh_api_list(
+                    host="github.com",
+                    path="repos/example/demo/issues/9999/comments",
+                    allow_public_fallback=True,
+                )
+            finally:
+                rf._GH_API_SLURP_SUPPORTED = previous
+
+        self.assertEqual(payload, [{"id": 1}, {"id": 2}])
+        self.assertEqual(second_payload, [{"id": 1}, {"id": 2}])
+        self.assertEqual(["--slurp" in call for call in calls], [True, False, False])
 
     def test_github_list_slurp_failure_public_fallback_preserves_cause_detail(self) -> None:
         slurp_error = rf.ReviewflowSubprocessError(
