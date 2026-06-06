@@ -104,6 +104,8 @@ def build_prior_review_corpus(
         "review": ("pr_review", "review_id"),
     }
     if discussion is not None:
+        if discussion.status is ModuleStatus.DEGRADED:
+            reasons.extend(discussion.status_reasons)
         for event in discussion.events:
             remote_source = remote_corpus_sources.get(event.kind)
             if remote_source is None:

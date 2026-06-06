@@ -49,6 +49,7 @@ def _candidate_from_block(
     finding_id: str,
     title: str,
     block_lines: list[str],
+    default_section: str | None = None,
 ) -> tuple[PriorFindingCandidate | None, dict[str, Any] | None]:
     fields: dict[str, list[str]] = {}
     evidence: list[str] = []
@@ -67,7 +68,7 @@ def _candidate_from_block(
         if _SOURCE_REF_RE.search(line):
             evidence.append(line.strip())
     severity = " ".join(fields.get("severity", [])).strip().lower()
-    section = " ".join(fields.get("section", [])).strip() or "unknown"
+    section = " ".join(fields.get("section", [])).strip() or (default_section or "unknown")
     if not severity:
         return None, {"entry_id": entry.entry_id, "finding_id": finding_id, "status": "parse_degraded", "reason": "missing_severity"}
     clean_title = title.strip() or finding_id
@@ -202,19 +203,27 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
     current_id: str | None = None
     current_title = ""
     current_section = ""
+    current_default_section = ""
     block: list[str] = []
 
     def flush() -> None:
-        nonlocal current_id, current_title, block
+        nonlocal current_id, current_title, current_default_section, block
         if current_id is None:
             return
-        candidate, status = _candidate_from_block(entry=entry, finding_id=current_id, title=current_title, block_lines=block)
+        candidate, status = _candidate_from_block(
+            entry=entry,
+            finding_id=current_id,
+            title=current_title,
+            block_lines=block,
+            default_section=current_default_section or None,
+        )
         if candidate is not None:
             findings.append(candidate)
         if status is not None:
             statuses.append(status)
         current_id = None
         current_title = ""
+        current_default_section = ""
         block = []
 
     for line in entry.body.splitlines():
@@ -228,17 +237,17 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
             flush()
             current_id = heading.group("id").upper()
             current_title = heading.group("title").strip()
+            current_default_section = current_section
             block = []
         elif bullet:
             flush()
             current_id = bullet.group("id").upper()
             current_title = bullet.group("title").strip()
+            current_default_section = current_section
             block = []
             severity = str(bullet.group("severity") or "").strip()
             if severity:
                 block.append(f"Severity: {severity}")
-            if current_section:
-                block.append(f"Section: {current_section}")
         elif current_id is not None:
             block.append(line)
     flush()

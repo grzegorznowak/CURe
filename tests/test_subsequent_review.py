@@ -633,6 +633,36 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertIn("CURE-99", {item.finding_id for item in degraded.findings})
         self.assertTrue(any(status.get("finding_id") == "CURE-100" for status in degraded.artifact_statuses))
 
+    def test_heading_style_prior_findings_inherit_surrounding_section(self) -> None:
+        ledger = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="fixture:heading-section",
+                        source_type="fixture",
+                        provenance={},
+                        body="""## Technical Assessment
+
+### A-01: Cache issue
+Severity: Medium
+Evidence: cache.py:10
+
+### A-02: Explicit section wins
+Severity: Low
+Section: Reliability
+Evidence: worker.py:20
+""",
+                        reviewed_head="sha-section",
+                    ),
+                ),
+            )
+        )
+
+        by_id = {item.finding_id: item for item in ledger.findings}
+        self.assertEqual(by_id["A-01"].section, "Technical Assessment")
+        self.assertEqual(by_id["A-02"].section, "Reliability")
+
     def test_generated_review_parser_degrades_malformed_sibling_and_ignores_clean_none(self) -> None:
         mixed = extract_prior_findings(
             corpus=PriorReviewCorpus(
@@ -797,6 +827,8 @@ class SubsequentReviewTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("ambiguous_supersedes", ledger.status_reasons)
         payload = ledger.to_json()
         all_local = [item for group in payload["groups"] for item in group["local_findings"]]
         duplicate_origins = [item["origin_key"] for item in all_local if item["finding_id"] == "CURE-01"]
@@ -817,6 +849,30 @@ class SubsequentReviewTests(unittest.TestCase):
                 for group in payload["groups"]
             )
         )
+
+    def test_reconciliation_degrades_missing_supersedes_target(self) -> None:
+        finding = PriorFindingCandidate(
+            finding_id="CURE-02",
+            severity="medium",
+            section="Technical Assessment",
+            title="Missing superseded target",
+            source_evidence_snippets=("app.py:1",),
+            reviewed_head="sha-session-a",
+            provenance=FindingProvenance(
+                corpus_entry_id="session-a",
+                source_type="session_review",
+                artifact_path="/tmp/session-a/review.md",
+                reviewed_head="sha-session-a",
+            ),
+            supersedes=("CURE-01",),
+        )
+
+        ledger = reconcile_findings(findings=(finding,))
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("supersedes_target_not_found", ledger.status_reasons)
+        edges = [edge for group in ledger.to_json()["groups"] for edge in group["supersedes_edges"]]
+        self.assertTrue(any(edge.get("target_display_id") == "CURE-01" and edge.get("status") == "target_not_found" for edge in edges))
 
     def test_reconciliation_preserves_same_entry_duplicate_finding_ids(self) -> None:
         def candidate(title: str) -> PriorFindingCandidate:
@@ -850,6 +906,55 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual({item["finding_id"] for item in all_local}, {"CURE-01"})
         self.assertEqual(len({item["origin_key"] for item in all_local}), 2)
         self.assertTrue(all(item["origin_key"].startswith("session-a:CURE-01") for item in all_local))
+
+    def test_degraded_discussion_status_propagates_through_intake_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            comment_body = (
+                "CURe Review\n"
+                "### CURE-79: Degraded discussion finding\n"
+                "Severity: medium\n"
+                "Section: Reliability\n"
+                "Evidence: app/jobs.py:9 retries missing\n"
+            )
+
+            def fetch(path: str) -> Any:
+                if path.endswith("/issues/9999/comments"):
+                    return {
+                        "items": [
+                            {
+                                "id": 801,
+                                "html_url": "comment-url",
+                                "user": {"login": "cure-bot"},
+                                "body": comment_body,
+                                "created_at": "2026-01-04T00:00:00Z",
+                            }
+                        ],
+                        "complete": False,
+                        "status": "discussion_incomplete",
+                    }
+                return []
+
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[],
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
+                fetch_json=fetch,
+            )
+            subsequent = root / "work" / "subsequent"
+            corpus = json.loads((subsequent / "prior_review_corpus.json").read_text(encoding="utf-8"))
+            findings = json.loads((subsequent / "prior_findings.json").read_text(encoding="utf-8"))
+            reconciled = json.loads((subsequent / "reconciled_findings.json").read_text(encoding="utf-8"))
+            manifest = json.loads((subsequent / "run_manifest.json").read_text(encoding="utf-8"))
+
+        for artifact in (corpus, findings, reconciled):
+            self.assertEqual(artifact["status"], "degraded")
+            self.assertIn("discussion_incomplete", artifact["status_reasons"])
+        self.assertEqual(manifest["modules"]["prior_review_corpus_builder"]["status"], "degraded")
+        self.assertEqual(manifest["modules"]["prior_finding_extractor"]["status"], "degraded")
+        self.assertEqual(manifest["modules"]["finding_reconciler"]["status"], "degraded")
+        self.assertIn("discussion_incomplete", manifest["modules"]["finding_reconciler"]["reasons"])
 
     def test_github_list_slurp_failure_public_fallback_preserves_cause_detail(self) -> None:
         slurp_error = rf.ReviewflowSubprocessError(
@@ -1273,6 +1378,14 @@ class SubsequentReviewTests(unittest.TestCase):
             self.assertTrue((subsequent / "prior_findings.json").is_file())
             self.assertTrue((subsequent / "reconciled_findings.json").is_file())
             manifest = json.loads((subsequent / "run_manifest.json").read_text(encoding="utf-8"))
+            for artifact_name in (
+                "pr_discussion.json",
+                "prior_review_corpus.json",
+                "prior_findings.json",
+                "reconciled_findings.json",
+            ):
+                payload = json.loads((subsequent / artifact_name).read_text(encoding="utf-8"))
+                self.assertEqual(payload["schema_version"], 1, artifact_name)
             self.assertEqual(manifest["evidence_policy"], "untrusted")
             self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "disabled")
             self.assertIn("prior completed sessions: 1", summaries[0])

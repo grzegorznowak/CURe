@@ -76,7 +76,11 @@ def _indexed_origin_items(findings: list[PriorFindingCandidate]) -> tuple[list[t
     return indexed, tuple(sorted(duplicate_base_keys))
 
 
-def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFindingCandidate, ...]) -> ReconciliationLedger:
+def reconcile_findings(
+    *,
+    findings: list[PriorFindingCandidate] | tuple[PriorFindingCandidate, ...],
+    upstream_status_reasons: tuple[str, ...] = (),
+) -> ReconciliationLedger:
     ordered_findings = list(findings)
     indexed_findings, duplicate_origin_keys = _indexed_origin_items(ordered_findings)
     origin_keys = [key for key, _finding in indexed_findings]
@@ -128,6 +132,7 @@ def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFin
                         "target_origin_key": None,
                         "target_display_id": superseded_id,
                         "status": "target_not_found",
+                        "reason": "supersedes_target_not_found",
                     }
                 )
 
@@ -163,6 +168,13 @@ def reconcile_findings(*, findings: list[PriorFindingCandidate] | tuple[PriorFin
                 ambiguous_supersedes=tuple(ambiguity_group.get(root, ())),
             )
         )
-    status_reasons = ("duplicate_origin_keys",) if duplicate_origin_keys else ()
-    status = ModuleStatus.DEGRADED if status_reasons else ModuleStatus.SUCCESS
-    return ReconciliationLedger(status=status, groups=tuple(groups), status_reasons=status_reasons)
+    status_reasons = list(upstream_status_reasons)
+    if duplicate_origin_keys:
+        status_reasons.append("duplicate_origin_keys")
+    if ambiguous_supersedes:
+        status_reasons.append("ambiguous_supersedes")
+    if any(edge.get("status") == "target_not_found" for edge in supersedes_edges):
+        status_reasons.append("supersedes_target_not_found")
+    deduped_reasons = tuple(dict.fromkeys(status_reasons))
+    status = ModuleStatus.DEGRADED if deduped_reasons else ModuleStatus.SUCCESS
+    return ReconciliationLedger(status=status, groups=tuple(groups), status_reasons=deduped_reasons)

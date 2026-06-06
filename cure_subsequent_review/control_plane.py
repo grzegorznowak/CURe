@@ -164,7 +164,10 @@ def run_subsequent_review_intake(
         _record(records, SubsequentReviewModule.PRIOR_FINDING_EXTRACTOR, ModuleStatus.DISABLED)
 
     if finding_ledger is not None and config.module_enabled(SubsequentReviewModule.FINDING_RECONCILER):
-        reconciliation = reconcile_findings(findings=finding_ledger.findings)
+        reconciliation = reconcile_findings(
+            findings=finding_ledger.findings,
+            upstream_status_reasons=finding_ledger.status_reasons,
+        )
         reconciliation_path = artifact_dir / "reconciled_findings.json"
         write_json(reconciliation_path, reconciliation.to_json())
         _record(

@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
+SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION = 1
+
+
 class EvidencePolicy(str, Enum):
     TRUSTED = "trusted"
     UNTRUSTED = "untrusted"
@@ -128,6 +131,7 @@ class DiscussionArtifact:
 
     def to_json(self) -> dict[str, Any]:
         return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "events": [item.to_json() for item in self.events],
@@ -166,6 +170,7 @@ class PriorReviewCorpus:
 
     def to_json(self) -> dict[str, Any]:
         return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "entries": [item.to_json() for item in self.entries],
@@ -226,6 +231,7 @@ class PriorFindingLedger:
 
     def to_json(self) -> dict[str, Any]:
         return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "artifact_statuses": list(self.artifact_statuses),
@@ -267,6 +273,7 @@ class ReconciliationLedger:
 
     def to_json(self) -> dict[str, Any]:
         return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "groups": [item.to_json() for item in self.groups],
