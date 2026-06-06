@@ -88,6 +88,17 @@ def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[lis
     return [], PaginationMarker(source, False, status="discussion_unavailable", endpoint=path), ("discussion_unavailable",)
 
 
+def _reviewed_head(payload: dict[str, Any]) -> str | None:
+    for key in ("commit_id", "commitId", "head_sha", "headSha", "sha"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    raw_commit = payload.get("commit")
+    commit = raw_commit if isinstance(raw_commit, dict) else {}
+    value = str(commit.get("sha") or "").strip()
+    return value or None
+
+
 def _thread_state(payload: dict[str, Any]) -> tuple[str, str | None]:
     raw = payload.get("thread_state") or payload.get("threadState")
     if raw is None and isinstance(payload.get("thread"), dict):
@@ -151,6 +162,7 @@ def collect_pr_discussion(*, pr: Any, fetch_json: JsonFetcher) -> DiscussionArti
                         url=str(item.get("html_url") or item.get("url") or "") or None,
                         created_at=str(item.get("submitted_at") or item.get("created_at") or "") or None,
                         review_state=str(item.get("state") or "") or None,
+                        reviewed_head=_reviewed_head(item),
                     )
                 )
             else:

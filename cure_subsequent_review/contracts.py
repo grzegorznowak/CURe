@@ -105,6 +105,7 @@ class DiscussionEvent:
     path: str | None = None
     line: int | None = None
     review_state: str | None = None
+    reviewed_head: str | None = None
     thread_state: str = "unknown"
 
     def to_json(self) -> dict[str, Any]:
@@ -118,6 +119,7 @@ class DiscussionEvent:
             "path": self.path,
             "line": self.line,
             "review_state": self.review_state,
+            "reviewed_head": self.reviewed_head,
             "thread_state": self.thread_state,
         }
 

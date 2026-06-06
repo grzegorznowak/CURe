@@ -862,13 +862,19 @@ def _resolve_session_review_md_candidate(*, session_dir: Path, meta: dict[str, A
     raw_review_md = str(raw_value).strip() if raw_value else ""
     display_raw = raw_review_md or str(session_dir / "review.md")
     raw_path = Path(raw_review_md) if raw_review_md else (session_dir / "review.md")
-    candidate = (session_dir / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+    try:
+        candidate = (session_dir / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+        boundary = session_dir.resolve()
+    except Exception:
+        return session_dir / "review.md", "review_md_unresolvable", display_raw
 
-    boundary = session_dir.resolve()
     if not _is_relative_to_path(candidate, boundary):
-        return (session_dir / "review.md").resolve(), "review_md_outside_session", display_raw
-    if not candidate.is_file():
-        return candidate, "review_md_missing", display_raw
+        return session_dir / "review.md", "review_md_outside_session", display_raw
+    try:
+        if not candidate.is_file():
+            return candidate, "review_md_missing", display_raw
+    except Exception:
+        return candidate, "review_md_unresolvable", display_raw
     return candidate, None, display_raw
 
 
@@ -1067,6 +1073,12 @@ def scan_completed_sessions_for_pr(
         if not _is_relative_to_path(resolved_entry, sandbox_boundary):
             continue
         meta_path = entry / "meta.json"
+        try:
+            resolved_meta_path = meta_path.resolve()
+        except Exception:
+            continue
+        if not _is_relative_to_path(resolved_meta_path, resolved_entry):
+            continue
         meta = _load_session_meta(meta_path)
         if not meta or str(meta.get("status") or "") != "done" or (not _meta_matches_pr(meta=meta, pr=pr)):
             continue

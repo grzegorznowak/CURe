@@ -288,6 +288,7 @@ class SubsequentReviewTests(unittest.TestCase):
                         "user": {"login": "cure-bot"},
                         "body": review_body,
                         "state": "COMMENTED",
+                        "commit_id": "review-head-sha-901",
                         "submitted_at": "2026-01-05T00:00:00Z",
                     }
                 ]
@@ -307,6 +308,9 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
 
         discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        review_event = next(event for event in discussion.events if event.kind == "review")
+        self.assertEqual(review_event.reviewed_head, "review-head-sha-901")
+
         corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion)
         self.assertEqual(corpus.status, ModuleStatus.SUCCESS)
         self.assertNotIn("no_prior_reviews", corpus.status_reasons)
@@ -319,6 +323,8 @@ class SubsequentReviewTests(unittest.TestCase):
         self.assertEqual(entry.provenance["url"], "review-url")
         self.assertEqual(entry.provenance["author"], "cure-bot")
         self.assertEqual(entry.provenance["state"], "COMMENTED")
+        self.assertEqual(entry.reviewed_head, "review-head-sha-901")
+        self.assertEqual(entry.provenance["reviewed_head"], "review-head-sha-901")
 
         findings = extract_prior_findings(corpus=corpus)
         self.assertEqual(findings.status, ModuleStatus.SUCCESS)
@@ -327,6 +333,8 @@ class SubsequentReviewTests(unittest.TestCase):
         pull_review_finding = next(item for item in findings.findings if item.finding_id == "CURE-77")
         self.assertEqual(pull_review_finding.provenance.source_type, "pr_review")
         self.assertEqual(pull_review_finding.provenance.comment_url, "review-url")
+        self.assertEqual(pull_review_finding.reviewed_head, "review-head-sha-901")
+        self.assertEqual(pull_review_finding.provenance.reviewed_head, "review-head-sha-901")
 
     def test_trusted_issue_comment_remote_only_corpus_status_is_success(self) -> None:
         pr = PR()
@@ -481,6 +489,90 @@ class SubsequentReviewTests(unittest.TestCase):
             self.assertEqual(ignored["missing-session"].get("reason"), "review_md_missing")
             self.assertEqual(ignored["outside-session"].get("review_md_path"), str(outside))
 
+    def test_completed_session_review_md_resolve_failures_are_degraded_corpus_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_root = root / "sandboxes"
+            session = sandbox_root / "loop-session"
+            session.mkdir(parents=True)
+            loop = session / "review-loop.md"
+            loop.symlink_to(loop)
+            (session / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "loop-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "example",
+                        "repo": "demo",
+                        "number": 9999,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "completed_at": "2026-01-02T00:00:00Z",
+                        "paths": {"review_md": "review-loop.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            historical = rf.scan_completed_sessions_for_pr(sandbox_root=sandbox_root, pr=PR())
+            corpus_candidates = rf.scan_completed_sessions_for_pr(
+                sandbox_root=sandbox_root,
+                pr=PR(),
+                include_unavailable=True,
+            )
+
+            self.assertEqual(historical, [])
+            self.assertEqual([item.session_id for item in corpus_candidates], ["loop-session"])
+            self.assertEqual(getattr(corpus_candidates[0], "review_artifact_reason", None), "review_md_unresolvable")
+            corpus = build_prior_review_corpus(pr=PR(), sessions=corpus_candidates)
+            self.assertEqual(corpus.status, ModuleStatus.DEGRADED)
+            ignored = {item.get("session_id"): item for item in corpus.ignored_pr_comments}
+            self.assertEqual(ignored["loop-session"].get("reason"), "review_md_unresolvable")
+
+    def test_completed_session_scan_rejects_meta_json_symlink_outside_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_root = root / "sandboxes"
+            sandbox_root.mkdir()
+            session = sandbox_root / "meta-link-session"
+            session.mkdir()
+            outside_review = root / "outside-review.md"
+            outside_review.write_text(
+                "### CURE-META: outside metadata should not be read\n"
+                "Severity: high\n"
+                "Section: Security\n"
+                "Evidence: outside.py:1\n",
+                encoding="utf-8",
+            )
+            outside_meta = root / "outside-meta.json"
+            outside_meta.write_text(
+                json.dumps(
+                    {
+                        "session_id": "meta-link-session",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "example",
+                        "repo": "demo",
+                        "number": 9999,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "completed_at": "2026-01-02T00:00:00Z",
+                        "paths": {"review_md": str(outside_review)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session / "meta.json").symlink_to(outside_meta)
+
+            historical = rf.scan_completed_sessions_for_pr(sandbox_root=sandbox_root, pr=PR())
+            corpus_candidates = rf.scan_completed_sessions_for_pr(
+                sandbox_root=sandbox_root,
+                pr=PR(),
+                include_unavailable=True,
+            )
+
+            self.assertEqual(historical, [])
+            self.assertEqual(corpus_candidates, [])
+
     def test_completed_session_scan_rejects_symlink_session_dirs_outside_sandbox(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -631,7 +723,13 @@ class SubsequentReviewTests(unittest.TestCase):
         )
         self.assertEqual(degraded.status, ModuleStatus.DEGRADED)
         self.assertIn("CURE-99", {item.finding_id for item in degraded.findings})
-        self.assertTrue(any(status.get("finding_id") == "CURE-100" for status in degraded.artifact_statuses))
+        malformed_status = next(status for status in degraded.artifact_statuses if status.get("finding_id") == "CURE-100")
+        self.assertEqual(malformed_status.get("source_type"), "fixture")
+        self.assertEqual(malformed_status.get("reviewed_head"), "sha-degraded")
+        self.assertIn(
+            "tests/fixtures/subsequent_review/simulation_raw.json:2 missing severity",
+            malformed_status.get("source_evidence_snippets", []),
+        )
 
     def test_heading_style_prior_findings_inherit_surrounding_section(self) -> None:
         ledger = extract_prior_findings(
@@ -713,6 +811,43 @@ Evidence: worker.py:20
                 for status in mixed.artifact_statuses
             )
         )
+
+        missing_sources = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="real-run:missing-sources",
+                        source_type="session_review",
+                        provenance={},
+                        body="""## Technical Assessment
+**Verdict**: REQUEST CHANGES
+
+### In Scope Issues
+- Generated issue with severity but no sources.
+
+  <details open>
+  <summary><b>High</b> severity · <b>Medium</b> likelihood</summary>
+
+  **Why:** This issue has no source references.
+
+  </details>
+""",
+                        reviewed_head="sha-missing-sources",
+                        artifact_path=Path("/tmp/prior/missing-sources.md"),
+                    ),
+                ),
+            )
+        )
+        self.assertEqual(missing_sources.status, ModuleStatus.DEGRADED)
+        self.assertEqual(missing_sources.findings, ())
+        missing_source_status = next(
+            status for status in missing_sources.artifact_statuses if status.get("reason") == "missing_generated_sources"
+        )
+        self.assertEqual(missing_source_status.get("entry_id"), "real-run:missing-sources")
+        self.assertEqual(missing_source_status.get("reviewed_head"), "sha-missing-sources")
+        self.assertEqual(missing_source_status.get("artifact_path"), "/tmp/prior/missing-sources.md")
+        self.assertIn("Generated issue with severity", str(missing_source_status.get("title")))
 
         clean_none = extract_prior_findings(
             corpus=PriorReviewCorpus(

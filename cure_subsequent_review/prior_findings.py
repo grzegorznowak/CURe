@@ -43,6 +43,16 @@ def _provenance(entry: PriorReviewCorpusEntry) -> FindingProvenance:
     )
 
 
+def _status_provenance(entry: PriorReviewCorpusEntry) -> dict[str, Any]:
+    return {
+        "entry_id": entry.entry_id,
+        "source_type": entry.source_type,
+        "artifact_path": str(entry.artifact_path) if entry.artifact_path is not None else None,
+        "comment_url": str(entry.provenance.get("url") or "") or None,
+        "reviewed_head": entry.reviewed_head,
+    }
+
+
 def _candidate_from_block(
     *,
     entry: PriorReviewCorpusEntry,
@@ -70,7 +80,15 @@ def _candidate_from_block(
     severity = " ".join(fields.get("severity", [])).strip().lower()
     section = " ".join(fields.get("section", [])).strip() or (default_section or "unknown")
     if not severity:
-        return None, {"entry_id": entry.entry_id, "finding_id": finding_id, "status": "parse_degraded", "reason": "missing_severity"}
+        return None, {
+            **_status_provenance(entry),
+            "finding_id": finding_id,
+            "status": "parse_degraded",
+            "reason": "missing_severity",
+            "section": section,
+            "title": title.strip() or finding_id,
+            "source_evidence_snippets": list(dict.fromkeys(evidence)),
+        }
     clean_title = title.strip() or finding_id
     hints = {
         "title_hash": _stable_hint(clean_title),
@@ -116,11 +134,9 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
 
     def status_payload(*, title: str, reason: str, evidence: list[str]) -> dict[str, Any]:
         return {
-            "entry_id": entry.entry_id,
+            **_status_provenance(entry),
             "status": "parse_degraded",
             "reason": reason,
-            "source_type": entry.source_type,
-            "artifact_path": str(entry.artifact_path) if entry.artifact_path is not None else None,
             "title": title,
             "section": current_section,
             "source_evidence_snippets": list(dict.fromkeys(evidence)),
@@ -137,7 +153,7 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             if severity_match and not severity:
                 severity = severity_match.group("severity").strip().lower()
             evidence.extend(_source_refs(line))
-        if severity:
+        if severity and evidence:
             index = len(findings) + 1
             block = [f"Severity: {severity}", f"Section: {current_section}"]
             block.extend(f"Evidence: {item}" for item in dict.fromkeys(evidence))
@@ -149,6 +165,8 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             )
             if candidate is not None:
                 findings.append(candidate)
+        elif severity:
+            statuses.append(status_payload(title=current_title, reason="missing_generated_sources", evidence=evidence))
         else:
             statuses.append(status_payload(title=current_title, reason="missing_generated_severity", evidence=evidence))
         current_title = ""
@@ -187,11 +205,9 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
     if not findings and not statuses and not saw_clean_none and ("### In Scope Issues" in entry.body or "**Verdict**: REQUEST CHANGES" in entry.body):
         statuses.append(
             {
-                "entry_id": entry.entry_id,
+                **_status_provenance(entry),
                 "status": "parse_degraded",
                 "reason": "generated_review_without_parseable_findings",
-                "source_type": entry.source_type,
-                "artifact_path": str(entry.artifact_path) if entry.artifact_path is not None else None,
             }
         )
     return findings, statuses
@@ -257,7 +273,13 @@ def _extract_from_entry(entry: PriorReviewCorpusEntry) -> tuple[list[PriorFindin
         findings.extend(generated_findings)
         statuses.extend(generated_statuses)
     if not findings and not statuses and _INLINE_ID_RE.search(entry.body):
-        statuses.append({"entry_id": entry.entry_id, "status": "parse_degraded", "reason": "finding_id_without_parseable_heading"})
+        statuses.append(
+            {
+                **_status_provenance(entry),
+                "status": "parse_degraded",
+                "reason": "finding_id_without_parseable_heading",
+            }
+        )
     return findings, statuses
 
 

@@ -119,13 +119,14 @@ def build_prior_review_corpus(
             }
             if event.kind == "review":
                 provenance["state"] = event.review_state
+                provenance["reviewed_head"] = event.reviewed_head
             if _looks_cure_authored(author=event.author, body=event.body):
                 entries.append(
                     PriorReviewCorpusEntry(
                         entry_id=f"{source_type}:{event.event_id}",
                         source_type=source_type,
                         body=event.body,
-                        reviewed_head=None,
+                        reviewed_head=event.reviewed_head,
                         provenance=provenance,
                     )
                 )
