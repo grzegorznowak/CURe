@@ -165,8 +165,8 @@ class SubsequentReviewTests(unittest.TestCase):
             (
                 "missing_thread_state_metadata",
                 {"id": 14, "user": {"login": "human"}, "body": "CURe review", "path": "a.py", "line": 1},
-                True,
-                "remote_probe_degraded",
+                False,
+                "no_prior_review_signals",
             ),
             (
                 "cure_looking_review_comment_thread_excluded_from_auto_markers",
@@ -734,6 +734,35 @@ class SubsequentReviewTests(unittest.TestCase):
             malformed_status.get("source_evidence_snippets", []),
         )
 
+    def test_heading_style_prior_findings_missing_evidence_degrades_artifact(self) -> None:
+        ledger = extract_prior_findings(
+            corpus=PriorReviewCorpus(
+                status=ModuleStatus.SUCCESS,
+                entries=(
+                    PriorReviewCorpusEntry(
+                        entry_id="fixture:missing-evidence",
+                        source_type="fixture",
+                        provenance={},
+                        body="""## Security
+
+### A-01: Missing evidence
+Severity: Medium
+Section: Security
+""",
+                        reviewed_head="sha-missing-evidence",
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("parse_degraded", ledger.status_reasons)
+        self.assertEqual(ledger.findings, ())
+        status = ledger.artifact_statuses[0]
+        self.assertEqual(status.get("finding_id"), "A-01")
+        self.assertEqual(status.get("reason"), "missing_evidence")
+        self.assertEqual(status.get("source_evidence_snippets"), [])
+
     def test_heading_style_prior_findings_inherit_surrounding_section(self) -> None:
         ledger = extract_prior_findings(
             corpus=PriorReviewCorpus(
@@ -987,6 +1016,46 @@ Evidence: worker.py:20
                 for group in payload["groups"]
             )
         )
+
+    def test_reconciliation_prefers_superseding_canonical_and_serializes_local_details(self) -> None:
+        older = PriorFindingCandidate(
+            finding_id="A-01",
+            severity="high",
+            section="Security",
+            title="Zulu vulnerability",
+            source_evidence_snippets=("app/auth.py:42",),
+            reviewed_head="sha-older",
+            provenance=FindingProvenance(
+                corpus_entry_id="session-a",
+                source_type="session_review",
+                artifact_path="/tmp/session-a/review.md",
+                reviewed_head="sha-older",
+            ),
+        )
+        newer = PriorFindingCandidate(
+            finding_id="A-02",
+            severity="medium",
+            section="Reliability",
+            title="Alpha vulnerability",
+            source_evidence_snippets=("app/auth.py:99",),
+            reviewed_head="sha-newer",
+            provenance=FindingProvenance(
+                corpus_entry_id="session-b",
+                source_type="session_review",
+                artifact_path="/tmp/session-b/review.md",
+                reviewed_head="sha-newer",
+            ),
+            supersedes=("A-01",),
+        )
+
+        ledger = reconcile_findings(findings=(older, newer))
+
+        self.assertEqual(ledger.groups[0].canonical_id, "A-02")
+        local_by_id = {item["finding_id"]: item for item in ledger.to_json()["groups"][0]["local_findings"]}
+        self.assertEqual(local_by_id["A-02"]["severity"], "medium")
+        self.assertEqual(local_by_id["A-02"]["section"], "Reliability")
+        self.assertEqual(local_by_id["A-02"]["title"], "Alpha vulnerability")
+        self.assertEqual(local_by_id["A-02"]["source_evidence_snippets"], ["app/auth.py:99"])
 
     def test_reconciliation_degrades_missing_supersedes_target(self) -> None:
         finding = PriorFindingCandidate(

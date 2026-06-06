@@ -89,6 +89,16 @@ def _candidate_from_block(
             "title": title.strip() or finding_id,
             "source_evidence_snippets": list(dict.fromkeys(evidence)),
         }
+    if not evidence:
+        return None, {
+            **_status_provenance(entry),
+            "finding_id": finding_id,
+            "status": "parse_degraded",
+            "reason": "missing_evidence",
+            "section": section,
+            "title": title.strip() or finding_id,
+            "source_evidence_snippets": [],
+        }
     clean_title = title.strip() or finding_id
     hints = {
         "title_hash": _stable_hint(clean_title),

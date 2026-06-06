@@ -85,6 +85,13 @@ def _is_positive_remote_marker(event: Any) -> bool:
     return _looks_cure_authored(author=event.author, body=event.body)
 
 
+_NON_ENABLING_REMOTE_METADATA_REASONS = {"thread_state_unavailable"}
+
+
+def _degraded_remote_probe_requires_intake(degraded_reasons: tuple[str, ...]) -> bool:
+    return not degraded_reasons or any(reason not in _NON_ENABLING_REMOTE_METADATA_REASONS for reason in degraded_reasons)
+
+
 def decide_subsequent_review(
     *,
     pr: Any,
@@ -156,14 +163,24 @@ def decide_subsequent_review(
             signal_counts=signal_counts,
             degraded_reasons=_ordered_unique(degraded_reasons),
         )
+    ordered_degraded_reasons = _ordered_unique(degraded_reasons)
     if discussion.status is ModuleStatus.DEGRADED or degraded_reasons:
+        if _degraded_remote_probe_requires_intake(ordered_degraded_reasons):
+            return SubsequentReviewDecision(
+                mode=command_mode,
+                enabled=True,
+                evidence_policy=evidence_policy,
+                reasons=("remote_probe_degraded",),
+                signal_counts=signal_counts,
+                degraded_reasons=ordered_degraded_reasons or ("remote_probe_degraded",),
+            )
         return SubsequentReviewDecision(
             mode=command_mode,
-            enabled=True,
+            enabled=False,
             evidence_policy=evidence_policy,
-            reasons=("remote_probe_degraded",),
+            reasons=("no_prior_review_signals",),
             signal_counts=signal_counts,
-            degraded_reasons=_ordered_unique(degraded_reasons) or ("remote_probe_degraded",),
+            degraded_reasons=ordered_degraded_reasons,
         )
     return SubsequentReviewDecision(
         mode=command_mode,

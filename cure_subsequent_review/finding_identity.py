@@ -54,6 +54,10 @@ def _local_finding_payload(finding: PriorFindingCandidate, *, origin_key: str) -
     return {
         "origin_key": origin_key,
         "finding_id": finding.finding_id,
+        "severity": finding.severity,
+        "section": finding.section,
+        "title": finding.title,
+        "source_evidence_snippets": list(finding.source_evidence_snippets),
         "corpus_entry_id": finding.provenance.corpus_entry_id,
         "source_type": finding.provenance.source_type,
         "artifact_path": finding.provenance.artifact_path,
@@ -147,14 +151,22 @@ def reconcile_findings(
     for marker in ambiguous_supersedes:
         ambiguity_group[dsu.find(str(marker["source_origin_key"]))].append(marker)
 
+    superseded_targets_by_root: dict[str, set[str]] = defaultdict(set)
+    for edge in supersedes_edges:
+        edge_target_key = edge.get("target_origin_key")
+        if edge_target_key is not None:
+            superseded_targets_by_root[dsu.find(str(edge["source_origin_key"]))].add(str(edge_target_key))
+
     groups: list[ReconciledFindingGroup] = []
     for index, (_root, grouped) in enumerate(sorted(grouped_by_root.items()), start=1):
         grouped.sort(key=lambda item: (_normalized_title(item[1].title), item[1].finding_id, item[0]))
-        canonical = grouped[-1][1]
+        root = dsu.find(grouped[0][0])
+        superseded_targets = superseded_targets_by_root.get(root, set())
+        canonical_candidates = [item for item in grouped if item[0] not in superseded_targets] or grouped
+        canonical = canonical_candidates[-1][1]
         supersedes: list[str] = []
         for _origin_key_value, finding in grouped:
             supersedes.extend(finding.supersedes)
-        root = dsu.find(grouped[0][0])
         groups.append(
             ReconciledFindingGroup(
                 group_id=f"G-{index:04d}",
