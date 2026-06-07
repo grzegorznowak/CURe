@@ -60,9 +60,11 @@ def _candidate_from_block(
     title: str,
     block_lines: list[str],
     default_section: str | None = None,
+    allow_extensionless_root_paths: bool = False,
 ) -> tuple[PriorFindingCandidate | None, dict[str, Any] | None]:
     fields: dict[str, list[str]] = {}
     evidence: list[str] = []
+    invalid_evidence: list[str] = []
     supersedes: list[str] = []
     for line in block_lines:
         match = _FIELD_RE.match(line.strip())
@@ -71,11 +73,14 @@ def _candidate_from_block(
             value = match.group("value").strip()
             fields.setdefault(key, []).append(value)
             if key in {"evidence", "source"} and value:
-                evidence.append(value)
+                if _source_refs(value, allow_extensionless_root_paths=allow_extensionless_root_paths):
+                    evidence.append(value)
+                else:
+                    invalid_evidence.append(value)
             if key == "supersedes":
                 supersedes.extend(item.group("id").upper() for item in _INLINE_ID_RE.finditer(value))
             continue
-        if _source_refs(line):
+        if _source_refs(line, allow_extensionless_root_paths=allow_extensionless_root_paths):
             evidence.append(line.strip())
     severity = " ".join(fields.get("severity", [])).strip().lower()
     section = " ".join(fields.get("section", [])).strip() or (default_section or "unknown")
@@ -88,17 +93,21 @@ def _candidate_from_block(
             "section": section,
             "title": title.strip() or finding_id,
             "source_evidence_snippets": list(dict.fromkeys(evidence)),
+            "invalid_evidence_snippets": list(dict.fromkeys(invalid_evidence)),
         }
     if not evidence:
-        return None, {
+        status = {
             **_status_provenance(entry),
             "finding_id": finding_id,
             "status": "parse_degraded",
-            "reason": "missing_evidence",
+            "reason": "missing_source_ref" if invalid_evidence else "missing_evidence",
             "section": section,
             "title": title.strip() or finding_id,
             "source_evidence_snippets": [],
         }
+        if invalid_evidence:
+            status["invalid_evidence_snippets"] = list(dict.fromkeys(invalid_evidence))
+        return None, status
     clean_title = title.strip() or finding_id
     hints = {
         "title_hash": _stable_hint(clean_title),
@@ -185,6 +194,7 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
                 finding_id=f"CURE-{index:03d}",
                 title=current_title,
                 block_lines=block,
+                allow_extensionless_root_paths=True,
             )
             if candidate is not None:
                 findings.append(candidate)

@@ -59,7 +59,19 @@ def _user_login(payload: dict[str, Any]) -> str | None:
 
 def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[list[dict[str, Any]], PaginationMarker, tuple[str, ...]]:
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)], PaginationMarker(source, True, endpoint=path, fetch="gh_api_list"), ()
+        items = [item for item in payload if isinstance(item, dict)]
+        if len(items) != len(payload):
+            marker = PaginationMarker(
+                source,
+                False,
+                status="discussion_payload_malformed",
+                detail="list payload included non-object items",
+                endpoint=path,
+                fetch="gh_api_list",
+                cause="payload_shape",
+            )
+            return items, marker, ("discussion_payload_malformed",)
+        return items, PaginationMarker(source, True, endpoint=path, fetch="gh_api_list"), ()
     if isinstance(payload, dict):
         raw_items: Any = None
         if isinstance(payload.get("items"), list):
@@ -80,8 +92,16 @@ def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[lis
             )
             return [], marker, ("discussion_payload_malformed",)
         items = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
-        reasons: tuple[str, ...] = () if complete and status == "complete" else (status,)
+        dropped_items = bool(isinstance(raw_items, list) and len(items) != len(raw_items))
+        if dropped_items and complete and status == "complete":
+            complete = False
+            status = "discussion_payload_malformed"
+        reasons = [status] if not (complete and status == "complete") else []
+        if dropped_items and "discussion_payload_malformed" not in reasons:
+            reasons.append("discussion_payload_malformed")
         detail = str(payload.get("detail") or "") or None
+        if dropped_items and detail is None:
+            detail = "payload included non-object items"
         command = payload.get("command", ())
         command_parts = tuple(str(part) for part in command) if isinstance(command, list | tuple) else ()
         exit_code_raw = payload.get("exit_code")
@@ -93,13 +113,13 @@ def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[lis
             detail=detail,
             endpoint=str(payload.get("endpoint") or path),
             fetch=str(payload.get("fetch") or "gh_api_list"),
-            cause=str(payload.get("cause") or "") or None,
+            cause="payload_shape" if dropped_items and not payload.get("cause") else str(payload.get("cause") or "") or None,
             exit_code=exit_code,
             stderr=str(payload.get("stderr") or "") or None,
             stdout=str(payload.get("stdout") or "") or None,
             command=command_parts,
         )
-        return items, marker, reasons
+        return items, marker, tuple(reasons)
     return [], PaginationMarker(source, False, status="discussion_unavailable", endpoint=path, fetch="gh_api_list"), ("discussion_unavailable",)
 
 

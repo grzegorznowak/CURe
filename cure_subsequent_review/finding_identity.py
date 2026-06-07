@@ -131,15 +131,31 @@ def reconcile_findings(
                     }
                 )
             elif len(targets) > 1:
-                ambiguous_supersedes.append(
-                    {
-                        "source_origin_key": source_key,
-                        "source_display_id": finding.finding_id,
-                        "target_display_id": superseded_id,
-                        "target_origin_keys": [target_key for target_key, _target in targets],
-                        "reason": "ambiguous_local_display_id",
-                    }
-                )
+                targets_by_root: dict[str, list[str]] = defaultdict(list)
+                for target_key, _target in targets:
+                    targets_by_root[dsu.find(target_key)].append(target_key)
+                if len(targets_by_root) == 1:
+                    target_root, target_origin_keys = next(iter(targets_by_root.items()))
+                    dsu.union(source_key, target_root)
+                    supersedes_edges.append(
+                        {
+                            "source_origin_key": source_key,
+                            "source_display_id": finding.finding_id,
+                            "target_origin_key": target_root,
+                            "target_origin_keys": target_origin_keys,
+                            "target_display_id": superseded_id,
+                        }
+                    )
+                else:
+                    ambiguous_supersedes.append(
+                        {
+                            "source_origin_key": source_key,
+                            "source_display_id": finding.finding_id,
+                            "target_display_id": superseded_id,
+                            "target_origin_keys": [target_key for target_key, _target in targets],
+                            "reason": "ambiguous_local_display_id",
+                        }
+                    )
             else:
                 supersedes_edges.append(
                     {
@@ -165,8 +181,11 @@ def reconcile_findings(
 
     superseded_targets_by_root: dict[str, set[str]] = defaultdict(set)
     for edge in supersedes_edges:
-        edge_target_key = edge.get("target_origin_key")
-        if edge_target_key is not None:
+        edge_target_keys = edge.get("target_origin_keys")
+        if not isinstance(edge_target_keys, list):
+            edge_target_key = edge.get("target_origin_key")
+            edge_target_keys = [] if edge_target_key is None else [str(edge_target_key)]
+        for edge_target_key in edge_target_keys:
             superseded_targets_by_root[dsu.find(str(edge["source_origin_key"]))].add(str(edge_target_key))
 
     groups: list[ReconciledFindingGroup] = []

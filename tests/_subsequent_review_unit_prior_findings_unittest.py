@@ -22,12 +22,17 @@ class SubsequentReviewPriorFindingsTests(SubsequentReviewTestCase):
                 )
             corpus = build_prior_review_corpus(pr=PR(), sessions=materialized)
             ledger = extract_prior_findings(corpus=corpus)
-        self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("parse_degraded", ledger.status_reasons)
         by_id = {item.finding_id: item for item in ledger.findings}
-        self.assertEqual(set(by_id), {f"A-{index:02d}" for index in range(1, 6)} | {f"B-{index:02d}" for index in range(1, 7)})
+        self.assertEqual(set(by_id), {f"A-{index:02d}" for index in range(1, 6)} | {"B-01", "B-03", "B-04", "B-05", "B-06"})
         self.assertEqual(by_id["A-01"].severity, "medium")
         self.assertEqual(by_id["A-01"].section, "Business / Product Assessment")
         self.assertIn("cure.py:4120-4167", by_id["A-01"].source_evidence_snippets[0])
+        self.assertNotIn("B-02", by_id)
+        prose_status = next(status for status in ledger.artifact_statuses if status.get("finding_id") == "B-02")
+        self.assertEqual(prose_status.get("reason"), "missing_source_ref")
+        self.assertIn("PR discussion says GraphQL", prose_status.get("invalid_evidence_snippets", [])[0])
         self.assertEqual(by_id["B-03"].supersedes, ("A-03",))
 
         degraded_entry = fixture["raw_prior_reviews"]["parse_degraded_prior_artifact_md"]
@@ -91,6 +96,26 @@ Evidence: worker.py:20
         self.assertEqual(by_id["A-01"].section, "Technical Assessment")
         self.assertEqual(by_id["A-02"].section, "Technical Assessment")
         self.assertEqual(by_id["A-03"].section, "Reliability")
+
+    def test_heading_style_prior_findings_degrade_non_citation_evidence_field(self) -> None:
+        ledger = self._extract_ledger_from_body(
+            """## Business / Product Assessment
+
+### CURE-123: Prose memory
+Severity: Low
+Evidence: PR discussion says GraphQL fetching moved to CURe-123.
+""",
+            entry_id="fixture:prose-evidence",
+            reviewed_head="sha-prose",
+        )
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertEqual(ledger.findings, ())
+        status = ledger.artifact_statuses[0]
+        self.assertEqual(status.get("finding_id"), "CURE-123")
+        self.assertEqual(status.get("reason"), "missing_source_ref")
+        self.assertEqual(status.get("source_evidence_snippets"), [])
+        self.assertEqual(status.get("invalid_evidence_snippets"), ["PR discussion says GraphQL fetching moved to CURe-123."])
 
     def test_prior_findings_ignore_incidental_word_colon_digits_as_source_evidence(self) -> None:
         ledger = self._extract_ledger_from_body(

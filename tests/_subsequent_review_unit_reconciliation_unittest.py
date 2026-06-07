@@ -79,6 +79,44 @@ class SubsequentReviewReconciliationTests(SubsequentReviewTestCase):
             )
         )
 
+    def test_reconciliation_resolves_supersedes_to_duplicate_ids_collapsed_by_fingerprint(self) -> None:
+        first = self._finding_candidate(
+            entry_id="session-a",
+            finding_id="CURE-01",
+            title="Shared defect",
+            severity="medium",
+            section="Technical Assessment",
+            evidence="app/cache.py:10",
+        )
+        duplicate = self._finding_candidate(
+            entry_id="session-b",
+            finding_id="CURE-01",
+            title="Shared defect",
+            severity="medium",
+            section="Technical Assessment",
+            evidence="app/cache.py:10",
+        )
+        superseding = self._finding_candidate(
+            entry_id="session-c",
+            finding_id="CURE-02",
+            title="Shared defect follow-up",
+            severity="medium",
+            section="Technical Assessment",
+            evidence="app/cache.py:20",
+            supersedes=("CURE-01",),
+        )
+
+        ledger = reconcile_findings(findings=(first, duplicate, superseding))
+
+        self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
+        self.assertNotIn("ambiguous_supersedes", ledger.status_reasons)
+        self.assertEqual(len(ledger.groups), 1)
+        payload = ledger.to_json()
+        group = payload["groups"][0]
+        self.assertEqual(set(group["finding_ids"]), {"CURE-01", "CURE-02"})
+        self.assertEqual(group["ambiguous_supersedes"], [])
+        self.assertTrue(any(edge["target_display_id"] == "CURE-01" for edge in group["supersedes_edges"]))
+
     def test_reconciliation_prefers_superseding_canonical_and_serializes_local_details(self) -> None:
         older = self._finding_candidate(
             entry_id="session-a",

@@ -56,6 +56,33 @@ class SubsequentReviewGithubHistoryTests(SubsequentReviewTestCase):
                 self.assertEqual({marker.status for marker in discussion.pagination}, {"discussion_payload_malformed"})
                 self.assertEqual({marker.cause for marker in discussion.pagination}, {"payload_shape"})
 
+    def test_mixed_malformed_list_payload_preserves_events_but_degrades_discussion(self) -> None:
+        payloads: list[Any] = [
+            [
+                {
+                    "id": 101,
+                    "html_url": "u1",
+                    "user": {"login": "cure-bot"},
+                    "body": "CURe review",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                "bad",
+            ],
+            [],
+            [],
+        ]
+
+        discussion = collect_pr_discussion(pr=PR(), fetch_json=lambda _path: payloads.pop(0))
+
+        self.assertEqual(discussion.status, ModuleStatus.DEGRADED)
+        self.assertIn("discussion_payload_malformed", discussion.status_reasons)
+        self.assertEqual(len(discussion.events), 1)
+        self.assertEqual(discussion.events[0].event_id, "101")
+        marker = discussion.pagination[0]
+        self.assertFalse(marker.complete)
+        self.assertEqual(marker.status, "discussion_payload_malformed")
+        self.assertEqual(marker.cause, "payload_shape")
+
     def test_public_fallback_list_payload_marks_discussion_incomplete(self) -> None:
         auth_error = rf.ReviewflowSubprocessError(
             cmd=["gh", "api"],
