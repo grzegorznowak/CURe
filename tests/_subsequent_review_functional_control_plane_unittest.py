@@ -148,6 +148,10 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
             self.assertEqual(manifest["evidence_policy"], "untrusted")
             self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "disabled")
             self.assertIn("prior completed sessions: 1", summaries[0])
+            self.assertIn("discussion events: 0", summaries[0])
+            self.assertIn("control_plane=success", summaries[0])
+            self.assertIn("source_truth_verifier=disabled", summaries[0])
+            self.assertIn("landmark_trace_runner=disabled", summaries[0])
 
 
 __all__ = ["SubsequentReviewControlPlaneTests"]

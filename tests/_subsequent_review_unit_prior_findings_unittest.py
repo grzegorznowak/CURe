@@ -230,22 +230,11 @@ Evidence: cure.py:10
         self.assertEqual(clean_none.artifact_statuses, ())
 
     def test_real_generated_review_markdown_extracts_in_scope_issues(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "subsequent_review"
+        fixture = json.loads((root / "story_01_regression_goldens.json").read_text(encoding="utf-8"))["a22_generated_review"]
+        review_body = (root / fixture["valid_review_md_fixture"]).read_text(encoding="utf-8")
         ledger = self._extract_ledger_from_body(
-            """## Business / Product Assessment
-**Verdict**: REQUEST CHANGES
-
-### In Scope Issues
-- Enabled intake can lose recoverable PR discussion evidence when `gh api` list collection fails for a non-auth reason. Sources: `cure.py:7456`, `cure_subsequent_review/github_history.py:66`
-
-  <details open>
-  <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
-
-  **Why:** Story 01 is meant to preserve PR discussion history.
-
-  **Code Trail:** `_pr_flow_impl` passes `allow_public_fallback=True` through `gh_api_list`.
-
-  </details>
-""",
+            review_body,
             entry_id="real-run:review-md",
             source_type="session_review",
             reviewed_head="sha-real",
@@ -253,14 +242,32 @@ Evidence: cure.py:10
         )
 
         self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
-        self.assertEqual(len(ledger.findings), 1)
+        self.assertEqual(len(ledger.findings), fixture["expected_valid_finding_count"])
         finding = ledger.findings[0]
         self.assertEqual(finding.finding_id, "CURE-001")
         self.assertEqual(finding.severity, "medium")
         self.assertEqual(finding.section, "Business / Product Assessment")
-        self.assertIn("gh api", finding.title)
+        self.assertIn("generated review evidence", finding.title)
         self.assertIn("cure.py:7456", finding.source_evidence_snippets)
         self.assertEqual(finding.provenance.artifact_path, "/tmp/prior/review.md")
+
+    def test_generated_review_parser_rejects_incidental_sources_tokens(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "subsequent_review"
+        fixture = json.loads((root / "story_01_regression_goldens.json").read_text(encoding="utf-8"))["a22_generated_review"]
+        review_body = (root / fixture["invalid_incidental_sources_md"]).read_text(encoding="utf-8")
+        ledger = self._extract_ledger_from_body(
+            review_body,
+            entry_id="real-run:incidental-generated-sources",
+            source_type="session_review",
+            reviewed_head="sha-real",
+            artifact_path=Path("/tmp/prior/review.md"),
+        )
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertEqual(ledger.findings, ())
+        status = next(status for status in ledger.artifact_statuses if status.get("reason") == fixture["expected_invalid_reason"])
+        self.assertEqual(status.get("source_evidence_snippets"), [])
+        self.assertIn("infrastructure numbers", str(status.get("title")))
 
 
 __all__ = ["SubsequentReviewPriorFindingsTests"]

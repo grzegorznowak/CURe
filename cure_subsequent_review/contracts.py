@@ -43,6 +43,9 @@ class SubsequentReviewModule(str, Enum):
     LANDMARK_TRACE_RUNNER = "landmark_trace_runner"
 
 
+SubsequentReviewModules = SubsequentReviewModule
+
+
 @dataclass(frozen=True)
 class ModuleRunRecord:
     module: SubsequentReviewModule

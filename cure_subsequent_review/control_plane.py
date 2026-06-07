@@ -85,7 +85,8 @@ def _manifest_json(*, pr: Any, config: SubsequentReviewConfig, records: dict[Sub
 
 def _summary(*, completed_count: int, discussion_count: int, records: dict[SubsequentReviewModule, ModuleRunRecord]) -> str:
     status_text = ", ".join(
-        f"{module.value}={records[module].status.value}" for module in SubsequentReviewModule if module in records
+        f"{module.value}={records[module].status.value if module in records else ModuleStatus.DISABLED.value}"
+        for module in SubsequentReviewModule
     )
     return (
         "Subsequent review intake: "

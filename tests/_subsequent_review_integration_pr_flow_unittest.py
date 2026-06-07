@@ -294,5 +294,110 @@ class SubsequentReviewPrFlowIntegrationTests(SubsequentReviewTestCase):
             self.assertFalse(meta["subsequent_review"]["enabled"])
             self.assertEqual(meta["subsequent_review"]["manifest_path"], None)
 
+    def test_if_reviewed_latest_available_session_exits_before_sandbox_or_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "latest.md"
+            review.write_text("latest review body\n", encoding="utf-8")
+            completed = rf.HistoricalReviewSession(
+                session_id="latest",
+                session_dir=root,
+                review_md_path=review,
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+            )
+            args = rf.build_parser().parse_args(
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "latest"]
+            )
+            paths = self._reviewflow_paths(root)
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for historical exits"),
+            ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(rf._pr_flow_impl(args, paths=paths), 0)
+            self.assertEqual(stdout.getvalue(), "latest review body\n")
+            self.assertFalse(paths.sandbox_root.exists())
+
+    def test_if_reviewed_prompt_selected_historical_session_exits_before_sandbox_or_intake(self) -> None:
+        class TtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "selected.md"
+            review.write_text("selected review body\n", encoding="utf-8")
+            completed = rf.HistoricalReviewSession(
+                session_id="selected",
+                session_dir=root,
+                review_md_path=review,
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+            )
+            args = rf.build_parser().parse_args(
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "prompt"]
+            )
+            paths = self._reviewflow_paths(root)
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=AssertionError("intake must not run for historical exits"),
+            ), mock.patch("sys.stdin", TtyInput("1\n")), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(rf._pr_flow_impl(args, paths=paths), 0)
+            self.assertEqual(stdout.getvalue(), "selected review body\n")
+            self.assertFalse(paths.sandbox_root.exists())
+
+    def test_if_reviewed_prompt_non_tty_falls_back_to_new_and_runs_intake(self) -> None:
+        class NonTtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "prior.md"
+            review.write_text("### A-01: Prior\nSeverity: high\nSection: Security\nEvidence: app.py:1\n", encoding="utf-8")
+            completed = rf.HistoricalReviewSession(
+                session_id="prior",
+                session_dir=root,
+                review_md_path=review,
+                created_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-02T00:00:00Z",
+                verdicts=None,
+            )
+            args = rf.build_parser().parse_args(
+                ["pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "prompt", "--no-index", "--no-review"]
+            )
+            paths = self._reviewflow_paths(root)
+            intake_calls: list[Path] = []
+
+            def fake_intake(**kwargs: Any) -> Any:
+                work_dir = kwargs["work_dir"]
+                self.assertTrue(work_dir.is_dir())
+                intake_calls.append(work_dir)
+                manifest_path = work_dir / "subsequent" / "run_manifest.json"
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text("{}\n", encoding="utf-8")
+                return type("Result", (), {"manifest_path": manifest_path, "artifact_dir": work_dir / "subsequent"})()
+
+            with mock.patch.object(rf, "ensure_review_config"), mock.patch.object(
+                rf, "gh_api_json", return_value={"base": {"ref": "main"}, "head": {"sha": "abc"}, "title": "PR"}
+            ), mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]), mock.patch.object(
+                rf,
+                "load_chunkhound_runtime_config",
+                return_value=({}, {"chunkhound": {}}, {}),
+            ), mock.patch.object(rf, "materialize_chunkhound_env_config"), mock.patch(
+                "cure_subsequent_review.control_plane.run_subsequent_review_intake",
+                side_effect=fake_intake,
+            ), mock.patch("sys.stdin", NonTtyInput("1\n")):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf._pr_flow_impl(args, paths=paths)
+            self.assertEqual(len(intake_calls), 1)
+            self.assertEqual(intake_calls[0].name, "work")
+
 
 __all__ = ["SubsequentReviewPrFlowIntegrationTests"]

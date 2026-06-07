@@ -59,12 +59,27 @@ def _user_login(payload: dict[str, Any]) -> str | None:
 
 def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[list[dict[str, Any]], PaginationMarker, tuple[str, ...]]:
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)], PaginationMarker(source, True, endpoint=path), ()
+        return [item for item in payload if isinstance(item, dict)], PaginationMarker(source, True, endpoint=path, fetch="gh_api_list"), ()
     if isinstance(payload, dict):
-        raw_items = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("data")
-        items = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+        raw_items: Any = None
+        if isinstance(payload.get("items"), list):
+            raw_items = payload.get("items")
+        elif isinstance(payload.get("data"), list):
+            raw_items = payload.get("data")
         complete = bool(payload.get("complete", True))
         status = str(payload.get("status") or ("complete" if complete else "discussion_incomplete"))
+        if raw_items is None and complete and status == "complete":
+            marker = PaginationMarker(
+                source,
+                False,
+                status="discussion_payload_malformed",
+                detail="payload did not include list-valued items or data",
+                endpoint=str(payload.get("endpoint") or path),
+                fetch=str(payload.get("fetch") or "gh_api_list"),
+                cause="payload_shape",
+            )
+            return [], marker, ("discussion_payload_malformed",)
+        items = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
         reasons: tuple[str, ...] = () if complete and status == "complete" else (status,)
         detail = str(payload.get("detail") or "") or None
         command = payload.get("command", ())
@@ -85,7 +100,7 @@ def _normalize_source_payload(source: str, path: str, payload: Any) -> tuple[lis
             command=command_parts,
         )
         return items, marker, reasons
-    return [], PaginationMarker(source, False, status="discussion_unavailable", endpoint=path), ("discussion_unavailable",)
+    return [], PaginationMarker(source, False, status="discussion_unavailable", endpoint=path, fetch="gh_api_list"), ("discussion_unavailable",)
 
 
 def _reviewed_head(payload: dict[str, Any]) -> str | None:

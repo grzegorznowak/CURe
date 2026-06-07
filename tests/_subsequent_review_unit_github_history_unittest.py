@@ -33,6 +33,29 @@ class SubsequentReviewGithubHistoryTests(SubsequentReviewTestCase):
         self.assertEqual(incomplete.status, ModuleStatus.DEGRADED)
         self.assertIn("discussion_incomplete", incomplete.status_reasons)
 
+    def test_normalized_success_markers_include_fetch_provenance_and_malformed_dicts_degrade(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "subsequent_review"
+        fixture = json.loads((root / "story_01_regression_goldens.json").read_text(encoding="utf-8"))["a21_github_history"]
+        payloads = [fixture["normal_success_payload"], [], []]
+        discussion = collect_pr_discussion(pr=PR(), fetch_json=lambda _path: payloads.pop(0))
+
+        self.assertEqual(discussion.status, ModuleStatus.SUCCESS)
+        self.assertEqual(len(discussion.events), 1)
+        for marker in discussion.pagination:
+            self.assertTrue(marker.endpoint)
+            self.assertEqual(marker.fetch, "gh_api_list")
+            self.assertEqual(marker.status, "complete")
+
+        for malformed in fixture["malformed_payloads"]:
+            with self.subTest(payload=malformed):
+                discussion = collect_pr_discussion(pr=PR(), fetch_json=lambda _path, payload=malformed: payload)
+                self.assertEqual(discussion.status, ModuleStatus.DEGRADED)
+                self.assertEqual(discussion.events, ())
+                self.assertIn(fixture["expected_malformed_reason"], discussion.status_reasons)
+                self.assertTrue(all(not marker.complete for marker in discussion.pagination))
+                self.assertEqual({marker.status for marker in discussion.pagination}, {"discussion_payload_malformed"})
+                self.assertEqual({marker.cause for marker in discussion.pagination}, {"payload_shape"})
+
     def test_public_fallback_list_payload_marks_discussion_incomplete(self) -> None:
         auth_error = rf.ReviewflowSubprocessError(
             cmd=["gh", "api"],

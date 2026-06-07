@@ -39,43 +39,25 @@ class SubsequentReviewReconciliationTests(SubsequentReviewTestCase):
             self.assertTrue(any("A-01" in group.supersedes for group in ledger.groups))
 
     def test_reconciliation_namespaces_duplicate_ids_ambiguous_and_transitive_supersedes(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "subsequent_review"
+        fixture = json.loads((root / "story_01_regression_goldens.json").read_text(encoding="utf-8"))["a20_reconciliation"]
         ledger = reconcile_findings(
-            findings=(
+            findings=tuple(
                 self._finding_candidate(
-                    entry_id="session-a",
-                    finding_id="CURE-01",
-                    title="Cache grows forever",
-                    section="Business / Product Assessment",
-                    evidence="session-a.py:1",
-                ),
-                self._finding_candidate(
-                    entry_id="session-b",
-                    finding_id="CURE-01",
-                    title="SQL injection risk",
-                    section="Business / Product Assessment",
-                    evidence="session-b.py:1",
-                ),
-                self._finding_candidate(
-                    entry_id="session-c",
-                    finding_id="CURE-02",
-                    title="SQL injection still possible",
-                    section="Business / Product Assessment",
-                    evidence="session-c.py:1",
-                    supersedes=("CURE-01",),
-                ),
-                self._finding_candidate(
-                    entry_id="session-d",
-                    finding_id="CURE-03",
-                    title="SQL injection remains exploitable",
-                    section="Business / Product Assessment",
-                    evidence="session-d.py:1",
-                    supersedes=("CURE-02",),
-                ),
+                    entry_id=item["entry_id"],
+                    finding_id=item["finding_id"],
+                    title=item["title"],
+                    section=item["section"],
+                    evidence=item["evidence"],
+                    supersedes=tuple(item.get("supersedes", ())),
+                )
+                for item in fixture["candidates"]
             )
         )
 
         self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
-        self.assertIn("ambiguous_supersedes", ledger.status_reasons)
+        for reason in fixture["expected_degraded_reasons"]:
+            self.assertIn(reason, ledger.status_reasons)
         payload = ledger.to_json()
         all_local = [item for group in payload["groups"] for item in group["local_findings"]]
         duplicate_origins = [item["origin_key"] for item in all_local if item["finding_id"] == "CURE-01"]

@@ -4,6 +4,11 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 class SubsequentReviewContractsCliTests(SubsequentReviewTestCase):
     def test_contracts_expose_story_modules_and_two_policy_modes(self) -> None:
+        from cure_subsequent_review import SubsequentReviewModules as PackageSubsequentReviewModules
+        from cure_subsequent_review.contracts import SubsequentReviewModules
+
+        self.assertIs(SubsequentReviewModules, SubsequentReviewModule)
+        self.assertIs(PackageSubsequentReviewModules, SubsequentReviewModule)
         self.assertEqual(len(SubsequentReviewModule), 13)
         self.assertEqual([item.value for item in EvidencePolicy], ["trusted", "untrusted"])
         self.assertEqual(ModuleStatus.DISABLED.value, "disabled")
@@ -46,6 +51,22 @@ class SubsequentReviewContractsCliTests(SubsequentReviewTestCase):
         self.assertIn("parse_degraded_prior_artifact_md", fixture["raw_prior_reviews"])
         self.assertIn("discussion_incomplete", fixture["degraded_inputs"])
         self.assertNotIn("dispositions", fixture)
+
+        regression = json.loads((root / "story_01_regression_goldens.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(regression["a20_reconciliation"]["candidates"]), 5)
+        self.assertEqual(
+            {item["finding_id"] for item in regression["a20_reconciliation"]["candidates"]},
+            {"CURE-01", "CURE-02", "CURE-03", "CURE-04"},
+        )
+        self.assertEqual(
+            regression["a21_github_history"]["expected_malformed_reason"],
+            "discussion_payload_malformed",
+        )
+        for fixture_name in (
+            regression["a22_generated_review"]["valid_review_md_fixture"],
+            regression["a22_generated_review"]["invalid_incidental_sources_md"],
+        ):
+            self.assertTrue((root / fixture_name).is_file(), fixture_name)
 
 
 __all__ = ["SubsequentReviewContractsCliTests"]

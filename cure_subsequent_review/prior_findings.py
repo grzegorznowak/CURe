@@ -122,7 +122,11 @@ def _candidate_from_block(
 
 def _looks_like_source_ref(ref: str, *, allow_extensionless_root_path: bool = False) -> bool:
     location = ref.rsplit(":", 1)[0]
-    return "/" in location or "." in location or allow_extensionless_root_path
+    if "/" in location or "." in location:
+        return True
+    if not allow_extensionless_root_path:
+        return False
+    return location.upper() == location and bool(re.search(r"[A-Z]", location))
 
 
 def _source_refs(text: str, *, allow_extensionless_root_paths: bool = False) -> list[str]:
