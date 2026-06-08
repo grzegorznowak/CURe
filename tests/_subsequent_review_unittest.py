@@ -5,6 +5,9 @@ from _subsequent_review_unit_github_history_unittest import SubsequentReviewGith
 from _subsequent_review_unit_prior_corpus_unittest import SubsequentReviewPriorCorpusTests
 from _subsequent_review_unit_prior_findings_unittest import SubsequentReviewPriorFindingsTests
 from _subsequent_review_unit_reconciliation_unittest import SubsequentReviewReconciliationTests
+from _subsequent_review_unit_source_truth_unittest import SubsequentReviewSourceTruthTests
+from _subsequent_review_unit_discussion_signals_unittest import SubsequentReviewDiscussionSignalsTests
+from _subsequent_review_unit_disposition_arbiter_unittest import SubsequentReviewDispositionArbiterTests
 from _subsequent_review_functional_control_plane_unittest import SubsequentReviewControlPlaneTests
 from _subsequent_review_integration_pr_flow_unittest import SubsequentReviewPrFlowIntegrationTests
 
@@ -15,6 +18,9 @@ __all__ = [
     "SubsequentReviewPriorCorpusTests",
     "SubsequentReviewPriorFindingsTests",
     "SubsequentReviewReconciliationTests",
+    "SubsequentReviewSourceTruthTests",
+    "SubsequentReviewDiscussionSignalsTests",
+    "SubsequentReviewDispositionArbiterTests",
     "SubsequentReviewControlPlaneTests",
     "SubsequentReviewPrFlowIntegrationTests",
 ]

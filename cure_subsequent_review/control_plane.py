@@ -18,6 +18,9 @@ from cure_subsequent_review.finding_identity import reconcile_findings
 from cure_subsequent_review.github_history import JsonFetcher, collect_pr_discussion
 from cure_subsequent_review.prior_corpus import build_prior_review_corpus
 from cure_subsequent_review.prior_findings import extract_prior_findings
+from cure_subsequent_review.semantic_pipeline import MODULE_REGISTRY, run_semantic_pipeline
+from cure_subsequent_review.source_truth import FindingVerifier
+from cure_subsequent_review.discussion_signals import DiscussionLinker
 
 SummaryWriter = Callable[[str], None]
 
@@ -40,7 +43,7 @@ class SubsequentReviewConfig:
         status = self.module_overrides.get(module)
         if status is ModuleStatus.DISABLED:
             return False
-        return module in _STORY_01_MODULES
+        return module in _STORY_01_MODULES or module in MODULE_REGISTRY
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,8 @@ def run_subsequent_review_intake(
     config: SubsequentReviewConfig,
     fetch_json: JsonFetcher,
     summary_writer: SummaryWriter | None = None,
+    source_verifier: FindingVerifier | None = None,
+    discussion_linker: DiscussionLinker | None = None,
 ) -> SubsequentReviewIntakeResult | None:
     """Run Story 01 intake after a new sandbox work directory exists.
 
@@ -150,6 +155,7 @@ def run_subsequent_review_intake(
         _record(records, SubsequentReviewModule.PRIOR_REVIEW_CORPUS_BUILDER, ModuleStatus.DISABLED)
 
     finding_ledger = None
+    reconciliation = None
     if corpus is not None and config.module_enabled(SubsequentReviewModule.PRIOR_FINDING_EXTRACTOR):
         finding_ledger = extract_prior_findings(corpus=corpus)
         findings_path = artifact_dir / "prior_findings.json"
@@ -180,6 +186,17 @@ def run_subsequent_review_intake(
         )
     else:
         _record(records, SubsequentReviewModule.FINDING_RECONCILER, ModuleStatus.DISABLED)
+
+    run_semantic_pipeline(
+        artifact_dir=artifact_dir,
+        config=config,
+        records=records,
+        reconciliation=reconciliation,
+        discussion=discussion,
+        corpus=corpus,
+        source_verifier=source_verifier,
+        discussion_linker=discussion_linker,
+    )
 
     manifest_path = artifact_dir / "run_manifest.json"
     write_json(manifest_path, _manifest_json(pr=pr, config=config, records=records))

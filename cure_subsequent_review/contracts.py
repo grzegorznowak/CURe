@@ -1,7 +1,7 @@
 """Typed contracts for subsequent PR review intake.
 
-Story 01 defines contracts for all functional modules, but implements only the
-intake modules.  No source-state or disposition labels live here.
+Story 01 defines contracts for all functional modules. Story 03 adds semantic
+source-state, discussion-signal, and disposition contracts for modules 6-8.
 """
 
 from __future__ import annotations
@@ -25,6 +25,33 @@ class ModuleStatus(str, Enum):
     DISABLED = "disabled"
     SUCCESS = "success"
     DEGRADED = "degraded"
+
+
+class SourceState(str, Enum):
+    RESOLVED_FROM_SOURCE = "resolved_from_source"
+    STILL_OPEN = "still_open"
+    PARTIALLY_RESOLVED = "partially_resolved"
+    SOURCE_UNKNOWN = "source_unknown"
+    NOT_VERIFIABLE = "not_verifiable"
+
+
+class DiscussionSignalClass(str, Enum):
+    DEVELOPER_CLAIM_FIXED = "developer_claim_fixed"
+    RESOLVED_THREAD_HINT = "resolved_thread_hint"
+    BY_DESIGN = "by_design"
+    ADDRESSED_ELSEWHERE = "addressed_elsewhere"
+    DUPLICATE_SUPERSEDED = "duplicate_superseded"
+    UNRESOLVED_THREAD_HINT = "unresolved_thread_hint"
+    PUSHBACK = "pushback"
+    AUTHORITY_CONFLICT = "authority_conflict"
+
+
+class DispositionAction(str, Enum):
+    CONFIRM_RESOLVED = "confirm_resolved"
+    REWORD_PARTIAL = "reword_partial"
+    SUPPRESS_DUPLICATE = "suppress_duplicate"
+    MOVE_OUT_OF_SCOPE = "move_out_of_scope"
+    RE_REPORT = "re_report"
 
 
 class SubsequentReviewModule(str, Enum):
@@ -282,4 +309,141 @@ class ReconciliationLedger:
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "groups": [item.to_json() for item in self.groups],
+        }
+
+
+@dataclass(frozen=True)
+class SourceVerificationRow:
+    row_id: str
+    group_id: str
+    finding_ids: tuple[str, ...]
+    source_state: SourceState
+    current_source_citations: tuple[dict[str, Any], ...] = ()
+    inspected_source_refs: tuple[str, ...] = ()
+    unavailable_reasons: tuple[str, ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "row_id": self.row_id,
+            "group_id": self.group_id,
+            "finding_ids": list(self.finding_ids),
+            "source_state": self.source_state.value,
+            "current_source_citations": list(self.current_source_citations),
+            "inspected_source_refs": list(self.inspected_source_refs),
+            "unavailable_reasons": list(self.unavailable_reasons),
+            "provenance": self.provenance,
+        }
+
+
+@dataclass(frozen=True)
+class SourceVerificationLedger:
+    status: ModuleStatus
+    rows: tuple[SourceVerificationRow, ...] = ()
+    status_reasons: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "status": self.status.value,
+            "status_reasons": list(self.status_reasons),
+            "rows": [item.to_json() for item in self.rows],
+        }
+
+
+@dataclass(frozen=True)
+class DiscussionSignalRow:
+    row_id: str
+    event_id: str
+    group_ids: tuple[str, ...]
+    finding_ids: tuple[str, ...]
+    signal_class: DiscussionSignalClass
+    evidence_policy: EvidencePolicy
+    authority: str
+    reasons: tuple[str, ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "row_id": self.row_id,
+            "event_id": self.event_id,
+            "group_ids": list(self.group_ids),
+            "finding_ids": list(self.finding_ids),
+            "signal_class": self.signal_class.value,
+            "evidence_policy": self.evidence_policy.value,
+            "authority": self.authority,
+            "reasons": list(self.reasons),
+            "provenance": self.provenance,
+        }
+
+
+@dataclass(frozen=True)
+class DiscussionSignalLedger:
+    status: ModuleStatus
+    rows: tuple[DiscussionSignalRow, ...] = ()
+    status_reasons: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "status": self.status.value,
+            "status_reasons": list(self.status_reasons),
+            "rows": [item.to_json() for item in self.rows],
+        }
+
+
+@dataclass(frozen=True)
+class DispositionRow:
+    row_id: str
+    group_id: str
+    finding_ids: tuple[str, ...]
+    action: DispositionAction
+    source_verification_row_id: str
+    discussion_signal_row_ids: tuple[str, ...]
+    reconciliation_group_id: str
+    provenance: dict[str, Any]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "row_id": self.row_id,
+            "group_id": self.group_id,
+            "finding_ids": list(self.finding_ids),
+            "action": self.action.value,
+            "source_verification_row_id": self.source_verification_row_id,
+            "discussion_signal_row_ids": list(self.discussion_signal_row_ids),
+            "reconciliation_group_id": self.reconciliation_group_id,
+            "provenance": self.provenance,
+        }
+
+
+@dataclass(frozen=True)
+class DegradedFinding:
+    group_id: str
+    finding_ids: tuple[str, ...]
+    blocking_reasons: tuple[str, ...]
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "finding_ids": list(self.finding_ids),
+            "blocking_reasons": list(self.blocking_reasons),
+            "provenance": self.provenance,
+        }
+
+
+@dataclass(frozen=True)
+class DispositionLedger:
+    status: ModuleStatus
+    dispositions: tuple[DispositionRow, ...] = ()
+    degraded_findings: tuple[DegradedFinding, ...] = ()
+    status_reasons: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "status": self.status.value,
+            "status_reasons": list(self.status_reasons),
+            "dispositions": [item.to_json() for item in self.dispositions],
+            "degraded_findings": [item.to_json() for item in self.degraded_findings],
         }

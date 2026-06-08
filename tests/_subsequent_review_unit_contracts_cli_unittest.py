@@ -14,6 +14,21 @@ class SubsequentReviewContractsCliTests(SubsequentReviewTestCase):
         self.assertEqual(ModuleStatus.DISABLED.value, "disabled")
         self.assertIn(SubsequentReviewModule.PRIOR_FINDING_EXTRACTOR, set(SubsequentReviewModule))
 
+    def test_semantic_contracts_preserve_policy_and_action_vocabulary(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+
+        self.assertEqual([item.value for item in EvidencePolicy], ["trusted", "untrusted"])
+        self.assertEqual(
+            [item.value for item in SourceState],
+            ["resolved_from_source", "still_open", "partially_resolved", "source_unknown", "not_verifiable"],
+        )
+        self.assertEqual(
+            [item.value for item in DispositionAction],
+            ["confirm_resolved", "reword_partial", "suppress_duplicate", "move_out_of_scope", "re_report"],
+        )
+        self.assertNotIn("ask_human", {item.value for item in DispositionAction})
+        self.assertNotIn("escalate_or_keep_visible", {item.value for item in DispositionAction})
+
     def test_parser_defaults_to_auto_opt_out_disables_and_force_enable_is_rejected(self) -> None:
         parser = rf.build_parser()
         default_args = parser.parse_args(["pr", "https://github.com/acme/repo/pull/14"])

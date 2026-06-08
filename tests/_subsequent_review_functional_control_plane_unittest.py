@@ -142,16 +142,89 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
                 "prior_review_corpus.json",
                 "prior_findings.json",
                 "reconciled_findings.json",
+                "source_verification.json",
+                "discussion_signals.json",
+                "disposition_ledger.json",
             ):
                 payload = json.loads((subsequent / artifact_name).read_text(encoding="utf-8"))
                 self.assertEqual(payload["schema_version"], 1, artifact_name)
             self.assertEqual(manifest["evidence_policy"], "untrusted")
-            self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "disabled")
+            self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "degraded")
+            self.assertEqual(manifest["modules"]["discussion_signal_resolver"]["status"], "success")
+            self.assertEqual(manifest["modules"]["disposition_arbiter"]["status"], "degraded")
+            self.assertEqual(
+                manifest["modules"]["source_truth_verifier"]["artifact_path"],
+                str(subsequent / "source_verification.json"),
+            )
+            dispositions = json.loads((subsequent / "disposition_ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(dispositions["degraded_findings"][0]["blocking_reasons"], ["verifier_provider_not_configured"])
             self.assertIn("prior completed sessions: 1", summaries[0])
             self.assertIn("discussion events: 0", summaries[0])
             self.assertIn("control_plane=success", summaries[0])
-            self.assertIn("source_truth_verifier=disabled", summaries[0])
+            self.assertIn("source_truth_verifier=degraded", summaries[0])
             self.assertIn("landmark_trace_runner=disabled", summaries[0])
+
+    def test_injected_source_verifier_produces_successful_semantic_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from cure_subsequent_review.contracts import SourceState
+            from cure_subsequent_review.source_truth import FindingVerificationResult
+
+            root = Path(tmp)
+            review = root / "review.md"
+            review.write_text("### A-01: Prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1 example\n", encoding="utf-8")
+            session = Session("s1", root, review, review_head_sha="abc123")
+
+            def source_verifier(_request: Any) -> FindingVerificationResult:
+                return FindingVerificationResult(
+                    source_state=SourceState.RESOLVED_FROM_SOURCE,
+                    current_source_citations=({"path": "app.py", "start_line": 1, "summary": "fixed"},),
+                    rationale="fixture source proves resolution",
+                )
+
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[session],
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
+                fetch_json=lambda _path: [],
+                source_verifier=source_verifier,
+            )
+            subsequent = root / "work" / "subsequent"
+            manifest = json.loads((subsequent / "run_manifest.json").read_text(encoding="utf-8"))
+            source = json.loads((subsequent / "source_verification.json").read_text(encoding="utf-8"))
+            dispositions = json.loads((subsequent / "disposition_ledger.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "success")
+        self.assertEqual(manifest["modules"]["disposition_arbiter"]["status"], "success")
+        self.assertEqual(source["rows"][0]["source_state"], "resolved_from_source")
+        self.assertEqual(dispositions["dispositions"][0]["action"], "confirm_resolved")
+        self.assertEqual(dispositions["degraded_findings"], [])
+
+    def test_semantic_module_override_disables_source_and_degrades_arbiter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "review.md"
+            review.write_text("### A-01: Prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1 example\n", encoding="utf-8")
+            session = Session("s1", root, review, review_head_sha="abc123")
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[session],
+                config=SubsequentReviewConfig(
+                    enabled=True,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    module_overrides={SubsequentReviewModule.SOURCE_TRUTH_VERIFIER: ModuleStatus.DISABLED},
+                ),
+                fetch_json=lambda _path: [],
+            )
+            subsequent = root / "work" / "subsequent"
+            manifest = json.loads((subsequent / "run_manifest.json").read_text(encoding="utf-8"))
+            dispositions = json.loads((subsequent / "disposition_ledger.json").read_text(encoding="utf-8"))
+
+        self.assertFalse((subsequent / "source_verification.json").exists())
+        self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "disabled")
+        self.assertEqual(manifest["modules"]["disposition_arbiter"]["status"], "degraded")
+        self.assertEqual(dispositions["degraded_findings"][0]["blocking_reasons"], ["source_verification_missing"])
 
 
 __all__ = ["SubsequentReviewControlPlaneTests"]
