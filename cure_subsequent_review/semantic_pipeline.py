@@ -18,7 +18,7 @@ from cure_subsequent_review.contracts import (
 )
 from cure_subsequent_review.discussion_signals import DiscussionLinker, resolve_discussion_signals
 from cure_subsequent_review.disposition import arbitrate_dispositions
-from cure_subsequent_review.source_truth import FindingVerifier, verify_source_truth
+from cure_subsequent_review.source_truth import FindingVerifier, SourceVerificationMemory, verify_source_truth
 
 
 @dataclass(frozen=True)
@@ -29,15 +29,15 @@ class ModuleRegistryEntry:
 
 
 MODULE_REGISTRY: dict[SubsequentReviewModule, ModuleRegistryEntry] = {
-    SubsequentReviewModule.SOURCE_TRUTH_VERIFIER: ModuleRegistryEntry(
-        requires=("reconciliation",),
-        produces="source_verification",
-        artifact_name="source_verification.json",
-    ),
     SubsequentReviewModule.DISCUSSION_SIGNAL_RESOLVER: ModuleRegistryEntry(
         requires=("discussion_artifact", "corpus"),
         produces="discussion_signals",
         artifact_name="discussion_signals.json",
+    ),
+    SubsequentReviewModule.SOURCE_TRUTH_VERIFIER: ModuleRegistryEntry(
+        requires=("reconciliation",),
+        produces="source_verification",
+        artifact_name="source_verification.json",
     ),
     SubsequentReviewModule.DISPOSITION_ARBITER: ModuleRegistryEntry(
         requires=("reconciliation", "source_verification", "discussion_signals"),
@@ -77,6 +77,9 @@ def run_semantic_pipeline(
     corpus: PriorReviewCorpus | None,
     source_verifier: FindingVerifier | None = None,
     discussion_linker: DiscussionLinker | None = None,
+    memory_store: SourceVerificationMemory | None = None,
+    current_head: str | None = None,
+    pr_files_changed: tuple[str, ...] = (),
 ) -> None:
     """Run Story 03 modules in registry order and persist semantic ledgers."""
 
@@ -98,7 +101,14 @@ def run_semantic_pipeline(
         artifact_path = artifact_dir / str(entry.artifact_name)
         ledger: Any
         if module is SubsequentReviewModule.SOURCE_TRUTH_VERIFIER:
-            ledger = verify_source_truth(reconciliation=context["reconciliation"], verifier=source_verifier)
+            ledger = verify_source_truth(
+                reconciliation=context["reconciliation"],
+                verifier=source_verifier,
+                memory_store=memory_store,
+                current_head=current_head,
+                discussion_signals=context.get("discussion_signals"),
+                pr_files_changed=pr_files_changed,
+            )
             context[entry.produces] = ledger
         elif module is SubsequentReviewModule.DISCUSSION_SIGNAL_RESOLVER:
             reconciliation_for_discussion = context["reconciliation"] or ReconciliationLedger(status=ModuleStatus.SUCCESS)

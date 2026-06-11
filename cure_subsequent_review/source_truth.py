@@ -8,9 +8,13 @@ it does not inspect files or treat PR discussion as source proof.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from cure_subsequent_review.contracts import (
+    DiscussionSignalClass,
+    DiscussionSignalLedger,
+    DiscussionSignalRow,
+    EvidencePolicy,
     ModuleStatus,
     ReconciledFindingGroup,
     ReconciliationLedger,
@@ -30,6 +34,8 @@ class FindingVerificationRequest:
     section: str | None
     source_evidence_snippets: tuple[str, ...]
     reviewed_heads: tuple[str, ...]
+    pr_files_changed: tuple[str, ...] = ()
+    discussion_signals: tuple[dict[str, Any], ...] = ()
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,6 +49,17 @@ class FindingVerificationResult:
 
 
 FindingVerifier = Callable[[FindingVerificationRequest], FindingVerificationResult]
+
+
+class SourceVerificationMemory(Protocol):
+    def synthesize_resolved_source_row(
+        self,
+        *,
+        group_id: str,
+        finding_ids: tuple[str, ...],
+        row_id: str,
+        current_head: str | None,
+    ) -> SourceVerificationRow | None: ...
 
 
 def _local_finding_value(group: ReconciledFindingGroup, key: str) -> str | None:
@@ -71,7 +88,22 @@ def _reviewed_heads(group: ReconciledFindingGroup) -> tuple[str, ...]:
     return tuple(dict.fromkeys(heads))
 
 
-def _request(group: ReconciledFindingGroup) -> FindingVerificationRequest:
+def _clean_pr_files_changed(pr_files_changed: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if not pr_files_changed:
+        return ()
+    return tuple(dict.fromkeys(str(path).strip() for path in pr_files_changed if str(path).strip()))
+
+
+def _discussion_signal_context(rows: tuple[DiscussionSignalRow, ...]) -> tuple[dict[str, Any], ...]:
+    return tuple(row.to_json() for row in rows)
+
+
+def _request(
+    group: ReconciledFindingGroup,
+    *,
+    pr_files_changed: tuple[str, ...] = (),
+    discussion_rows: tuple[DiscussionSignalRow, ...] = (),
+) -> FindingVerificationRequest:
     return FindingVerificationRequest(
         group_id=group.group_id,
         canonical_id=group.canonical_id,
@@ -81,6 +113,8 @@ def _request(group: ReconciledFindingGroup) -> FindingVerificationRequest:
         section=_local_finding_value(group, "section"),
         source_evidence_snippets=_source_refs(group),
         reviewed_heads=_reviewed_heads(group),
+        pr_files_changed=_clean_pr_files_changed(pr_files_changed),
+        discussion_signals=_discussion_signal_context(discussion_rows),
         provenance={"reconciliation_group_id": group.group_id, "fingerprint": group.fingerprint},
     )
 
@@ -99,21 +133,109 @@ def default_finding_verifier(_request: FindingVerificationRequest) -> FindingVer
     )
 
 
+_DISCUSSION_SKIP_CLASSES = frozenset(
+    {
+        DiscussionSignalClass.PUSHBACK,
+        DiscussionSignalClass.BY_DESIGN,
+        DiscussionSignalClass.ADDRESSED_ELSEWHERE,
+        DiscussionSignalClass.DUPLICATE_SUPERSEDED,
+    }
+)
+
+
+def _discussion_rows_by_group(
+    discussion_signals: DiscussionSignalLedger | None,
+) -> dict[str, tuple[DiscussionSignalRow, ...]]:
+    if discussion_signals is None:
+        return {}
+    grouped: dict[str, list[DiscussionSignalRow]] = {}
+    for row in discussion_signals.rows:
+        for group_id in row.group_ids:
+            grouped.setdefault(group_id, []).append(row)
+    return {group_id: tuple(rows) for group_id, rows in grouped.items()}
+
+
+def _discussion_skips_source_verifier(rows: tuple[DiscussionSignalRow, ...]) -> bool:
+    if not rows:
+        return False
+    return all(
+        row.evidence_policy is EvidencePolicy.UNTRUSTED and row.signal_class in _DISCUSSION_SKIP_CLASSES
+        for row in rows
+    )
+
+
+def _skipped_by_discussion_row(
+    *,
+    row_id: str,
+    group: ReconciledFindingGroup,
+    discussion_rows: tuple[DiscussionSignalRow, ...],
+) -> SourceVerificationRow:
+    return SourceVerificationRow(
+        row_id=row_id,
+        group_id=group.group_id,
+        finding_ids=group.finding_ids,
+        source_state=SourceState.STILL_OPEN,
+        inspected_source_refs=_source_refs(group),
+        unavailable_reasons=("source_verification_skipped_by_discussion_signals",),
+        provenance={
+            "reconciliation_group_id": group.group_id,
+            "fingerprint": group.fingerprint,
+            "discussion_signal_row_ids": [row.row_id for row in discussion_rows],
+            "discussion_signal_classes": [row.signal_class.value for row in discussion_rows],
+            "discussion_policies": [row.evidence_policy.value for row in discussion_rows],
+            "not_source_proof": True,
+            "rationale": (
+                "source verifier skipped because all linked discussion signals are untrusted non-fix "
+                "skip classes; prior finding remains reportable without treating discussion as source proof"
+            ),
+        },
+    )
+
+
 def verify_source_truth(
     *,
     reconciliation: ReconciliationLedger,
     verifier: FindingVerifier | None = None,
+    memory_store: SourceVerificationMemory | None = None,
+    current_head: str | None = None,
+    discussion_signals: DiscussionSignalLedger | None = None,
+    pr_files_changed: tuple[str, ...] = (),
 ) -> SourceVerificationLedger:
     provider = verifier or default_finding_verifier
     rows: list[SourceVerificationRow] = []
     reasons: list[str] = list(reconciliation.status_reasons)
+    discussion_by_group = _discussion_rows_by_group(discussion_signals)
 
     for index, group in enumerate(reconciliation.groups, start=1):
-        request = _request(group)
+        row_id = f"SV-{index:04d}"
+        if memory_store is not None and str(current_head or "").strip():
+            try:
+                cached_row = memory_store.synthesize_resolved_source_row(
+                    group_id=group.group_id,
+                    finding_ids=group.finding_ids,
+                    row_id=row_id,
+                    current_head=current_head,
+                )
+            except Exception:  # noqa: BLE001 - memory is a performance cache; failures disable the gate
+                cached_row = None
+            if cached_row is not None:
+                rows.append(cached_row)
+                continue
+
+        discussion_rows = discussion_by_group.get(group.group_id, ())
+        if _discussion_skips_source_verifier(discussion_rows):
+            rows.append(_skipped_by_discussion_row(row_id=row_id, group=group, discussion_rows=discussion_rows))
+            continue
+
+        request = _request(
+            group,
+            pr_files_changed=pr_files_changed,
+            discussion_rows=discussion_rows,
+        )
         if not request.source_evidence_snippets:
             rows.append(
                 SourceVerificationRow(
-                    row_id=f"SV-{index:04d}",
+                    row_id=row_id,
                     group_id=group.group_id,
                     finding_ids=group.finding_ids,
                     source_state=SourceState.NOT_VERIFIABLE,
@@ -129,7 +251,7 @@ def verify_source_truth(
         except Exception as exc:  # noqa: BLE001 - provider failure is degraded evidence, not fatal runtime failure
             rows.append(
                 SourceVerificationRow(
-                    row_id=f"SV-{index:04d}",
+                    row_id=row_id,
                     group_id=group.group_id,
                     finding_ids=group.finding_ids,
                     source_state=SourceState.SOURCE_UNKNOWN,
@@ -152,7 +274,7 @@ def verify_source_truth(
             provenance["rationale"] = result.rationale
         rows.append(
             SourceVerificationRow(
-                row_id=f"SV-{index:04d}",
+                row_id=row_id,
                 group_id=group.group_id,
                 finding_ids=group.finding_ids,
                 source_state=result.source_state,

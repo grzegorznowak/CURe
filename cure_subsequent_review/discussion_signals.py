@@ -106,7 +106,7 @@ def resolve_discussion_signals(
     for index, event in enumerate(discussion.events, start=1):
         link_result = linker(event, groups) if linker is not None else DiscussionLinkResult()
         signal_class = link_result.signal_class or _classify_signal(event)
-        linked_groups = link_result.group_ids or _text_link_groups(event, groups)
+        linked_groups = link_result.group_ids if linker is not None else _text_link_groups(event, groups)
         authority, policy, reasons = _authority(event, signal_class)
         provenance: dict[str, Any] = {
             "event_kind": event.kind,

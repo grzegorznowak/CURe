@@ -32,13 +32,14 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
                 return []
             raise AssertionError(path)
 
-        decision = decide_subsequent_review(
+        decision, discussion_from_decision = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
             mode=SubsequentReviewCommandMode.AUTO,
             evidence_policy=EvidencePolicy.UNTRUSTED,
             fetch_json=fetch,
         )
+        self.assertIsNotNone(discussion_from_decision)
         self.assertTrue(decision.enabled)
         self.assertIn("cure_pr_discussion_found", decision.reasons)
         self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)

@@ -1,0 +1,28 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "event_count": 0,
+      "status": "degraded",
+      "status_reasons": [
+        "discussion_unavailable"
+      ]
+    },
+    {
+      "attempt": 2,
+      "event_count": 2,
+      "status": "success",
+      "status_reasons": []
+    }
+  ],
+  "final_reason": "discussion_available",
+  "module": "degraded_runtime_manager",
+  "operator_choices": [
+    {
+      "attempt": 1,
+      "choice": "retry"
+    }
+  ],
+  "schema_version": 1,
+  "status": "success"
+}

@@ -9,6 +9,8 @@ Ensure code quality, prevent technical debt, and maintain architectural consiste
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review.
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:

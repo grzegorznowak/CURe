@@ -9,6 +9,7 @@ from typing import Any, Callable
 from meta import write_json
 
 from cure_subsequent_review.contracts import (
+    DiscussionArtifact,
     EvidencePolicy,
     ModuleRunRecord,
     ModuleStatus,
@@ -19,10 +20,11 @@ from cure_subsequent_review.github_history import JsonFetcher, collect_pr_discus
 from cure_subsequent_review.prior_corpus import build_prior_review_corpus
 from cure_subsequent_review.prior_findings import extract_prior_findings
 from cure_subsequent_review.semantic_pipeline import MODULE_REGISTRY, run_semantic_pipeline
-from cure_subsequent_review.source_truth import FindingVerifier
+from cure_subsequent_review.source_truth import FindingVerifier, SourceVerificationMemory
 from cure_subsequent_review.discussion_signals import DiscussionLinker
 
 SummaryWriter = Callable[[str], None]
+DiscussionFetcher = Callable[[], DiscussionArtifact]
 
 _STORY_01_MODULES = {
     SubsequentReviewModule.CONTROL_PLANE,
@@ -105,10 +107,16 @@ def run_subsequent_review_intake(
     work_dir: Path,
     completed_sessions: list[Any] | tuple[Any, ...],
     config: SubsequentReviewConfig,
-    fetch_json: JsonFetcher,
+    fetch_json: JsonFetcher | None = None,
     summary_writer: SummaryWriter | None = None,
+    prefetched_discussion: DiscussionArtifact | None = None,
+    discussion_fetcher: DiscussionFetcher | None = None,
+    degraded_runtime_path: Path | None = None,
     source_verifier: FindingVerifier | None = None,
     discussion_linker: DiscussionLinker | None = None,
+    memory_store: SourceVerificationMemory | None = None,
+    current_head: str | None = None,
+    pr_files_changed: tuple[str, ...] = (),
 ) -> SubsequentReviewIntakeResult | None:
     """Run Story 01 intake after a new sandbox work directory exists.
 
@@ -126,7 +134,14 @@ def run_subsequent_review_intake(
 
     discussion = None
     if config.module_enabled(SubsequentReviewModule.PR_HISTORY_COLLECTOR):
-        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch_json)
+        if prefetched_discussion is not None:
+            discussion = prefetched_discussion
+        elif discussion_fetcher is not None:
+            discussion = discussion_fetcher()
+        elif fetch_json is not None:
+            discussion = collect_pr_discussion(pr=pr, fetch_json=fetch_json)
+        else:
+            raise ValueError("run_subsequent_review_intake requires prefetched_discussion, discussion_fetcher, or fetch_json")
         discussion_path = artifact_dir / "pr_discussion.json"
         write_json(discussion_path, discussion.to_json())
         _record(
@@ -138,6 +153,16 @@ def run_subsequent_review_intake(
         )
     else:
         _record(records, SubsequentReviewModule.PR_HISTORY_COLLECTOR, ModuleStatus.DISABLED)
+
+    if degraded_runtime_path is not None:
+        status = ModuleStatus.DEGRADED if discussion is not None and discussion.status is ModuleStatus.DEGRADED else ModuleStatus.SUCCESS
+        _record(
+            records,
+            SubsequentReviewModule.DEGRADED_RUNTIME_MANAGER,
+            status,
+            reasons=discussion.status_reasons if discussion is not None else (),
+            artifact_path=degraded_runtime_path,
+        )
 
     corpus = None
     if config.module_enabled(SubsequentReviewModule.PRIOR_REVIEW_CORPUS_BUILDER):
@@ -196,6 +221,9 @@ def run_subsequent_review_intake(
         corpus=corpus,
         source_verifier=source_verifier,
         discussion_linker=discussion_linker,
+        memory_store=memory_store,
+        current_head=current_head,
+        pr_files_changed=pr_files_changed,
     )
 
     manifest_path = artifact_dir / "run_manifest.json"

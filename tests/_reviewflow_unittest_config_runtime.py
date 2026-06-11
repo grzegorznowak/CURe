@@ -7,6 +7,7 @@ from _reviewflow_unittest_config_runtime_impl import (
     CodexConfigTests,
     LlmPresetConfigTests,
     ReviewIntelligenceConfigTests,
+    SubsequentReviewConfigTests,
 )
 from _reviewflow_unittest_runtime_ui_impl import CanonicalShellOwnershipTests, RuntimeResolutionTests
 
@@ -20,4 +21,5 @@ __all__ = [
     "LlmPresetConfigTests",
     "ReviewIntelligenceConfigTests",
     "RuntimeResolutionTests",
+    "SubsequentReviewConfigTests",
 ]

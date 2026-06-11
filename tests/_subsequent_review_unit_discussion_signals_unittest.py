@@ -82,5 +82,31 @@ class SubsequentReviewDiscussionSignalsTests(SubsequentReviewTestCase):
         self.assertEqual(ledger.rows[0].signal_class, DiscussionSignalClass.BY_DESIGN)
         self.assertEqual(ledger.rows[0].provenance["rationale"], "llm linked topic")
 
+    def test_injected_linker_no_link_does_not_fall_back_to_text_linking(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionArtifact, DiscussionEvent, DiscussionSignalClass
+        from cure_subsequent_review.discussion_signals import DiscussionLinkResult, resolve_discussion_signals
+
+        artifact = DiscussionArtifact(
+            status=ModuleStatus.SUCCESS,
+            events=(
+                DiscussionEvent(
+                    kind="issue_comment",
+                    event_id="C-06",
+                    author="developer",
+                    body="This is by design; A-01 appears nearby but the classifier found no confident finding link.",
+                ),
+            ),
+        )
+
+        def linker(_event: Any, _groups: tuple[Any, ...]) -> DiscussionLinkResult:
+            return DiscussionLinkResult(group_ids=(), signal_class=DiscussionSignalClass.BY_DESIGN, rationale="topical low-confidence no-link")
+
+        ledger = resolve_discussion_signals(discussion=artifact, reconciliation=self._reconciliation(), linker=linker)
+
+        self.assertEqual(ledger.rows[0].group_ids, ())
+        self.assertEqual(ledger.rows[0].finding_ids, ())
+        self.assertEqual(ledger.rows[0].signal_class, DiscussionSignalClass.BY_DESIGN)
+        self.assertEqual(ledger.rows[0].provenance["rationale"], "topical low-confidence no-link")
+
 
 __all__ = ["SubsequentReviewDiscussionSignalsTests"]

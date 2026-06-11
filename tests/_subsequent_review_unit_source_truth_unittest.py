@@ -74,5 +74,50 @@ class SubsequentReviewSourceTruthTests(SubsequentReviewTestCase):
         self.assertEqual(provider_calls, [])
         self.assertIn("missing_source_evidence", ledger.rows[0].unavailable_reasons)
 
+    def test_variant_c_request_includes_changed_files_and_linked_discussion_signals(self) -> None:
+        from cure_subsequent_review.contracts import (
+            DiscussionSignalClass,
+            DiscussionSignalLedger,
+            DiscussionSignalRow,
+            EvidencePolicy,
+            SourceState,
+        )
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        _finding, reconciliation = self._group()
+        requests: list[Any] = []
+        discussion_signals = DiscussionSignalLedger(
+            status=ModuleStatus.SUCCESS,
+            rows=(
+                DiscussionSignalRow(
+                    row_id="DS-0001",
+                    event_id="C-01",
+                    group_ids=("G-0001",),
+                    finding_ids=("A-01",),
+                    signal_class=DiscussionSignalClass.DEVELOPER_CLAIM_FIXED,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    authority="developer",
+                    reasons=("linked_by_llm",),
+                    provenance={"rationale": "developer claims a fix"},
+                ),
+            ),
+        )
+
+        def provider(request: Any) -> FindingVerificationResult:
+            requests.append(request)
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN)
+
+        verify_source_truth(
+            reconciliation=reconciliation,
+            verifier=provider,
+            discussion_signals=discussion_signals,
+            pr_files_changed=("src/app.py", "tests/test_app.py"),
+        )
+
+        self.assertEqual(requests[0].pr_files_changed, ("src/app.py", "tests/test_app.py"))
+        self.assertEqual(requests[0].discussion_signals[0]["row_id"], "DS-0001")
+        self.assertEqual(requests[0].discussion_signals[0]["signal_class"], "developer_claim_fixed")
+        self.assertEqual(requests[0].discussion_signals[0]["provenance"]["rationale"], "developer claims a fix")
+
 
 __all__ = ["SubsequentReviewSourceTruthTests"]

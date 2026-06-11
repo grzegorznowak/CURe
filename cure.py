@@ -4180,7 +4180,8 @@ def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -
     name_only = run_cmd(
         ["git", "-C", str(repo_dir), "diff", "--name-only", f"{base_ref}...{head_ref}"]
     ).stdout
-    changed_files = len([line for line in name_only.splitlines() if line.strip()])
+    files_changed = tuple(line.strip() for line in name_only.splitlines() if line.strip())
+    changed_files = len(files_changed)
 
     numstat = run_cmd(
         ["git", "-C", str(repo_dir), "diff", "--numstat", f"{base_ref}...{head_ref}"]
@@ -4211,6 +4212,7 @@ def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -
         "base_ref": base_ref,
         "head_ref": head_ref,
         "changed_files": changed_files,
+        "files": list(files_changed),
         "additions": additions,
         "deletions": deletions,
         "changed_lines": changed_lines,
@@ -6434,6 +6436,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    prior_review_brief: str = "",
     cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
@@ -6459,6 +6462,7 @@ def _build_multipass_step_entries(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
+                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                 "PLAN_JSON_PATH": str(plan_json_path),
                 "STEP_ID": step_id,
                 "STEP_TITLE": step_title,
@@ -6544,6 +6548,7 @@ def _build_incremental_resume_step_entries(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
+                "PRIOR_REVIEW_BRIEF": "",
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "PREVIOUS_REVIEW_MD": str(previous_review_md_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": previous_review_head_sha,
@@ -9585,6 +9590,9 @@ def _pr_flow_impl(
     ensure_review_config(paths, config_path=effective_config_path)
 
     log(f"PR {pr.owner}/{pr.repo}#{pr.number} ({pr.host})", quiet=quiet)
+    subsequent_review_cfg, subsequent_review_config_meta = load_reviewflow_subsequent_review_config(
+        config_path=effective_config_path
+    )
 
     # PR metadata (base ref name + head SHA).
     with phase("resolve_pr_meta", progress=None, quiet=quiet):
@@ -9601,6 +9609,8 @@ def _pr_flow_impl(
 
     if not base_ref:
         raise ReviewflowError("Failed to resolve baseRefName via `gh pr view`.")
+    if not head_sha:
+        raise ReviewflowError("Failed to resolve PR head SHA via `gh pr view`.")
     baseline_selection = resolve_pr_review_baseline_selection(pr=pr, pr_meta=pr_meta)
     selected_baseline_ref = (
         str(baseline_selection.get("selected_baseline_ref") or base_ref).strip() or base_ref
@@ -9709,6 +9719,10 @@ def _pr_flow_impl(
             "base_ref_for_review": base_ref_for_review,
             "head_sha": head_sha,
             "baseline_selection": baseline_selection,
+            "subsequent_review_config": {
+                "governor_mode": str(subsequent_review_cfg.get("governor_mode") or "strict"),
+                "meta": subsequent_review_config_meta.get("subsequent_review", {}),
+            },
             "paths": {
                 "session_dir": str(session_dir),
                 "repo_dir": str(repo_dir),
@@ -9760,16 +9774,107 @@ def _pr_flow_impl(
         summarize_decision,
         write_decision_artifact,
     )
+    from cure_subsequent_review.degraded_runtime import DiscussionFetchAborted, DiscussionFetchController
+    from cure_subsequent_review.github_history import collect_pr_discussion
+    from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
+    from cure_subsequent_review.llm_verifier import LlmFindingVerifier
+    from cure_subsequent_review.memory_store import ReviewMemoryStore
+    from cure_subsequent_review.runtime import (
+        REPORT_GOVERNOR_RESULT_ARTIFACT,
+        audit_review_report_after_review,
+        prepare_review_runtime_pre_prompt,
+        review_memory_root_from_sandbox_root,
+        update_review_memory_after_review,
+    )
+
+    subsequent_memory_store = ReviewMemoryStore.for_pr(
+        root=review_memory_root_from_sandbox_root(paths.sandbox_root),
+        pr=pr,
+    )
+    subsequent_artifact_dir: Path | None = None
+    subsequent_manifest_path: Path | None = None
+    subsequent_intake_pending = False
+    subsequent_pr_files_changed: tuple[str, ...] = ()
+    prior_review_brief = ""
+    llm_resolved: dict[str, Any] | None = None
+    llm_resolution_meta: dict[str, Any] | None = None
+    picker_completed = bool(args.no_review)
 
     try:
+        if not bool(args.no_review):
+            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+                args,
+                reviewflow_config_path=effective_config_path,
+                base_codex_config_path=effective_codex_base_config_path,
+            )
+            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
+                llm_resolved=llm_resolved,
+                llm_resolution_meta=llm_resolution_meta,
+            )
+            picker_completed = True
+
+        discussion_linker = None
+        if llm_resolved is not None and llm_resolution_meta is not None:
+            linker_call_index = 0
+            linker_resolved = llm_resolved
+            linker_resolution_meta = llm_resolution_meta
+
+            def run_discussion_linker_classifier(prompt_text: str) -> str:
+                nonlocal linker_call_index
+                linker_call_index += 1
+                raw_linker_response_path = work_dir / "subsequent" / f"discussion_linker_response_{linker_call_index:04d}.md"
+                raw_linker_response_path.parent.mkdir(parents=True, exist_ok=True)
+                linker_run = run_llm_exec(
+                    repo_dir=session_dir,
+                    resolved=linker_resolved,
+                    resolution_meta=linker_resolution_meta,
+                    output_path=raw_linker_response_path,
+                    prompt=prompt_text,
+                    env=dict(os.environ),
+                    stream=False,
+                    progress=progress,
+                )
+                record_llm_usage(progress.meta.setdefault("llm", {}), linker_run.adapter_meta)
+                return raw_linker_response_path.read_text(encoding="utf-8") if raw_linker_response_path.is_file() else ""
+
+            discussion_linker = LlmDiscussionLinker(
+                classifier=run_discussion_linker_classifier,
+                current_head=head_sha,
+                memory_store=subsequent_memory_store,
+            )
+
         policy = EvidencePolicy(_subsequent_review_evidence_policy(args))
-        subsequent_decision = decide_subsequent_review(
+        subsequent_command_mode = _subsequent_review_command_mode(args)
+        prefetched_discussion = None
+        degraded_runtime_path = None
+        if subsequent_command_mode != "disabled":
+            discussion_controller = DiscussionFetchController(
+                fetch_discussion=lambda: collect_pr_discussion(
+                    pr=pr,
+                    fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
+                ),
+                artifact_dir=work_dir / "subsequent",
+                interactive=sys.stdin.isatty(),
+            )
+            try:
+                prefetched_discussion = discussion_controller.fetch()
+            except DiscussionFetchAborted as exc:
+                progress.meta.setdefault("paths", {})["subsequent_review_degraded_runtime"] = str(
+                    discussion_controller.artifact_path
+                )
+                progress.flush()
+                raise ReviewflowError(str(exc)) from exc
+            degraded_runtime_path = discussion_controller.artifact_path if discussion_controller.artifact_path.is_file() else None
+            if degraded_runtime_path is not None:
+                progress.meta.setdefault("paths", {})["subsequent_review_degraded_runtime"] = str(degraded_runtime_path)
+        subsequent_decision, decision_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=completed_for_intake,
-            mode=_subsequent_review_command_mode(args),
+            mode=subsequent_command_mode,
             evidence_policy=policy,
-            fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
+            discussion=prefetched_discussion,
         )
+        prefetched_discussion = decision_discussion or prefetched_discussion
         subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
         progress.meta.setdefault("paths", {})["subsequent_review_decision"] = str(subsequent_decision_path)
         progress.meta["subsequent_review"] = decision_meta_json(
@@ -9780,7 +9885,9 @@ def _pr_flow_impl(
         )
         progress.flush()
         _eprint(summarize_decision(subsequent_decision))
-        if subsequent_decision.enabled:
+
+        def run_enabled_subsequent_intake(*, source_verifier: Any | None) -> None:
+            nonlocal subsequent_artifact_dir, subsequent_manifest_path
             intake_result = run_subsequent_review_intake(
                 pr=pr,
                 work_dir=work_dir,
@@ -9788,8 +9895,17 @@ def _pr_flow_impl(
                 config=SubsequentReviewConfig(enabled=True, evidence_policy=policy),
                 fetch_json=lambda path: gh_api_list(host=pr.host, path=path, allow_public_fallback=True),
                 summary_writer=_eprint,
+                prefetched_discussion=prefetched_discussion,
+                degraded_runtime_path=degraded_runtime_path,
+                source_verifier=source_verifier,
+                discussion_linker=discussion_linker,
+                memory_store=subsequent_memory_store,
+                current_head=head_sha,
+                pr_files_changed=subsequent_pr_files_changed,
             )
             if intake_result is not None:
+                subsequent_artifact_dir = intake_result.artifact_dir
+                subsequent_manifest_path = intake_result.manifest_path
                 progress.meta.setdefault("paths", {})["subsequent_review_manifest"] = str(intake_result.manifest_path)
                 progress.meta["subsequent_review"] = decision_meta_json(
                     decision=subsequent_decision,
@@ -9798,6 +9914,12 @@ def _pr_flow_impl(
                     manifest_path=intake_result.manifest_path,
                 )
                 progress.flush()
+
+        if subsequent_decision.enabled:
+            if bool(args.no_review):
+                run_enabled_subsequent_intake(source_verifier=None)
+            else:
+                subsequent_intake_pending = True
     except ReviewflowSubprocessError as e:
         progress.error(
             {
@@ -9842,10 +9964,8 @@ def _pr_flow_impl(
     success_resume_command: str | None = None
     codex_meta: dict[str, Any] | None = None
     runtime_policy: dict[str, Any] | None = None
-    llm_resolved: dict[str, Any] | None = None
-    llm_resolution_meta: dict[str, Any] | None = None
-    picker_completed = bool(args.no_review)
-
+    env: dict[str, str] = {}
+    add_dirs: list[Path] = []
     base_cache_meta: dict[str, Any] | None = None
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
@@ -9911,18 +10031,6 @@ def _pr_flow_impl(
     }
     progress.flush()
     try:
-        if not bool(args.no_review):
-            llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
-                args,
-                reviewflow_config_path=effective_config_path,
-                base_codex_config_path=effective_codex_base_config_path,
-            )
-            llm_resolved, llm_resolution_meta = _maybe_apply_pr_llm_picker(
-                llm_resolved=llm_resolved,
-                llm_resolution_meta=llm_resolution_meta,
-            )
-            picker_completed = True
-
         if not args.no_index:
             with phase("ensure_base_cache", progress=progress, quiet=quiet):
                 base_cache_meta = ensure_base_cache(
@@ -10070,6 +10178,13 @@ def _pr_flow_impl(
                     "error": str(e),
                 }
             progress.meta["pr_stats"] = pr_stats
+            raw_files_changed = pr_stats.get("files") if isinstance(pr_stats, dict) else None
+            if isinstance(raw_files_changed, list | tuple):
+                subsequent_pr_files_changed = tuple(
+                    dict.fromkeys(str(path).strip() for path in raw_files_changed if str(path).strip())
+                )
+            else:
+                subsequent_pr_files_changed = ()
             progress.flush()
 
         if bool(args.no_review):
@@ -10332,6 +10447,100 @@ def _pr_flow_impl(
                 )
 
             add_dirs = list(runtime_policy.get("add_dirs") or [])
+
+            if subsequent_intake_pending:
+                finding_verifier_call_index = 0
+                finding_verifier_research_call_index = 0
+
+                def run_finding_verifier_llm(prompt_text: str) -> str:
+                    nonlocal finding_verifier_call_index
+                    finding_verifier_call_index += 1
+                    raw_response_path = work_dir / "subsequent" / f"finding_verifier_response_{finding_verifier_call_index:04d}.md"
+                    raw_response_path.parent.mkdir(parents=True, exist_ok=True)
+                    verifier_run = run_llm_exec(
+                        repo_dir=repo_dir,
+                        resolved=llm_resolved,
+                        resolution_meta=llm_resolution_meta,
+                        output_path=raw_response_path,
+                        prompt=prompt_text,
+                        env=env,
+                        stream=False,
+                        progress=progress,
+                        add_dirs=add_dirs,
+                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=runtime_policy,
+                    )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), verifier_run.adapter_meta)
+                    return raw_response_path.read_text(encoding="utf-8") if raw_response_path.is_file() else ""
+
+                def run_finding_verifier_research(query: str) -> str:
+                    nonlocal finding_verifier_research_call_index
+                    finding_verifier_research_call_index += 1
+                    raw_response_path = (
+                        work_dir
+                        / "subsequent"
+                        / f"finding_verifier_research_{finding_verifier_research_call_index:04d}.md"
+                    )
+                    raw_response_path.parent.mkdir(parents=True, exist_ok=True)
+                    research_prompt = (
+                        "Use the current repository and available source/search tools to research this "
+                        "subsequent-review finding. Return concise evidence with file:line citations.\n\n"
+                        f"Research query: {query}\n"
+                    )
+                    research_run = run_llm_exec(
+                        repo_dir=repo_dir,
+                        resolved=llm_resolved,
+                        resolution_meta=llm_resolution_meta,
+                        output_path=raw_response_path,
+                        prompt=research_prompt,
+                        env=env,
+                        stream=False,
+                        progress=progress,
+                        add_dirs=add_dirs,
+                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=runtime_policy,
+                    )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), research_run.adapter_meta)
+                    return raw_response_path.read_text(encoding="utf-8") if raw_response_path.is_file() else ""
+
+                with phase("subsequent_review_intake", progress=progress, quiet=quiet):
+                    run_enabled_subsequent_intake(
+                        source_verifier=LlmFindingVerifier(
+                            repo_dir=repo_dir,
+                            llm=run_finding_verifier_llm,
+                            chunkhound_research=None if bool(args.no_index) else run_finding_verifier_research,
+                        )
+                    )
+
+            if subsequent_artifact_dir is not None:
+                with phase("subsequent_review_pre_prompt", progress=progress, quiet=quiet):
+                    try:
+                        pre_prompt_result = prepare_review_runtime_pre_prompt(
+                            artifact_dir=subsequent_artifact_dir,
+                            governor_mode=str(subsequent_review_cfg.get("governor_mode") or "strict"),
+                            memory_store_path=subsequent_memory_store.path,
+                            manifest_path=subsequent_manifest_path,
+                        )
+                    except ValueError as exc:
+                        raise ReviewflowError(str(exc)) from exc
+                    prior_review_brief = pre_prompt_result.prior_review_brief
+                    progress.meta.setdefault("paths", {})["subsequent_review_context_package"] = str(
+                        pre_prompt_result.context_package_path
+                    )
+                    progress.meta.setdefault("paths", {})["subsequent_review_context_md"] = str(
+                        pre_prompt_result.context_markdown_path
+                    )
+                    if pre_prompt_result.governor_brief_path is not None:
+                        progress.meta.setdefault("paths", {})["subsequent_review_governor_brief"] = str(
+                            pre_prompt_result.governor_brief_path
+                        )
+                    runtime_modules = progress.meta.setdefault("subsequent_review", {}).setdefault(
+                        "runtime_modules", {}
+                    )
+                    for record in pre_prompt_result.records:
+                        runtime_modules[record.module.value] = record.to_json()
+                    progress.flush()
+
             if str(llm_resolved.get("provider") or "") == "codex":
                 if not args.no_index:
                     log(
@@ -10412,6 +10621,7 @@ def _pr_flow_impl(
                             **cod_hypothesis_ledger_prompt_vars(
                                 enabled=bool(getattr(args, "cod_ledger", False))
                             ),
+                            "PRIOR_REVIEW_BRIEF": prior_review_brief,
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
@@ -10542,6 +10752,7 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
+                        prior_review_brief=prior_review_brief,
                         cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
                     )
                     for entry in step_entries:
@@ -10631,6 +10842,7 @@ def _pr_flow_impl(
                                 **cod_hypothesis_ledger_prompt_vars(
                                     enabled=bool(getattr(args, "cod_ledger", False))
                                 ),
+                                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
@@ -10707,6 +10919,7 @@ def _pr_flow_impl(
                             )
                         )
                         prompt_extra_vars["PR_CONTEXT_PATH"] = str(pr_context_path)
+                        prompt_extra_vars["PRIOR_REVIEW_BRIEF"] = prior_review_brief
                         rendered = render_prompt(
                             prompt,
                             base_ref_for_review=base_ref_for_review,
@@ -10774,9 +10987,67 @@ def _pr_flow_impl(
             persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
         ):
             progress.flush()
+        if (
+            review_md_path.is_file()
+            and subsequent_artifact_dir is not None
+            and llm_resolved is not None
+            and llm_resolution_meta is not None
+            and runtime_policy is not None
+        ):
+            with phase("subsequent_review_post_review_governor", progress=progress, quiet=quiet):
+                raw_governor_response_path = subsequent_artifact_dir / "report_governor_response.md"
+
+                def run_report_governor_auditor(prompt_text: str) -> str:
+                    governor_result = run_llm_exec(
+                        repo_dir=repo_dir,
+                        resolved=llm_resolved,
+                        resolution_meta=llm_resolution_meta,
+                        output_path=raw_governor_response_path,
+                        prompt=prompt_text,
+                        env=env,
+                        stream=stream,
+                        progress=progress,
+                        add_dirs=add_dirs,
+                        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+                        runtime_policy=runtime_policy,
+                    )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), governor_result.adapter_meta)
+                    return raw_governor_response_path.read_text(encoding="utf-8") if raw_governor_response_path.is_file() else ""
+
+                governor_record = audit_review_report_after_review(
+                    artifact_dir=subsequent_artifact_dir,
+                    review_path=review_md_path,
+                    governor_mode=str(subsequent_review_cfg.get("governor_mode") or "strict"),
+                    auditor=run_report_governor_auditor,
+                    manifest_path=subsequent_manifest_path,
+                )
+                progress.meta.setdefault("subsequent_review", {}).setdefault("runtime_modules", {})[
+                    "report_governor"
+                ] = governor_record.to_json()
+                if governor_record.artifact_path:
+                    progress.meta.setdefault("paths", {})["subsequent_review_report_governor_result"] = governor_record.artifact_path
+                elif (subsequent_artifact_dir / REPORT_GOVERNOR_RESULT_ARTIFACT).is_file():
+                    progress.meta.setdefault("paths", {})["subsequent_review_report_governor_result"] = str(
+                        subsequent_artifact_dir / REPORT_GOVERNOR_RESULT_ARTIFACT
+                    )
+                progress.flush()
         progress.done()
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
+        if success_markdown_path is not None and subsequent_artifact_dir is not None:
+            memory_record = update_review_memory_after_review(
+                artifact_dir=subsequent_artifact_dir,
+                memory_store=subsequent_memory_store,
+                current_head=head_sha,
+                run_provenance={"session_id": session_id, "manifest_path": str(subsequent_manifest_path or "")},
+                manifest_path=subsequent_manifest_path,
+            )
+            progress.meta.setdefault("subsequent_review", {}).setdefault("runtime_modules", {})[
+                "review_memory_store"
+            ] = memory_record.to_json()
+            if memory_record.artifact_path:
+                progress.meta.setdefault("paths", {})["subsequent_review_memory"] = memory_record.artifact_path
+            progress.flush()
     except ReviewflowSubprocessError as e:
         progress.error(
             {
@@ -15498,6 +15769,7 @@ from cure_runtime import (
     DEFAULT_MULTIPASS_MAX_STEPS,
     DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
+    DEFAULT_SUBSEQUENT_REVIEW_GOVERNOR_MODE,
     HTTP_LLM_PROVIDERS,
     LOCAL_AGENT_PRESET_BY_NAME,
     LLM_RESUME_PROVIDERS,
@@ -15536,6 +15808,7 @@ from cure_runtime import (
     load_reviewflow_llm_config,
     load_reviewflow_multipass_defaults,
     load_reviewflow_paths_defaults,
+    load_reviewflow_subsequent_review_config,
     load_toml,
     parse_llm_header_overrides,
     parse_llm_key_value,

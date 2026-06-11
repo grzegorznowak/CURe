@@ -17,6 +17,8 @@ Read the plan JSON and all step outputs, then produce the final review.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
+$PRIOR_REVIEW_BRIEF
+
 # Claim Verification Rule
 Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.
 

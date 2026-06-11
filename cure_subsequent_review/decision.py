@@ -14,7 +14,7 @@ from typing import Any
 
 from meta import write_json
 
-from cure_subsequent_review.contracts import EvidencePolicy, ModuleStatus
+from cure_subsequent_review.contracts import DiscussionArtifact, EvidencePolicy, ModuleStatus
 from cure_subsequent_review.github_history import JsonFetcher, collect_pr_discussion
 from cure_subsequent_review.prior_corpus import _looks_cure_authored
 
@@ -99,8 +99,9 @@ def decide_subsequent_review(
     mode: SubsequentReviewCommandMode | str,
     evidence_policy: EvidencePolicy,
     fetch_json: JsonFetcher | None = None,
-) -> SubsequentReviewDecision:
-    """Return the command-mode decision for a new sandbox run."""
+    discussion: DiscussionArtifact | None = None,
+) -> tuple[SubsequentReviewDecision, DiscussionArtifact | None]:
+    """Return the command-mode decision plus the discussion artifact used to decide."""
 
     command_mode = normalize_command_mode(mode)
     completed_count = len(completed_sessions)
@@ -113,12 +114,15 @@ def decide_subsequent_review(
     }
 
     if command_mode is SubsequentReviewCommandMode.DISABLED:
-        return SubsequentReviewDecision(
-            mode=command_mode,
-            enabled=False,
-            evidence_policy=evidence_policy,
-            reasons=("operator_disabled",),
-            signal_counts=signal_counts,
+        return (
+            SubsequentReviewDecision(
+                mode=command_mode,
+                enabled=False,
+                evidence_policy=evidence_policy,
+                reasons=("operator_disabled",),
+                signal_counts=signal_counts,
+            ),
+            None,
         )
 
     reasons: list[str] = []
@@ -126,26 +130,33 @@ def decide_subsequent_review(
         reasons.append("completed_sessions_found")
     if sessions_with_subsequent_artifacts > 0:
         reasons.append("prior_subsequent_artifacts_found")
-    if reasons:
-        return SubsequentReviewDecision(
-            mode=command_mode,
-            enabled=True,
-            evidence_policy=evidence_policy,
-            reasons=_ordered_unique(reasons),
-            signal_counts=signal_counts,
+    if discussion is None and not reasons and fetch_json is not None:
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch_json)
+
+    if discussion is None:
+        if reasons:
+            return (
+                SubsequentReviewDecision(
+                    mode=command_mode,
+                    enabled=True,
+                    evidence_policy=evidence_policy,
+                    reasons=_ordered_unique(reasons),
+                    signal_counts=signal_counts,
+                ),
+                None,
+            )
+        return (
+            SubsequentReviewDecision(
+                mode=command_mode,
+                enabled=True,
+                evidence_policy=evidence_policy,
+                reasons=("remote_probe_degraded",),
+                signal_counts=signal_counts,
+                degraded_reasons=("remote_probe_unavailable",),
+            ),
+            None,
         )
 
-    if fetch_json is None:
-        return SubsequentReviewDecision(
-            mode=command_mode,
-            enabled=True,
-            evidence_policy=evidence_policy,
-            reasons=("remote_probe_degraded",),
-            signal_counts=signal_counts,
-            degraded_reasons=("remote_probe_unavailable",),
-        )
-
-    discussion = collect_pr_discussion(pr=pr, fetch_json=fetch_json)
     signal_counts["remote_events"] = len(discussion.events)
     remote_cure_markers = sum(1 for event in discussion.events if _is_positive_remote_marker(event))
     signal_counts["remote_cure_markers"] = remote_cure_markers
@@ -155,39 +166,63 @@ def decide_subsequent_review(
             degraded_reasons.append(marker.status)
 
     if remote_cure_markers > 0:
-        return SubsequentReviewDecision(
-            mode=command_mode,
-            enabled=True,
-            evidence_policy=evidence_policy,
-            reasons=("cure_pr_discussion_found",),
-            signal_counts=signal_counts,
-            degraded_reasons=_ordered_unique(degraded_reasons),
-        )
-    ordered_degraded_reasons = _ordered_unique(degraded_reasons)
-    if discussion.status is ModuleStatus.DEGRADED or degraded_reasons:
-        if _degraded_remote_probe_requires_intake(ordered_degraded_reasons):
-            return SubsequentReviewDecision(
+        return (
+            SubsequentReviewDecision(
                 mode=command_mode,
                 enabled=True,
                 evidence_policy=evidence_policy,
-                reasons=("remote_probe_degraded",),
+                reasons=_ordered_unique([*reasons, "cure_pr_discussion_found"]),
                 signal_counts=signal_counts,
-                degraded_reasons=ordered_degraded_reasons or ("remote_probe_degraded",),
-            )
-        return SubsequentReviewDecision(
-            mode=command_mode,
-            enabled=False,
-            evidence_policy=evidence_policy,
-            reasons=("no_prior_review_signals",),
-            signal_counts=signal_counts,
-            degraded_reasons=ordered_degraded_reasons,
+                degraded_reasons=_ordered_unique(degraded_reasons),
+            ),
+            discussion,
         )
-    return SubsequentReviewDecision(
-        mode=command_mode,
-        enabled=False,
-        evidence_policy=evidence_policy,
-        reasons=("no_prior_review_signals",),
-        signal_counts=signal_counts,
+    ordered_degraded_reasons = _ordered_unique(degraded_reasons)
+    if "operator_skipped_degraded_discussion" in ordered_degraded_reasons and remote_cure_markers == 0:
+        return (
+            SubsequentReviewDecision(
+                mode=command_mode,
+                enabled=bool(reasons),
+                evidence_policy=evidence_policy,
+                reasons=_ordered_unique(reasons) or ("no_prior_review_signals",),
+                signal_counts=signal_counts,
+                degraded_reasons=ordered_degraded_reasons,
+            ),
+            discussion,
+        )
+    if discussion.status is ModuleStatus.DEGRADED or degraded_reasons:
+        if _degraded_remote_probe_requires_intake(ordered_degraded_reasons):
+            return (
+                SubsequentReviewDecision(
+                    mode=command_mode,
+                    enabled=True,
+                    evidence_policy=evidence_policy,
+                    reasons=_ordered_unique([*reasons, "remote_probe_degraded"]),
+                    signal_counts=signal_counts,
+                    degraded_reasons=ordered_degraded_reasons or ("remote_probe_degraded",),
+                ),
+                discussion,
+            )
+        return (
+            SubsequentReviewDecision(
+                mode=command_mode,
+                enabled=bool(reasons),
+                evidence_policy=evidence_policy,
+                reasons=_ordered_unique(reasons) or ("no_prior_review_signals",),
+                signal_counts=signal_counts,
+                degraded_reasons=ordered_degraded_reasons,
+            ),
+            discussion,
+        )
+    return (
+        SubsequentReviewDecision(
+            mode=command_mode,
+            enabled=bool(reasons),
+            evidence_policy=evidence_policy,
+            reasons=_ordered_unique(reasons) or ("no_prior_review_signals",),
+            signal_counts=signal_counts,
+        ),
+        discussion,
     )
 
 

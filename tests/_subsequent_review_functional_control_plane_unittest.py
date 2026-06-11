@@ -103,6 +103,34 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
         self.assertEqual(manifest["modules"]["finding_reconciler"]["status"], "degraded")
         self.assertIn("discussion_incomplete", manifest["modules"]["finding_reconciler"]["reasons"])
 
+    def test_intake_reuses_prefetched_discussion_without_fetching_again(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionArtifact, DiscussionEvent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = DiscussionArtifact(
+                status=ModuleStatus.SUCCESS,
+                events=(
+                    DiscussionEvent(
+                        kind="issue_comment",
+                        event_id="prefetched-1",
+                        author="cure-bot",
+                        body="CURe Review\n### CURE-88: Prefetched finding\nSeverity: medium\nSection: Security\nEvidence: app.py:1",
+                    ),
+                ),
+            )
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[],
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
+                prefetched_discussion=artifact,
+                fetch_json=lambda _path: (_ for _ in ()).throw(AssertionError("prefetched discussion must be reused")),
+            )
+            discussion = json.loads((root / "work" / "subsequent" / "pr_discussion.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([event["event_id"] for event in discussion["events"]], ["prefetched-1"])
+
     def test_control_plane_writes_story_01_artifacts_only_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

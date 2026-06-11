@@ -16,6 +16,8 @@ Read the plan JSON file first and use it for business context and overall framin
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
+$PRIOR_REVIEW_BRIEF
+
 Safety guardrail:
 - Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
 - If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.

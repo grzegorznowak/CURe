@@ -10,18 +10,19 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
             review = root / "review.md"
             review.write_text("prior\n", encoding="utf-8")
             session = Session("s1", root, review)
-            local = decide_subsequent_review(
+            local, local_discussion = decide_subsequent_review(
                 pr=pr,
                 completed_sessions=[session],
                 mode=SubsequentReviewCommandMode.AUTO,
                 evidence_policy=EvidencePolicy.UNTRUSTED,
                 fetch_json=lambda _path: (_ for _ in ()).throw(AssertionError("remote probe not needed with local sessions")),
             )
+        self.assertIsNone(local_discussion)
         self.assertTrue(local.enabled)
         self.assertIn("completed_sessions_found", local.reasons)
         self.assertEqual(local.signal_counts["completed_sessions"], 1)
 
-        remote = decide_subsequent_review(
+        remote, remote_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
             mode=SubsequentReviewCommandMode.AUTO,
@@ -30,12 +31,13 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
                 {"id": 1, "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}
             ] if path.endswith("/issues/9999/comments") else [],
         )
+        self.assertIsNotNone(remote_discussion)
         self.assertTrue(remote.enabled)
         self.assertIn("cure_pr_discussion_found", remote.reasons)
         self.assertEqual(remote.signal_counts["remote_cure_markers"], 1)
         self.assertEqual(remote.evidence_policy, EvidencePolicy.TRUSTED)
 
-        first_run = decide_subsequent_review(
+        first_run, first_run_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
             mode=SubsequentReviewCommandMode.AUTO,
@@ -44,10 +46,11 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
                 {"id": 2, "user": {"login": "human"}, "body": "looks good"}
             ] if path.endswith("/issues/9999/comments") else [],
         )
+        self.assertIsNotNone(first_run_discussion)
         self.assertFalse(first_run.enabled)
         self.assertIn("no_prior_review_signals", first_run.reasons)
 
-        public_fallback_empty = decide_subsequent_review(
+        public_fallback_empty, public_fallback_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
             mode=SubsequentReviewCommandMode.AUTO,
@@ -59,31 +62,53 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
                 "fetch": "public_github_api",
             },
         )
+        self.assertIsNotNone(public_fallback_discussion)
         self.assertFalse(public_fallback_empty.enabled)
         self.assertEqual(public_fallback_empty.reasons, ("no_prior_review_signals",))
         self.assertEqual(public_fallback_empty.signal_counts["remote_cure_markers"], 0)
         self.assertIn("discussion_incomplete", public_fallback_empty.degraded_reasons)
 
-        degraded = decide_subsequent_review(
+        degraded, degraded_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=[],
             mode=SubsequentReviewCommandMode.AUTO,
             evidence_policy=EvidencePolicy.UNTRUSTED,
             fetch_json=lambda _path: (_ for _ in ()).throw(RuntimeError("offline")),
         )
+        self.assertIsNotNone(degraded_discussion)
         self.assertTrue(degraded.enabled)
         self.assertIn("remote_probe_degraded", degraded.reasons)
         self.assertIn("discussion_unavailable", degraded.degraded_reasons)
 
-        explicit = decide_subsequent_review(
+        explicit, explicit_discussion = decide_subsequent_review(
             pr=pr,
             completed_sessions=[object()],
             mode=SubsequentReviewCommandMode.DISABLED,
             evidence_policy=EvidencePolicy.UNTRUSTED,
             fetch_json=lambda _path: (_ for _ in ()).throw(AssertionError("disabled mode must not probe remote")),
         )
+        self.assertIsNone(explicit_discussion)
         self.assertFalse(explicit.enabled)
         self.assertEqual(explicit.reasons, ("operator_disabled",))
+
+    def test_operator_skipped_degraded_discussion_does_not_enable_first_run(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionArtifact
+
+        decision, discussion = decide_subsequent_review(
+            pr=PR(),
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            discussion=DiscussionArtifact(
+                status=ModuleStatus.DEGRADED,
+                status_reasons=("discussion_unavailable", "operator_skipped_degraded_discussion"),
+            ),
+        )
+
+        self.assertIsNotNone(discussion)
+        self.assertFalse(decision.enabled)
+        self.assertEqual(decision.reasons, ("no_prior_review_signals",))
+        self.assertIn("operator_skipped_degraded_discussion", decision.degraded_reasons)
 
     def test_decision_service_rejects_false_positive_remote_markers(self) -> None:
         pr = PR()
@@ -152,13 +177,14 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
                         return [payload]
                     return []
 
-                decision = decide_subsequent_review(
+                decision, discussion = decide_subsequent_review(
                     pr=pr,
                     completed_sessions=[],
                     mode=SubsequentReviewCommandMode.AUTO,
                     evidence_policy=EvidencePolicy.UNTRUSTED,
                     fetch_json=fetch,
                 )
+                self.assertIsNotNone(discussion)
                 self.assertEqual(decision.enabled, expected_enabled)
                 self.assertEqual(decision.signal_counts["remote_cure_markers"], 0)
                 self.assertNotIn("cure_pr_discussion_found", decision.reasons)

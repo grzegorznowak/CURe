@@ -12,6 +12,8 @@ You are reviewing a GitHub PR checked out locally in an **isolated sandbox** (no
   - `git diff <base>...HEAD`
 Use the configured review-intelligence guidance below when you need PR, ticket, or external context:
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
 - Prefer the staged ChunkHound helper for fast context (`search` + `research`).
   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
   - Treat helper `research` as satisfying the `code_research` requirement.

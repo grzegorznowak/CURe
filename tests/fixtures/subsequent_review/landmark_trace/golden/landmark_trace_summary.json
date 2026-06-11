@@ -1,0 +1,98 @@
+{
+  "degraded_runtime": {
+    "final_reason": "discussion_available",
+    "operator_choices": [
+      "retry"
+    ],
+    "status": "success"
+  },
+  "dispositions": {
+    "action_counts": {
+      "confirm_resolved": 1,
+      "move_out_of_scope": 1,
+      "re_report": 1,
+      "suppress_duplicate": 1
+    },
+    "degraded_count": 1
+  },
+  "fb_010": {
+    "discussion_event_count_matches_decision": true
+  },
+  "governor_brief": {
+    "headings": [
+      "### Confirmed Fixed",
+      "### Still Open",
+      "### Suppressed Duplicates",
+      "### Out of Scope",
+      "### Degraded"
+    ]
+  },
+  "memory": {
+    "finding_count": 4,
+    "resolved_from_source_count": 1
+  },
+  "module": "landmark_trace_runner",
+  "report_governor": {
+    "awareness": "demonstrated",
+    "status": "success"
+  },
+  "schema_version": 1,
+  "source_verification": {
+    "state_counts": {
+      "resolved_from_source": 1,
+      "source_unknown": 1,
+      "still_open": 2
+    }
+  },
+  "stage_coverage": [
+    {
+      "module": "control_plane",
+      "status": "success"
+    },
+    {
+      "module": "pr_history_collector",
+      "status": "success"
+    },
+    {
+      "module": "prior_review_corpus_builder",
+      "status": "success"
+    },
+    {
+      "module": "prior_finding_extractor",
+      "status": "success"
+    },
+    {
+      "module": "finding_reconciler",
+      "status": "success"
+    },
+    {
+      "module": "source_truth_verifier",
+      "status": "success"
+    },
+    {
+      "module": "discussion_signal_resolver",
+      "status": "success"
+    },
+    {
+      "module": "disposition_arbiter",
+      "status": "success"
+    },
+    {
+      "module": "review_context_packager",
+      "status": "success"
+    },
+    {
+      "module": "report_governor",
+      "status": "success"
+    },
+    {
+      "module": "review_memory_store",
+      "status": "success"
+    },
+    {
+      "module": "degraded_runtime_manager",
+      "status": "success"
+    }
+  ],
+  "status": "success"
+}

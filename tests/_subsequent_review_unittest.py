@@ -6,10 +6,19 @@ from _subsequent_review_unit_prior_corpus_unittest import SubsequentReviewPriorC
 from _subsequent_review_unit_prior_findings_unittest import SubsequentReviewPriorFindingsTests
 from _subsequent_review_unit_reconciliation_unittest import SubsequentReviewReconciliationTests
 from _subsequent_review_unit_source_truth_unittest import SubsequentReviewSourceTruthTests
+from _subsequent_review_unit_semantic_pipeline_unittest import SubsequentReviewSemanticPipelineTests
+from _subsequent_review_unit_memory_store_unittest import SubsequentReviewMemoryStoreTests
+from _subsequent_review_unit_runtime_memory_unittest import SubsequentReviewRuntimeMemoryTests
+from _subsequent_review_unit_runtime_packaging_unittest import SubsequentReviewRuntimePackagingTests
+from _subsequent_review_unit_report_governor_unittest import SubsequentReviewReportGovernorTests
+from _subsequent_review_unit_degraded_runtime_unittest import SubsequentReviewDegradedRuntimeTests
 from _subsequent_review_unit_discussion_signals_unittest import SubsequentReviewDiscussionSignalsTests
+from _subsequent_review_unit_discussion_linker_unittest import SubsequentReviewDiscussionLinkerTests
+from _subsequent_review_unit_llm_verifier_unittest import SubsequentReviewLlmVerifierTests
 from _subsequent_review_unit_disposition_arbiter_unittest import SubsequentReviewDispositionArbiterTests
 from _subsequent_review_functional_control_plane_unittest import SubsequentReviewControlPlaneTests
 from _subsequent_review_integration_pr_flow_unittest import SubsequentReviewPrFlowIntegrationTests
+from _subsequent_review_acceptance_landmark_trace_unittest import SubsequentReviewLandmarkTraceTests
 
 __all__ = [
     "SubsequentReviewContractsCliTests",
@@ -19,8 +28,17 @@ __all__ = [
     "SubsequentReviewPriorFindingsTests",
     "SubsequentReviewReconciliationTests",
     "SubsequentReviewSourceTruthTests",
+    "SubsequentReviewSemanticPipelineTests",
+    "SubsequentReviewMemoryStoreTests",
+    "SubsequentReviewRuntimeMemoryTests",
+    "SubsequentReviewRuntimePackagingTests",
+    "SubsequentReviewReportGovernorTests",
+    "SubsequentReviewDegradedRuntimeTests",
     "SubsequentReviewDiscussionSignalsTests",
+    "SubsequentReviewDiscussionLinkerTests",
+    "SubsequentReviewLlmVerifierTests",
     "SubsequentReviewDispositionArbiterTests",
     "SubsequentReviewControlPlaneTests",
     "SubsequentReviewPrFlowIntegrationTests",
+    "SubsequentReviewLandmarkTraceTests",
 ]

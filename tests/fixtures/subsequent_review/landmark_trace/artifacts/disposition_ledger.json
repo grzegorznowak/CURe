@@ -1,0 +1,81 @@
+{
+  "degraded_findings": [
+    {
+      "blocking_reasons": [
+        "discussion_unavailable_after_operator_skip"
+      ],
+      "finding_ids": [
+        "F-005"
+      ],
+      "group_id": "G-005",
+      "provenance": {
+        "degraded_runtime": true
+      }
+    }
+  ],
+  "dispositions": [
+    {
+      "action": "confirm_resolved",
+      "discussion_signal_row_ids": [
+        "DS-002"
+      ],
+      "finding_ids": [
+        "F-001"
+      ],
+      "group_id": "G-001",
+      "provenance": {
+        "arbiter": "fixture"
+      },
+      "reconciliation_group_id": "G-001",
+      "row_id": "D-001",
+      "source_verification_row_id": "SV-001"
+    },
+    {
+      "action": "re_report",
+      "discussion_signal_row_ids": [
+        "DS-001"
+      ],
+      "finding_ids": [
+        "F-002"
+      ],
+      "group_id": "G-002",
+      "provenance": {
+        "arbiter": "fixture"
+      },
+      "reconciliation_group_id": "G-002",
+      "row_id": "D-002",
+      "source_verification_row_id": "SV-002"
+    },
+    {
+      "action": "suppress_duplicate",
+      "discussion_signal_row_ids": [],
+      "finding_ids": [
+        "F-003"
+      ],
+      "group_id": "G-003",
+      "provenance": {
+        "arbiter": "fixture"
+      },
+      "reconciliation_group_id": "G-003",
+      "row_id": "D-003",
+      "source_verification_row_id": "SV-003"
+    },
+    {
+      "action": "move_out_of_scope",
+      "discussion_signal_row_ids": [],
+      "finding_ids": [
+        "F-004"
+      ],
+      "group_id": "G-004",
+      "provenance": {
+        "arbiter": "fixture"
+      },
+      "reconciliation_group_id": "G-004",
+      "row_id": "D-004",
+      "source_verification_row_id": "SV-004"
+    }
+  ],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

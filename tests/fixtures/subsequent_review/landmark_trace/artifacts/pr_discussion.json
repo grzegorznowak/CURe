@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "author": "developer",
+      "body": "This is just by design for F-002.",
+      "event_id": "C-001",
+      "kind": "issue_comment",
+      "thread_state": "open",
+      "url": "https://example.test/C-001"
+    },
+    {
+      "author": "reviewer",
+      "body": "F-001 was fixed in parser.py.",
+      "event_id": "C-002",
+      "kind": "review_comment",
+      "line": 10,
+      "path": "src/parser.py",
+      "thread_state": "resolved"
+    }
+  ],
+  "pagination": [],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

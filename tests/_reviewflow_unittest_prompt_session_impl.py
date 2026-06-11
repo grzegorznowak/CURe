@@ -665,6 +665,63 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
             self.assertNotIn("<details open>", default_rendered)
 
+    def test_subsequent_review_prior_brief_placeholder_renders_in_pr_prompts(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$PRIOR_REVIEW_BRIEF", text)
+            self.assertLess(text.index("$REVIEW_INTELLIGENCE_GUIDANCE"), text.index("$PRIOR_REVIEW_BRIEF"))
+            rendered = rf.render_prompt(
+                text,
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars={
+                    "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.",
+                    "PRIOR_REVIEW_BRIEF": "### Still Open\n- D-0002 — retry gap",
+                    "MAX_STEPS": "4",
+                    "PLAN_JSON_PATH": "/tmp/plan.json",
+                    "RESUME_PLAN_JSON_PATH": "/tmp/resume-plan.json",
+                    "STEP_ID": "01",
+                    "STEP_TITLE": "Routing",
+                    "STEP_FOCUS": "Inspect routing",
+                    "PREVIOUS_REVIEW_MD": "/tmp/previous.md",
+                    "PREVIOUS_REVIEW_HEAD_SHA": "abc123",
+                    "CURRENT_REVIEW_HEAD_SHA": "def456",
+                    "EXISTING_PLAN_JSON_PATH": "/tmp/existing-plan.json",
+                    "EXISTING_STEP_CATALOG": "- 01 Routing",
+                    "PRIOR_STEP_OUTPUT_PATH": "/tmp/prior-step.md",
+                    "STEP_OUTPUT_PATHS": "- `/tmp/step-01.md`",
+                    "GROUNDING_SKIPPED_STEPS": "- None.",
+                    **rf.verbose_review_findings_prompt_vars(enabled=False),
+                    **rf.cod_hypothesis_ledger_prompt_vars(enabled=False),
+                },
+            )
+            self.assertIn("### Still Open\n- D-0002", rendered)
+            self.assertNotIn("$PRIOR_REVIEW_BRIEF", rendered)
+        self.assertNotIn(
+            "$PRIOR_REVIEW_BRIEF",
+            (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
+        )
+
     def test_final_review_templates_require_input_boundary_shape_risk_assessment(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",
