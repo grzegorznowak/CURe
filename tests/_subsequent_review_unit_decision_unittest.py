@@ -28,7 +28,12 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
             mode=SubsequentReviewCommandMode.AUTO,
             evidence_policy=EvidencePolicy.TRUSTED,
             fetch_json=lambda path: [
-                {"id": 1, "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}
+                {
+                    "id": 1,
+                    "user": {"login": "human-operator"},
+                    "body": f"CURe Review\n{CURE_FOOTER_BLOCK}",
+                    "created_at": "2026-01-01T00:00:00Z",
+                }
             ] if path.endswith("/issues/9999/comments") else [],
         )
         self.assertIsNotNone(remote_discussion)
@@ -167,11 +172,22 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
                 False,
                 "no_prior_review_signals",
             ),
+            (
+                "allowlisted_author_without_official_footer",
+                {
+                    "id": 17,
+                    "user": {"login": "cure-bot"},
+                    "body": "CURe Review\n### CURE-92: old body-only marker",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                False,
+                "no_prior_review_signals",
+            ),
         )
         for name, payload, expected_enabled, expected_reason in cases:
             with self.subTest(name=name):
                 def fetch(path: str) -> Any:
-                    if path.endswith("/issues/9999/comments") and "issue_comment" in name:
+                    if path.endswith("/issues/9999/comments") and ("issue_comment" in name or name == "allowlisted_author_without_official_footer"):
                         return [payload]
                     if path.endswith("/pulls/9999/comments") and "thread" in name:
                         return [payload]

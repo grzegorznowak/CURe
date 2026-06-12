@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from cure_subsequent_review.contracts import (
@@ -12,33 +11,28 @@ from cure_subsequent_review.contracts import (
     PriorReviewCorpusEntry,
 )
 
-_CURE_BODY_RE = re.compile(r"\b(CURe|CURE|Reviewflow)\s+(review|finding|findings)\b|<!--\s*cure", re.IGNORECASE)
-_TRUSTED_CURE_AUTHOR_LOGINS = frozenset(
-    {
-        "cure-bot",
-        "cure-bot[bot]",
-        "cure-review-bot",
-        "cure-review-bot[bot]",
-        "reviewflow-bot",
-        "reviewflow-bot[bot]",
-    }
-)
+_CURE_REVIEW_FOOTER_START = "<!-- CURE_REVIEW_FOOTER_START -->"
+_CURE_REVIEW_FOOTER_END = "<!-- CURE_REVIEW_FOOTER_END -->"
 
 
-def _trusted_cure_author_login(author: str | None) -> bool:
-    return bool(author and author.strip().lower() in _TRUSTED_CURE_AUTHOR_LOGINS)
+def _has_official_cure_review_footer(body: str) -> bool:
+    start = body.find(_CURE_REVIEW_FOOTER_START)
+    end = body.find(_CURE_REVIEW_FOOTER_END)
+    return start >= 0 and end > start
 
 
 def _looks_cure_authored(*, author: str | None, body: str) -> bool:
-    """Return true only for configured trusted CURe-authored review markers.
+    """Return true only for the official CURe review footer marker.
 
-    Body text alone is not enough: a human can mention ``CURe review`` in a
-    generic GitHub discussion without that being evidence of a prior CURe run.
-    Broad login regexes are also not enough because names like ``cure-fake``
-    are user-spoofable; remote corpus trust uses a small durable author allowlist.
+    Remote GitHub issue comments and pull review bodies may be authored by the
+    operator or another non-bot account, so author/login is not a durable CURe
+    provenance signal.  Generic body text alone is still insufficient: a human
+    can mention ``CURe review`` or ``<!-- cure -->`` in discussion without that
+    being evidence of a prior CURe run.
     """
 
-    return bool(_trusted_cure_author_login(author) and _CURE_BODY_RE.search(body))
+    _ = author
+    return _has_official_cure_review_footer(body)
 
 
 def build_prior_review_corpus(

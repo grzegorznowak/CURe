@@ -17,7 +17,13 @@ class SubsequentReviewReconciliationTests(SubsequentReviewTestCase):
             discussion = collect_pr_discussion(
                 pr=PR(),
                 fetch_json=lambda path: [
-                    {"id": 900, "html_url": "comment-url", "user": {"login": "cure-bot"}, "body": "CURe Review\n### CURE-01: Comment finding\nSeverity: low\nSection: Docs\nEvidence: README.md:3 typo", "created_at": "2026-01-04T00:00:00Z"}
+                    {
+                        "id": 900,
+                        "html_url": "comment-url",
+                        "user": {"login": "human-operator"},
+                        "body": "CURe Review\n### CURE-01: Comment finding\nSeverity: low\nSection: Docs\nEvidence: README.md:3 typo\n" + CURE_FOOTER_BLOCK,
+                        "created_at": "2026-01-04T00:00:00Z",
+                    }
                 ] if path.endswith("/issues/9999/comments") else [],
             )
 

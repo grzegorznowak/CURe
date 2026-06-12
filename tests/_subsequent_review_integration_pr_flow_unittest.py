@@ -339,8 +339,8 @@ class SubsequentReviewPrFlowIntegrationTests(SubsequentReviewTestCase):
                     return [
                         {
                             "id": 777,
-                            "user": {"login": "cure-bot"},
-                            "body": "CURe Review\n### CURE-777: prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1",
+                            "user": {"login": "human-operator"},
+                            "body": "CURe Review\n### CURE-777: prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1\n" + CURE_FOOTER_BLOCK,
                             "created_at": "2026-01-01T00:00:00Z",
                         }
                     ]

@@ -3,7 +3,7 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 
 class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
-    def test_trusted_pull_review_body_enables_and_enters_prior_corpus(self) -> None:
+    def test_official_footer_pull_review_body_enables_and_enters_prior_corpus_regardless_of_author(self) -> None:
         pr = PR()
         review_body = (
             "CURe Review\n"
@@ -11,6 +11,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
             "Severity: high\n"
             "Section: Security\n"
             "Evidence: app/auth.py:42 missing check\n"
+            f"\n{CURE_FOOTER_BLOCK}\n"
         )
 
         def fetch(path: str) -> Any:
@@ -21,7 +22,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
                     {
                         "id": 901,
                         "html_url": "review-url",
-                        "user": {"login": "cure-bot"},
+                        "user": {"login": "human-operator"},
                         "body": review_body,
                         "state": "COMMENTED",
                         "commit_id": "review-head-sha-901",
@@ -58,7 +59,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
         self.assertEqual(entry.body, review_body)
         self.assertEqual(entry.provenance["review_id"], "901")
         self.assertEqual(entry.provenance["url"], "review-url")
-        self.assertEqual(entry.provenance["author"], "cure-bot")
+        self.assertEqual(entry.provenance["author"], "human-operator")
         self.assertEqual(entry.provenance["state"], "COMMENTED")
         self.assertEqual(entry.reviewed_head, "review-head-sha-901")
         self.assertEqual(entry.provenance["reviewed_head"], "review-head-sha-901")
@@ -73,7 +74,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
         self.assertEqual(pull_review_finding.reviewed_head, "review-head-sha-901")
         self.assertEqual(pull_review_finding.provenance.reviewed_head, "review-head-sha-901")
 
-    def test_trusted_issue_comment_remote_only_corpus_status_is_success(self) -> None:
+    def test_official_footer_issue_comment_remote_only_corpus_status_is_success_regardless_of_author(self) -> None:
         pr = PR()
         comment_body = (
             "CURe Review\n"
@@ -81,6 +82,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
             "Severity: medium\n"
             "Section: Reliability\n"
             "Evidence: app/jobs.py:9 retries missing\n"
+            f"\n{CURE_FOOTER_BLOCK}\n"
         )
 
         def fetch(path: str) -> Any:
@@ -89,7 +91,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
                     {
                         "id": 801,
                         "html_url": "comment-url",
-                        "user": {"login": "cure-bot"},
+                        "user": {"login": "human-operator"},
                         "body": comment_body,
                         "created_at": "2026-01-04T00:00:00Z",
                     }
@@ -119,7 +121,12 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
                         "id": 901,
                         "user": {"login": "cure-fake"},
                         "body": "CURe Review\n### CURE-87: Spoofed issue comment",
-                    }
+                    },
+                    {
+                        "id": 906,
+                        "user": {"login": "cure-bot"},
+                        "body": "CURe Review\n### CURE-92: Allowlisted author without official footer",
+                    },
                 ]
             if path.endswith("/pulls/9999/reviews"):
                 return [
@@ -152,6 +159,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
             for item in corpus.ignored_pr_comments
         }
         self.assertIn(("pr_comment", "901", None, "cure_authorship_not_established"), ignored)
+        self.assertIn(("pr_comment", "906", None, "cure_authorship_not_established"), ignored)
         self.assertIn(("pr_review", None, "902", "cure_authorship_not_established"), ignored)
         self.assertIn(("pr_review", None, "903", "cure_authorship_not_established"), ignored)
         self.assertIn(("pr_review", None, "905", "cure_authorship_not_established"), ignored)
