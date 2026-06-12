@@ -9782,6 +9782,7 @@ def _pr_flow_impl(
     from cure_subsequent_review.runtime import (
         REPORT_GOVERNOR_RESULT_ARTIFACT,
         audit_review_report_after_review,
+        finalize_review_runtime_context,
         prepare_review_runtime_pre_prompt,
         review_memory_root_from_sandbox_root,
         update_review_memory_after_review,
@@ -11047,6 +11048,29 @@ def _pr_flow_impl(
             ] = memory_record.to_json()
             if memory_record.artifact_path:
                 progress.meta.setdefault("paths", {})["subsequent_review_memory"] = memory_record.artifact_path
+            finalize_record = finalize_review_runtime_context(
+                artifact_dir=subsequent_artifact_dir,
+                memory_store_path=subsequent_memory_store.path,
+                manifest_path=subsequent_manifest_path,
+            )
+            runtime_modules = progress.meta.setdefault("subsequent_review", {}).setdefault("runtime_modules", {})
+            runtime_modules["review_context_packager"] = finalize_record.to_json()
+            if subsequent_manifest_path is not None and subsequent_manifest_path.is_file():
+                try:
+                    manifest_payload = json.loads(subsequent_manifest_path.read_text(encoding="utf-8"))
+                    manifest_modules = manifest_payload.get("modules")
+                    if isinstance(manifest_modules, dict):
+                        for module_name, module_record in manifest_modules.items():
+                            if isinstance(module_record, dict):
+                                runtime_modules[str(module_name)] = dict(module_record)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            progress.meta.setdefault("paths", {})["subsequent_review_context_package"] = str(
+                subsequent_artifact_dir / "review_context_package.json"
+            )
+            progress.meta.setdefault("paths", {})["subsequent_review_context_md"] = str(
+                subsequent_artifact_dir / "subsequent_review_context.md"
+            )
             progress.flush()
     except ReviewflowSubprocessError as e:
         progress.error(

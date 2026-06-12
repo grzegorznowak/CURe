@@ -84,6 +84,67 @@ class SubsequentReviewLlmVerifierTests(SubsequentReviewTestCase):
             self.assertIn("semantic research", calls[1])
             self.assertEqual(result.provenance["chunkhound_research"], "used")
 
+    def test_verifier_degrades_inactive_duplicate_symbol_refs_instead_of_scoring_dead_code(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.llm_verifier import LlmFindingVerifier
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "cure_sessions.py").write_text(
+                "def resolve_completed_review():\n    return 'fixed active implementation'\n",
+                encoding="utf-8",
+            )
+            (repo / "cure.py").write_text(
+                "def resolve_completed_review():\n    return 'stale duplicate missing fix'\n\n"
+                "from cure_sessions import resolve_completed_review\n",
+                encoding="utf-8",
+            )
+            calls: list[str] = []
+            request = self._request().__class__(
+                **{
+                    **self._request().__dict__,
+                    "source_evidence_snippets": ("cure.py:1 stale duplicate resolve_completed_review",),
+                }
+            )
+
+            result = LlmFindingVerifier(repo_dir=repo, llm=lambda prompt: calls.append(prompt) or {})(request)
+
+            self.assertEqual(result.source_state, SourceState.NOT_VERIFIABLE)
+            self.assertEqual(calls, [])
+            self.assertTrue(any(reason.startswith("inactive_source_reference") for reason in result.unavailable_reasons))
+
+    def test_verifier_degrades_parenthesized_multiline_reexport_refs_instead_of_calling_llm(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.llm_verifier import LlmFindingVerifier
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "cure_sessions.py").write_text(
+                "def _resolve_session_relative_path():\n    return 'fixed active implementation'\n",
+                encoding="utf-8",
+            )
+            (repo / "cure.py").write_text(
+                "def _resolve_session_relative_path():\n    return 'stale duplicate missing fix'\n\n"
+                "from cure_sessions import (\n"
+                "    create_session,\n"
+                "    _resolve_session_relative_path,\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            calls: list[str] = []
+            request = self._request().__class__(
+                **{
+                    **self._request().__dict__,
+                    "source_evidence_snippets": ("cure.py:1 stale duplicate _resolve_session_relative_path",),
+                }
+            )
+
+            result = LlmFindingVerifier(repo_dir=repo, llm=lambda prompt: calls.append(prompt) or {})(request)
+
+            self.assertEqual(result.source_state, SourceState.NOT_VERIFIABLE)
+            self.assertEqual(calls, [])
+            self.assertTrue(any(reason.startswith("inactive_source_reference") for reason in result.unavailable_reasons))
+
     def test_verifier_returns_not_verifiable_without_llm_when_evidence_refs_are_missing(self) -> None:
         from cure_subsequent_review.contracts import SourceState
         from cure_subsequent_review.llm_verifier import LlmFindingVerifier

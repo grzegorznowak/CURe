@@ -72,6 +72,92 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                 str(artifact_dir / "report_governor_result.json"),
             )
 
+    def test_governor_brief_requires_prior_review_disposition_map_for_every_da_row(self) -> None:
+        from cure_subsequent_review.runtime import build_governor_brief
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "disposition_ledger.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "status_reasons": [],
+                        "dispositions": [
+                            {
+                                "row_id": "DA-0001",
+                                "group_id": "G-0001",
+                                "finding_ids": ["A-01"],
+                                "action": "confirm_resolved",
+                                "source_verification_row_id": "SV-0001",
+                            },
+                            {
+                                "row_id": "DA-0002",
+                                "group_id": "G-0002",
+                                "finding_ids": ["A-02"],
+                                "action": "re_report",
+                                "source_verification_row_id": "SV-0002",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            brief = build_governor_brief(artifact_dir=artifact_dir)
+
+            self.assertIn("Prior Review Disposition Map", brief)
+            self.assertIn("DA-0001: confirmed-resolved", brief)
+            self.assertIn("DA-0002: carried-forward/re_report", brief)
+            self.assertIn("confirmed-resolved | carried-forward/re_report | degraded | out-of-scope | contradicted-with-evidence", brief)
+
+    def test_post_review_disposition_map_gaps_degrade_without_blocking(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief="### Prior Review Disposition Map (required final output)\n- DA-0001: confirmed-resolved\n- DA-0002: carried-forward/re_report\n",
+            )
+            (artifact_dir / "disposition_ledger.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "dispositions": [
+                            {"row_id": "DA-0001", "action": "confirm_resolved"},
+                            {"row_id": "DA-0002", "action": "re_report"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "# Review\n\n## Prior Review Disposition Map\n- DA-0001: carried-forward/re_report\n",
+                encoding="utf-8",
+            )
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "partial", "judgment": "only one DA row mentioned", "evidence": ["DA-0001"]}
+                ),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "degraded")
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "degraded")
+            self.assertEqual(result["awareness"], "partial")
+            self.assertIn("missing_disposition_map_rows:DA-0002", result["warnings"])
+            self.assertIn("contradicted_disposition_map_rows:DA-0001", result["warnings"])
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]["report_governor"]["status"], "degraded")
+
     def test_post_review_sanitization_skips_when_brief_empty_or_governor_off(self) -> None:
         from cure_subsequent_review.runtime import audit_review_report_after_review
 

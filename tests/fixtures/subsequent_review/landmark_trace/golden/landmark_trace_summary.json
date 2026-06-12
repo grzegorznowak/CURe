@@ -20,6 +20,7 @@
   },
   "governor_brief": {
     "headings": [
+      "### Prior Review Disposition Map (required final output)",
       "### Confirmed Fixed",
       "### Still Open",
       "### Suppressed Duplicates",

@@ -88,6 +88,64 @@ def _safe_child(root: Path, raw_path: str) -> Path | None:
     return candidate
 
 
+def _imported_names(raw_names: str, *, lines: list[str], start_index: int) -> tuple[set[str], int]:
+    names_fragments: list[str] = []
+    text = raw_names
+    index = start_index
+    if "(" in text:
+        text = text.split("(", 1)[1]
+        while True:
+            before_close, separator, _after_close = text.partition(")")
+            names_fragments.append(before_close)
+            if separator:
+                break
+            index += 1
+            if index >= len(lines):
+                break
+            text = lines[index]
+    else:
+        names_fragments.append(text)
+
+    imported: set[str] = set()
+    for fragment in ",".join(names_fragments).split(","):
+        name = fragment.split("#", 1)[0].strip().strip("()")
+        if not name:
+            continue
+        imported.add(name.rsplit(" as ", 1)[-1].strip())
+    return imported, index
+
+
+def _inactive_binding_reason(*, repo_dir: Path, path_text: str, line: int, lines: list[str]) -> str | None:
+    definition_name: str | None = None
+    definition_line = 0
+    for index in range(min(line, len(lines)), 0, -1):
+        match = re.match(
+            r"\s*(?:async\s+def|def|class)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
+            lines[index - 1],
+        )
+        if match is not None:
+            definition_name = match.group("name")
+            definition_line = index
+            break
+    if not definition_name:
+        return None
+    import_pattern = re.compile(r"^\s*from\s+(?P<module>[A-Za-z_][A-Za-z0-9_\.]+)\s+import\s+(?P<names>.*)$")
+    index = definition_line
+    while index < len(lines):
+        match = import_pattern.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        imported_names, index = _imported_names(match.group("names"), lines=lines, start_index=index)
+        if definition_name in imported_names:
+            module_path = repo_dir.joinpath(*match.group("module").split(".")).with_suffix(".py")
+            if module_path.is_file() and module_path.name != Path(path_text).name:
+                return f"inactive_source_reference_active_binding:{definition_name}:{module_path.relative_to(repo_dir)}"
+            return f"inactive_source_reference_active_binding:{definition_name}"
+        index += 1
+    return None
+
+
 def _read_context(repo_dir: Path, ref: str) -> tuple[dict[str, Any] | None, str | None]:
     match = _REF_RE.search(ref)
     if match is None:
@@ -100,6 +158,9 @@ def _read_context(repo_dir: Path, ref: str) -> tuple[dict[str, Any] | None, str 
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if line < 1 or line > len(lines):
         return None, "evidence_reference_missing"
+    inactive_reason = _inactive_binding_reason(repo_dir=repo_dir, path_text=path_text, line=line, lines=lines)
+    if inactive_reason is not None:
+        return None, inactive_reason
     start = max(1, line - _CONTEXT_RADIUS)
     end = min(len(lines), line + _CONTEXT_RADIUS)
     context_lines = []

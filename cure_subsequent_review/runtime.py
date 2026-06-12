@@ -9,6 +9,7 @@ copied into the shared per-PR memory cache after the review run completes.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
@@ -36,6 +37,13 @@ SUBSEQUENT_REVIEW_CONTEXT_ARTIFACT = "subsequent_review_context.md"
 GOVERNOR_BRIEF_ARTIFACT = "governor_brief.md"
 REPORT_GOVERNOR_RESULT_ARTIFACT = "report_governor_result.json"
 REPORT_GOVERNOR_AWARENESS_QUESTION = "Does this review demonstrate awareness of the prior review context?"
+ALLOWED_DISPOSITION_MAP_STATUSES = (
+    "confirmed-resolved",
+    "carried-forward/re_report",
+    "degraded",
+    "out-of-scope",
+    "contradicted-with-evidence",
+)
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,33 @@ def _memory_artifact_status(memory_store_path: Path | None) -> dict[str, Any]:
     return {"path": str(memory_store_path), "status": status, "count": count}
 
 
+def _has_official_footer(body: str) -> bool:
+    start = body.find("<!-- CURE_REVIEW_FOOTER_START -->")
+    end = body.find("<!-- CURE_REVIEW_FOOTER_END -->")
+    return start >= 0 and end > start
+
+
+def _footer_marker_policy_summary(corpus_payload: dict[str, Any] | None) -> dict[str, Any]:
+    entries = (corpus_payload or {}).get("entries")
+    ignored = (corpus_payload or {}).get("ignored_pr_comments")
+    remote_entries = [entry for entry in entries if isinstance(entry, dict) and str(entry.get("source_type") or "") in {"pr_comment", "pr_review"}] if isinstance(entries, list) else []
+    official_footer_remote_entries = sum(1 for entry in remote_entries if _has_official_footer(str(entry.get("body") or "")))
+    body_only_rejected_comments = sum(
+        1
+        for item in ignored
+        if isinstance(item, dict) and str(item.get("reason") or "") == "cure_authorship_not_established"
+    ) if isinstance(ignored, list) else 0
+    return {
+        "policy": "official_footer_sufficient_regardless_of_author_login_body_only_rejected",
+        "official_footer_remote_entries": official_footer_remote_entries,
+        "body_only_rejected_comments": body_only_rejected_comments,
+        "summary": (
+            "Official CURe footer markers are accepted as prior-review provenance regardless of author/login; "
+            "generic or body-only CURe-looking text remains rejected."
+        ),
+    }
+
+
 def build_review_context_package(*, artifact_dir: Path, memory_store_path: Path | None = None) -> dict[str, Any]:
     """Build the module-9 audit package from available subsequent-review artifacts."""
 
@@ -189,6 +224,7 @@ def build_review_context_package(*, artifact_dir: Path, memory_store_path: Path 
             "pr_discussion_events": discussion_event_count,
             "discussion_event_count_matches_decision": decision_remote_events == discussion_event_count,
         },
+        "footer_marker_policy": _footer_marker_policy_summary(payloads.get("prior_review_corpus")),
     }
 
 
@@ -212,8 +248,15 @@ def _write_context_markdown(*, path: Path, package: dict[str, Any]) -> None:
             lines.append(f"- {module}: {statuses[module]}")
     else:
         lines.append("- None recorded.")
+    raw_footer_policy = package.get("footer_marker_policy")
+    footer_policy: dict[str, Any] = raw_footer_policy if isinstance(raw_footer_policy, dict) else {}
     lines.extend(
         [
+            "",
+            "## Footer marker policy",
+            f"- {footer_policy.get('summary', 'Official CURe footer markers identify prior CURe reviews; body-only markers are rejected.')}",
+            f"- Official-footer remote entries: {footer_policy.get('official_footer_remote_entries', 0)}",
+            f"- Body-only/generic rejected comments: {footer_policy.get('body_only_rejected_comments', 0)}",
             "",
             "## FB-010 discussion evidence reuse",
             f"- Decision remote events: {package.get('fb_010', {}).get('decision_remote_events', 0)}",
@@ -327,17 +370,58 @@ def _discussion_text(row_ids: tuple[str, ...], discussion_rows: dict[str, dict[s
         policy = str(row.get("evidence_policy") or "unknown")
         authority = str(row.get("authority") or "unknown")
         parts.append(f"{row_id} {policy}/{signal} by {authority}")
-        if policy != EvidencePolicy.TRUSTED.value or authority in {"", "unknown", "developer"} or signal == DiscussionSignalClass.AUTHORITY_CONFLICT.value:
+        if (
+            policy != EvidencePolicy.TRUSTED.value
+            or authority in {"", "unknown", "developer"}
+            or signal == DiscussionSignalClass.AUTHORITY_CONFLICT.value
+        ):
             caveats.append(f"{row_id} has {policy} discussion authority ({authority})")
     return "; ".join(parts), "; ".join(caveats) if caveats else None
+
+
+def _disposition_map_status_for_action(action: str) -> str:
+    return {
+        DispositionAction.CONFIRM_RESOLVED.value: "confirmed-resolved",
+        DispositionAction.RE_REPORT.value: "carried-forward/re_report",
+        DispositionAction.REWORD_PARTIAL.value: "carried-forward/re_report",
+        DispositionAction.MOVE_OUT_OF_SCOPE.value: "out-of-scope",
+        DispositionAction.SUPPRESS_DUPLICATE.value: "out-of-scope",
+    }.get(action, "degraded")
+
+
+def _disposition_map_rows(dispositions: list[Any]) -> dict[str, str]:
+    rows: dict[str, str] = {}
+    for raw in dispositions:
+        if not isinstance(raw, dict):
+            continue
+        row_id = str(raw.get("row_id") or "").strip()
+        if row_id:
+            rows[row_id] = _disposition_map_status_for_action(str(raw.get("action") or ""))
+    return rows
+
+
+def _footer_policy_brief(corpus_payload: dict[str, Any] | None) -> list[str]:
+    summary = _footer_marker_policy_summary(corpus_payload)
+    if not summary["official_footer_remote_entries"] and not summary["body_only_rejected_comments"]:
+        return []
+    return [
+        "### Footer Marker Policy",
+        (
+            "- Story 02/FB-026 policy: official CURe footer markers are accepted as prior-review provenance "
+            "regardless of author/login; generic/body-only CURe-looking text remains rejected. "
+            f"Accepted official-footer remote entries: {summary['official_footer_remote_entries']}; "
+            f"body-only/generic rejected comments: {summary['body_only_rejected_comments']}."
+        ),
+    ]
 
 
 def build_governor_brief(*, artifact_dir: Path) -> str:
     """Build the module-10 pre-review brief from disposition/source ledgers."""
 
     disposition_payload = _load_json_object(artifact_dir / DISPOSITION_LEDGER_ARTIFACT)
+    corpus_payload = _load_json_object(artifact_dir / "prior_review_corpus.json")
     if disposition_payload is None:
-        return ""
+        return "\n".join(_footer_policy_brief(corpus_payload))
     source_rows = _rows_by_id(_load_json_object(artifact_dir / SOURCE_VERIFICATION_ARTIFACT))
     discussion_rows = _rows_by_id(_load_json_object(artifact_dir / "discussion_signals.json"))
     finding_meta = _finding_metadata_by_id(_load_json_object(artifact_dir / "prior_findings.json"))
@@ -388,7 +472,15 @@ def build_governor_brief(*, artifact_dir: Path) -> str:
                 group_id = str(raw.get("group_id") or "unknown")
                 reasons = ", ".join(str(item) for item in raw.get("blocking_reasons") or []) or "unknown"
                 sections["### Degraded"].append(f"- {group_id}: {reasons}. Citation: `{DISPOSITION_LEDGER_ARTIFACT}`.")
-    lines: list[str] = []
+    lines: list[str] = _footer_policy_brief(corpus_payload)
+    map_rows = _disposition_map_rows(dispositions if isinstance(dispositions, list) else [])
+    if map_rows:
+        if lines:
+            lines.append("")
+        lines.append("### Prior Review Disposition Map (required final output)")
+        lines.append("Allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES))
+        for row_id in sorted(map_rows):
+            lines.append(f"- {row_id}: {map_rows[row_id]} (cite `{DISPOSITION_LEDGER_ARTIFACT}#{row_id}`)")
     for heading, entries in sections.items():
         if entries:
             if lines:
@@ -422,6 +514,10 @@ def build_report_governor_sanitization_prompt(*, governor_brief: str, review_tex
             "Answer this exact question:",
             REPORT_GOVERNOR_AWARENESS_QUESTION,
             "",
+            "The final review must include a Prior Review Disposition Map covering every DA-* row from disposition_ledger.json.",
+            "Allowed map statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES),
+            "Official CURe footer markers are valid prior-review provenance regardless of author/login; body-only CURe-looking text remains rejected.",
+            "",
             "Return JSON only with these fields:",
             '- awareness: one of "demonstrated", "partial", "missing", or "unknown"',
             "- judgment: concise qualitative assessment",
@@ -446,6 +542,42 @@ def _list_of_strings(value: object) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _expected_disposition_map(artifact_dir: Path) -> dict[str, str]:
+    payload = _load_json_object(artifact_dir / DISPOSITION_LEDGER_ARTIFACT)
+    dispositions = (payload or {}).get("dispositions")
+    if not isinstance(dispositions, list):
+        return {}
+    rows = _disposition_map_rows(dispositions)
+    return {row_id: status for row_id, status in rows.items() if row_id.startswith("DA-")}
+
+
+def _actual_disposition_map(review_text: str) -> dict[str, str]:
+    statuses = "|".join(re.escape(status) for status in ALLOWED_DISPOSITION_MAP_STATUSES)
+    pattern = re.compile(rf"\b(DA-\d{{4,}})\b[^\n]*\b({statuses})\b", re.IGNORECASE)
+    return {match.group(1): match.group(2).lower() for match in pattern.finditer(review_text)}
+
+
+def _disposition_map_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
+    expected = _expected_disposition_map(artifact_dir)
+    if not expected:
+        return []
+    actual = _actual_disposition_map(review_text)
+    missing = tuple(sorted(row_id for row_id in expected if row_id not in actual))
+    contradicted = tuple(
+        sorted(
+            row_id
+            for row_id, expected_status in expected.items()
+            if row_id in actual and actual[row_id] not in {expected_status, "contradicted-with-evidence"}
+        )
+    )
+    warnings: list[str] = []
+    if missing:
+        warnings.append("missing_disposition_map_rows:" + ",".join(missing))
+    if contradicted:
+        warnings.append("contradicted_disposition_map_rows:" + ",".join(contradicted))
+    return warnings
 
 
 def _write_report_governor_result(
@@ -603,21 +735,68 @@ def audit_review_report_after_review(
         )
         return finish(ModuleStatus.DEGRADED, reasons)
 
-    awareness = str(parsed.get("awareness") or "unknown").strip() or "unknown"
+    awareness = str(parsed.get("awareness") or "unknown").strip().lower() or "unknown"
     judgment = str(parsed.get("judgment") or "").strip()
     evidence = _list_of_strings(parsed.get("evidence"))
     warnings = _list_of_strings(parsed.get("warnings"))
+    if awareness in {"partial", "missing"}:
+        warnings.append(f"awareness_{awareness}")
+    warnings.extend(_disposition_map_warnings(artifact_dir=artifact_dir, review_text=review_text))
+    status = ModuleStatus.DEGRADED if warnings and awareness in {"partial", "missing", "unknown"} else ModuleStatus.SUCCESS
+    if any(warning.startswith(("missing_disposition_map_rows:", "contradicted_disposition_map_rows:")) for warning in warnings):
+        status = ModuleStatus.DEGRADED
+    final_reasons: tuple[str, ...] = tuple(dict.fromkeys(warnings)) if status is ModuleStatus.DEGRADED else ()
     _write_report_governor_result(
         path=result_path,
-        status=ModuleStatus.SUCCESS,
+        status=status,
+        reasons=final_reasons,
         review_path=review_path,
         governor_brief_path=governor_brief_path,
         awareness=awareness,
         judgment=judgment,
         evidence=evidence,
-        warnings=warnings,
+        warnings=list(dict.fromkeys(warnings)),
     )
-    return finish(ModuleStatus.SUCCESS)
+    return finish(status, final_reasons)
+
+
+def finalize_review_runtime_context(
+    *,
+    artifact_dir: Path,
+    memory_store_path: Path | None = None,
+    manifest_path: Path | None = None,
+    meta_path: Path | None = None,
+) -> ModuleRunRecord:
+    """Refresh module-9 artifacts after all runtime statuses have settled."""
+
+    context_package_path = artifact_dir / REVIEW_CONTEXT_PACKAGE_ARTIFACT
+    context_markdown_path = artifact_dir / SUBSEQUENT_REVIEW_CONTEXT_ARTIFACT
+    packager_record = ModuleRunRecord(
+        module=SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
+        status=ModuleStatus.SUCCESS,
+        artifact_path=str(context_package_path),
+    )
+    _record_runtime_module_in_manifest(manifest_path, packager_record)
+    package = build_review_context_package(artifact_dir=artifact_dir, memory_store_path=memory_store_path)
+    _write_json_object(context_package_path, package)
+    _write_context_markdown(path=context_markdown_path, package=package)
+
+    if meta_path is not None and meta_path.is_file():
+        meta = _load_json_object(meta_path)
+        if meta is not None:
+            runtime_modules = meta.setdefault("subsequent_review", {}).setdefault("runtime_modules", {})
+            manifest_payload = _load_json_object(manifest_path) if manifest_path is not None else None
+            modules = (manifest_payload or {}).get("modules")
+            if isinstance(runtime_modules, dict) and isinstance(modules, dict):
+                runtime_modules.clear()
+                for module_name, record in modules.items():
+                    if isinstance(record, dict):
+                        runtime_modules[str(module_name)] = dict(record)
+            try:
+                _write_json_object(meta_path, meta)
+            except OSError:
+                pass
+    return packager_record
 
 
 def prepare_review_runtime_pre_prompt(
@@ -649,6 +828,11 @@ def prepare_review_runtime_pre_prompt(
             reasons=("governor_mode_off",),
         )
         _record_runtime_module_in_manifest(manifest_path, governor_record)
+        finalize_review_runtime_context(
+            artifact_dir=artifact_dir,
+            memory_store_path=memory_store_path,
+            manifest_path=manifest_path,
+        )
         return ReviewRuntimePrePromptResult(
             prior_review_brief="",
             context_package_path=context_package_path,
@@ -679,6 +863,11 @@ def prepare_review_runtime_pre_prompt(
         artifact_path=str(governor_brief_path),
     )
     _record_runtime_module_in_manifest(manifest_path, governor_record)
+    finalize_review_runtime_context(
+        artifact_dir=artifact_dir,
+        memory_store_path=memory_store_path,
+        manifest_path=manifest_path,
+    )
     return ReviewRuntimePrePromptResult(
         prior_review_brief=brief,
         context_package_path=context_package_path,

@@ -230,6 +230,103 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
 
+    def test_runtime_finalization_refreshes_package_context_and_meta_after_late_status_updates(self) -> None:
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.runtime import (
+            audit_review_report_after_review,
+            finalize_review_runtime_context,
+            prepare_review_runtime_pre_prompt,
+            update_review_memory_after_review,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_seed_runtime_artifacts(artifact_dir)
+            meta_path = Path(tmp) / "meta.json"
+            meta_path.write_text(json.dumps({"subsequent_review": {"runtime_modules": {}}}), encoding="utf-8")
+            memory_store = ReviewMemoryStore(Path(tmp) / "pr" / "github.com" / "example" / "demo" / "9999" / "cure_memory.json")
+
+            prepare_review_runtime_pre_prompt(
+                artifact_dir=artifact_dir,
+                governor_mode="strict",
+                memory_store_path=memory_store.path,
+                manifest_path=manifest_path,
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "# Review\n\n## Prior Review Disposition Map\n- D-0001: confirmed-resolved\n- D-0002: carried-forward/re_report\n",
+                encoding="utf-8",
+            )
+            audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "demonstrated", "judgment": "map present", "evidence": ["D-0001", "D-0002"]}
+                ),
+                manifest_path=manifest_path,
+            )
+            update_review_memory_after_review(
+                artifact_dir=artifact_dir,
+                memory_store=memory_store,
+                current_head="abc123",
+                manifest_path=manifest_path,
+            )
+
+            finalize_review_runtime_context(
+                artifact_dir=artifact_dir,
+                memory_store_path=memory_store.path,
+                manifest_path=manifest_path,
+                meta_path=meta_path,
+            )
+
+            manifest_modules = json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]
+            package = json.loads((artifact_dir / "review_context_package.json").read_text(encoding="utf-8"))
+            context_md = (artifact_dir / "subsequent_review_context.md").read_text(encoding="utf-8")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            for module_name in ("review_context_packager", "report_governor", "review_memory_store"):
+                self.assertEqual(package["module_statuses"][module_name], manifest_modules[module_name]["status"])
+                self.assertIn(f"{module_name}: {manifest_modules[module_name]['status']}", context_md)
+                self.assertEqual(
+                    meta["subsequent_review"]["runtime_modules"][module_name]["status"],
+                    manifest_modules[module_name]["status"],
+                )
+            self.assertNotEqual(package["module_statuses"]["report_governor"], "disabled")
+            self.assertNotEqual(package["module_statuses"]["review_memory_store"], "disabled")
+
+    def test_context_package_and_governor_brief_publish_footer_marker_policy(self) -> None:
+        from cure_subsequent_review.runtime import build_governor_brief, build_review_context_package
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            self._write_seed_runtime_artifacts(artifact_dir)
+            corpus = {
+                "schema_version": 1,
+                "status": "success",
+                "status_reasons": [],
+                "entries": [
+                    {
+                        "entry_id": "pr_comment:IC-1",
+                        "source_type": "pr_comment",
+                        "provenance": {"author": "human-owner"},
+                        "body": "CURe review\n<!-- CURE_REVIEW_FOOTER_START -->ok<!-- CURE_REVIEW_FOOTER_END -->",
+                    }
+                ],
+                "ignored_pr_comments": [
+                    {"source_type": "pr_comment", "comment_id": "IC-2", "reason": "cure_authorship_not_established"}
+                ],
+            }
+            (artifact_dir / "prior_review_corpus.json").write_text(json.dumps(corpus), encoding="utf-8")
+
+            package = build_review_context_package(artifact_dir=artifact_dir)
+            brief = build_governor_brief(artifact_dir=artifact_dir)
+
+            self.assertEqual(package["footer_marker_policy"]["official_footer_remote_entries"], 1)
+            self.assertEqual(package["footer_marker_policy"]["body_only_rejected_comments"], 1)
+            self.assertIn("official CURe footer", brief)
+            self.assertIn("regardless of author/login", brief)
+            self.assertIn("body-only", brief)
+
     def test_governor_off_keeps_prior_review_brief_empty(self) -> None:
         from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
 
