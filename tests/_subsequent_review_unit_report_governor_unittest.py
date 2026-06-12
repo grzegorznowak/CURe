@@ -99,6 +99,13 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                                 "action": "re_report",
                                 "source_verification_row_id": "SV-0002",
                             },
+                            {
+                                "row_id": "DA-0006",
+                                "group_id": "G-0006",
+                                "finding_ids": ["CURE-001"],
+                                "action": "move_out_of_scope",
+                                "source_verification_row_id": "SV-0006",
+                            },
                         ],
                     }
                 ),
@@ -110,6 +117,8 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             self.assertIn("Prior Review Disposition Map", brief)
             self.assertIn("DA-0001: confirmed-resolved", brief)
             self.assertIn("DA-0002: carried-forward/re_report", brief)
+            self.assertIn("DA-0006: out-of-scope", brief)
+            self.assertNotIn("DA-0006: carried-forward/re_report", brief)
             self.assertIn("confirmed-resolved | carried-forward/re_report | degraded | out-of-scope | contradicted-with-evidence", brief)
 
     def test_post_review_disposition_map_gaps_degrade_without_blocking(self) -> None:

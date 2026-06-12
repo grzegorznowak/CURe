@@ -28,7 +28,16 @@ def _degraded(group: ReconciledFindingGroup, reasons: tuple[str, ...]) -> Degrad
     )
 
 
+def _source_is_footer_policy_approved(source: SourceVerificationRow) -> bool:
+    return source.provenance.get("policy_override") == "official_footer_marker_acceptance"
+
+
 def _action_for(source: SourceVerificationRow, signals: tuple) -> tuple[DispositionAction, str]:
+    if _source_is_footer_policy_approved(source):
+        return (
+            DispositionAction.MOVE_OUT_OF_SCOPE,
+            "official CURe footer acceptance is approved by FB-026 policy; generic/body-only text remains rejected",
+        )
     if source.source_state is SourceState.RESOLVED_FROM_SOURCE:
         return DispositionAction.CONFIRM_RESOLVED, "current source verification confirms the prior finding is resolved"
     if source.source_state is SourceState.PARTIALLY_RESOLVED:

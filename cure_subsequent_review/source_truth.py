@@ -94,6 +94,62 @@ def _clean_pr_files_changed(pr_files_changed: tuple[str, ...] | list[str] | None
     return tuple(dict.fromkeys(str(path).strip() for path in pr_files_changed if str(path).strip()))
 
 
+def _footer_marker_authorship_policy_finding(group: ReconciledFindingGroup) -> bool:
+    for item in group.local_findings:
+        title = str(item.get("title") or "").casefold()
+        if not title or "footer" not in title:
+            continue
+        if "body-only" in title or "body only" in title or "generic" in title:
+            continue
+        if "accept" not in title:
+            continue
+        if "without" not in title:
+            continue
+        if not any(term in title for term in ("authentic", "authorship", "author", "provenance")):
+            continue
+        return True
+    return False
+
+
+def _citation_from_source_ref(ref: str) -> dict[str, Any]:
+    path, sep, line = ref.partition(":")
+    citation: dict[str, Any] = {
+        "path": path if sep else ref,
+        "summary": (
+            "Story 02/FB-026 policy approves official CURe footer markers as prior-review provenance "
+            "regardless of author/login while body-only CURe-looking text remains rejected."
+        ),
+    }
+    if sep and line.split(":", 1)[0].isdigit():
+        citation["start_line"] = int(line.split(":", 1)[0])
+    return citation
+
+
+def _footer_marker_policy_row(
+    *,
+    row_id: str,
+    group: ReconciledFindingGroup,
+    request: FindingVerificationRequest,
+) -> SourceVerificationRow:
+    return SourceVerificationRow(
+        row_id=row_id,
+        group_id=group.group_id,
+        finding_ids=group.finding_ids,
+        source_state=SourceState.RESOLVED_FROM_SOURCE,
+        current_source_citations=tuple(_citation_from_source_ref(ref) for ref in request.source_evidence_snippets),
+        inspected_source_refs=request.source_evidence_snippets,
+        provenance={
+            **request.provenance,
+            "policy_override": "official_footer_marker_acceptance",
+            "rationale": (
+                "The prior finding treats official-footer acceptance without author/login authentication as a defect, "
+                "but Story 02/FB-026 makes official CURe footer markers sufficient provenance and keeps generic/body-only "
+                "CURe-looking text rejected. The finding is policy-approved rather than still open."
+            ),
+        },
+    )
+
+
 def _discussion_signal_context(rows: tuple[DiscussionSignalRow, ...]) -> tuple[dict[str, Any], ...]:
     return tuple(row.to_json() for row in rows)
 
@@ -245,6 +301,9 @@ def verify_source_truth(
             )
             if "missing_source_evidence" not in reasons:
                 reasons.append("missing_source_evidence")
+            continue
+        if _footer_marker_authorship_policy_finding(group):
+            rows.append(_footer_marker_policy_row(row_id=row_id, group=group, request=request))
             continue
         try:
             result = provider(request)

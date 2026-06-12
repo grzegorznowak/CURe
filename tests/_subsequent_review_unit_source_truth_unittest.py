@@ -74,6 +74,53 @@ class SubsequentReviewSourceTruthTests(SubsequentReviewTestCase):
         self.assertEqual(provider_calls, [])
         self.assertIn("missing_source_evidence", ledger.rows[0].unavailable_reasons)
 
+    def test_official_footer_authorship_false_positive_is_policy_approved_without_provider_call(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        finding = self._finding_candidate(
+            finding_id="CURE-001",
+            title="Footer-marked PR comments and reviews are still accepted as prior CURe reviews without authenticated CURe provenance",
+            evidence="cure_subsequent_review/prior_corpus.py:24",
+        )
+        reconciliation = reconcile_findings(findings=(finding,))
+        provider_calls: list[Any] = []
+
+        def provider(request: Any) -> FindingVerificationResult:
+            provider_calls.append(request)
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="old false positive")
+
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider)
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(ledger.status, ModuleStatus.SUCCESS)
+        self.assertEqual(ledger.rows[0].source_state, SourceState.RESOLVED_FROM_SOURCE)
+        self.assertEqual(ledger.rows[0].provenance["policy_override"], "official_footer_marker_acceptance")
+        self.assertIn("official CURe footer", ledger.rows[0].provenance["rationale"])
+        self.assertIn("body-only", ledger.rows[0].current_source_citations[0]["summary"])
+
+    def test_body_only_cure_text_finding_still_uses_source_verifier(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        finding = self._finding_candidate(
+            finding_id="CURE-002",
+            title="Generic body-only CURe-looking PR comments are accepted as prior reviews without official footer",
+            evidence="cure_subsequent_review/prior_corpus.py:117",
+        )
+        reconciliation = reconcile_findings(findings=(finding,))
+        provider_calls: list[Any] = []
+
+        def provider(request: Any) -> FindingVerificationResult:
+            provider_calls.append(request)
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="body-only text is still rejected")
+
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider)
+
+        self.assertEqual([request.group_id for request in provider_calls], ["G-0001"])
+        self.assertEqual(ledger.rows[0].source_state, SourceState.STILL_OPEN)
+        self.assertNotIn("policy_override", ledger.rows[0].provenance)
+
     def test_variant_c_request_includes_changed_files_and_linked_discussion_signals(self) -> None:
         from cure_subsequent_review.contracts import (
             DiscussionSignalClass,

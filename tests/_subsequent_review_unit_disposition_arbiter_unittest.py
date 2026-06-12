@@ -6,7 +6,7 @@ class SubsequentReviewDispositionArbiterTests(SubsequentReviewTestCase):
     def _reconciliation(self) -> Any:
         return reconcile_findings(findings=(self._finding_candidate(finding_id="A-01", title="Prior bug", severity="high"),))
 
-    def _source_ledger(self, state: Any) -> Any:
+    def _source_ledger(self, state: Any, *, provenance: dict[str, Any] | None = None) -> Any:
         from cure_subsequent_review.contracts import SourceVerificationLedger, SourceVerificationRow
 
         return SourceVerificationLedger(
@@ -18,7 +18,7 @@ class SubsequentReviewDispositionArbiterTests(SubsequentReviewTestCase):
                     finding_ids=("A-01",),
                     source_state=state,
                     current_source_citations=({"path": "app.py", "start_line": 1},),
-                    provenance={"rationale": "source says " + state.value},
+                    provenance={"rationale": "source says " + state.value, **(provenance or {})},
                 ),
             ),
         )
@@ -68,6 +68,23 @@ class SubsequentReviewDispositionArbiterTests(SubsequentReviewTestCase):
                 self.assertEqual(ledger.dispositions[0].discussion_signal_row_ids, ("DS-0001",))
                 self.assertEqual(ledger.dispositions[0].reconciliation_group_id, "G-0001")
                 self.assertIn("rationale", ledger.dispositions[0].provenance)
+
+    def test_footer_marker_policy_approved_prior_finding_moves_out_of_scope(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionSignalClass, DispositionAction, SourceState
+        from cure_subsequent_review.disposition import arbitrate_dispositions
+
+        ledger = arbitrate_dispositions(
+            reconciliation=self._reconciliation(),
+            source_verification=self._source_ledger(
+                SourceState.RESOLVED_FROM_SOURCE,
+                provenance={"policy_override": "official_footer_marker_acceptance"},
+            ),
+            discussion_signals=self._signals(DiscussionSignalClass.DEVELOPER_CLAIM_FIXED, EvidencePolicy.UNTRUSTED),
+        )
+
+        self.assertEqual(ledger.dispositions[0].action, DispositionAction.MOVE_OUT_OF_SCOPE)
+        self.assertEqual(ledger.dispositions[0].provenance["source_state"], SourceState.RESOLVED_FROM_SOURCE.value)
+        self.assertIn("footer", ledger.dispositions[0].provenance["rationale"])
 
     def test_source_open_developer_fixed_claim_is_re_reported(self) -> None:
         from cure_subsequent_review.contracts import DiscussionSignalClass, DispositionAction, SourceState
