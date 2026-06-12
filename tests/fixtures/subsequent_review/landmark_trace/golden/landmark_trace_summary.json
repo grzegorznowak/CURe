@@ -20,7 +20,8 @@
   },
   "governor_brief": {
     "headings": [
-      "### Prior Review Disposition Map (required final output)",
+      "### Prior Review Issue History (required final output)",
+      "### Internal DA coverage (audit only)",
       "### Confirmed Fixed",
       "### Still Open",
       "### Suppressed Duplicates",

@@ -44,6 +44,8 @@ ALLOWED_DISPOSITION_MAP_STATUSES = (
     "out-of-scope",
     "contradicted-with-evidence",
 )
+ISSUE_HISTORY_HEADING = "### Prior Review Issue History (required final output)"
+INTERNAL_DA_COVERAGE_HEADING = "### Internal DA coverage (audit only)"
 
 
 @dataclass(frozen=True)
@@ -400,6 +402,67 @@ def _disposition_map_rows(dispositions: list[Any]) -> dict[str, str]:
     return rows
 
 
+def _primary_finding_for_disposition(raw: dict[str, Any]) -> str:
+    finding_ids = tuple(str(item) for item in raw.get("finding_ids") or [] if str(item).strip())
+    return finding_ids[0] if finding_ids else str(raw.get("group_id") or "unknown")
+
+
+def _issue_title_for_disposition(raw: dict[str, Any], finding_meta: dict[str, dict[str, str]]) -> str:
+    primary_finding = _primary_finding_for_disposition(raw)
+    metadata = finding_meta.get(primary_finding, {})
+    return metadata.get("title", "") or primary_finding
+
+
+def _issue_status_for_cluster(statuses: list[str]) -> str:
+    priority = {
+        "carried-forward/re_report": 0,
+        "degraded": 1,
+        "contradicted-with-evidence": 2,
+        "out-of-scope": 3,
+        "confirmed-resolved": 4,
+    }
+    return min(statuses, key=lambda status: priority.get(status, 99)) if statuses else "degraded"
+
+
+def _issue_history_reason(status: str) -> str:
+    return {
+        "confirmed-resolved": "confirmed resolved in the current source or policy context",
+        "carried-forward/re_report": "carried forward because the prior issue remains open or needs re-reporting",
+        "degraded": "current status is uncertain because required evidence was degraded or unavailable",
+        "out-of-scope": "resolved, suppressed, or moved out of scope for this review",
+        "contradicted-with-evidence": "final review cites evidence contradicting the expected prior disposition",
+    }.get(status, "current status is uncertain")
+
+
+def _issue_history_rows(dispositions: list[Any], finding_meta: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+    clusters: dict[str, dict[str, Any]] = {}
+    for raw in dispositions:
+        if not isinstance(raw, dict):
+            continue
+        row_id = str(raw.get("row_id") or "").strip()
+        if not row_id:
+            continue
+        title = _issue_title_for_disposition(raw, finding_meta)
+        key = re.sub(r"\s+", " ", title.strip().lower()) or row_id.lower()
+        status = _disposition_map_status_for_action(str(raw.get("action") or ""))
+        cluster = clusters.setdefault(key, {"title": title, "statuses": [], "row_ids": []})
+        cluster["statuses"].append(status)
+        cluster["row_ids"].append(row_id)
+    rows: list[dict[str, Any]] = []
+    for cluster in clusters.values():
+        row_ids = sorted(str(row_id) for row_id in cluster["row_ids"])
+        status = _issue_status_for_cluster([str(status) for status in cluster["statuses"]])
+        rows.append(
+            {
+                "title": str(cluster["title"]),
+                "status": status,
+                "reason": _issue_history_reason(status),
+                "row_ids": row_ids,
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["title"]).lower())
+
+
 def _footer_policy_brief(corpus_payload: dict[str, Any] | None) -> list[str]:
     summary = _footer_marker_policy_summary(corpus_payload)
     if not summary["official_footer_remote_entries"] and not summary["body_only_rejected_comments"]:
@@ -473,11 +536,24 @@ def build_governor_brief(*, artifact_dir: Path) -> str:
                 reasons = ", ".join(str(item) for item in raw.get("blocking_reasons") or []) or "unknown"
                 sections["### Degraded"].append(f"- {group_id}: {reasons}. Citation: `{DISPOSITION_LEDGER_ARTIFACT}`.")
     lines: list[str] = _footer_policy_brief(corpus_payload)
-    map_rows = _disposition_map_rows(dispositions if isinstance(dispositions, list) else [])
+    raw_dispositions = dispositions if isinstance(dispositions, list) else []
+    issue_rows = _issue_history_rows(raw_dispositions, finding_meta)
+    map_rows = _disposition_map_rows(raw_dispositions)
+    if issue_rows:
+        if lines:
+            lines.append("")
+        lines.append(ISSUE_HISTORY_HEADING)
+        lines.append("Raw DA IDs are internal provenance anchors; the final review should lead with these human-readable issue clusters.")
+        lines.append("Allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES))
+        for row in issue_rows:
+            lines.append(
+                f"- {row['title']} — status: {row['status']}. Reason: {row['reason']}. "
+                f"Internal rows: {', '.join(row['row_ids'])}."
+            )
     if map_rows:
         if lines:
             lines.append("")
-        lines.append("### Prior Review Disposition Map (required final output)")
+        lines.append(INTERNAL_DA_COVERAGE_HEADING)
         lines.append("Allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES))
         for row_id in sorted(map_rows):
             lines.append(f"- {row_id}: {map_rows[row_id]} (cite `{DISPOSITION_LEDGER_ARTIFACT}#{row_id}`)")
@@ -514,8 +590,9 @@ def build_report_governor_sanitization_prompt(*, governor_brief: str, review_tex
             "Answer this exact question:",
             REPORT_GOVERNOR_AWARENESS_QUESTION,
             "",
-            "The final review must include a Prior Review Disposition Map covering every DA-* row from disposition_ledger.json.",
-            "Allowed map statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES),
+            "The final review must lead with a human-readable Prior Review Issue History: stable issue titles first, current status second, and plain-English reason third.",
+            "Raw DA-* row IDs are internal provenance anchors only; they may appear in optional/internal details but must not be the primary reader-facing representation.",
+            "The final review must still include internal DA coverage for every DA-* row from disposition_ledger.json using allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES),
             "Official CURe footer markers are valid prior-review provenance regardless of author/login; body-only CURe-looking text remains rejected.",
             "",
             "Return JSON only with these fields:",
@@ -553,10 +630,43 @@ def _expected_disposition_map(artifact_dir: Path) -> dict[str, str]:
     return {row_id: status for row_id, status in rows.items() if row_id.startswith("DA-")}
 
 
+def _expected_issue_history_rows(artifact_dir: Path) -> list[dict[str, Any]]:
+    payload = _load_json_object(artifact_dir / DISPOSITION_LEDGER_ARTIFACT)
+    dispositions = (payload or {}).get("dispositions")
+    if not isinstance(dispositions, list):
+        return []
+    finding_meta = _finding_metadata_by_id(_load_json_object(artifact_dir / "prior_findings.json"))
+    return _issue_history_rows(dispositions, finding_meta)
+
+
 def _actual_disposition_map(review_text: str) -> dict[str, str]:
     statuses = "|".join(re.escape(status) for status in ALLOWED_DISPOSITION_MAP_STATUSES)
     pattern = re.compile(rf"\b(DA-\d{{4,}})\b[^\n]*\b({statuses})\b", re.IGNORECASE)
     return {match.group(1): match.group(2).lower() for match in pattern.finditer(review_text)}
+
+
+def _issue_history_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
+    expected = _expected_issue_history_rows(artifact_dir)
+    if not expected:
+        return []
+    normalized_review = re.sub(r"\s+", " ", review_text).lower()
+    has_issue_history_heading = "prior review issue history" in normalized_review
+    has_da_map_heading = "prior review disposition map" in normalized_review or "internal da coverage" in normalized_review
+    warnings: list[str] = []
+    missing_titles = tuple(
+        sorted(
+            str(row["title"])
+            for row in expected
+            if str(row["title"]).lower() not in normalized_review or str(row["status"]).lower() not in normalized_review
+        )
+    )
+    if not has_issue_history_heading or missing_titles:
+        warnings.append("missing_prior_review_issue_history")
+    if missing_titles:
+        warnings.append("missing_prior_review_issue_clusters:" + ",".join(missing_titles))
+    if has_da_map_heading and (not has_issue_history_heading or missing_titles):
+        warnings.append("raw_da_list_only")
+    return warnings
 
 
 def _disposition_map_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
@@ -574,9 +684,10 @@ def _disposition_map_warnings(*, artifact_dir: Path, review_text: str) -> list[s
     )
     warnings: list[str] = []
     if missing:
-        warnings.append("missing_disposition_map_rows:" + ",".join(missing))
+        warnings.append("missing_internal_da_coverage:" + ",".join(missing))
     if contradicted:
-        warnings.append("contradicted_disposition_map_rows:" + ",".join(contradicted))
+        warnings.append("contradicted_internal_da_coverage:" + ",".join(contradicted))
+    warnings.extend(_issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text))
     return warnings
 
 
@@ -743,7 +854,18 @@ def audit_review_report_after_review(
         warnings.append(f"awareness_{awareness}")
     warnings.extend(_disposition_map_warnings(artifact_dir=artifact_dir, review_text=review_text))
     status = ModuleStatus.DEGRADED if warnings and awareness in {"partial", "missing", "unknown"} else ModuleStatus.SUCCESS
-    if any(warning.startswith(("missing_disposition_map_rows:", "contradicted_disposition_map_rows:")) for warning in warnings):
+    if any(
+        warning.startswith(
+            (
+                "missing_internal_da_coverage:",
+                "contradicted_internal_da_coverage:",
+                "missing_prior_review_issue_history",
+                "missing_prior_review_issue_clusters:",
+                "raw_da_list_only",
+            )
+        )
+        for warning in warnings
+    ):
         status = ModuleStatus.DEGRADED
     final_reasons: tuple[str, ...] = tuple(dict.fromkeys(warnings)) if status is ModuleStatus.DEGRADED else ()
     _write_report_governor_result(

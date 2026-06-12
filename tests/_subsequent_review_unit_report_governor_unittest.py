@@ -58,6 +58,9 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             self.assertEqual(record.status.value, "success")
             self.assertEqual(len(prompts), 1)
             self.assertIn("Does this review demonstrate awareness of the prior review context?", prompts[0])
+            self.assertIn("human-readable Prior Review Issue History", prompts[0])
+            self.assertIn("Raw DA-* row IDs are internal provenance anchors only", prompts[0])
+            self.assertIn("internal DA coverage for every DA-* row", prompts[0])
             self.assertIn("### Still Open", prompts[0])
             self.assertIn("A-02 remains a retry concern", prompts[0])
             result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
@@ -72,12 +75,26 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                 str(artifact_dir / "report_governor_result.json"),
             )
 
-    def test_governor_brief_requires_prior_review_disposition_map_for_every_da_row(self) -> None:
+    def test_governor_brief_requires_human_issue_history_with_internal_da_coverage(self) -> None:
         from cure_subsequent_review.runtime import build_governor_brief
 
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp) / "work" / "subsequent"
             artifact_dir.mkdir(parents=True)
+            (artifact_dir / "prior_findings.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "findings": [
+                            {"finding_id": "A-01", "title": "Retry gap", "severity": "medium"},
+                            {"finding_id": "A-02", "title": "Retry gap", "severity": "medium"},
+                            {"finding_id": "CURE-001", "title": "Official footer policy", "severity": "low"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             (artifact_dir / "disposition_ledger.json").write_text(
                 json.dumps(
                     {
@@ -114,9 +131,13 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
 
             brief = build_governor_brief(artifact_dir=artifact_dir)
 
-            self.assertIn("Prior Review Disposition Map", brief)
-            self.assertIn("DA-0001: confirmed-resolved", brief)
-            self.assertIn("DA-0002: carried-forward/re_report", brief)
+            self.assertIn("Prior Review Issue History", brief)
+            self.assertIn("Raw DA IDs are internal provenance anchors", brief)
+            self.assertIn("- Retry gap — status: carried-forward/re_report", brief)
+            self.assertIn("Internal rows: DA-0001, DA-0002", brief)
+            self.assertEqual(brief.count("- Retry gap — status:"), 1)
+            self.assertIn("- Official footer policy — status: out-of-scope", brief)
+            self.assertIn("Internal DA coverage", brief)
             self.assertIn("DA-0006: out-of-scope", brief)
             self.assertNotIn("DA-0006: carried-forward/re_report", brief)
             self.assertIn("confirmed-resolved | carried-forward/re_report | degraded | out-of-scope | contradicted-with-evidence", brief)
@@ -128,7 +149,11 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             artifact_dir = Path(tmp) / "work" / "subsequent"
             manifest_path = self._write_governor_inputs(
                 artifact_dir,
-                brief="### Prior Review Disposition Map (required final output)\n- DA-0001: confirmed-resolved\n- DA-0002: carried-forward/re_report\n",
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- Retry gap — status: carried-forward/re_report. Reason: still open. Internal rows: DA-0001, DA-0002\n"
+                    "### Internal DA coverage (audit only)\n- DA-0001: confirmed-resolved\n- DA-0002: carried-forward/re_report\n"
+                ),
             )
             (artifact_dir / "disposition_ledger.json").write_text(
                 json.dumps(
@@ -163,8 +188,10 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "degraded")
             self.assertEqual(result["awareness"], "partial")
-            self.assertIn("missing_disposition_map_rows:DA-0002", result["warnings"])
-            self.assertIn("contradicted_disposition_map_rows:DA-0001", result["warnings"])
+            self.assertIn("missing_internal_da_coverage:DA-0002", result["warnings"])
+            self.assertIn("contradicted_internal_da_coverage:DA-0001", result["warnings"])
+            self.assertIn("missing_prior_review_issue_history", result["warnings"])
+            self.assertIn("raw_da_list_only", result["warnings"])
             self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]["report_governor"]["status"], "degraded")
 
     def test_post_review_sanitization_skips_when_brief_empty_or_governor_off(self) -> None:
