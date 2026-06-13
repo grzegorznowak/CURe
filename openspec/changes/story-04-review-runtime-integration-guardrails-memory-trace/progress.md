@@ -17,6 +17,10 @@
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-13T08:04:40Z **Step**: fixed strict multipass prompt/schema regression surfaced by live PR #22 rerun sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-050345-4d51`.
+  - Changed: added a prompt regression proving issue-history-first output guidance applies only to final review/synthesis templates, while schema-bound multipass plan/step/resume-step templates keep their required output headers such as `### Step Result:`. Reworded schema-bound prompt guidance so `$PRIOR_REVIEW_BRIEF` remains available as context without overriding strict grounding formats.
+  - Test: PASS — `python -m pytest tests/test_reviewflow_prompts_unittest.py tests/test_subsequent_review.py -q`; `ruff check .`; `git diff --check`; `mypy`.
+  - Notes: This is an implementation bug fix, not a story contract change; Story A16 already targets final `review.md`/synthesis output rather than intermediate multipass artifacts.
 - 2026-06-13T04:47:11Z **Step**: implemented latest PR #22 feedback fixes FB-027/FB-028/FB-029 in the active Story 04 worktree.
   - Changed: strengthened `$PRIOR_REVIEW_BRIEF` prompt override so live output must start with `### Prior Review Issue History`; report-governor audit now degrades when issue history is not first or when stable issue clusters/statuses from the governor brief are missing; governor tests preserve the body-only PR-comments cluster as `carried-forward/re_report` while official-footer policy remains `out-of-scope`; malformed LLM discussion-linker output now records degraded discussion signals instead of aborting; memory replay now rejects same-ordinal group IDs when cached finding identity differs.
   - Test: PASS — red regressions failed before implementation; targeted suites, public wrapper, ruff, diff-check, and mypy passed.

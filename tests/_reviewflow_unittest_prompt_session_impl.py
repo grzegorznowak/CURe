@@ -205,25 +205,42 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("$REVIEW_CITATION_CONTRACT", zip_template)
 
     def test_subsequent_review_templates_override_output_order_for_issue_history(self) -> None:
-        prompt_paths = [
+        final_output_paths = [
             ROOT / "prompts" / "default.md",
             ROOT / "prompts" / "mrereview_gh_local.md",
             ROOT / "prompts" / "mrereview_gh_local_big.md",
             ROOT / "prompts" / "mrereview_gh_local_followup.md",
             ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
-            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
-            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
             ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
-            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
-            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
             ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
         ]
-        for path in prompt_paths:
+        schema_bound_paths = [
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+        ]
+        for path in final_output_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("$PRIOR_REVIEW_BRIEF", text)
             self.assertIn("Subsequent-review output override", text)
             self.assertIn("MUST begin with `### Prior Review Issue History`", text)
             self.assertIn("preserve the brief's stable issue titles and status labels", text)
+        for path in schema_bound_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$PRIOR_REVIEW_BRIEF", text)
+            self.assertNotIn("MUST begin with `### Prior Review Issue History`", text)
+            self.assertNotIn("Subsequent-review output override", text)
+        self.assertIn(
+            "### Step Result: $STEP_ID — $STEP_TITLE",
+            (ROOT / "prompts" / "mrereview_gh_local_big_step.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "### Step Result: $STEP_ID — $STEP_TITLE",
+            (ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md").read_text(
+                encoding="utf-8"
+            ),
+        )
         self.assertNotIn(
             "Subsequent-review output override",
             (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
