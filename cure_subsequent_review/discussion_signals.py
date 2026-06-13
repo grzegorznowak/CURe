@@ -108,6 +108,8 @@ def resolve_discussion_signals(
         signal_class = link_result.signal_class or _classify_signal(event)
         linked_groups = link_result.group_ids if linker is not None else _text_link_groups(event, groups)
         authority, policy, reasons = _authority(event, signal_class)
+        if link_result.rationale.startswith("llm_linker_malformed"):
+            status_reasons.append("llm_discussion_linker_malformed")
         provenance: dict[str, Any] = {
             "event_kind": event.kind,
             "event_url": event.url,

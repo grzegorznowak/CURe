@@ -5,6 +5,59 @@
 
 ## Review Log
 
+- 2026-06-13T04:51:44Z Review run by fresh maintainer session
+  - Decision: approve
+  - Approval gate: pass
+  - Product verdict: approve
+  - Technical verdict: approve
+  - Multipass review: completed
+  - Prior review concerns: resolved
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: unchanged: 🔵 IN PR -> 🔵 IN PR
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: initiative/story/proposal/design/tasks/progress/reviews; PR #22 state via `gh pr view 22`; latest sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424`; dependency invariants from Stories 01-03 for official-footer policy, source/discussion separation, and limited arbiter actions
+  - Traceability: forward complete for local FB-027/A16, FB-028, and FB-029 implementation fixes; backward complete from changed runtime/linker/signals/memory/prompt/test/fixture surfaces to A16/A17/A19/A12/A8 and prior feedback closure
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: `git diff --stat`; `runtime.py` issue-history/governor audit helpers; `discussion_linker.py` malformed output boundary; `discussion_signals.py` degraded signal ledger; `memory_store.py` resolved replay gate; `source_truth.py` memory callsite; all eleven subsequent-aware prompt templates; focused report-governor/linker/memory/prompt tests; A19 source/disposition/governor regression tests; public wrapper
+  - Risk lenses reviewed: prompt/template fail-open and final-output ordering; stable issue-cluster/status preservation; internal DA coverage; official-footer policy vs body-only PR-comment cluster status; LLM JSON/malformed linker fail-open; persisted memory identity/staleness; source-vs-discussion separation; PR-stage/live-output handoff
+  - Finding closure: FB-027/A16 resolved locally by prompt override and deterministic governor audit: prompts require final output to begin with `### Prior Review Issue History` and include `### Internal DA coverage`, while report-governor parses stable issue titles/statuses from `governor_brief.md` and degrades when issue history is not first or required clusters are missing (`prompts/default.md:17`, `cure_subsequent_review/runtime.py:642`, `cure_subsequent_review/runtime.py:675`, `tests/_subsequent_review_unit_report_governor_unittest.py:214`). Stable cluster/status proof preserves body-only PR-comments as `carried-forward/re_report` and official-footer policy as `out-of-scope` (`tests/_subsequent_review_unit_report_governor_unittest.py:144-159`). FB-028 resolved locally by catching malformed/failed linker output and emitting degraded no-link discussion signals instead of aborting (`cure_subsequent_review/discussion_linker.py:119`, `cure_subsequent_review/discussion_signals.py:106`, `tests/_subsequent_review_unit_discussion_linker_unittest.py:63`). FB-029 resolved locally by requiring cached finding IDs to match current finding IDs before replaying same-ordinal memory (`cure_subsequent_review/memory_store.py:42`, `cure_subsequent_review/memory_store.py:217`, `tests/_subsequent_review_unit_memory_store_unittest.py:126`). A17 warn-only and A19/DA-0006 behavior are preserved by focused regressions and latest sandbox evidence (`/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/disposition_ledger.json:123`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/source_verification.json:344`).
+  - Evidence quality: confirmed direct source/test/sandbox reads and local command execution; inferred none material; unknown live output after these uncommitted local changes until PR #22 is synced and rerun; provisional only the external PR-stage live rerun/done gate, not the local implementation review
+  - Files reviewed: `cure_subsequent_review/runtime.py`, `cure_subsequent_review/discussion_linker.py`, `cure_subsequent_review/discussion_signals.py`, `cure_subsequent_review/memory_store.py`, `cure_subsequent_review/source_truth.py`, `prompts/default.md`, all subsequent-aware `prompts/mrereview_*.md` templates in the diff, `tests/_reviewflow_unittest_prompt_session_impl.py`, `tests/_subsequent_review_unit_report_governor_unittest.py`, `tests/_subsequent_review_unit_discussion_linker_unittest.py`, `tests/_subsequent_review_unit_memory_store_unittest.py`, `tests/fixtures/subsequent_review/landmark_trace/artifacts/review.md`, latest sandbox artifacts, and OpenSpec coordination files
+  - Hypothesis triage:
+    - suspicious surface: final output ordering/cluster preservation; tentative issue: live review could start with other sections or omit stable governor issue clusters; next proof target: prompt overrides plus deterministic report-governor audit and focused test `test_post_review_issue_history_must_be_first_and_match_brief_clusters`
+    - suspicious surface: LLM discussion linker JSON boundary; tentative issue: malformed classifier output aborts semantic artifacts; next proof target: `LlmDiscussionLinker.__call__()` exception handling plus resolver degraded ledger regression
+    - suspicious surface: shared PR memory replay; tentative issue: ordinal `G-*` reuse confirms a different finding at the same head; next proof target: `ReviewMemoryStore.synthesize_resolved_source_row()` identity guard plus mismatched finding-id regression
+    - suspicious surface: A19 footer policy preservation; tentative issue: official-footer policy item regresses to `carried-forward/re_report`; next proof target: source/disposition/governor regression suite and latest sandbox `DA-0006` evidence
+  - Key findings:
+    - None.
+  - Debt Friction: none
+  - Next action: commit/push the local approved diff to PR #22, rerun/audit live PR #22 output, and only then move Story 04 from 🔵 IN PR to ✅ DONE if A16 issue history leads final output and `DA-0006` remains non-carried-forward.
+
+- 2026-06-13T04:34:15Z Feedback absorption review entry from latest PR #22 live sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424`
+  - Feedback IDs: FB-027, FB-028, FB-029
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Status transition: unchanged: 🔵 IN PR -> 🔵 IN PR
+  - Sections reviewed: latest sandbox final `review.md`, `work/pr_context.json`, `meta.json`, `work/subsequent/source_verification.json`, `work/subsequent/disposition_ledger.json`, `work/subsequent/report_governor_result.json`, `work/subsequent/run_manifest.json`, `work/subsequent/subsequent_review_context.md`, and `work/logs/cure.log`.
+  - Risk lenses reviewed: A16 human issue-history output ordering, stable issue-cluster preservation, internal DA coverage, official-footer policy propagation, report-governor warn-only behavior, malformed LLM linker degradation, memory replay/finding identity stability.
+  - Evidence quality: live sandbox artifact audit from PR head `5d5b2c1e431659ab52c17b3453031e05b8d421ac`; no product source edits in this absorption pass.
+  - Key findings:
+    - A16 remains partial/failing in the latest live output: final `review.md` contains a human-readable `### Prior Review Issue History`, but it starts with `### Steps taken` instead of leading with the issue history, and the report governor records partial awareness/degraded status. Sources: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md:1`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md:12`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/report_governor_result.json:2`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/report_governor_result.json:4`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/report_governor_result.json:19`.
+    - A16 also drops/renames required prior-review awareness: report governor notes no DA-by-DA internal coverage and a missing required carried-forward cluster for body-only PR comments (`PR comments can be admitted as prior CURe reviews based on body text alone`). Sources: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/report_governor_result.json:9`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/report_governor_result.json:10`.
+    - A19/DA-0006 passes in the latest live artifacts: `G-0006` is present, `SV-0006` records `policy_override=official_footer_marker_acceptance` and `source_state=resolved_from_source`, and `DA-0006` is `move_out_of_scope` rather than `re_report` / `carried-forward/re_report`. Sources: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/reconciled_findings.json:221`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/source_verification.json:344`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/source_verification.json:348-349`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/disposition_ledger.json:123`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/disposition_ledger.json:148-149`.
+    - A17 warn-only report-governor behavior passes: final `review.md` was published, sandbox status is done, post-review governor completed, and degraded report-governor status is recorded rather than blocking output. Sources: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md:109-111`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/meta.json:911`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/logs/cure.log:41-44`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/work/subsequent/run_manifest.json:38-48`, `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/meta.json:967-977`.
+    - The latest CURe review also reports malformed LLM discussion-linker output can abort semantic artifacts instead of degrading. Source: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md:31-42`.
+    - The latest CURe review also reports source-verification memory replay can confirm the wrong finding when ordinal group IDs shift. Source: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md:52-63`.
+  - Finding closure:
+    - Previous DA-0006 carried-forward blocker is closed in live artifacts.
+    - A16 live-output proof remains open.
+    - New implementation review findings FB-028 and FB-029 remain open.
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to fix A16 final-output ordering/cluster/internal-coverage behavior plus FB-028 malformed-linker degradation and FB-029 memory replay identity stability, then rerun PR #22 live output.
+
 - 2026-06-12T14:31:00Z Review run by fresh maintainer child session
   - Decision: approve locally; live-output gate still pending
   - Approval gate: pass for local A19/TAP-20 fix; not final DONE until PR #22 is rerun live

@@ -4,22 +4,27 @@
 > Canonical story contract: `story.md`. Legacy source remains under `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/`.
 
 ## Current Claim
-- Latest A16 PR sync (2026-06-12T18:07Z): directly verified the A16 implementation anchors, added explicit sanitization prompt-guidance assertions, reran focused/public/static checks, committed `fb78dca` (`cure-subsequent-pr-review/04: add human issue history guardrails`), pushed it to PR #22 head branch `origin/cure-subsequent-pr-review/story-01-intake`, and updated the PR body with the human issue-history contract. PR #22 live review-output rerun/audit remains pending.
-- Latest A19 PR sync (2026-06-12T14:32Z): DA-0006 semantic/disposition/governor gap is locally fixed, verified, committed as `99cd1ea`, and pushed to PR #22; live PR #22 review-output rerun/audit remains pending.
-- Latest plan review (2026-06-12T17:20Z): approved after verifying the A17 legacy/OpenSpec wording drift is closed; plan lane is now 🟢 PLAN APPROVED while implementation status remains 🔵 IN PR.
-- Latest A16 output-model update (2026-06-12T16:59Z): final review output contract is reopened/provisional for human-readable issue history; DA IDs remain internal provenance and must not be the primary reader-facing representation; implementation/output audit remains pending.
-- Claimed at: 2026-06-11T12:15:38Z
-- Claimed by: pi continuation session
+- Claimed at: 2026-06-13T04:39:52Z
+- Claimed by: pi child resume session
 - Model: not exposed by pi harness (no `MODEL` environment variable available)
-- Scope: Continue Story 04 runtime integration by wiring the LLM discussion linker into production PR-flow/runtime LLM resolution, then verify focused linker/semantic routing.
+- Scope: Address latest PR #22 feedback FB-027/FB-028/FB-029: make final output lead with prior-review issue history and stable clusters/internal coverage, degrade malformed discussion-linker LLM output, and stabilize memory replay identity when ordinal group IDs shift.
 - Worktrees:
   - CURe: `/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace`
-- Primary write surfaces: `projects/CURe/cure_subsequent_review/`, `projects/CURe/cure.py`, `projects/CURe/tests/_subsequent_review_*`, `projects/CURe/tests/test_subsequent_review.py`, coordination story/master files.
+- Primary write surfaces: `cure_subsequent_review/runtime.py`, `cure_subsequent_review/discussion_linker.py`, `cure_subsequent_review/discussion_signals.py`, `cure_subsequent_review/memory_store.py`, `prompts/*`, related tests, OpenSpec progress/handoff.
+- Status: 🔵 IN PR
 
 ### Legacy Scaffold Notes
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-13T04:47:11Z **Step**: implemented latest PR #22 feedback fixes FB-027/FB-028/FB-029 in the active Story 04 worktree.
+  - Changed: strengthened `$PRIOR_REVIEW_BRIEF` prompt override so live output must start with `### Prior Review Issue History`; report-governor audit now degrades when issue history is not first or when stable issue clusters/statuses from the governor brief are missing; governor tests preserve the body-only PR-comments cluster as `carried-forward/re_report` while official-footer policy remains `out-of-scope`; malformed LLM discussion-linker output now records degraded discussion signals instead of aborting; memory replay now rejects same-ordinal group IDs when cached finding identity differs.
+  - Test: PASS — red regressions failed before implementation; targeted suites, public wrapper, ruff, diff-check, and mypy passed.
+  - Notes: Story status remains `🔵 IN PR`; local changes are not committed/pushed and need fresh implementation review before PR sync/live rerun.
+- 2026-06-13T04:39:52Z **Resume**: picked up latest PR #22 request-changes feedback FB-027/FB-028/FB-029 while preserving Plan lane approval.
+  Worktrees: CURe=/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace
+  Main-tree targets: none
+  Claim: fix final output issue-history ordering/coverage, malformed LLM linker degradation, and memory replay identity stability.
 - 2026-06-12T18:20:00Z Verified the A16 local implementation/proof anchors in the active Story 04 worktree, added explicit post-review sanitization prompt-guidance assertions for human issue history/internal DA coverage, and reran: `python -m pytest tests/_subsequent_review_unit_report_governor_unittest.py -q`; `python -m pytest tests/_subsequent_review_unit_runtime_packaging_unittest.py tests/test_reviewflow_prompts_unittest.py -q`; `python -m pytest tests/test_subsequent_review.py -q`; `python -m pytest tests/_subsequent_review_unit_source_truth_unittest.py tests/_subsequent_review_unit_disposition_arbiter_unittest.py tests/_subsequent_review_unit_report_governor_unittest.py -q`; `ruff check .`; `git diff --check`; `mypy`. Local A16 implementation/proof tasks are now checked. Follow-up sync: committed `fb78dca21a4ad5c0a21d6a889189fb38d25e7559` (`cure-subsequent-pr-review/04: add human issue history guardrails`), pushed it to PR #22 head branch `origin/cure-subsequent-pr-review/story-01-intake`, updated the PR body through the GitHub API after `gh pr edit` hit the Projects-classic GraphQL deprecation error, and confirmed `mergeStateStatus=CLEAN` with Detect Secrets success. Live PR #22 rerun/audit and final done transition remain unchecked/pending.
 - 2026-06-12T18:10:00Z Resumed implementation in the active Story 04 worktree and locally implemented A16 human-readable final-output guardrails. `build_governor_brief()` now emits a cluster-first `### Prior Review Issue History (required final output)` section with titles/statuses/plain-English reasons and an audit-only `### Internal DA coverage` section; duplicate DA rows with the same issue title collapse into one reader-facing issue cluster. The post-review report-governor prompt/audit now treats raw-DA-list-only output, missing issue history, missing issue clusters, missing internal DA coverage, and contradictory internal DA status as degraded/warn-only evidence. Landmark golden was refreshed for the new headings. Verification: `python -m pytest tests/_subsequent_review_unit_report_governor_unittest.py -q`; `python -m pytest tests/_subsequent_review_unit_runtime_packaging_unittest.py tests/test_reviewflow_prompts_unittest.py -q`; `python -m pytest tests/test_subsequent_review.py -q`; `python -m pytest tests/_subsequent_review_unit_source_truth_unittest.py tests/_subsequent_review_unit_disposition_arbiter_unittest.py tests/_subsequent_review_unit_report_governor_unittest.py -q`; `ruff check .`; `git diff --check`; `mypy`. Product code changed in the active worktree but is not yet committed/pushed; PR #22 live rerun/audit remains pending.
 - 2026-06-12T17:20:10Z Plan review approved after direct verification that OpenSpec and legacy active A17/report-governor awareness wording now align on human issue-cluster awareness plus internal `DA-*` coverage. Plan lane moved from 🟡 PLAN DRAFT to 🟢 PLAN APPROVED; status stays 🔵 IN PR. Remaining gates are implementation/output gates: A16 human-readable issue history and PR #22 `DA-0006` rerun/audit. No product source code changed.
@@ -58,13 +63,22 @@
 - 2026-06-11T10:05:22Z Recorded readonly plan approval in the tracker, claimed step, and prepared the Story 04 implementation worktree. Focused red seam not chosen yet.
 
 ## Session Handoff
-- Status: Story 04 A19 fix and A16 human-friendly final-output issue-summary guardrails are locally verified, committed, and pushed to PR #22; PR body was updated to mention the A16 human issue-history contract. Tracker remains 🟢 PLAN APPROVED / 🔵 IN PR. Project gate now requires a live PR #22 rerun/audit proving `DA-0006` is not carried-forward/re_report and final output is human-readable issue history.
-- Latest live-output audit: sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-132229-cfad` returned verdict PARTIAL. A15-A18 pass in live artifacts; A19/TAP-20 was blocked because `G-0006` / `SV-0006` / `DA-0006` still mapped to `source_state=still_open`, `action=re_report`, and final map `carried-forward/re_report`.
-- A19 local fix: source-truth now recognizes the official-footer/authorship prior false-positive as FB-026 policy-approved, records `policy_override=official_footer_marker_acceptance`, and avoids provider reclassification as still-open; disposition maps that provenance to `move_out_of_scope`; governor map proof asserts `DA-0006: out-of-scope` and not `carried-forward/re_report`. Generic/body-only CURe-looking text still uses normal verifier/corpus rejection paths.
-- Verification: red A19 tests failed before implementation; focused source/disposition/governor suite `18 passed, 15 subtests`; public subsequent wrapper `112 passed, 29 subtests`; `ruff check .`; `git diff --check`; `mypy`.
-- Preserved pass evidence: A15 package/context status consistency, the previous A16 internal DA-map coverage, A17 warn-only report-governor degradation, and A18 inactive duplicate `cure.py` binding handling all passed in the latest live audit; the earlier A18 probe still returns `not_verifiable`, `inactive_source_reference_active_binding:_resolve_session_relative_path:cure_sessions.py`, and `llm_calls=0`. A16 local human-friendly issue-history guardrails are now implemented/proven and pushed, but remain provisional until live PR #22 output audit.
-- Latest PR sync: 2026-06-12T18:07Z pushed commit `fb78dca21a4ad5c0a21d6a889189fb38d25e7559` to `origin/cure-subsequent-pr-review/story-01-intake` for PR #22 and updated the PR body with the A16 human issue-history contract. `gh pr view 22` after push reports PR open at that head, `mergeStateStatus=CLEAN`, and Detect Secrets success.
-- Exact next step: rerun PR #22 review/live output and confirm `DA-0006` no longer appears as `carried-forward/re_report` in semantic/disposition/governor/final artifacts while the final review leads with human issue history rather than raw DA rows.
+- **Timestamp**: 2026-06-13T04:47:11Z
+- **Status**: 🔵 IN PR
+- **Completed In This Session**:
+  - Addressed FB-027/A16 locally: prompt templates now state that, when the governor brief contains required issue history, final output must begin with `### Prior Review Issue History` before steps/summary/assessments; report-governor audit deterministically degrades if issue history is not first or if stable governor-brief issue clusters/statuses are missing.
+  - Added proof that body-only PR comments remain a carried-forward/re_report issue cluster while official-footer policy findings remain out-of-scope.
+  - Addressed FB-028 locally: malformed/failed LLM discussion-linker output returns a degraded no-link result, preserving semantic artifact generation instead of raising.
+  - Addressed FB-029 locally: memory replay rejects same ordinal `group_id` cache hits when the cached finding identity differs from the current finding IDs.
+- **Remaining**:
+  - Fresh `/openspec-story-review` on the local product/coordinator diff.
+  - If approved, commit/push to PR #22 and rerun/audit live PR #22 output.
+  - Done gate remains a live audit proving `DA-0006` is not carried-forward/re_report and final output leads with human issue history.
+- **Blockers**: none.
+- **Next Steps**: `/openspec-story-review cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` against the active worktree.
+- **Worktrees**:
+  - CURe: `/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace`
+- **Proof Statement**: Red regressions for FB-027/FB-028/FB-029 failed before implementation and now pass. Verification passed: targeted report-governor/discussion-linker/discussion-signals/memory/prompt suite (`67 passed`), public subsequent-review wrapper (`115 passed, 29 subtests`), A19 preservation suite (`19 passed, 15 subtests`), `ruff check .`, `git diff --check`, and `mypy`.
 
 ## PR State
 - PR URL: https://github.com/grzegorznowak/CURe/pull/22

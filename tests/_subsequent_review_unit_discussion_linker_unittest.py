@@ -60,6 +60,35 @@ class SubsequentReviewDiscussionLinkerTests(SubsequentReviewTestCase):
         self.assertEqual(result.signal_class, DiscussionSignalClass.BY_DESIGN)
         self.assertEqual(result.rationale, "topical but no confident finding id")
 
+    def test_malformed_llm_linker_output_degrades_without_aborting_signal_resolution(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionArtifact, DiscussionEvent, ModuleStatus
+        from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
+        from cure_subsequent_review.discussion_signals import resolve_discussion_signals
+
+        event = DiscussionEvent(
+            kind="issue_comment",
+            event_id="C-04",
+            author="developer",
+            body="Parser null check is by design",
+        )
+        linker = LlmDiscussionLinker(classifier=lambda _prompt: "not json", current_head="head-1")
+
+        ledger = resolve_discussion_signals(
+            discussion=DiscussionArtifact(status=ModuleStatus.SUCCESS, events=(event,)),
+            reconciliation=reconcile_findings(
+                findings=(
+                    self._finding_candidate(finding_id="A-01", title="Parser null check", evidence="src/parser.py:42"),
+                )
+            ),
+            linker=linker,
+        )
+
+        self.assertEqual(ledger.status, ModuleStatus.DEGRADED)
+        self.assertIn("llm_discussion_linker_malformed", ledger.status_reasons)
+        self.assertEqual(len(ledger.rows), 1)
+        self.assertEqual(ledger.rows[0].group_ids, ())
+        self.assertIn("llm_linker_malformed", ledger.rows[0].provenance["rationale"])
+
     def test_llm_linker_replays_cached_result_for_same_event_body_and_head(self) -> None:
         from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass
         from cure_subsequent_review.discussion_linker import LlmDiscussionLinker

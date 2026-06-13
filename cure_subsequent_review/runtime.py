@@ -639,20 +639,50 @@ def _expected_issue_history_rows(artifact_dir: Path) -> list[dict[str, Any]]:
     return _issue_history_rows(dispositions, finding_meta)
 
 
+def _expected_issue_history_rows_from_brief(governor_brief: str) -> list[dict[str, Any]]:
+    lines = str(governor_brief or "").splitlines()
+    rows: list[dict[str, Any]] = []
+    in_issue_history = False
+    statuses = "|".join(re.escape(status) for status in ALLOWED_DISPOSITION_MAP_STATUSES)
+    pattern = re.compile(rf"^-\s+(?P<title>.+?)\s+—\s+status:\s*(?P<status>{statuses})\b", re.IGNORECASE)
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            in_issue_history = stripped == ISSUE_HISTORY_HEADING
+            continue
+        if not in_issue_history:
+            continue
+        match = pattern.search(stripped)
+        if match:
+            rows.append({"title": match.group("title").strip(), "status": match.group("status").lower()})
+    return rows
+
+
+def _first_markdown_heading(review_text: str) -> str:
+    for line in str(review_text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped
+    return ""
+
+
 def _actual_disposition_map(review_text: str) -> dict[str, str]:
     statuses = "|".join(re.escape(status) for status in ALLOWED_DISPOSITION_MAP_STATUSES)
     pattern = re.compile(rf"\b(DA-\d{{4,}})\b[^\n]*\b({statuses})\b", re.IGNORECASE)
     return {match.group(1): match.group(2).lower() for match in pattern.finditer(review_text)}
 
 
-def _issue_history_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
-    expected = _expected_issue_history_rows(artifact_dir)
+def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
+    expected = _expected_issue_history_rows_from_brief(governor_brief) or _expected_issue_history_rows(artifact_dir)
     if not expected:
         return []
     normalized_review = re.sub(r"\s+", " ", review_text).lower()
     has_issue_history_heading = "prior review issue history" in normalized_review
     has_da_map_heading = "prior review disposition map" in normalized_review or "internal da coverage" in normalized_review
     warnings: list[str] = []
+    first_heading = _first_markdown_heading(review_text).lower()
+    if has_issue_history_heading and not first_heading.startswith("### prior review issue history"):
+        warnings.append("prior_review_issue_history_not_first")
     missing_titles = tuple(
         sorted(
             str(row["title"])
@@ -669,10 +699,11 @@ def _issue_history_warnings(*, artifact_dir: Path, review_text: str) -> list[str
     return warnings
 
 
-def _disposition_map_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
+def _disposition_map_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
+    warnings = _issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief)
     expected = _expected_disposition_map(artifact_dir)
     if not expected:
-        return []
+        return warnings
     actual = _actual_disposition_map(review_text)
     missing = tuple(sorted(row_id for row_id in expected if row_id not in actual))
     contradicted = tuple(
@@ -682,12 +713,10 @@ def _disposition_map_warnings(*, artifact_dir: Path, review_text: str) -> list[s
             if row_id in actual and actual[row_id] not in {expected_status, "contradicted-with-evidence"}
         )
     )
-    warnings: list[str] = []
     if missing:
         warnings.append("missing_internal_da_coverage:" + ",".join(missing))
     if contradicted:
         warnings.append("contradicted_internal_da_coverage:" + ",".join(contradicted))
-    warnings.extend(_issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text))
     return warnings
 
 
@@ -852,7 +881,7 @@ def audit_review_report_after_review(
     warnings = _list_of_strings(parsed.get("warnings"))
     if awareness in {"partial", "missing"}:
         warnings.append(f"awareness_{awareness}")
-    warnings.extend(_disposition_map_warnings(artifact_dir=artifact_dir, review_text=review_text))
+    warnings.extend(_disposition_map_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief))
     status = ModuleStatus.DEGRADED if warnings and awareness in {"partial", "missing", "unknown"} else ModuleStatus.SUCCESS
     if any(
         warning.startswith(
@@ -861,6 +890,7 @@ def audit_review_report_after_review(
                 "contradicted_internal_da_coverage:",
                 "missing_prior_review_issue_history",
                 "missing_prior_review_issue_clusters:",
+                "prior_review_issue_history_not_first",
                 "raw_da_list_only",
             )
         )

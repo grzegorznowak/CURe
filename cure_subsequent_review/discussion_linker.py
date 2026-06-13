@@ -116,7 +116,14 @@ class LlmDiscussionLinker:
             return cached
 
         known_group_ids = {group.group_id for group in groups}
-        payload = _payload(self.classifier(_prompt(event, groups)))
+        try:
+            payload = _payload(self.classifier(_prompt(event, groups)))
+        except Exception as exc:  # noqa: BLE001 - malformed/failed linker output degrades semantic artifacts
+            return DiscussionLinkResult(
+                group_ids=(),
+                signal_class=None,
+                rationale=f"llm_linker_malformed:{type(exc).__name__}",
+            )
         signal_class = _signal_class(payload.get("signal_class"))
         group_ids = _group_ids(payload.get("group_ids"), known_group_ids=known_group_ids)
         rationale = str(payload.get("rationale") or "").strip()

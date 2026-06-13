@@ -90,6 +90,11 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                             {"finding_id": "A-01", "title": "Retry gap", "severity": "medium"},
                             {"finding_id": "A-02", "title": "Retry gap", "severity": "medium"},
                             {"finding_id": "CURE-001", "title": "Official footer policy", "severity": "low"},
+                            {
+                                "finding_id": "CURE-002",
+                                "title": "PR comments can be admitted as prior CURe reviews based on body text alone",
+                                "severity": "medium",
+                            },
                         ],
                     }
                 ),
@@ -123,6 +128,13 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                                 "action": "move_out_of_scope",
                                 "source_verification_row_id": "SV-0006",
                             },
+                            {
+                                "row_id": "DA-0007",
+                                "group_id": "G-0007",
+                                "finding_ids": ["CURE-002"],
+                                "action": "re_report",
+                                "source_verification_row_id": "SV-0007",
+                            },
                         ],
                     }
                 ),
@@ -137,8 +149,13 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             self.assertIn("Internal rows: DA-0001, DA-0002", brief)
             self.assertEqual(brief.count("- Retry gap — status:"), 1)
             self.assertIn("- Official footer policy — status: out-of-scope", brief)
+            self.assertIn(
+                "- PR comments can be admitted as prior CURe reviews based on body text alone — status: carried-forward/re_report",
+                brief,
+            )
             self.assertIn("Internal DA coverage", brief)
             self.assertIn("DA-0006: out-of-scope", brief)
+            self.assertIn("DA-0007: carried-forward/re_report", brief)
             self.assertNotIn("DA-0006: carried-forward/re_report", brief)
             self.assertIn("confirmed-resolved | carried-forward/re_report | degraded | out-of-scope | contradicted-with-evidence", brief)
 
@@ -193,6 +210,52 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             self.assertIn("missing_prior_review_issue_history", result["warnings"])
             self.assertIn("raw_da_list_only", result["warnings"])
             self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]["report_governor"]["status"], "degraded")
+
+    def test_post_review_issue_history_must_be_first_and_match_brief_clusters(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- PR comments can be admitted as prior CURe reviews based on body text alone — "
+                    "status: carried-forward/re_report. Reason: still open. Internal rows: DA-0007\n"
+                    "- Official footer policy — status: out-of-scope. Reason: policy-approved. Internal rows: DA-0006\n"
+                    "### Internal DA coverage (audit only)\n"
+                    "- DA-0006: out-of-scope\n"
+                    "- DA-0007: carried-forward/re_report\n"
+                ),
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "### Steps taken\n- Read files\n\n"
+                "### Prior Review Issue History\n"
+                "- Official footer policy — status: out-of-scope. Reason: policy-approved.\n\n"
+                "### Internal DA coverage\n"
+                "- DA-0006: out-of-scope\n"
+                "- DA-0007: carried-forward/re_report\n",
+                encoding="utf-8",
+            )
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "demonstrated", "judgment": "mentions issue history", "evidence": ["issue history"]}
+                ),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "degraded")
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertIn("prior_review_issue_history_not_first", result["warnings"])
+            self.assertIn(
+                "missing_prior_review_issue_clusters:PR comments can be admitted as prior CURe reviews based on body text alone",
+                result["warnings"],
+            )
 
     def test_post_review_sanitization_skips_when_brief_empty_or_governor_off(self) -> None:
         from cure_subsequent_review.runtime import audit_review_report_after_review

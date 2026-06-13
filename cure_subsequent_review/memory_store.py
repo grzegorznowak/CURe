@@ -39,6 +39,12 @@ def _linker_cache_key(*, event_id: str, body: str, current_head: str) -> str:
     return f"{current_head}:{event_id}:{_body_hash(body)}"
 
 
+def _finding_identity_matches(cached: object, current: tuple[str, ...]) -> bool:
+    cached_ids = tuple(str(item).strip() for item in cached if str(item).strip()) if isinstance(cached, list | tuple) else ()
+    current_ids = tuple(str(item).strip() for item in current if str(item).strip())
+    return bool(cached_ids) and set(cached_ids) == set(current_ids)
+
+
 @dataclass(frozen=True)
 class ReviewMemoryStore:
     path: Path
@@ -207,6 +213,8 @@ class ReviewMemoryStore:
             if isinstance(candidate, dict):
                 head_entry = candidate
         if head_entry.get("source_state") != SourceState.RESOLVED_FROM_SOURCE.value:
+            return None
+        if not _finding_identity_matches(entry.get("finding_ids"), finding_ids):
             return None
 
         cached_row = head_entry.get("source_verification_row")

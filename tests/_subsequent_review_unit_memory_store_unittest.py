@@ -123,6 +123,35 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
             self.assertEqual([call.group_id for call in provider_calls], ["G-0001", "G-0002"])
             self.assertNotEqual(stale.rows[0].provenance.get("source"), "memory_cache")
 
+    def test_resolved_replay_rejects_same_ordinal_group_with_different_finding_identity(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-a",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                ),
+                disposition_ledger=self._disposition_ledger(
+                    action=DispositionAction.CONFIRM_RESOLVED,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                ),
+            )
+
+            row = store.synthesize_resolved_source_row(
+                group_id="G-0001",
+                finding_ids=("B-99",),
+                row_id="SV-0001",
+                current_head="head-a",
+            )
+
+            self.assertIsNone(row)
+
     def test_resolved_replay_requires_top_level_last_seen_head_match(self) -> None:
         from cure_subsequent_review.contracts import DispositionAction, SourceState
         from cure_subsequent_review.memory_store import ReviewMemoryStore
