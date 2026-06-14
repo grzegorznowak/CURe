@@ -575,7 +575,7 @@ Implementation should stop and return to planning if the pre-review governor can
 
 ## Live-audit remap addendum — FB-030/031/034/035/036/038
 
-Story 04 is the active runtime/report/memory owner for the Story 05 tombstone's runtime follow-up items. Status remains `🔵 IN PR` until fresh PR #22 live proof is collected after the already-pushed hardening commits.
+Story 04 is the active runtime/report/memory owner for the former synthetic Story 05 runtime follow-up items. Status remains `🔵 IN PR` until fresh PR #22 live proof is collected after the already-pushed hardening commits.
 
 ### Runtime ownership
 
@@ -588,4 +588,4 @@ Story 04 is the active runtime/report/memory owner for the Story 05 tombstone's 
 | FB-036 | Discussion-linker LLM calls use the prepared review runtime policy, config overrides, add-dir access, cwd/environment constraints, and model settings. | — |
 | FB-038 | Multipass planner-abort paths with prior-review context cannot publish synthetic output that bypasses final-output issue-history/governor guardrails. | — |
 
-The superseded Story 05 workspace is retained only as provenance for the initial live-audit intake. It does not own an independent delivery gate.
+The superseded Story 05 workspace has been removed after remap. Provenance for the initial live-audit intake is preserved in the initiative feedback log and the Stories 01/03/04 addenda; Story 05 owns no independent delivery gate.

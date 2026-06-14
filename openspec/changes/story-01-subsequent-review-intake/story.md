@@ -444,7 +444,7 @@ Activated risk lenses and idioms: external service/CLI compatibility (prove norm
 
 ## Live-audit remap addendum — FB-033 and FB-037
 
-Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the superseded Story 05 workspace. Product/test code is unchanged by the remap.
+Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the former synthetic Story 05 scaffold. Product/test code is unchanged by the remap.
 
 ### Ownership
 

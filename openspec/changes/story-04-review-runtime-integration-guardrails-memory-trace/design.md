@@ -108,7 +108,7 @@ Implementation should stop and return to planning if the pre-review governor can
 
 ## Live-audit remap design addendum
 
-Story 04 owns the runtime/report design for FB-030, FB-031, FB-034, runtime-FB-035, FB-036, and FB-038 after the Story 05 tombstone remap:
+Story 04 owns the runtime/report design for FB-030, FB-031, FB-034, runtime-FB-035, FB-036, and FB-038 after the Story 05 removal/remap:
 
 - Consumer output should be human-first: raw DA coverage remains a complete audit/governor obligation but not a prominent ordinary review body section.
 - Memory and linker caches are advisory optimizations and must be bound to stable current-group identity before replay.

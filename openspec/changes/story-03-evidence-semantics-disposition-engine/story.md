@@ -299,7 +299,7 @@ Keep source/discussion/arbiter logic in small `cure_subsequent_review` modules. 
 
 ## Live-audit remap addendum — FB-032 and FB-035 source-truth side
 
-Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the superseded Story 05 workspace. Product/test code is unchanged by the remap.
+Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the former synthetic Story 05 scaffold. Product/test code is unchanged by the remap.
 
 ### Ownership
 

@@ -31,7 +31,7 @@
     - FB-036/A7: discussion linker LLM calls must use the prepared runtime policy/config/add-dir environment.
     - FB-037/A8: supported concise generated reviews must not disappear from prior-finding identity.
     - FB-038/A9: multipass planner abort must not bypass prior-review final-output/governor guardrails.
-  - Remap note: Story 05 is now a tombstone only. Active follow-up owners are Story 04 for runtime/report/memory/linker guardrails, Story 01 for artifact-path and concise-parser support, and Story 03 for authority/source-truth invariants. Next proof step is a fresh PR #22 live audit after the already-pushed hardening commits.
+  - Remap note: the Story 05 OpenSpec files have been removed after remap. Active follow-up owners are Story 04 for runtime/report/memory/linker guardrails, Story 01 for artifact-path and concise-parser support, and Story 03 for authority/source-truth invariants. Next proof step is a fresh PR #22 live audit after the already-pushed hardening commits.
 
 - 2026-06-13T04:51:44Z Review run by fresh maintainer session
   - Decision: approve
@@ -330,4 +330,4 @@
 
 ## Live-audit remap review note
 
-- 2026-06-14T10:46:40Z OpenSpec provenance repair: synthetic Story 05 is superseded/remapped. Review Story 04 for FB-030 (consumer DA coverage demotion), FB-031 (memory replay identity), FB-034 (linker cache group identity), runtime-FB-035 (verifier citation enforcement), FB-036 (linker runtime policy/add-dir/config), and FB-038 (planner-abort prior-review guardrails). Story 04 remains `🔵 IN PR`; implementation is on PR #22, but fresh live proof is still pending.
+- 2026-06-14T10:46:40Z OpenSpec provenance repair: synthetic Story 05 is superseded/remapped and its OpenSpec files have been removed. Review Story 04 for FB-030 (consumer DA coverage demotion), FB-031 (memory replay identity), FB-034 (linker cache group identity), runtime-FB-035 (verifier citation enforcement), FB-036 (linker runtime policy/add-dir/config), and FB-038 (planner-abort prior-review guardrails). Story 04 remains `🔵 IN PR`; implementation is on PR #22, but fresh live proof is still pending.
