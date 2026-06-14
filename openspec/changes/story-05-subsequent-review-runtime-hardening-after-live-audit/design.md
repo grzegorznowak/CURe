@@ -13,3 +13,8 @@
 - Should DA coverage be artifact-only, appendix, or collapsible markdown in `review.md`? Product preference currently favors removing it from the ordinary visible body while preserving audit access.
 - What is the minimal stable identity digest that can be shared by memory replay and linker cache replay: origin key, fingerprint, source refs, corpus entry, or a combined group digest?
 - Should planner abort with prior-review context publish a synthetic guarded review, or fail/degrade before publication?
+
+
+## Superseded design note
+
+The design decisions above are preserved as historical live-audit notes. They are not a standalone active design contract after the remap. Runtime/report/memory/linker design belongs to Story 04; intake/path/parser identity support belongs to Story 01; source-truth and authority invariants belong to Story 03.

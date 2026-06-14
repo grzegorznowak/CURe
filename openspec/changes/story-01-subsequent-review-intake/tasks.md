@@ -15,3 +15,10 @@
 ## Integration & Cleanup
 - [x] Update OpenSpec story/progress/review artifacts with final local state.
 - [x] Mark story status as `✅ DONE`.
+
+
+## Live-audit remap tasks
+
+- [x] Record Story 01 ownership of FB-033 session-bound historical artifact path containment.
+- [x] Record Story 01 ownership of FB-037 concise generated-review prior-finding parsing/degraded provenance.
+- [x] Keep Story 01 status `✅ DONE`; this is a provenance/remap addendum over already-implemented PR #22 hardening.

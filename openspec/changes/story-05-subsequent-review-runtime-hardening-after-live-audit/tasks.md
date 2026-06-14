@@ -21,9 +21,19 @@
 - [x] Run focused suites listed in `story.md` Verification Commands.
 - [x] Run `python -m pytest tests/test_subsequent_review.py -q`.
 - [x] Run `ruff check .`, `git diff --check`, and `mypy`.
-- [ ] Run and audit a fresh PR #22 live review after implementation.
+- [x] Superseded/remapped to Story 04: run and audit a fresh PR #22 live review after implementation.
 
 ## Integration & Cleanup
 - [x] Update `progress.md`, `reviews.md`, and the initiative tracker after plan review.
 - [x] Update PR #22 body/status with Story 05 scope if implementation proceeds on the same PR branch.
-- [ ] Confirm Story 04 successful gates remain non-regressed: strict multipass schema, A17 warn-only governor, A19/DA-0006, and FB-028 malformed-linker degradation.
+- [x] Superseded/remapped to Story 04: confirm Story 04 successful gates remain non-regressed: strict multipass schema, A17 warn-only governor, A19/DA-0006, and FB-028 malformed-linker degradation.
+
+
+## Superseded remap tasks
+
+- [x] Mark synthetic Story 05 as non-authoritative OpenSpec provenance only.
+- [x] Remap FB-030/031/034/runtime-FB-035/036/038 to Story 04.
+- [x] Remap FB-033 and FB-037 to Story 01, with Story 04 runtime support where applicable.
+- [x] Remap FB-032 and the source-truth side of FB-035 to Story 03.
+- [x] Leave product/test implementation commits on PR #22 unchanged.
+- [x] Hand the remaining fresh PR #22 live-audit proof gate to Story 04; it is no longer a Story 05 completion task.

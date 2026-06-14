@@ -23,3 +23,8 @@ Single follow-up story — this change is the feedback-derived hardening scope a
 - Live audit sandbox: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739`
 - Prior story: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/`
 - Feedback records: FB-030 through FB-038 in `openspec/initiatives/cure-subsequent-pr-review/feedback-log.md`
+
+
+## Superseded proposal note
+
+This proposal is superseded. The live-audit feedback remains accepted, but it amends existing Stories 01, 03, and 04 instead of creating a new authoritative Story 05. The Story 05 workspace stays only as an audit trail for how FB-030 through FB-038 were first ingested.

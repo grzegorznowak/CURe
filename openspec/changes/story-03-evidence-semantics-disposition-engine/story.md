@@ -295,3 +295,20 @@ Keep source/discussion/arbiter logic in small `cure_subsequent_review` modules. 
   - Hypothesis triage: none material; checked suspected scenario/acceptance coverage gaps, Story 02 numbering/roadmap drift, evidence-policy expansion, disabled-module silent success, unresolved source-fact provider seam, authority unknown handling, fixture/golden coverage, and public wrapper/static proof coverage
   - Debt Friction: none
   - Next action: run `/epic-story-resume cure-subsequent-pr-review 03` from a fresh session; implementation status remains ⚪ TODO and planning is approved
+
+
+## Live-audit remap addendum — FB-032 and FB-035 source-truth side
+
+Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the superseded Story 05 workspace. Product/test code is unchanged by the remap.
+
+### Ownership
+
+- FB-032: Story 03 owns the discussion-authority invariant. Trusted product/security/maintainer authority comes from authenticated author/role metadata or explicit configuration, never from untrusted comment body words alone.
+- FB-035: Story 03 owns the source-truth invariant that source-state labels must be grounded in inspected current repo-local source contexts. Story 04 owns the runtime LLM verifier enforcement surface for this invariant.
+
+### Acceptance addenda
+
+- LA-01 / FB-032: Discussion Signal Resolver separates authenticated metadata/config authority from untrusted body content. Role words such as `product`, `security`, or `maintainer` inside an untrusted body are recorded as body claims or rationale only; they cannot elevate the event to trusted authority.
+- LA-02 / FB-035: Source Truth Verifier and Disposition Arbiter accept `resolved_from_source` only from inspected current-source evidence with repo-local citations or explicit unavailable/degraded reasons. Arbitrary LLM-returned paths or line numbers outside inspected context cannot become source truth.
+
+Implementation evidence for the remapped feedback is on PR #22 in commits `f96e7ad` and `ee7410a`; the remaining fresh live audit is tracked by Story 04.

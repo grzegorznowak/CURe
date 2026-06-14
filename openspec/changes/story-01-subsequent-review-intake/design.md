@@ -104,3 +104,9 @@ Activated risk lenses and idioms: external service/CLI compatibility (prove norm
 - Latest local PR #22 run evidence at `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260604-122432-f8ac/work/subsequent/prior_review_corpus.json` shows two completed local session `review.md` bodies captured successfully with reviewed head `76712fb...`; `/work/subsequent/prior_findings.json` then has zero findings and two `parse_degraded` artifact statuses with `finding_id_without_parseable_heading`, proving a real generated-report extraction gap rather than missing corpus.
 - The captured generated review bodies include normal CURe final report issue blocks under `### In Scope Issues` with `<details><summary><b>Severity</b>...` structures, not only canonical `### CURE-01` or `- [A-01][Medium]` fixture formats; A22 requires parser support for this shape or an explicit machine-readable ledger.
 - Still-open implementation details: exact top-level config source, exact CURe-authored PR comment identification strategy, GraphQL/thread-state availability, robust historical markdown parser shape versus machine-readable ledger design, exact GitHub list fallback order, and ambiguity marker schema for supersedes.
+
+
+## Live-audit remap design addendum
+
+- Session-bound artifact containment (FB-033) is an intake/corpus boundary: historical paths are data, not trusted filesystem authority, until resolved under the owning session/sandbox root.
+- Concise generated-review parsing (FB-037) is an extractor boundary: supported source-backed concise issue bullets preserve identity; absent verbose-card fields degrade metadata quality without discarding the candidate.

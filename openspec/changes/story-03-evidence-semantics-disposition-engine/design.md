@@ -54,3 +54,9 @@ Keep source/discussion/arbiter logic in small `cure_subsequent_review` modules. 
 - `projects/CURe/cure_subsequent_review/finding_identity.py:95-223` owns reconciliation groups, supersedes edges, and ambiguity; the arbiter should consume this ledger instead of rematching findings from scratch.
 - `projects/CURe/docs/examples/subsequent-review-simulation.md:133-154` names the intended source-verification, comment-resolution, and disposition artifacts; this story chooses JSON machine ledgers under the existing `work/subsequent/` directory while leaving human-readable final summaries to a later story.
 - Existing public test entrypoint `projects/CURe/tests/test_subsequent_review.py:1-13` imports split private subsequent-review suites; new Story 03 tests should join that wrapper so focused and public commands stay aligned.
+
+
+## Live-audit remap design addendum
+
+- Discussion authority (FB-032) remains metadata/config-driven. Body text may explain a claim but cannot authenticate product/security/maintainer authority.
+- Source truth (FB-035) remains inspected-current-source-driven. LLM citations are candidate references only until constrained to repo-local inspected context; unsupported citations must degrade or remain unverifiable.

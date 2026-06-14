@@ -4,10 +4,10 @@
 - Claimed at: 2026-06-14T10:20:46Z
 - Claimed by: pi child agent (openspec-story-resume)
 - Model: unknown
-- Scope: Verify whether Story 05 can close the remaining live-target proof gap from the main worktree after migration, without re-running a remote PR audit that ignores local uncommitted changes.
+- Scope: Historical claim from the now-superseded Story 05 resume pass. After the 2026-06-14 remap, this workspace is a tombstone only; remaining live-target proof belongs to Story 04.
 - Main-tree targets: CURe
 - Primary write surfaces: Story 05 OpenSpec artifacts only unless a new local implementation gap is found.
-- Status: 🔄 IN PROGRESS
+- Status: ⚫ SUPERSEDED / REMAPPED
 
 ## Progress Timeline
 - 2026-06-13T10:05:45Z **Plan draft scaffold**: created Story 05 from the latest PR #22 live-audit findings. Captured the product decision to remove/demote `### Internal DA coverage` from ordinary consumer-facing `review.md` while preserving complete audit/governor coverage. Added acceptance slices for memory/linker identity, authority classification, artifact path containment, verifier citation constraints, runtime policy wiring, concise prior-review parsing, and multipass planner-abort guardrails.
@@ -30,17 +30,22 @@
 ## Session Handoff
 
 - **Timestamp**: 2026-06-14T10:28:33Z
-- **Status**: 🔄 IN PROGRESS
+- **Status**: ⚫ SUPERSEDED / REMAPPED
 - **Completed In This Session**:
   - Refreshed the Story 05 claim in the main CURe worktree on branch `cure-subsequent-pr-review/story-05-subsequent-review-runtime-hardening-after-live-audit`.
   - Verified local migrated implementation with the Story 05 focused pytest groups, `tests/test_subsequent_review.py`, `ruff check .`, `git diff --check`, and `mypy`.
   - Confirmed the current `cure pr` live-audit path audits the PR head (`gh pr checkout 22 --force`) and therefore required pushing Story 05 changes before rerunning live proof.
   - Committed Story 05 as `f96e7ad`, pushed it to PR #22, and updated the PR body/status with Story 05 scope and local verification results.
 - **Remaining**:
-  - `tasks.md` still has the fresh PR #22 live review audit unchecked; now that PR #22 points at the Story 05 commit, rerun the live audit to close or refresh that proof.
-  - Final Story 04 gate non-regression confirmation remains unchecked as an integration-cleanup item, although the local verification suite passed.
+  - Superseded/remapped: fresh PR #22 live proof now belongs to Story 04, not this tombstone workspace.
+  - Final Story 04 gate non-regression confirmation is tracked by Story 04 after remap.
 - **Blockers**: none in local code; `blocked.md` remains absent.
-- **Next Steps**: run `/openspec-story-resume cure-subsequent-pr-review story-05-subsequent-review-runtime-hardening-after-live-audit` to execute a fresh `python -m cure pr https://github.com/grzegorznowak/CURe/pull/22 --if-reviewed new --ui off --no-stream` audit against PR head `f96e7ad` and inspect `review.md`, `work/subsequent/report_governor_result.json`, `source_verification.json`, `disposition_ledger.json`, `discussion_signals.json`, and the memory path from `meta.json`.
+- **Next Steps**: use Story 04 to run a fresh `python -m cure pr https://github.com/grzegorznowak/CURe/pull/22 --if-reviewed new --ui off --no-stream` audit at the current PR head and inspect `review.md`, `work/subsequent/report_governor_result.json`, `source_verification.json`, `disposition_ledger.json`, `discussion_signals.json`, and the memory path from `meta.json`.
 - **Worktrees**:
   - CURe: `/workspaces/cure_workspace/projects/CURe` (main-tree target; no auxiliary worktree)
 - **Proof Statement**: Local implementation proof passes in the main worktree and the PR head now contains the Story 05 commit. Live proof is not yet closed; expected live closure evidence remains no prominent raw `### Internal DA coverage`, report governor not degraded for A1, and no live REQUEST CHANGES re-reporting A2-A9 hardening findings.
+
+
+## Superseded remap progress
+
+- 2026-06-14T10:46:40Z **OpenSpec remap repair**: operator directed that product/test code remains as-is, but the synthetic Story 05 scope should not be authoritative. FB-030 through FB-038 are remapped into Stories 01, 03, and 04; this workspace is retained as a tombstone only. Existing implementation commits `f96e7ad` and `ee7410a` stay on PR #22. Fresh post-push PR #22 live audit remains pending under Story 04's `🔵 IN PR` gate.

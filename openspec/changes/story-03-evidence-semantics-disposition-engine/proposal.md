@@ -21,3 +21,8 @@ Inherits initiative-level decisions from `../../initiatives/cure-subsequent-pr-r
 ## External Resources
 - Initiative: `../../initiatives/cure-subsequent-pr-review/initiative.md`
 - Legacy coordination source: `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/story-03-evidence-semantics-disposition-engine.md`
+
+
+## Live-audit remap proposal addendum
+
+The superseded Story 05 live-audit bucket amended Story 03 for discussion-authority and source-truth invariants: FB-032 body text cannot grant trusted authority, and FB-035 source-state labels require inspected source context. Runtime verifier wiring remains Story 04; the semantic invariant belongs here.

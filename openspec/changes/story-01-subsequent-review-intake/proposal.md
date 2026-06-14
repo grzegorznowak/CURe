@@ -29,3 +29,8 @@ Inherits initiative-level decisions from `../../initiatives/cure-subsequent-pr-r
 ## External Resources
 - Initiative: `../../initiatives/cure-subsequent-pr-review/initiative.md`
 - Legacy coordination source: `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/story-01-subsequent-review-intake.md`
+
+
+## Live-audit remap proposal addendum
+
+The superseded Story 05 live-audit bucket amended Story 01 for two intake responsibilities: FB-033 historical artifact path containment and FB-037 concise generated-review prior-finding parsing. These are additive clarifications to the completed intake/ledger slice and do not make Story 01 own source-truth, discussion authority, report governor, or runtime publication behavior.

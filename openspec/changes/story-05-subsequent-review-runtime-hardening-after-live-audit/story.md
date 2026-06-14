@@ -1,7 +1,9 @@
 # Story 05 — Subsequent Review Runtime Hardening After Live Audit
 
-Plan: 🟢 PLAN APPROVED
-Status: 🔄 IN PROGRESS
+Plan: ⚫ SUPERSEDED
+Status: ⚫ SUPERSEDED / REMAPPED
+
+> Superseded/remapped on 2026-06-14: this synthetic Story 05 is retained only as an audit intake tombstone. The product/test implementation remains on PR #22, but authoritative OpenSpec ownership for FB-030 through FB-038 is remapped into Stories 01, 03, and 04. The acceptance and design text below is historical/non-authoritative except as feedback provenance.
 
 > Story candidate scaffolded from the 2026-06-13 PR #22 live-audit ingestion. It captures feedback that should not re-expand completed Story 01-04 contracts without a fresh plan/review loop.
 
@@ -147,3 +149,22 @@ The 2026-06-13 PR #22 live review completed successfully and closed the prior st
 
 - 2026-06-13T10:05:45Z Initial plan draft scaffolded from PR #22 live-audit ingestion. Requires fresh plan review before implementation.
 - 2026-06-13T10:19:08Z Plan review APPROVED. Activated risk lenses: consumer-facing output/provenance separation (A1/TAP-1), memory/cache identity (A2/A5/TAP-2/TAP-5), untrusted discussion authority (A3/TAP-3), path traversal/session containment (A4/TAP-4), verifier citation trust boundary (A6/TAP-6), runtime policy wiring (A7/TAP-5), prior finding parsing (A8/TAP-7), multipass abort guardrails (A9/TAP-8), TAP/proof adequacy, and test feasibility/overbreadth. Rationale: Story A1-A9, TAP-1..TAP-8, and the proof matrix map directly to the live-audit FB-030..FB-038 findings and verified runtime modules; no plan-blocking gaps found before implementation.
+
+
+## Superseded remap
+
+This workspace is no longer an active delivery story. It preserves the PR #22 live-audit intake trail only; authoritative requirements, tasks, and review gates now live in the pre-existing stories below.
+
+| Historical Story 05 item | Feedback | Authoritative OpenSpec owner after remap |
+|---|---:|---|
+| A1 — demote `### Internal DA coverage` from ordinary review body | FB-030 | Story 04 |
+| A2 — memory replay stable identity | FB-031 | Story 04 primary; Story 01 support |
+| A3 — body text cannot grant trusted authority | FB-032 | Story 03 |
+| A4 — session-bound zip/source artifact paths | FB-033 | Story 01 primary; Story 04 support |
+| A5 — discussion-linker cache group identity | FB-034 | Story 04 primary; Story 01 support |
+| A6 — verifier citations constrained to inspected source | FB-035 | Story 03 source-truth invariant + Story 04 runtime verifier enforcement |
+| A7 — linker uses prepared runtime policy/add-dir/config | FB-036 | Story 04 |
+| A8 — concise generated review prior-finding parsing | FB-037 | Story 01 |
+| A9 — multipass planner-abort prior-review guardrails | FB-038 | Story 04 |
+
+Historical acceptance below should not be used to claim a separate Story 05 gate. Fresh live proof for PR #22 remains a Story 04 PR-stage gate, with Story 01/03 addenda documenting the supporting intake and semantic invariants.

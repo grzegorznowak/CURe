@@ -440,3 +440,20 @@ Activated risk lenses and idioms: external service/CLI compatibility (prove norm
   - Hypothesis triage: none material; checked suspected TAP quality-lens omissions, A13 narrowing, proof-class vocabulary drift, provisional Open Detail blanks, critical-file staleness, and Story 02 semantic bleed
   - Debt Friction: none
   - Next action: run `/epic-story-review cure-subsequent-pr-review 01` from a fresh implementation-review session against the reopened implementation status
+
+
+## Live-audit remap addendum — FB-033 and FB-037
+
+Status remains `✅ DONE`: this addendum records authoritative ownership for PR #22 live-audit feedback that was initially staged in the superseded Story 05 workspace. Product/test code is unchanged by the remap.
+
+### Ownership
+
+- FB-033: Story 01 is the primary owner for session-bound historical artifact path containment in prior-review corpus/session scanning. Story 04 may share or call the same containment helper when runtime modules consume historical artifacts.
+- FB-037: Story 01 owns supported concise generated-review parsing. The Prior Finding Extractor must preserve candidate identity for recognizable concise CURe issue bullets with source evidence, and must degrade missing severity/card detail with provenance rather than silently dropping the finding.
+
+### Acceptance addenda
+
+- LA-01 / FB-033: Prior-review corpus/session readers resolve historical `meta.paths.*`, archive/source entries, and review artifact paths against the owning session or sandbox boundary before reading. Absolute paths, symlinks, or `..` traversals that escape the session are rejected or recorded as unavailable/degraded artifacts with provenance.
+- LA-02 / FB-037: The Prior Finding Extractor recognizes supported concise generated review output (for example concise issue bullets plus `Sources:` evidence) as prior finding candidates even when verbose details-card severity markup is absent. Missing severity or optional card metadata becomes explicit degraded provenance, not identity loss.
+
+Implementation evidence for the remapped feedback is on PR #22 in commits `f96e7ad` and `ee7410a`; the remaining fresh live audit is tracked by Story 04.

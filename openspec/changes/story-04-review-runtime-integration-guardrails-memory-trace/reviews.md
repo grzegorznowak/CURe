@@ -6,7 +6,7 @@
 ## Review Log
 
 - 2026-06-13T10:05:45Z Latest PR #22 live-audit ingestion from sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739`
-  - Decision: request_changes overall; Story 04 prior closure gates mostly pass; fresh hardening feedback split to Story 05
+  - Decision: request_changes overall; Story 04 prior closure gates mostly pass; fresh hardening feedback was initially staged in synthetic Story 05, then remapped on 2026-06-14 into Stories 01/03/04
   - Approval gate: partial/pass for previous Story 04 gates, fail for new hardening findings
   - Product verdict: request_changes
   - Technical verdict: request_changes
@@ -21,7 +21,7 @@
     - FB-028 is resolved for the original malformed-linker-abort shape: artifacts cite malformed linker output degrading instead of aborting semantic artifact creation.
     - FB-029 is resolved only narrowly: cache replay rejects same ordinal groups with different `finding_ids`, but the latest review reports a broader repeated-display-ID/origin/fingerprint variant.
   - Computed-vs-carried note: the five `### Prior Review Issue History` clusters are historical prior issue identities carried from prior corpus/comments/sessions, but current statuses were recomputed in this run via 14 `llm_finding_verifier` source-verification rows plus one FB-026 policy override; no `memory_cache` provenance was found for those status computations.
-  - Key findings ingested as fresh Story 05 feedback:
+  - Key findings ingested as live-audit feedback and later remapped to existing story owners:
     - FB-030/A1: `### Internal DA coverage` is audit/provenance output and should be removed/demoted from ordinary consumer-facing `review.md` while preserving complete audit coverage.
     - FB-031/A2: memory replay needs stable origin/fingerprint/source-reference identity beyond ordinal `group_id` plus display `finding_ids`.
     - FB-032/A3: untrusted comment body text must not escalate discussion authority.
@@ -31,7 +31,7 @@
     - FB-036/A7: discussion linker LLM calls must use the prepared runtime policy/config/add-dir environment.
     - FB-037/A8: supported concise generated reviews must not disappear from prior-finding identity.
     - FB-038/A9: multipass planner abort must not bypass prior-review final-output/governor guardrails.
-  - Next action: run fresh OpenSpec plan review for Story 05 before implementing the new hardening scope; preserve Story 04 proven gates while deciding whether PR #22 absorbs Story 05 implementation or keeps it as a follow-up PR.
+  - Remap note: Story 05 is now a tombstone only. Active follow-up owners are Story 04 for runtime/report/memory/linker guardrails, Story 01 for artifact-path and concise-parser support, and Story 03 for authority/source-truth invariants. Next proof step is a fresh PR #22 live audit after the already-pushed hardening commits.
 
 - 2026-06-13T04:51:44Z Review run by fresh maintainer session
   - Decision: approve
@@ -326,3 +326,8 @@
       </details>
   - Debt Friction: none
   - Next action: `/epic-story-resume cure-subsequent-pr-review 04` to finalize the proof matrix and harden strict report-governor citation/ledger validation, then rerun focused governor/runtime tests plus the public wrapper/ruff/mypy.
+
+
+## Live-audit remap review note
+
+- 2026-06-14T10:46:40Z OpenSpec provenance repair: synthetic Story 05 is superseded/remapped. Review Story 04 for FB-030 (consumer DA coverage demotion), FB-031 (memory replay identity), FB-034 (linker cache group identity), runtime-FB-035 (verifier citation enforcement), FB-036 (linker runtime policy/add-dir/config), and FB-038 (planner-abort prior-review guardrails). Story 04 remains `🔵 IN PR`; implementation is on PR #22, but fresh live proof is still pending.

@@ -15,3 +15,10 @@
 ## Integration & Cleanup
 - [x] Update OpenSpec story/progress/review artifacts with final local state.
 - [x] Mark story status as `✅ DONE`.
+
+
+## Live-audit remap tasks
+
+- [x] Record Story 03 ownership of FB-032 discussion-authority metadata/body-text separation.
+- [x] Record Story 03 ownership of the source-truth side of FB-035 inspected-source citation constraints.
+- [x] Keep Story 03 status `✅ DONE`; this is a provenance/remap addendum over already-implemented PR #22 hardening.

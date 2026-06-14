@@ -66,3 +66,8 @@ Story 03 plan was grilled before implementation. The following decisions refine 
 
 ## Unresolved Debt Friction
 - None current; story status is `✅ DONE`.
+
+
+## Live-audit remap progress
+
+- 2026-06-14T10:46:40Z **OpenSpec remap repair**: FB-032 and the source-truth side of FB-035 from the superseded Story 05 live-audit bucket are now documented as Story 03 addenda. FB-032 belongs to discussion authority classification; FB-035's invariant belongs to source-truth evidence semantics, with Story 04 owning runtime verifier enforcement. Story status remains `✅ DONE` because no product/test code changed in this provenance repair.

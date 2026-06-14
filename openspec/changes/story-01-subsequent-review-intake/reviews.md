@@ -632,3 +632,8 @@
   - Positive notes: pre-existing untracked `projects/CURe/docs/examples/subsequent-pr-run-flow.svg` remains untracked and untouched; no product commit made
   - Debt Friction: none for Story 01; later-story candidates FB-007/FB-010 and Story 02/03 semantics remain out-of-scope
   - Next action: Story 01 can be finalized/committed; preserve untracked SVG unless explicitly bundling that separate epic artifact
+
+
+## Live-audit remap review note
+
+- 2026-06-14T10:46:40Z Provenance repair review note: PR #22 live-audit feedback FB-033 and FB-037 should be reviewed against Story 01 intake/extractor/path-boundary invariants, not as an active Story 05. The change is documentation/provenance-only; implementation evidence remains in PR #22 commits `f96e7ad` and `ee7410a`.

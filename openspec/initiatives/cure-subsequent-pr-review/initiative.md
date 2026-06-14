@@ -4,7 +4,7 @@ source_of_truth: internal
 
 ## Goal / Context
 
-CURe subsequent PR review makes a fresh `cure pr <PR_URL>` run prior-review-aware without requiring the operator to manually identify that a PR is subsequent. The workflow fetches and normalizes prior CURe findings plus PR discussion, verifies old findings against current source, interprets discussion/scope signals separately from source truth, and arbitrates final-report decisions with auditable provenance. Done means operators receive explicit confirmations, re-reports, duplicate/out-of-scope suppressions, degraded-mode warnings, human-readable prior-review issue history in final `review.md`, and persisted `work/subsequent/` ledgers that future runs can reuse. Design landmarks are `docs/examples/subsequent-review-simulation.md`, simulated PR `https://github.com/grzegorznowak/CURe/pull/21`, and `docs/examples/subsequent-pr-run-flow.svg`; implementation stories should cite which landmark stages they satisfy, but SVG polish is not implementation scope. Current delivery state: Stories 01-03 are `✅ DONE`; Story 04 is `🔵 IN PR` on PR #22 after a 2026-06-13 live audit closed the strict multipass `### Step Result:` regression, A17 warn-only governor path, and A19/`DA-0006` footer-policy disposition, but the same audit returned REQUEST CHANGES and seeded Story 05 as a fresh hardening plan draft for consumer-facing DA coverage shape plus runtime identity/trust/source-boundary findings.
+CURe subsequent PR review makes a fresh `cure pr <PR_URL>` run prior-review-aware without requiring the operator to manually identify that a PR is subsequent. The workflow fetches and normalizes prior CURe findings plus PR discussion, verifies old findings against current source, interprets discussion/scope signals separately from source truth, and arbitrates final-report decisions with auditable provenance. Done means operators receive explicit confirmations, re-reports, duplicate/out-of-scope suppressions, degraded-mode warnings, human-readable prior-review issue history in final `review.md`, and persisted `work/subsequent/` ledgers that future runs can reuse. Design landmarks are `docs/examples/subsequent-review-simulation.md`, simulated PR `https://github.com/grzegorznowak/CURe/pull/21`, and `docs/examples/subsequent-pr-run-flow.svg`; implementation stories should cite which landmark stages they satisfy, but SVG polish is not implementation scope. Current delivery state: Stories 01-03 are `✅ DONE`; Story 04 is `🔵 IN PR` on PR #22 after a 2026-06-13 live audit closed the strict multipass `### Step Result:` regression, A17 warn-only governor path, and A19/`DA-0006` footer-policy disposition, but the same audit returned REQUEST CHANGES for hardening items FB-030 through FB-038. Those items were temporarily scaffolded as synthetic Story 05, then remapped into Stories 01, 03, and 04; Story 05 is now only a superseded/tombstone intake record.
 
 ### Risks / unknowns
 
@@ -25,7 +25,7 @@ The initiative is decomposed into the current change workspaces under `openspec/
 | 02 | 🟢 PLAN APPROVED | ✅ DONE | Auto-infer Subsequent Review Mode | 01 | `openspec/changes/story-02-auto-infer-subsequent-review-mode/` |
 | 03 | 🟢 PLAN APPROVED | ✅ DONE | Evidence Semantics and Disposition Engine | 01, 02 | `openspec/changes/story-03-evidence-semantics-disposition-engine/` |
 | 04 | 🟢 PLAN APPROVED | 🔵 IN PR | Review Runtime Integration, Guardrails, Memory, and Landmark Trace | 01, 02, 03 | `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/` |
-| 05 | 🟢 PLAN APPROVED | 🔄 IN PROGRESS | Subsequent Review Runtime Hardening After Live Audit | 01, 02, 03, 04 | `openspec/changes/story-05-subsequent-review-runtime-hardening-after-live-audit/` |
+| 05 | ⚫ SUPERSEDED | ⚫ REMAPPED | Superseded live-audit intake tombstone; FB-030..FB-038 remapped to Stories 01/03/04 | 01, 03, 04 | `openspec/changes/story-05-subsequent-review-runtime-hardening-after-live-audit/` |
 
 Functional module ownership:
 
@@ -33,9 +33,9 @@ Functional module ownership:
 - Story 02 owns the command decision surface: default `auto`, explicit `--no-subsequent-review` disabled state, durable decision artifacts, and official-footer marker policy intake boundaries.
 - Story 03 owns modules 6-8: Source Truth Verifier, Discussion Signal Resolver, and Disposition Arbiter.
 - Story 04 owns modules 9-12 plus test-only module 13: Review Context Packager, Report Governor, Review Memory Store, Degraded Runtime Manager, and Landmark Trace Runner.
-- Story 05 owns post-live-audit hardening of Story 04 surfaces: consumer-facing DA coverage shape, stronger memory/linker identity, discussion authority boundaries, source/path/citation constraints, concise prior-review parsing, and multipass abort guardrails.
+- Story 05 is superseded/remapped and owns no active delivery gate. FB-030/031/034/runtime-FB-035/036/038 amend Story 04; FB-033/037 amend Story 01; FB-032 and the source-truth side of FB-035 amend Story 03.
 
-Legacy feedback-derived story candidates and absorption history are preserved in `feedback-log.md`. Previously open candidates FB-007 (final-report provenance surfacing) and FB-010 (decision/intake discussion evidence reuse) are represented in Story 04 scope; any new feedback-derived change should be planned as a fresh OpenSpec story rather than re-expanding completed contracts.
+Legacy feedback-derived story candidates and absorption history are preserved in `feedback-log.md`. Previously open candidates FB-007 (final-report provenance surfacing) and FB-010 (decision/intake discussion evidence reuse) are represented in Story 04 scope. FB-030 through FB-038 are a remap exception: they amend the pre-existing stories that PR #22 actually covered, while the synthetic Story 05 workspace remains only as a tombstone.
 
 ## Decisions & Constraints
 

@@ -64,3 +64,8 @@
 
 ## Unresolved Debt Friction
 - None current; story status is `✅ DONE`.
+
+
+## Live-audit remap progress
+
+- 2026-06-14T10:46:40Z **OpenSpec remap repair**: FB-033 and FB-037 from the superseded Story 05 live-audit bucket are now documented as Story 01 addenda. FB-033 belongs to session/prior-corpus path containment; FB-037 belongs to prior-finding extraction of supported concise generated reviews with degraded provenance for missing optional metadata. Story status remains `✅ DONE` because no product/test code changed in this provenance repair.
