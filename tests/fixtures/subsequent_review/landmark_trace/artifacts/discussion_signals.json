@@ -1,0 +1,45 @@
+{
+  "rows": [
+    {
+      "authority": "developer",
+      "event_id": "C-001",
+      "evidence_policy": "untrusted",
+      "finding_ids": [
+        "F-002"
+      ],
+      "group_ids": [
+        "G-002"
+      ],
+      "provenance": {
+        "linker": "llm"
+      },
+      "reasons": [
+        "weak_authority_pushback"
+      ],
+      "row_id": "DS-001",
+      "signal_class": "pushback"
+    },
+    {
+      "authority": "maintainer",
+      "event_id": "C-002",
+      "evidence_policy": "trusted",
+      "finding_ids": [
+        "F-001"
+      ],
+      "group_ids": [
+        "G-001"
+      ],
+      "provenance": {
+        "linker": "llm"
+      },
+      "reasons": [
+        "resolved_thread"
+      ],
+      "row_id": "DS-002",
+      "signal_class": "resolved_thread_hint"
+    }
+  ],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

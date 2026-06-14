@@ -10,6 +10,12 @@ Treat the sandbox checkout as the code under review and optimize your investigat
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review.
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
+Subsequent-review output override:
+- If the prior-review brief above contains `### Prior Review Issue History (required final output)`, your final answer MUST begin with `### Prior Review Issue History` before any `### Steps taken`, summary, assessment, or other section.
+- preserve the brief's stable issue titles and status labels, including `carried-forward/re_report` body-only PR-comment clusters and `out-of-scope` official-footer policy clusters.
+- Include `### Internal DA coverage` with every DA-* status before the normal review sections. If no prior-review issue-history brief is present, use the normal output format below.
 CURe may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
 - If that file exists, read it first and use it as the primary PR-context source for this session.
 - Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.

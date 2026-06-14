@@ -1,0 +1,29 @@
+{
+  "modules": {
+    "control_plane": {
+      "status": "success"
+    },
+    "discussion_signal_resolver": {
+      "status": "success"
+    },
+    "disposition_arbiter": {
+      "status": "success"
+    },
+    "finding_reconciler": {
+      "status": "success"
+    },
+    "pr_history_collector": {
+      "status": "success"
+    },
+    "prior_finding_extractor": {
+      "status": "success"
+    },
+    "prior_review_corpus_builder": {
+      "status": "success"
+    },
+    "source_truth_verifier": {
+      "status": "success"
+    }
+  },
+  "schema_version": 1
+}

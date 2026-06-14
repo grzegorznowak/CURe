@@ -12,6 +12,12 @@ You are reviewing a GitHub PR checked out locally in an **isolated sandbox** (no
   - `git diff <base>...HEAD`
 Use the configured review-intelligence guidance below when you need PR, ticket, or external context:
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
+Subsequent-review output override:
+- If the prior-review brief above contains `### Prior Review Issue History (required final output)`, your final answer MUST begin with `### Prior Review Issue History` before any `### Steps taken`, summary, assessment, or other section.
+- preserve the brief's stable issue titles and status labels, including `carried-forward/re_report` body-only PR-comment clusters and `out-of-scope` official-footer policy clusters.
+- Include `### Internal DA coverage` with every DA-* status before the normal review sections. If no prior-review issue-history brief is present, use the normal output format below.
 - Prefer the staged ChunkHound helper for fast context (`search` + `research`).
   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
   - Treat helper `research` as satisfying the `code_research` requirement.

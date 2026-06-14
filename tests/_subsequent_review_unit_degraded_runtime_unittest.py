@@ -1,0 +1,96 @@
+# ruff: noqa: F403, F405
+from _subsequent_review_test_support import *  # noqa: F401, F403
+
+from cure_subsequent_review.contracts import DiscussionArtifact, DiscussionEvent
+from cure_subsequent_review.degraded_runtime import DiscussionFetchAborted, DiscussionFetchController
+
+
+class SubsequentReviewDegradedRuntimeTests(SubsequentReviewTestCase):
+    def test_controller_retries_degraded_discussion_before_accepting_success(self) -> None:
+        attempts: list[int] = []
+        choices = iter(["retry"])
+
+        def fetch() -> DiscussionArtifact:
+            attempts.append(len(attempts) + 1)
+            if len(attempts) == 1:
+                return DiscussionArtifact(status=ModuleStatus.DEGRADED, status_reasons=("discussion_unavailable",))
+            return DiscussionArtifact(
+                status=ModuleStatus.SUCCESS,
+                events=(DiscussionEvent(kind="issue_comment", event_id="c1", author="cure-bot", body="CURe Review"),),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = DiscussionFetchController(
+                fetch_discussion=fetch,
+                artifact_dir=Path(tmp),
+                interactive=True,
+                choice_provider=lambda _artifact, _attempt: next(choices),
+            )
+            result = controller.fetch()
+            runtime = json.loads((Path(tmp) / "degraded_runtime.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, ModuleStatus.SUCCESS)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(runtime["status"], "success")
+        self.assertEqual([item["choice"] for item in runtime["operator_choices"]], ["retry"])
+
+    def test_controller_skip_records_auditable_empty_discussion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = DiscussionFetchController(
+                fetch_discussion=lambda: DiscussionArtifact(
+                    status=ModuleStatus.DEGRADED,
+                    events=(DiscussionEvent(kind="issue_comment", event_id="tentative", author="human", body="partial"),),
+                    status_reasons=("discussion_incomplete",),
+                ),
+                artifact_dir=Path(tmp),
+                interactive=True,
+                choice_provider=lambda _artifact, _attempt: "skip",
+            )
+            result = controller.fetch()
+            runtime = json.loads((Path(tmp) / "degraded_runtime.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, ModuleStatus.DEGRADED)
+        self.assertEqual(result.events, ())
+        self.assertIn("operator_skipped_degraded_discussion", result.status_reasons)
+        self.assertEqual(runtime["status"], "degraded")
+        self.assertEqual(runtime["operator_choices"][0]["choice"], "skip")
+
+    def test_controller_abort_records_runtime_artifact_and_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            controller = DiscussionFetchController(
+                fetch_discussion=lambda: DiscussionArtifact(
+                    status=ModuleStatus.DEGRADED,
+                    status_reasons=("discussion_payload_malformed",),
+                ),
+                artifact_dir=artifact_dir,
+                interactive=True,
+                choice_provider=lambda _artifact, _attempt: "abort",
+            )
+            with self.assertRaises(DiscussionFetchAborted):
+                controller.fetch()
+            runtime = json.loads((artifact_dir / "degraded_runtime.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(runtime["status"], "aborted")
+        self.assertEqual(runtime["operator_choices"][0]["choice"], "abort")
+        self.assertIn("discussion_payload_malformed", runtime["attempts"][0]["status_reasons"])
+
+    def test_noninteractive_controller_retries_at_most_three_times_then_skips(self) -> None:
+        attempts = 0
+
+        def fetch() -> DiscussionArtifact:
+            nonlocal attempts
+            attempts += 1
+            return DiscussionArtifact(status=ModuleStatus.DEGRADED, status_reasons=("discussion_unavailable",))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = DiscussionFetchController(fetch_discussion=fetch, artifact_dir=Path(tmp), interactive=False).fetch()
+            runtime = json.loads((Path(tmp) / "degraded_runtime.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(result.events, ())
+        self.assertIn("operator_skipped_degraded_discussion", result.status_reasons)
+        self.assertEqual([item["choice"] for item in runtime["operator_choices"]], ["retry", "retry", "skip"])
+
+
+__all__ = ["SubsequentReviewDegradedRuntimeTests"]

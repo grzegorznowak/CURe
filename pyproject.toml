@@ -15,7 +15,7 @@ cure = "cure:console_main"
 
 [tool.setuptools]
 py-modules = ["cure", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_citations", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_flows", "cure_commands", "chunkhound_summary"]
-packages = ["prompts"]
+packages = ["prompts", "cure_subsequent_review"]
 include-package-data = true
 
 [tool.setuptools.package-data]
@@ -42,6 +42,7 @@ files = [
     "cure_errors.py",
     "cure_output.py",
     "cure_sessions.py",
+    "cure_subsequent_review",
     "meta.py",
     "paths.py",
     "run.py",

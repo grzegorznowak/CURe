@@ -1,0 +1,97 @@
+name: story-change
+version: 1
+description: >
+  ADD story-change schema. Each change workspace contains planning artifacts
+  (proposal, story, design, tasks, delta specs), runtime artifacts (progress,
+  reviews), and an explicit blocker gate (blocked). Implementation is gated on
+  completed planning artifacts and tracked via tasks.md checkboxes.
+
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: >
+      Why this change, what problem it solves, goal and context. Created by
+      /openspec-story-plan during the planning interview.
+    template: proposal.md
+
+  - id: story
+    generates: story.md
+    description: >
+      The story contract: Purpose, Actors, Scenarios / Behavior Examples,
+      Acceptance, Verification (with Test Architecture Plan, Acceptance Proof
+      Matrix, and conditional matrices for surfaces, design trace, input
+      boundaries, fail-open checks, and risk lenses), Scope, Out of Scope,
+      Discovery Notes, Critical Files, Implementation Notes, Locked Decisions.
+      Created by /openspec-story-plan. Reviewed by /openspec-story-plan-review.
+      Repaired by /openspec-story-plan-resume.
+    template: story.md
+
+  - id: design
+    generates: design.md
+    description: >
+      Technical design decisions, architecture rationale, and implementation
+      strategy. Created by /openspec-story-plan. Excluded from PR bodies
+      (product-contract boundary per decision #6).
+    template: design.md
+
+  - id: tasks
+    generates: tasks.md
+    description: >
+      Implementation task checklist with checkbox tracking. Each task is a
+      concrete, verifiable unit of work. Checkbox state drives progress
+      visibility via apply.tracks. Created by /openspec-story-plan, maintained
+      by /openspec-story-claim and /openspec-story-resume.
+    template: tasks.md
+
+  - id: specs
+    generates: specs/**/*.md
+    description: >
+      Delta specs describing behavior changes. Each spec file captures the
+      before/after behavioral contract for one capability domain. Created by
+      /openspec-story-plan; archived by /opsx:archive into openspec/specs/.
+    template: spec.md
+
+  - id: progress
+    generates: progress.md
+    description: >
+      Progress tracking: Current Claim, Progress Timeline, Session Handoff,
+      PR State, Unresolved Debt Friction. Written by /openspec-story-claim,
+      /openspec-story-resume, and /openspec-story-pr. Excluded from PR bodies
+      (implementation diary, not product contract).
+    template: progress.md
+
+  - id: reviews
+    generates: reviews.md
+    description: >
+      Standalone review log artifact. Append-only numbered entries with the
+      same field schema as the existing ADD Review Log (Decision, Approval gate,
+      Product/Technical verdict, Key findings, Hypothesis triage, etc.).
+      Written by /openspec-story-review. Read by /openspec-story-converge
+      (implementation converge loop reads the latest entry's Decision,
+      Approval gate, risk-lens coverage, and finding-closure evidence).
+    template: reviews.md
+
+  - id: blocked
+    generates: blocked.md
+    description: >
+      Explicit blocker gate file. When present, lifecycle gates refuse to
+      continue. The operator removes this file to unblock; editing or annotating
+      it may document resolution, but the gate remains closed while the file
+      exists. Created only by commands that own explicit blocker files; a plan
+      review `blocked` verdict uses the Plan lane instead. Never auto-created
+      during normal planning.
+    template: blocked.md
+
+apply:
+  requires:
+    - proposal
+    - story
+    - design
+    - tasks
+  tracks: tasks.md
+  instruction: >
+    Implement the tasks in tasks.md top-to-bottom. Check off each task as
+    completed. Follow red-first discipline: choose the smallest focused seam,
+    make it fail, turn it green, then broaden verification. Record progress
+    milestones in progress.md. Before claiming done, verify every acceptance
+    criterion from story.md is satisfied and every task is checked.

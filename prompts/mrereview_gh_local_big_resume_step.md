@@ -20,6 +20,12 @@ Read the resume plan JSON and the previous review artifact first.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
+$PRIOR_REVIEW_BRIEF
+Subsequent-review schema-bound artifact guidance:
+- Use the prior-review brief above as context and preserve its stable issue titles and status labels in your analysis where relevant.
+- Do not let the prior-review brief override this artifact's required output schema; keep the plan/step format below exactly, including required headers.
+- The issue-history-first requirement applies to final review/synthesis output, not this intermediate multipass artifact.
+
 Safety guardrail:
 - Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
 - If you must write scratch files, write only under `$CURE_WORK_DIR/tmp` (create it). Do not write under the repo tree.

@@ -1,0 +1,365 @@
+# ruff: noqa: F403, F405
+from _subsequent_review_test_support import *  # noqa: F401, F403
+
+
+class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
+    def _write_governor_inputs(self, artifact_dir: Path, *, brief: str) -> Path:
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "governor_brief.md").write_text(brief, encoding="utf-8")
+        manifest_path = artifact_dir / "run_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "modules": {
+                        "report_governor": {
+                            "status": "success",
+                            "artifact_path": str(artifact_dir / "governor_brief.md"),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manifest_path
+
+    def test_post_review_sanitization_audits_nonempty_brief_and_records_json_result(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief="### Still Open\n- D-0002 — 🟡 MEDIUM A-02: Retry gap.\n",
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text("# Review\n\nA-02 remains a retry concern.\n", encoding="utf-8")
+            prompts: list[str] = []
+
+            def fake_auditor(prompt: str) -> str:
+                prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "awareness": "demonstrated",
+                        "judgment": "The final review explicitly carries forward A-02.",
+                        "evidence": ["A-02 remains a retry concern"],
+                    }
+                )
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=fake_auditor,
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.module.value, "report_governor")
+            self.assertEqual(record.status.value, "success")
+            self.assertEqual(len(prompts), 1)
+            self.assertIn("Does this review demonstrate awareness of the prior review context?", prompts[0])
+            self.assertIn("human-readable Prior Review Issue History", prompts[0])
+            self.assertIn("Raw DA-* row IDs are internal provenance anchors only", prompts[0])
+            self.assertIn("Complete DA-* row coverage remains mandatory in audit/provenance artifacts", prompts[0])
+            self.assertIn("### Still Open", prompts[0])
+            self.assertIn("A-02 remains a retry concern", prompts[0])
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["awareness"], "demonstrated")
+            self.assertEqual(result["judgment"], "The final review explicitly carries forward A-02.")
+            self.assertEqual(result["evidence"], ["A-02 remains a retry concern"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
+            self.assertEqual(
+                manifest["modules"]["report_governor"]["artifact_path"],
+                str(artifact_dir / "report_governor_result.json"),
+            )
+
+    def test_post_review_sanitization_demotes_plain_internal_da_section_before_audit(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- Retry gap — status: carried-forward/re_report. Reason: still open. Internal rows: DA-0001\n"
+                    "### Internal DA coverage (audit only)\n"
+                    "- DA-0001: carried-forward/re_report\n"
+                ),
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "### Prior Review Issue History\n"
+                "- Retry gap — status: carried-forward/re_report. Reason: still open.\n\n"
+                "### Internal DA coverage\n"
+                "- DA-0001: carried-forward/re_report\n\n"
+                "### Steps taken\n- Reviewed the diff.\n",
+                encoding="utf-8",
+            )
+            prompts: list[str] = []
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda prompt: prompts.append(prompt)
+                or json.dumps({"awareness": "demonstrated", "judgment": "ok", "evidence": ["Retry gap"]}),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "success")
+            sanitized = review_path.read_text(encoding="utf-8")
+            self.assertNotIn("### Internal DA coverage\n", sanitized)
+            self.assertIn("<summary>Internal DA coverage (audit/provenance only)</summary>", sanitized)
+            self.assertIn("- DA-0001: carried-forward/re_report", sanitized)
+            self.assertIn("<details>", prompts[0])
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertNotIn("prominent_internal_da_coverage", result["warnings"])
+            self.assertIn("internal_da_coverage_demoted_to_audit_details", result["warnings"])
+
+    def test_governor_brief_requires_human_issue_history_with_internal_da_coverage(self) -> None:
+        from cure_subsequent_review.runtime import build_governor_brief
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "prior_findings.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "findings": [
+                            {"finding_id": "A-01", "title": "Retry gap", "severity": "medium"},
+                            {"finding_id": "A-02", "title": "Retry gap", "severity": "medium"},
+                            {"finding_id": "CURE-001", "title": "Official footer policy", "severity": "low"},
+                            {
+                                "finding_id": "CURE-002",
+                                "title": "PR comments can be admitted as prior CURe reviews based on body text alone",
+                                "severity": "medium",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / "disposition_ledger.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "status_reasons": [],
+                        "dispositions": [
+                            {
+                                "row_id": "DA-0001",
+                                "group_id": "G-0001",
+                                "finding_ids": ["A-01"],
+                                "action": "confirm_resolved",
+                                "source_verification_row_id": "SV-0001",
+                            },
+                            {
+                                "row_id": "DA-0002",
+                                "group_id": "G-0002",
+                                "finding_ids": ["A-02"],
+                                "action": "re_report",
+                                "source_verification_row_id": "SV-0002",
+                            },
+                            {
+                                "row_id": "DA-0006",
+                                "group_id": "G-0006",
+                                "finding_ids": ["CURE-001"],
+                                "action": "move_out_of_scope",
+                                "source_verification_row_id": "SV-0006",
+                            },
+                            {
+                                "row_id": "DA-0007",
+                                "group_id": "G-0007",
+                                "finding_ids": ["CURE-002"],
+                                "action": "re_report",
+                                "source_verification_row_id": "SV-0007",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            brief = build_governor_brief(artifact_dir=artifact_dir)
+
+            self.assertIn("Prior Review Issue History", brief)
+            self.assertIn("Raw DA IDs are internal provenance anchors", brief)
+            self.assertIn("- Retry gap — status: carried-forward/re_report", brief)
+            self.assertIn("Internal rows: DA-0001, DA-0002", brief)
+            self.assertEqual(brief.count("- Retry gap — status:"), 1)
+            self.assertIn("- Official footer policy — status: out-of-scope", brief)
+            self.assertIn(
+                "- PR comments can be admitted as prior CURe reviews based on body text alone — status: carried-forward/re_report",
+                brief,
+            )
+            self.assertIn("Internal DA coverage", brief)
+            self.assertIn("DA-0006: out-of-scope", brief)
+            self.assertIn("DA-0007: carried-forward/re_report", brief)
+            self.assertNotIn("DA-0006: carried-forward/re_report", brief)
+            self.assertIn("confirmed-resolved | carried-forward/re_report | degraded | out-of-scope | contradicted-with-evidence", brief)
+
+    def test_post_review_disposition_map_gaps_degrade_without_blocking(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- Retry gap — status: carried-forward/re_report. Reason: still open. Internal rows: DA-0001, DA-0002\n"
+                    "### Internal DA coverage (audit only)\n- DA-0001: confirmed-resolved\n- DA-0002: carried-forward/re_report\n"
+                ),
+            )
+            (artifact_dir / "disposition_ledger.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "success",
+                        "dispositions": [
+                            {"row_id": "DA-0001", "action": "confirm_resolved"},
+                            {"row_id": "DA-0002", "action": "re_report"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "# Review\n\n## Prior Review Disposition Map\n- DA-0001: carried-forward/re_report\n",
+                encoding="utf-8",
+            )
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "partial", "judgment": "only one DA row mentioned", "evidence": ["DA-0001"]}
+                ),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "degraded")
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "degraded")
+            self.assertEqual(result["awareness"], "partial")
+            self.assertNotIn("missing_internal_da_coverage:DA-0002", result["warnings"])
+            self.assertNotIn("contradicted_internal_da_coverage:DA-0001", result["warnings"])
+            self.assertIn("missing_prior_review_issue_history", result["warnings"])
+            self.assertIn("raw_da_list_only", result["warnings"])
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]["report_governor"]["status"], "degraded")
+
+    def test_post_review_issue_history_must_be_first_and_match_brief_clusters(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- PR comments can be admitted as prior CURe reviews based on body text alone — "
+                    "status: carried-forward/re_report. Reason: still open. Internal rows: DA-0007\n"
+                    "- Official footer policy — status: out-of-scope. Reason: policy-approved. Internal rows: DA-0006\n"
+                    "### Internal DA coverage (audit only)\n"
+                    "- DA-0006: out-of-scope\n"
+                    "- DA-0007: carried-forward/re_report\n"
+                ),
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "### Steps taken\n- Read files\n\n"
+                "### Prior Review Issue History\n"
+                "- Official footer policy — status: out-of-scope. Reason: policy-approved.\n\n"
+                "### Internal DA coverage\n"
+                "- DA-0006: out-of-scope\n"
+                "- DA-0007: carried-forward/re_report\n",
+                encoding="utf-8",
+            )
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "demonstrated", "judgment": "mentions issue history", "evidence": ["issue history"]}
+                ),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "degraded")
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertIn("prior_review_issue_history_not_first", result["warnings"])
+            self.assertIn(
+                "missing_prior_review_issue_clusters:PR comments can be admitted as prior CURe reviews based on body text alone",
+                result["warnings"],
+            )
+
+    def test_post_review_sanitization_skips_when_brief_empty_or_governor_off(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(artifact_dir, brief="\n")
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text("# Review\n", encoding="utf-8")
+            calls: list[str] = []
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=calls.append,
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "disabled")
+            self.assertEqual(record.reasons, ("empty_governor_brief",))
+            self.assertEqual(calls, [])
+            self.assertFalse((artifact_dir / "report_governor_result.json").exists())
+
+            off_record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="off",
+                auditor=calls.append,
+                manifest_path=manifest_path,
+            )
+            self.assertEqual(off_record.status.value, "disabled")
+            self.assertEqual(off_record.reasons, ("governor_mode_off",))
+            self.assertEqual(calls, [])
+
+    def test_post_review_sanitization_is_warn_only_when_auditor_fails(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(artifact_dir, brief="### Still Open\n- D-0002.\n")
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text("# Review\n", encoding="utf-8")
+
+            def failing_auditor(_prompt: str) -> str:
+                raise RuntimeError("model unavailable")
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="warn",
+                auditor=failing_auditor,
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "degraded")
+            self.assertEqual(record.reasons, ("sanitization_auditor_failed",))
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "degraded")
+            self.assertIn("model unavailable", result["warnings"][0])
+
+
+__all__ = ["SubsequentReviewReportGovernorTests"]

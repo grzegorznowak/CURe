@@ -1486,6 +1486,7 @@ def render_prompt(
         text = text.replace("$REVIEW_INTELLIGENCE_GUIDANCE", review_intelligence_guidance).replace(
             "${REVIEW_INTELLIGENCE_GUIDANCE}", review_intelligence_guidance
         )
+    text = text.replace("$PRIOR_REVIEW_BRIEF", "").replace("${PRIOR_REVIEW_BRIEF}", "")
     # Replace AGENT_DESC last to avoid mutating its contents if it contains `$FOO`.
     text = text.replace("$AGENT_DESC", agent_desc).replace("${AGENT_DESC}", agent_desc)
     return text

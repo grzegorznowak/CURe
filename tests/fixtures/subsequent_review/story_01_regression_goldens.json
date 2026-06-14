@@ -1,0 +1,34 @@
+{
+  "a20_reconciliation": {
+    "description": "Duplicate local IDs, ambiguous supersedes targets, missing supersedes targets, and transitive supersedes chains for Story 01 reconciliation fixtures.",
+    "candidates": [
+      {"entry_id": "session-a", "finding_id": "CURE-01", "title": "Cache grows forever", "section": "Business / Product Assessment", "evidence": "session-a.py:1"},
+      {"entry_id": "session-b", "finding_id": "CURE-01", "title": "SQL injection risk", "section": "Business / Product Assessment", "evidence": "session-b.py:1"},
+      {"entry_id": "session-c", "finding_id": "CURE-02", "title": "SQL injection still possible", "section": "Business / Product Assessment", "evidence": "session-c.py:1", "supersedes": ["CURE-01"]},
+      {"entry_id": "session-d", "finding_id": "CURE-03", "title": "SQL injection remains exploitable", "section": "Business / Product Assessment", "evidence": "session-d.py:1", "supersedes": ["CURE-02"]},
+      {"entry_id": "session-e", "finding_id": "CURE-04", "title": "Missing superseded target", "section": "Technical Assessment", "evidence": "session-e.py:1", "supersedes": ["CURE-99"]}
+    ],
+    "expected_degraded_reasons": ["ambiguous_supersedes", "supersedes_target_not_found"]
+  },
+  "a21_github_history": {
+    "normal_success_payload": {
+      "items": [
+        {"id": 101, "user": {"login": "cure-bot"}, "body": "CURe review", "created_at": "2026-01-01T00:00:00Z"}
+      ],
+      "complete": true,
+      "status": "complete"
+    },
+    "malformed_payloads": [
+      {"items": {"id": 1}, "complete": true, "status": "complete"},
+      {"data": {"id": 2}, "complete": true, "status": "complete"},
+      {"complete": true, "status": "complete"}
+    ],
+    "expected_malformed_reason": "discussion_payload_malformed"
+  },
+  "a22_generated_review": {
+    "valid_review_md_fixture": "generated_review_valid.md",
+    "invalid_incidental_sources_md": "generated_review_incidental_sources.md",
+    "expected_valid_finding_count": 1,
+    "expected_invalid_reason": "missing_generated_sources"
+  }
+}
