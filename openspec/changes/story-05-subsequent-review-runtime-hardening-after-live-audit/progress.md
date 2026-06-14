@@ -25,21 +25,22 @@
   - Changed: `openspec/changes/story-05-subsequent-review-runtime-hardening-after-live-audit/progress.md`
   - Test: PASS — all Story 05 verification commands except the live PR audit passed in the main worktree: focused pytest groups, `tests/test_subsequent_review.py`, `ruff check .`, `git diff --check`, and `mypy`.
   - Notes: `python -m cure pr --help` exposes no local-uncommitted PR audit mode, and `_pr_flow_impl` clones a sandbox from the seed cache then runs `gh pr checkout <number> --force`; PR #22 is still open at head `372b4a753099c4b6e077d98551da51039222a16b` on `cure-subsequent-pr-review/story-01-intake`, matching the local base commit before the dirty Story 05 changes. A repeated `cure pr https://github.com/grzegorznowak/CURe/pull/22 --if-reviewed new --ui off --no-stream` would still ignore local uncommitted Story 05 changes.
+- 2026-06-14T10:28:33Z **Commit and PR update**: committed Story 05 implementation as `f96e7ad` (`cure-subsequent-pr-review/05: harden subsequent review runtime`), pushed it to PR #22 head branch `cure-subsequent-pr-review/story-01-intake`, and updated the PR body with Story 05 scope plus local verification results.
 
 ## Session Handoff
 
-- **Timestamp**: 2026-06-14T10:22:44Z
+- **Timestamp**: 2026-06-14T10:28:33Z
 - **Status**: 🔄 IN PROGRESS
 - **Completed In This Session**:
   - Refreshed the Story 05 claim in the main CURe worktree on branch `cure-subsequent-pr-review/story-05-subsequent-review-runtime-hardening-after-live-audit`.
   - Verified local migrated implementation with the Story 05 focused pytest groups, `tests/test_subsequent_review.py`, `ruff check .`, `git diff --check`, and `mypy`.
-  - Confirmed the current `cure pr` live-audit path cannot close the proof gap while Story 05 changes are only dirty/uncommitted locally: the command creates a sandbox checkout from PR #22 (`gh pr checkout 22 --force`) and PR #22 still points at `372b4a753099c4b6e077d98551da51039222a16b` on `cure-subsequent-pr-review/story-01-intake`.
+  - Confirmed the current `cure pr` live-audit path audits the PR head (`gh pr checkout 22 --force`) and therefore required pushing Story 05 changes before rerunning live proof.
+  - Committed Story 05 as `f96e7ad`, pushed it to PR #22, and updated the PR body/status with Story 05 scope and local verification results.
 - **Remaining**:
-  - `tasks.md` still has the fresh PR #22 live review audit unchecked because no valid live target currently includes the Story 05 changes.
-  - PR #22 body/status update remains unchecked.
+  - `tasks.md` still has the fresh PR #22 live review audit unchecked; now that PR #22 points at the Story 05 commit, rerun the live audit to close or refresh that proof.
   - Final Story 04 gate non-regression confirmation remains unchecked as an integration-cleanup item, although the local verification suite passed.
-- **Blockers**: none in local code; proof gap is branch/live-target coordination. `blocked.md` remains absent.
-- **Next Steps**: commit and push the dirty Story 05 changes to the PR #22 branch, or otherwise point a live review target at a branch/SHA containing these exact changes; then run `/openspec-story-resume cure-subsequent-pr-review story-05-subsequent-review-runtime-hardening-after-live-audit` to execute a fresh `python -m cure pr https://github.com/grzegorznowak/CURe/pull/22 --if-reviewed new --ui off --no-stream` audit and inspect `review.md`, `work/subsequent/report_governor_result.json`, `source_verification.json`, `disposition_ledger.json`, `discussion_signals.json`, and the memory path from `meta.json`.
+- **Blockers**: none in local code; `blocked.md` remains absent.
+- **Next Steps**: run `/openspec-story-resume cure-subsequent-pr-review story-05-subsequent-review-runtime-hardening-after-live-audit` to execute a fresh `python -m cure pr https://github.com/grzegorznowak/CURe/pull/22 --if-reviewed new --ui off --no-stream` audit against PR head `f96e7ad` and inspect `review.md`, `work/subsequent/report_governor_result.json`, `source_verification.json`, `disposition_ledger.json`, `discussion_signals.json`, and the memory path from `meta.json`.
 - **Worktrees**:
   - CURe: `/workspaces/cure_workspace/projects/CURe` (main-tree target; no auxiliary worktree)
-- **Proof Statement**: Local implementation proof passes in the main worktree. Live proof is not closed because the live PR target still resolves to the pre-Story-05 commit `372b4a753099c4b6e077d98551da51039222a16b`; expected live closure evidence remains no prominent raw `### Internal DA coverage`, report governor not degraded for A1, and no live REQUEST CHANGES re-reporting A2-A9 hardening findings.
+- **Proof Statement**: Local implementation proof passes in the main worktree and the PR head now contains the Story 05 commit. Live proof is not yet closed; expected live closure evidence remains no prominent raw `### Internal DA coverage`, report governor not degraded for A1, and no live REQUEST CHANGES re-reporting A2-A9 hardening findings.

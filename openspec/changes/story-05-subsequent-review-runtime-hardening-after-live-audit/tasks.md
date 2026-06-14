@@ -25,5 +25,5 @@
 
 ## Integration & Cleanup
 - [x] Update `progress.md`, `reviews.md`, and the initiative tracker after plan review.
-- [ ] Update PR #22 body/status with Story 05 scope if implementation proceeds on the same PR branch.
+- [x] Update PR #22 body/status with Story 05 scope if implementation proceeds on the same PR branch.
 - [ ] Confirm Story 04 successful gates remain non-regressed: strict multipass schema, A17 warn-only governor, A19/DA-0006, and FB-028 malformed-linker degradation.
