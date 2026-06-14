@@ -38,6 +38,69 @@
 - Recommended next command: `/epic-story-plan EPIC="cure-subsequent-pr-review"` and reference `FB-010` during the interview
 - Planning outcome: deferred from Story 03. Story 03 consumes persisted intake ledgers and records missing/degraded provenance, while decision-vs-intake discussion evidence reproducibility remains a runtime/packaging consistency candidate.
 
+### FB-030 - Demote Internal DA coverage from ordinary review body
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit at head `372b4a753099c4b6e077d98551da51039222a16b`
+- Reason: A16/TAP-17 says the human issue summary is reader-facing and DA rows are internal/audit provenance. The live final `review.md` prominently shows `### Internal DA coverage` near the top, which overexposes internal rows to ordinary consumers.
+- Proposed story: Move/demote DA row coverage to an audit artifact, appendix, metadata/comment, or hidden/collapsible audit-only block while preserving report-governor completeness.
+- Planning outcome: scaffolded as Story 05 A1.
+
+### FB-031 - Strengthen memory replay identity beyond display finding IDs
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: The narrow same-ordinal/different-finding-IDs regression is fixed, but same display IDs under different origins can still replay a cached resolved row without fingerprint/origin/source-reference validation.
+- Proposed story: Require stable identity proof for source-verification memory replay.
+- Planning outcome: scaffolded as Story 05 A2.
+
+### FB-032 - Prevent untrusted discussion body text from escalating authority
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Authority classification can trust role words such as product/maintainer/security when they appear in untrusted comment bodies.
+- Proposed story: Derive trusted authority from authenticated metadata/config, not untrusted body text.
+- Planning outcome: scaffolded as Story 05 A3.
+
+### FB-033 - Enforce session boundary for zip/source artifact paths
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Historical metadata paths used by zip/source selection can resolve outside the owning session boundary.
+- Proposed story: Reject/degrade absolute or traversal paths outside the session directory for artifact selection.
+- Planning outcome: scaffolded as Story 05 A4.
+
+### FB-034 - Validate cached linker results against current group identity
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Cached discussion linker results can replay stale ordinal group IDs after reconciliation layout changes.
+- Proposed story: Bind linker cache entries to stable current-group identity or discard them.
+- Planning outcome: scaffolded as Story 05 A5.
+
+### FB-035 - Constrain verifier citations to inspected source contexts
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: LLM verifier citations are accepted from arbitrary returned paths/lines rather than being constrained to inspected repo-local contexts before confirming source resolution.
+- Proposed story: Code-enforce citation membership in inspected source contexts before `resolved_from_source`.
+- Planning outcome: scaffolded as Story 05 A6.
+
+### FB-036 - Route discussion linker through prepared runtime policy
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Discussion linker LLM calls can run outside the prepared runtime policy/add-dir/config environment used by sibling calls.
+- Proposed story: Share prepared runtime policy and environment constraints with linker calls.
+- Planning outcome: scaffolded as Story 05 A7.
+
+### FB-037 - Preserve prior-finding identity for concise generated reviews
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Supported concise `--wtf off` generated reviews with source-backed bullets can disappear because the parser expects verbose-card severity markup.
+- Proposed story: Parse supported concise issue bullets or degrade missing severity with provenance instead of dropping identity.
+- Planning outcome: scaffolded as Story 05 A8.
+
+### FB-038 - Preserve prior-review guardrails on multipass planner abort
+- Source: local-review:grzegorznowak-cure-pr22-20260613-080828-d739
+- Origin: PR #22 live audit final review
+- Reason: Multipass planner abort can write synthetic review output and return before the prior-review final-output guardrail/governor audit runs.
+- Proposed story: Ensure abort paths with prior-review briefs emit required issue-history context or fail/degrade before publication.
+- Planning outcome: scaffolded as Story 05 A9.
+
 ## Feedback Absorption Log
 
 | ID | Source Type | Source ID | Source URL | Created | Updated | Disposition | Target | Changed | Status |
@@ -71,3 +134,12 @@
 | FB-027 | manual | manual:sha256-aa91ef4810b6:1 | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424 | 2026-06-13T04:34:15Z | 2026-06-13T04:34:15Z | resume-current-story | story-04-review-runtime-integration-guardrails-memory-trace | Reviews.md entry; latest live run leaves A16 partial/failing while A19/DA-0006 and A17 pass; miss-category=behavior-vs-mechanics proof/output contract | absorbed |
 | FB-028 | manual | manual:sha256-61c9fda061a2:2 | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md | 2026-06-13T04:34:15Z | 2026-06-13T04:34:15Z | resume-current-story | story-04-review-runtime-integration-guardrails-memory-trace | Reviews.md entry; malformed LLM discussion-linker output must degrade instead of aborting semantic artifacts; miss-category=platform/API failure/degraded behavior | absorbed |
 | FB-029 | manual | manual:sha256-451b683eda28:3 | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260612-181530-f424/review.md | 2026-06-13T04:34:15Z | 2026-06-13T04:34:15Z | resume-current-story | story-04-review-runtime-integration-guardrails-memory-trace | Reviews.md entry; source-verification memory replay can confirm the wrong finding when ordinal group IDs shift; miss-category=persistence/finding-identity | absorbed |
+| FB-030 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:internal-da-coverage | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A1; remove/demote `### Internal DA coverage` from ordinary consumer-facing `review.md` while retaining audit coverage; miss-category=output-contract/UX | planned |
+| FB-031 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:memory-origin | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A2; strengthen memory replay identity with origin/fingerprint/source-reference proof; miss-category=persistence/finding-identity | planned |
+| FB-032 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:discussion-authority | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A3; untrusted body text cannot grant trusted authority; miss-category=security/authority | planned |
+| FB-033 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:zip-path-boundary | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A4; constrain zip/source artifact metadata paths to session boundary; miss-category=security/persistence | planned |
+| FB-034 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:linker-cache-identity | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A5; validate cached linker group IDs against current reconciliation identity; miss-category=persistence/finding-identity | planned |
+| FB-035 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:verifier-citations | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A6; constrain verifier citations to inspected source contexts; miss-category=source-truth/evidence-contract | planned |
+| FB-036 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:linker-runtime-policy | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A7; route discussion linker through prepared runtime policy/add-dir/config; miss-category=runtime-policy | planned |
+| FB-037 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:concise-prior-findings | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A8; preserve prior-finding identity for supported concise generated reviews; miss-category=parsing/output-mode | planned |
+| FB-038 | local-review | grzegorznowak-cure-pr22-20260613-080828-d739:planner-abort-guardrail | /home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739/review.md | 2026-06-13T10:05:45Z | 2026-06-13T10:05:45Z | new-story-candidate | story-05-subsequent-review-runtime-hardening-after-live-audit | Story 05 A9; planner-abort output cannot bypass prior-review guardrails/governor; miss-category=runtime/control-flow | planned |

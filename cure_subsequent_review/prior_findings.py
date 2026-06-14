@@ -185,9 +185,10 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             evidence.extend(
                 _source_refs(line, allow_extensionless_root_paths=_GENERATED_SOURCES_RE.search(line) is not None)
             )
-        if severity and evidence:
+        if evidence:
             index = len(findings) + 1
-            block = [f"Severity: {severity}", f"Section: {current_section}"]
+            normalized_severity = severity or "unknown"
+            block = [f"Severity: {normalized_severity}", f"Section: {current_section}"]
             block.extend(f"Evidence: {item}" for item in dict.fromkeys(evidence))
             candidate, _status = _candidate_from_block(
                 entry=entry,
@@ -198,6 +199,8 @@ def _extract_generated_review_issues(entry: PriorReviewCorpusEntry) -> tuple[lis
             )
             if candidate is not None:
                 findings.append(candidate)
+            if not severity:
+                statuses.append(status_payload(title=current_title, reason="missing_generated_severity", evidence=evidence))
         elif severity:
             statuses.append(status_payload(title=current_title, reason="missing_generated_sources", evidence=evidence))
         else:

@@ -252,12 +252,17 @@ def _resolve_log_path(*, session_dir: Path, raw: str | None) -> Path | None:
 
 
 def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, default: Path) -> Path:
+    boundary = session_dir.resolve()
     if raw:
         path = Path(str(raw)).expanduser()
-        if not path.is_absolute():
-            return (session_dir / path).resolve()
-        return path.resolve()
-    return default.resolve()
+        candidate = (session_dir / path).resolve() if not path.is_absolute() else path.resolve()
+        if _is_relative_to_path(candidate, boundary):
+            return candidate
+        return boundary / ".cure-outside-session-path"
+    candidate = default.resolve()
+    if _is_relative_to_path(candidate, boundary):
+        return candidate
+    return boundary / ".cure-outside-session-path"
 
 
 @dataclass(frozen=True)

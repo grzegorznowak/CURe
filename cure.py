@@ -4550,7 +4550,7 @@ def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
     return verdicts.business == "REJECT" or verdicts.technical == "REJECT"
 
 
-def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False) -> str:
+def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False, prior_review_brief: str = "") -> str:
     lines: list[str] = []
     if include_steps_taken:
         lines.extend(["### Steps taken", "- Multipass plan aborted", ""])
@@ -4586,6 +4586,20 @@ def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = Fals
             "- None.",
         ]
     )
+    if prior_review_brief.strip():
+        lines.extend(
+            [
+                "",
+                "### Prior Review Issue History",
+                "- Multipass planning aborted before final review synthesis; prior-review context was present and publication is limited to this guarded abort report.",
+                "",
+                "<details><summary>Prior review context used for this abort</summary>",
+                "",
+                prior_review_brief.strip(),
+                "",
+                "</details>",
+            ]
+        )
     if include_steps_taken:
         lines.extend(["####", ""])
     else:
@@ -9819,21 +9833,29 @@ def _pr_flow_impl(
             linker_call_index = 0
             linker_resolved = llm_resolved
             linker_resolution_meta = llm_resolution_meta
+            linker_repo_dir = session_dir
+            linker_env: dict[str, str] | None = None
+            linker_add_dirs: list[Path] = []
+            linker_runtime_policy: dict[str, Any] | None = None
 
             def run_discussion_linker_classifier(prompt_text: str) -> str:
                 nonlocal linker_call_index
                 linker_call_index += 1
                 raw_linker_response_path = work_dir / "subsequent" / f"discussion_linker_response_{linker_call_index:04d}.md"
                 raw_linker_response_path.parent.mkdir(parents=True, exist_ok=True)
+                runtime_policy_for_call = linker_runtime_policy
                 linker_run = run_llm_exec(
-                    repo_dir=session_dir,
+                    repo_dir=linker_repo_dir,
                     resolved=linker_resolved,
                     resolution_meta=linker_resolution_meta,
                     output_path=raw_linker_response_path,
                     prompt=prompt_text,
-                    env=dict(os.environ),
+                    env=dict(linker_env or os.environ),
                     stream=False,
                     progress=progress,
+                    add_dirs=linker_add_dirs,
+                    codex_config_overrides=list((runtime_policy_for_call or {}).get("codex_config_overrides") or []),
+                    runtime_policy=runtime_policy_for_call,
                 )
                 record_llm_usage(progress.meta.setdefault("llm", {}), linker_run.adapter_meta)
                 return raw_linker_response_path.read_text(encoding="utf-8") if raw_linker_response_path.is_file() else ""
@@ -10448,6 +10470,11 @@ def _pr_flow_impl(
                 )
 
             add_dirs = list(runtime_policy.get("add_dirs") or [])
+            if discussion_linker is not None:
+                linker_repo_dir = repo_dir
+                linker_env = env
+                linker_add_dirs = add_dirs
+                linker_runtime_policy = runtime_policy
 
             if subsequent_intake_pending:
                 finding_verifier_call_index = 0
@@ -10705,7 +10732,11 @@ def _pr_flow_impl(
                     if bool(plan.get("abort")):
                         reason = str(plan.get("abort_reason") or "unknown")
                         review_md_path.write_text(
-                            build_abort_review_markdown(reason=reason, include_steps_taken=True),
+                            build_abort_review_markdown(
+                                reason=reason,
+                                include_steps_taken=True,
+                                prior_review_brief=prior_review_brief,
+                            ),
                             encoding="utf-8",
                         )
                         progress.meta.setdefault("multipass", {})["status"] = "abort"
@@ -12155,8 +12186,20 @@ def _resume_flow_impl(
                 "step_title": str(reason),
             }
             progress.flush()
+            resume_prior_review_brief = ""
+            raw_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+            governor_brief_text = str((raw_paths or {}).get("subsequent_review_governor_brief") or "").strip()
+            if governor_brief_text:
+                try:
+                    resume_prior_review_brief = Path(governor_brief_text).read_text(encoding="utf-8")
+                except OSError:
+                    resume_prior_review_brief = ""
             review_md_path.write_text(
-                build_abort_review_markdown(reason=reason, include_steps_taken=True),
+                build_abort_review_markdown(
+                    reason=reason,
+                    include_steps_taken=True,
+                    prior_review_brief=resume_prior_review_brief,
+                ),
                 encoding="utf-8",
             )
             if plan_reran:

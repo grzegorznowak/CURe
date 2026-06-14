@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 
 from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass, ReconciledFindingGroup
 from cure_subsequent_review.discussion_signals import DiscussionLinkResult
+from cure_subsequent_review.memory_store import group_identity_for_cache
 
 
 DiscussionClassifier = Callable[[str], str | dict[str, Any]]
@@ -31,6 +32,7 @@ class DiscussionLinkerMemory(Protocol):
         group_ids: tuple[str, ...],
         signal_class: DiscussionSignalClass,
         rationale: str = "",
+        group_identities: dict[str, dict[str, Any]] | None = None,
     ) -> None: ...
 
 
@@ -79,6 +81,18 @@ def _group_ids(value: object, *, known_group_ids: set[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(ids))
 
 
+def _cached_group_identity_matches(cached: object, current: dict[str, Any] | None) -> bool:
+    if not isinstance(cached, dict) or not isinstance(current, dict):
+        return False
+    cached_fingerprint = str(cached.get("fingerprint") or "").strip()
+    current_fingerprint = str(current.get("fingerprint") or "").strip()
+    if cached_fingerprint and current_fingerprint and cached_fingerprint == current_fingerprint:
+        return True
+    cached_origin = str(cached.get("origin_digest") or "").strip()
+    current_origin = str(current.get("origin_digest") or "").strip()
+    return bool(cached_origin and current_origin and cached_origin == current_origin)
+
+
 def _prompt(event: DiscussionEvent, groups: tuple[ReconciledFindingGroup, ...]) -> str:
     findings = []
     for group in groups:
@@ -111,7 +125,7 @@ class LlmDiscussionLinker:
     memory_store: DiscussionLinkerMemory | None = None
 
     def __call__(self, event: DiscussionEvent, groups: tuple[ReconciledFindingGroup, ...]) -> DiscussionLinkResult:
-        cached = self._cached(event)
+        cached = self._cached(event, groups)
         if cached is not None:
             return cached
 
@@ -128,10 +142,10 @@ class LlmDiscussionLinker:
         group_ids = _group_ids(payload.get("group_ids"), known_group_ids=known_group_ids)
         rationale = str(payload.get("rationale") or "").strip()
         result = DiscussionLinkResult(group_ids=group_ids, signal_class=signal_class, rationale=rationale)
-        self._store(event, result)
+        self._store(event, result, groups)
         return result
 
-    def _cached(self, event: DiscussionEvent) -> DiscussionLinkResult | None:
+    def _cached(self, event: DiscussionEvent, groups: tuple[ReconciledFindingGroup, ...]) -> DiscussionLinkResult | None:
         if self.memory_store is None:
             return None
         try:
@@ -147,16 +161,32 @@ class LlmDiscussionLinker:
         signal_class = _signal_class(payload.get("signal_class"))
         raw_groups = payload.get("group_ids")
         group_ids = tuple(str(item).strip() for item in raw_groups if str(item).strip()) if isinstance(raw_groups, list) else ()
+        current_identities = {group.group_id: group_identity_for_cache(group) for group in groups}
+        raw_cached_identities = payload.get("group_identities")
+        cached_identities: dict[str, Any] = raw_cached_identities if isinstance(raw_cached_identities, dict) else {}
+        valid_group_ids = tuple(
+            group_id
+            for group_id in group_ids
+            if _cached_group_identity_matches(cached_identities.get(group_id), current_identities.get(group_id))
+        )
+        if group_ids and not valid_group_ids:
+            return None
         return DiscussionLinkResult(
-            group_ids=group_ids,
+            group_ids=valid_group_ids,
             signal_class=signal_class,
             rationale=str(payload.get("rationale") or "").strip(),
         )
 
-    def _store(self, event: DiscussionEvent, result: DiscussionLinkResult) -> None:
+    def _store(
+        self,
+        event: DiscussionEvent,
+        result: DiscussionLinkResult,
+        groups: tuple[ReconciledFindingGroup, ...],
+    ) -> None:
         if self.memory_store is None or result.signal_class is None or not str(self.current_head or "").strip():
             return
         try:
+            current_identities = {group.group_id: group_identity_for_cache(group) for group in groups}
             self.memory_store.update_linker_result(
                 event_id=event.event_id,
                 body=event.body,
@@ -164,6 +194,7 @@ class LlmDiscussionLinker:
                 group_ids=result.group_ids,
                 signal_class=result.signal_class,
                 rationale=result.rationale,
+                group_identities={group_id: current_identities[group_id] for group_id in result.group_ids if group_id in current_identities},
             )
         except Exception:  # noqa: BLE001 - cache failure must not block linking
             return

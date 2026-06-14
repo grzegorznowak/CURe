@@ -75,16 +75,14 @@ def _finding_ids_for_groups(groups: tuple[ReconciledFindingGroup, ...], group_id
 
 
 def _authority(event: DiscussionEvent, signal_class: DiscussionSignalClass) -> tuple[str, EvidencePolicy, tuple[str, ...]]:
-    body = event.body.lower()
     author = (event.author or "").lower()
-    authority_text = f"{author} {body}"
     if not author:
         return "unknown", EvidencePolicy.UNTRUSTED, ("unknown_authority",)
-    if "security" in authority_text:
+    if "security" in author:
         return "security", EvidencePolicy.TRUSTED, ()
-    if "product" in authority_text or "owner" in authority_text:
+    if "product" in author or "owner" in author:
         return "product", EvidencePolicy.TRUSTED, ()
-    if "maintainer" in authority_text:
+    if "maintainer" in author:
         return "maintainer", EvidencePolicy.TRUSTED, ()
     if "bot" in author:
         return "automation", EvidencePolicy.UNTRUSTED, ("automation_authority_untrusted",)

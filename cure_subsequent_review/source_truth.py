@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from cure_subsequent_review.memory_store import group_identity_for_cache
+
 from cure_subsequent_review.contracts import (
     DiscussionSignalClass,
     DiscussionSignalLedger,
@@ -59,6 +61,7 @@ class SourceVerificationMemory(Protocol):
         finding_ids: tuple[str, ...],
         row_id: str,
         current_head: str | None,
+        current_identity: dict[str, Any] | None = None,
     ) -> SourceVerificationRow | None: ...
 
 
@@ -271,6 +274,7 @@ def verify_source_truth(
                     finding_ids=group.finding_ids,
                     row_id=row_id,
                     current_head=current_head,
+                    current_identity=group_identity_for_cache(group),
                 )
             except Exception:  # noqa: BLE001 - memory is a performance cache; failures disable the gate
                 cached_row = None

@@ -52,7 +52,7 @@ def _source_state(value: object, *, final_pass: bool = False) -> SourceState | s
     return state
 
 
-def _citations(value: object) -> tuple[dict[str, Any], ...]:
+def _citations(value: object, *, source_contexts: tuple[dict[str, Any], ...] = ()) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list | tuple):
         return ()
     citations: list[dict[str, Any]] = []
@@ -68,11 +68,41 @@ def _citations(value: object) -> tuple[dict[str, Any], ...]:
             citation["line"] = line
         elif str(line or "").strip().isdigit():
             citation["line"] = int(str(line).strip())
+        if source_contexts and not _citation_in_contexts(citation, source_contexts):
+            continue
         summary = str(item.get("summary") or "").strip()
         if summary:
             citation["summary"] = summary
         citations.append(citation)
     return tuple(citations)
+
+
+def _citation_in_contexts(citation: dict[str, Any], contexts: tuple[dict[str, Any], ...]) -> bool:
+    path = str(citation.get("path") or "").strip()
+    line = citation.get("line")
+    if not isinstance(line, int):
+        return False
+    for context in contexts:
+        if str(context.get("path") or "").strip() != path:
+            continue
+        start = int(context.get("start_line") or context.get("line") or 0)
+        end = int(context.get("end_line") or context.get("line") or 0)
+        if start <= line <= end:
+            return True
+    return False
+
+
+def _normalize_verifier_result(
+    *,
+    payload: dict[str, Any],
+    contexts: tuple[dict[str, Any], ...],
+    final_pass: bool = False,
+) -> tuple[SourceState | str, tuple[dict[str, Any], ...], tuple[str, ...]]:
+    state = _source_state(payload.get("source_state"), final_pass=final_pass)
+    citations = _citations(payload.get("citations"), source_contexts=contexts)
+    if isinstance(state, SourceState) and state is SourceState.RESOLVED_FROM_SOURCE and not citations:
+        return SourceState.NOT_VERIFIABLE if not final_pass else SourceState.STILL_OPEN, (), ("unsupported_verifier_citations",)
+    return state, citations, ()
 
 
 def _safe_child(root: Path, raw_path: str) -> Path | None:
@@ -235,13 +265,18 @@ class LlmFindingVerifier:
                 provenance={"verifier": "llm_finding_verifier"},
             )
 
-        first_payload = _payload(self.llm(_prompt(request=request, source_contexts=tuple(contexts))))
-        first_state = _source_state(first_payload.get("source_state"))
+        source_contexts = tuple(contexts)
+        first_payload = _payload(self.llm(_prompt(request=request, source_contexts=source_contexts)))
+        first_state, first_citations, first_unavailable = _normalize_verifier_result(
+            payload=first_payload,
+            contexts=source_contexts,
+        )
         if first_state != "need_more_context":
             assert isinstance(first_state, SourceState)
             return FindingVerificationResult(
                 source_state=first_state,
-                current_source_citations=_citations(first_payload.get("citations")),
+                current_source_citations=first_citations,
+                unavailable_reasons=first_unavailable,
                 rationale=str(first_payload.get("rationale") or "").strip(),
                 provenance={"verifier": "llm_finding_verifier", "chunkhound_research": "not_needed"},
             )
@@ -254,17 +289,22 @@ class LlmFindingVerifier:
             self.llm(
                 _prompt(
                     request=request,
-                    source_contexts=tuple(contexts),
+                    source_contexts=source_contexts,
                     chunkhound_research=research_text,
                     final_pass=True,
                 )
             )
         )
-        second_state = _source_state(second_payload.get("source_state"), final_pass=True)
+        second_state, second_citations, second_unavailable = _normalize_verifier_result(
+            payload=second_payload,
+            contexts=source_contexts,
+            final_pass=True,
+        )
         assert isinstance(second_state, SourceState)
         return FindingVerificationResult(
             source_state=second_state,
-            current_source_citations=_citations(second_payload.get("citations")),
+            current_source_citations=second_citations,
+            unavailable_reasons=second_unavailable,
             rationale=str(second_payload.get("rationale") or first_payload.get("rationale") or "").strip(),
             provenance={
                 "verifier": "llm_finding_verifier",

@@ -591,8 +591,8 @@ def build_report_governor_sanitization_prompt(*, governor_brief: str, review_tex
             REPORT_GOVERNOR_AWARENESS_QUESTION,
             "",
             "The final review must lead with a human-readable Prior Review Issue History: stable issue titles first, current status second, and plain-English reason third.",
-            "Raw DA-* row IDs are internal provenance anchors only; they may appear in optional/internal details but must not be the primary reader-facing representation.",
-            "The final review must still include internal DA coverage for every DA-* row from disposition_ledger.json using allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES),
+            "Raw DA-* row IDs are internal provenance anchors only; they must not be a prominent top-level reader-facing section.",
+            "Complete DA-* row coverage remains mandatory in audit/provenance artifacts (for example governor_brief.md or report_governor_result.json), not in the ordinary visible review body.",
             "Official CURe footer markers are valid prior-review provenance regardless of author/login; body-only CURe-looking text remains rejected.",
             "",
             "Return JSON only with these fields:",
@@ -672,6 +672,51 @@ def _actual_disposition_map(review_text: str) -> dict[str, str]:
     return {match.group(1): match.group(2).lower() for match in pattern.finditer(review_text)}
 
 
+def _demote_plain_internal_da_coverage_sections(review_text: str) -> tuple[str, bool]:
+    """Move plain Internal DA coverage sections behind an audit-only disclosure.
+
+    The final report may retain complete DA row coverage for provenance, but a
+    plain top-level ``### Internal DA coverage`` heading is too prominent for the
+    ordinary reader-facing body.  Keep the evidence in-place while removing the
+    heading shape that asks readers to consume raw DA rows as normal review text.
+    """
+
+    text = str(review_text or "")
+    lines = text.splitlines()
+    output: list[str] = []
+    changed = False
+    index = 0
+    heading_pattern = re.compile(r"^\s{0,3}###\s+Internal DA coverage\s*$", re.IGNORECASE)
+    stop_heading_pattern = re.compile(r"^\s{0,3}#{1,3}\s+")
+    while index < len(lines):
+        line = lines[index]
+        if not heading_pattern.match(line):
+            output.append(line)
+            index += 1
+            continue
+        changed = True
+        index += 1
+        section_lines: list[str] = []
+        while index < len(lines) and not stop_heading_pattern.match(lines[index]):
+            section_lines.append(lines[index])
+            index += 1
+        output.extend(
+            [
+                "<details>",
+                "<summary>Internal DA coverage (audit/provenance only)</summary>",
+                "",
+                *section_lines,
+                "</details>",
+            ]
+        )
+    if not changed:
+        return text, False
+    demoted = "\n".join(output)
+    if text.endswith("\n"):
+        demoted += "\n"
+    return demoted, True
+
+
 def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
     expected = _expected_issue_history_rows_from_brief(governor_brief) or _expected_issue_history_rows(artifact_dir)
     if not expected:
@@ -701,22 +746,11 @@ def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_br
 
 def _disposition_map_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
     warnings = _issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief)
-    expected = _expected_disposition_map(artifact_dir)
-    if not expected:
-        return warnings
-    actual = _actual_disposition_map(review_text)
-    missing = tuple(sorted(row_id for row_id in expected if row_id not in actual))
-    contradicted = tuple(
-        sorted(
-            row_id
-            for row_id, expected_status in expected.items()
-            if row_id in actual and actual[row_id] not in {expected_status, "contradicted-with-evidence"}
-        )
-    )
-    if missing:
-        warnings.append("missing_internal_da_coverage:" + ",".join(missing))
-    if contradicted:
-        warnings.append("contradicted_internal_da_coverage:" + ",".join(contradicted))
+    for line in str(review_text or "").splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith("### internal da coverage") and "audit" not in stripped:
+            warnings.append("prominent_internal_da_coverage")
+            break
     return warnings
 
 
@@ -816,6 +850,16 @@ def audit_review_report_after_review(
         )
         return finish(ModuleStatus.DEGRADED, reasons)
 
+    deterministic_warnings: list[str] = []
+    demoted_review_text, demoted_internal_da = _demote_plain_internal_da_coverage_sections(review_text)
+    if demoted_internal_da:
+        try:
+            review_path.write_text(demoted_review_text, encoding="utf-8")
+            review_text = demoted_review_text
+            deterministic_warnings.append("internal_da_coverage_demoted_to_audit_details")
+        except OSError as exc:
+            deterministic_warnings.append(f"internal_da_coverage_demotion_failed:{exc}")
+
     if auditor is None:
         reasons = ("sanitization_auditor_not_configured",)
         _write_report_governor_result(
@@ -878,7 +922,7 @@ def audit_review_report_after_review(
     awareness = str(parsed.get("awareness") or "unknown").strip().lower() or "unknown"
     judgment = str(parsed.get("judgment") or "").strip()
     evidence = _list_of_strings(parsed.get("evidence"))
-    warnings = _list_of_strings(parsed.get("warnings"))
+    warnings = [*deterministic_warnings, *_list_of_strings(parsed.get("warnings"))]
     if awareness in {"partial", "missing"}:
         warnings.append(f"awareness_{awareness}")
     warnings.extend(_disposition_map_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief))
@@ -886,8 +930,7 @@ def audit_review_report_after_review(
     if any(
         warning.startswith(
             (
-                "missing_internal_da_coverage:",
-                "contradicted_internal_da_coverage:",
+                "prominent_internal_da_coverage",
                 "missing_prior_review_issue_history",
                 "missing_prior_review_issue_clusters:",
                 "prior_review_issue_history_not_first",

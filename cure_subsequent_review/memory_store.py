@@ -45,6 +45,73 @@ def _finding_identity_matches(cached: object, current: tuple[str, ...]) -> bool:
     return bool(cached_ids) and set(cached_ids) == set(current_ids)
 
 
+def _stable_identity_from_row(row_json: dict[str, Any]) -> dict[str, Any]:
+    raw_provenance = row_json.get("provenance")
+    provenance: dict[str, Any] = raw_provenance if isinstance(raw_provenance, dict) else {}
+    raw_citations = row_json.get("current_source_citations")
+    citations: list[Any] = raw_citations if isinstance(raw_citations, list) else []
+    raw_source_refs = row_json.get("inspected_source_refs")
+    source_refs: list[Any] = raw_source_refs if isinstance(raw_source_refs, list) else []
+    return {
+        "fingerprint": str(provenance.get("fingerprint") or "").strip(),
+        "source_refs_digest": _json_digest(tuple(str(item).strip() for item in source_refs if str(item).strip())),
+        "citations_digest": _json_digest(tuple(_normalized_citation(item) for item in citations if isinstance(item, dict))),
+    }
+
+
+def _json_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _normalized_citation(citation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": str(citation.get("path") or "").strip(),
+        "line": int(citation.get("start_line") or citation.get("line") or 0),
+    }
+
+
+def _stable_identity_matches(cached: object, current: dict[str, Any] | None) -> bool:
+    if not isinstance(cached, dict) or not isinstance(current, dict):
+        return False
+    cached_fingerprint = str(cached.get("fingerprint") or "").strip()
+    current_fingerprint = str(current.get("fingerprint") or "").strip()
+    if cached_fingerprint and current_fingerprint and cached_fingerprint == current_fingerprint:
+        return True
+    for key in ("source_refs_digest", "citations_digest", "origin_digest"):
+        cached_value = str(cached.get(key) or "").strip()
+        current_value = str(current.get(key) or "").strip()
+        if cached_value and current_value and cached_value == current_value:
+            return True
+    return False
+
+
+def group_identity_for_cache(group: Any) -> dict[str, Any]:
+    provenance = getattr(group, "provenance", ()) or ()
+    origins: list[dict[str, Any]] = []
+    for item in provenance:
+        if hasattr(item, "to_json"):
+            raw = item.to_json()
+        elif isinstance(item, dict):
+            raw = item
+        else:
+            raw = {}
+        origins.append(
+            {
+                "entry_id": str(raw.get("corpus_entry_id") or raw.get("entry_id") or "").strip(),
+                "source_type": str(raw.get("source_type") or "").strip(),
+                "artifact_path": str(raw.get("artifact_path") or "").strip(),
+                "comment_url": str(raw.get("comment_url") or "").strip(),
+                "reviewed_head": str(raw.get("reviewed_head") or "").strip(),
+            }
+        )
+    return {
+        "canonical_id": str(getattr(group, "canonical_id", "") or "").strip(),
+        "finding_ids": [str(item).strip() for item in (getattr(group, "finding_ids", ()) or ()) if str(item).strip()],
+        "fingerprint": str(getattr(group, "fingerprint", "") or "").strip(),
+        "origin_digest": _json_digest(tuple(origins)) if origins else "",
+    }
+
+
 @dataclass(frozen=True)
 class ReviewMemoryStore:
     path: Path
@@ -121,10 +188,13 @@ class ReviewMemoryStore:
                     previous_heads.append(previous_head)
 
             disposition = dispositions.get(row.group_id)
+            row_json = row.to_json()
+            stable_identity = _stable_identity_from_row(row_json)
             head_entry = {
                 "source_state": row.source_state.value,
                 "disposition": disposition.action.value if disposition is not None else None,
-                "source_verification_row": row.to_json(),
+                "stable_identity": stable_identity,
+                "source_verification_row": row_json,
                 "disposition_row_id": disposition.row_id if disposition is not None else None,
                 "run_provenance": provenance,
             }
@@ -137,7 +207,8 @@ class ReviewMemoryStore:
                 "last_seen_head": head,
                 "previous_heads": previous_heads,
                 "heads": heads,
-                "source_verification_row": row.to_json(),
+                "stable_identity": stable_identity,
+                "source_verification_row": row_json,
                 "disposition_row_id": disposition.row_id if disposition is not None else None,
                 "run_provenance": provenance,
             }
@@ -172,6 +243,7 @@ class ReviewMemoryStore:
         group_ids: tuple[str, ...],
         signal_class: DiscussionSignalClass,
         rationale: str = "",
+        group_identities: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         head = _clean_head(current_head)
         event = str(event_id or "").strip()
@@ -185,6 +257,7 @@ class ReviewMemoryStore:
             "body_hash": body_digest,
             "head": head,
             "group_ids": list(group_ids),
+            "group_identities": dict(group_identities or {}),
             "signal_class": signal_class.value,
             "rationale": rationale,
         }
@@ -197,6 +270,7 @@ class ReviewMemoryStore:
         finding_ids: tuple[str, ...],
         row_id: str,
         current_head: str | None,
+        current_identity: dict[str, Any] | None = None,
     ) -> SourceVerificationRow | None:
         head = _clean_head(current_head)
         if not head:
@@ -215,6 +289,8 @@ class ReviewMemoryStore:
         if head_entry.get("source_state") != SourceState.RESOLVED_FROM_SOURCE.value:
             return None
         if not _finding_identity_matches(entry.get("finding_ids"), finding_ids):
+            return None
+        if not _stable_identity_matches(head_entry.get("stable_identity") or entry.get("stable_identity"), current_identity):
             return None
 
         cached_row = head_entry.get("source_verification_row")
@@ -240,6 +316,7 @@ class ReviewMemoryStore:
                 "not_source_proof": True,
                 "last_seen_head": head,
                 "memory_path": str(self.path),
-                "rationale": "unchanged resolved finding replayed from per-PR memory; not fresh source proof",
+                "stable_identity": dict(current_identity or {}),
+                "rationale": "unchanged resolved finding replayed from per-PR memory after stable group identity match; not fresh source proof",
             },
         )

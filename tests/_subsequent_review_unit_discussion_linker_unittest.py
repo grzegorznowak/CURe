@@ -92,11 +92,12 @@ class SubsequentReviewDiscussionLinkerTests(SubsequentReviewTestCase):
     def test_llm_linker_replays_cached_result_for_same_event_body_and_head(self) -> None:
         from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass
         from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
-        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.memory_store import ReviewMemoryStore, group_identity_for_cache
 
         with tempfile.TemporaryDirectory() as tmp:
             store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
             event = DiscussionEvent(kind="issue_comment", event_id="C-03", author="developer", body="Duplicate of A-01")
+            groups = self._groups()
             store.update_linker_result(
                 event_id="C-03",
                 body=event.body,
@@ -104,11 +105,12 @@ class SubsequentReviewDiscussionLinkerTests(SubsequentReviewTestCase):
                 group_ids=("G-0001",),
                 signal_class=DiscussionSignalClass.DUPLICATE_SUPERSEDED,
                 rationale="cached",
+                group_identities={"G-0001": group_identity_for_cache(groups[0])},
             )
             calls: list[str] = []
             linker = LlmDiscussionLinker(classifier=calls.append, current_head="head-1", memory_store=store)
 
-            result = linker(event, self._groups())
+            result = linker(event, groups)
 
             self.assertEqual(calls, [])
             self.assertEqual(result.group_ids, ("G-0001",))

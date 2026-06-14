@@ -3,7 +3,14 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 
 class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
-    def _source_ledger(self, *, state: Any, group_id: str = "G-0001", finding_id: str = "A-01") -> Any:
+    def _source_ledger(
+        self,
+        *,
+        state: Any,
+        group_id: str = "G-0001",
+        finding_id: str = "A-01",
+        fingerprint: str = "",
+    ) -> Any:
         from cure_subsequent_review.contracts import SourceVerificationLedger, SourceVerificationRow
 
         return SourceVerificationLedger(
@@ -16,7 +23,7 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
                     source_state=state,
                     current_source_citations=({"path": "app.py", "start_line": 10, "summary": "fixed"},),
                     inspected_source_refs=("app.py:10",),
-                    provenance={"rationale": "source checked"},
+                    provenance={"rationale": "source checked", "fingerprint": fingerprint},
                 ),
             ),
         )
@@ -90,7 +97,12 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
             store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
             store.update_findings(
                 current_head="head-ok",
-                source_verification=self._source_ledger(state=SourceState.RESOLVED_FROM_SOURCE, group_id="G-0001", finding_id="A-01"),
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=reconciliation.groups[0].fingerprint,
+                ),
                 disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED, group_id="G-0001", finding_id="A-01"),
                 run_provenance={"session_id": "run-1"},
             )

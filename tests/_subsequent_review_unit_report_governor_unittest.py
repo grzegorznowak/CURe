@@ -60,7 +60,7 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             self.assertIn("Does this review demonstrate awareness of the prior review context?", prompts[0])
             self.assertIn("human-readable Prior Review Issue History", prompts[0])
             self.assertIn("Raw DA-* row IDs are internal provenance anchors only", prompts[0])
-            self.assertIn("internal DA coverage for every DA-* row", prompts[0])
+            self.assertIn("Complete DA-* row coverage remains mandatory in audit/provenance artifacts", prompts[0])
             self.assertIn("### Still Open", prompts[0])
             self.assertIn("A-02 remains a retry concern", prompts[0])
             result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
@@ -74,6 +74,50 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
                 manifest["modules"]["report_governor"]["artifact_path"],
                 str(artifact_dir / "report_governor_result.json"),
             )
+
+    def test_post_review_sanitization_demotes_plain_internal_da_section_before_audit(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_governor_inputs(
+                artifact_dir,
+                brief=(
+                    "### Prior Review Issue History (required final output)\n"
+                    "- Retry gap — status: carried-forward/re_report. Reason: still open. Internal rows: DA-0001\n"
+                    "### Internal DA coverage (audit only)\n"
+                    "- DA-0001: carried-forward/re_report\n"
+                ),
+            )
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "### Prior Review Issue History\n"
+                "- Retry gap — status: carried-forward/re_report. Reason: still open.\n\n"
+                "### Internal DA coverage\n"
+                "- DA-0001: carried-forward/re_report\n\n"
+                "### Steps taken\n- Reviewed the diff.\n",
+                encoding="utf-8",
+            )
+            prompts: list[str] = []
+
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda prompt: prompts.append(prompt)
+                or json.dumps({"awareness": "demonstrated", "judgment": "ok", "evidence": ["Retry gap"]}),
+                manifest_path=manifest_path,
+            )
+
+            self.assertEqual(record.status.value, "success")
+            sanitized = review_path.read_text(encoding="utf-8")
+            self.assertNotIn("### Internal DA coverage\n", sanitized)
+            self.assertIn("<summary>Internal DA coverage (audit/provenance only)</summary>", sanitized)
+            self.assertIn("- DA-0001: carried-forward/re_report", sanitized)
+            self.assertIn("<details>", prompts[0])
+            result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
+            self.assertNotIn("prominent_internal_da_coverage", result["warnings"])
+            self.assertIn("internal_da_coverage_demoted_to_audit_details", result["warnings"])
 
     def test_governor_brief_requires_human_issue_history_with_internal_da_coverage(self) -> None:
         from cure_subsequent_review.runtime import build_governor_brief
@@ -205,8 +249,8 @@ class SubsequentReviewReportGovernorTests(SubsequentReviewTestCase):
             result = json.loads((artifact_dir / "report_governor_result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "degraded")
             self.assertEqual(result["awareness"], "partial")
-            self.assertIn("missing_internal_da_coverage:DA-0002", result["warnings"])
-            self.assertIn("contradicted_internal_da_coverage:DA-0001", result["warnings"])
+            self.assertNotIn("missing_internal_da_coverage:DA-0002", result["warnings"])
+            self.assertNotIn("contradicted_internal_da_coverage:DA-0001", result["warnings"])
             self.assertIn("missing_prior_review_issue_history", result["warnings"])
             self.assertIn("raw_da_list_only", result["warnings"])
             self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["modules"]["report_governor"]["status"], "degraded")

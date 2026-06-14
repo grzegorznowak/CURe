@@ -4,7 +4,7 @@
 - Duplicate logging finding — status: out-of-scope. Reason: suppressed as duplicate/out of scope. Internal rows: D-003.
 - Generated docs are out of scope — status: out-of-scope. Reason: moved out of review scope. Internal rows: D-004.
 
-### Internal DA coverage
+### Internal DA coverage (audit only)
 - D-001: confirmed-resolved
 - D-002: carried-forward/re_report
 - D-003: out-of-scope

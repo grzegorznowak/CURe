@@ -198,7 +198,9 @@ Evidence: cure.py:10
         )
 
         self.assertEqual(mixed.status, ModuleStatus.DEGRADED)
-        self.assertEqual([item.finding_id for item in mixed.findings], ["CURE-001"])
+        self.assertEqual([item.finding_id for item in mixed.findings], ["CURE-001", "CURE-002"])
+        self.assertEqual(mixed.findings[1].title, "Malformed generated issue missing severity markup")
+        self.assertEqual(mixed.findings[1].severity, "unknown")
         self.assertIn("parse_degraded", mixed.status_reasons)
         self.assertTrue(
             any(
