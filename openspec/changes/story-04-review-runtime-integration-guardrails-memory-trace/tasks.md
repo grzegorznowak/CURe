@@ -17,6 +17,7 @@
 - [x] Rerun/audit live PR #22 review output and confirm `DA-0006` is no longer `carried-forward/re_report` before marking Story 04 done. Latest audit: sandbox `grzegorznowak-cure-pr22-20260613-080828-d739`, head `372b4a753099c4b6e077d98551da51039222a16b`, `DA-0006=out-of-scope` / `move_out_of_scope`.
 - [x] Ingest latest live-audit REQUEST CHANGES findings into follow-up planning artifacts. Synthetic Story 05 initially captured `### Internal DA coverage` consumer shape and runtime hardening points FB-030 through FB-038.
 - [x] Remap synthetic Story 05 hardening back into existing Stories 01/03/04 after operator provenance correction; Story 04 owns FB-030, FB-031, FB-034, runtime-FB-035, FB-036, and FB-038.
+- [x] Audit latest PR #18 benchmark sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr18-20260615-095138-9664`: runner used label fix `e130543` against PR #18 head `c3f81e8`; prior history appears first, carried-forward reader-facing findings get the follow-up label, raw `DA-*` IDs remain audit-only, duplicate lineage dedupes coherently, empty successful discussion signals no longer fail strict governor, and module statuses agree across runtime artifacts.
 
 ## Integration & Cleanup
 - [x] Update OpenSpec story/progress/review artifacts with final local state.
@@ -29,6 +30,7 @@
 - [x] Cross-reference Story 01 support for FB-031/FB-034 identity inputs and Story 03 support for FB-035 source-truth invariants.
 - [x] Keep Story 04 status `🔵 IN PR`; fresh PR #22 live audit remains pending after remap.
 - [ ] Run and audit a fresh PR #22 live review at head `e305f826f3c0ece63be708f7df4b4f54c38b7658` or later, confirming FB-030/031/034/runtime-FB-035/036/038 are closed or explicitly refreshed.
+- [ ] A16 final-output polish: preserve the governor-supplied plain-English reason as the third element in leading `### Prior Review Issue History` bullets. Latest PR #18 benchmark warned that this reason can still be omitted there even after the label fix; treat it as reader-facing output polish rather than a label/provenance failure.
 
 ## A20 / FB-039..FB-042 source-verification cache hardening tasks
 
