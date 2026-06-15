@@ -179,7 +179,7 @@ def run_subsequent_review_intake(
 
     corpus = None
     if config.module_enabled(SubsequentReviewModule.PRIOR_REVIEW_CORPUS_BUILDER):
-        corpus = build_prior_review_corpus(pr=pr, sessions=completed_sessions, discussion=discussion)
+        corpus = build_prior_review_corpus(pr=pr, sessions=completed_sessions, discussion=discussion, current_head=current_head)
         corpus_path = artifact_dir / "prior_review_corpus.json"
         write_json(corpus_path, corpus.to_json())
         _record(

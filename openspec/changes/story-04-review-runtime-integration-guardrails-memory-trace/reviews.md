@@ -5,6 +5,40 @@
 
 ## Review Log
 
+- 2026-06-15T15:29:26Z A19/FB-043 footer-provenance hardening follow-up review
+  - Feedback IDs: FB-043
+  - Decision: approve
+  - Approval gate: pass
+  - Product verdict: approve
+  - Technical verdict: approve
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Status transition: unchanged: 🔵 IN PR -> 🔵 IN PR
+  - Sections reviewed: A19/FB-043 footer-provenance hardening diff; `cure_subsequent_review/prior_corpus.py`, `decision.py`, `runtime.py`, `control_plane.py`, `github_history.py`, `cure.py`; focused prior-corpus/decision/runtime-packaging/PR-flow tests; Story 04 OpenSpec A19/FB-043 docs.
+  - Risk lenses reviewed: official footer authenticity versus PR/session/head provenance, independent footer SHA and pull-review event-head checks, author/login independence for compatible official footers, generic/body-only rejection, pre-corpus exclusion before extraction/source-verification/disposition/final carry-forward, and runtime/governor audit surface for ignored foreign footers.
+  - Evidence quality: direct source/test/doc inspection, two independent child reviews, focused architecture/code-research helper saved to `notebook:story04-a19-footer-provenance-flow-2026-06-15`, and local command execution.
+  - Checks run: `git diff --check` ✅; `python -m pytest tests/_subsequent_review_unit_decision_unittest.py tests/_subsequent_review_unit_prior_corpus_unittest.py tests/_subsequent_review_unit_runtime_packaging_unittest.py tests/_subsequent_review_integration_pr_flow_unittest.py -q` ✅ 40 passed, 8 subtests; commit-prep full suite `git diff --check && ruff check . && mypy && python -m pytest -q` ✅ 774 passed, 50 subtests.
+  - Key findings:
+    - None blocking. The previous footer-current/event-foreign pull-review blocker is fixed: `_assess_remote_cure_footer_provenance()` now evaluates `footer_reviewed_head` and `event_reviewed_head` as separate signals and rejects/audits the review when any present head signal mismatches the current run (`cure_subsequent_review/prior_corpus.py:147-166`). Decision enablement now counts only compatible official remote markers (`cure_subsequent_review/decision.py:183-198`), while corpus construction admits only compatible entries and records ignored foreign-footer audit metadata before prior-finding extraction (`cure_subsequent_review/prior_corpus.py:278-320`). Runtime context/governor packaging surfaces official, foreign, and body-only counts plus foreign audit reasons (`cure_subsequent_review/runtime.py:180-212`, `cure_subsequent_review/runtime.py:550-570`).
+  - Debt Friction: none
+  - Next action: proceed with the remaining Story 04 PR-stage/live-output proof gates; no local A19/FB-043 implementation blocker remains.
+
+- 2026-06-15T15:04:08Z A19 footer-provenance hardening implementation review
+  - Feedback IDs: FB-043
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Status transition: unchanged: 🔵 IN PR -> 🔵 IN PR
+  - Sections reviewed: A19/TAP-20 footer-provenance hardening diff; `cure_subsequent_review/prior_corpus.py`, `decision.py`, `runtime.py`, `control_plane.py`, `cure.py`; focused prior-corpus/decision/runtime-packaging/PR-flow tests; Story 04 OpenSpec A19/FB-043 docs.
+  - Risk lenses reviewed: official footer authenticity versus PR/session/head provenance, author/login independence for compatible official footers, generic/body-only rejection, pre-corpus exclusion before extraction/source-verification/disposition/final carry-forward, and runtime/governor audit surface for ignored foreign footers.
+  - Evidence quality: direct source/test/doc inspection, independent child review, focused command execution, and a synthetic pull-review mismatch repro against the current worktree.
+  - Checks run: `git diff --check` ✅; `python -m pytest tests/_subsequent_review_unit_prior_corpus_unittest.py tests/_subsequent_review_unit_decision_unittest.py tests/_subsequent_review_unit_runtime_packaging_unittest.py tests/_subsequent_review_integration_pr_flow_unittest.py -q` ✅ 38 passed, 8 subtests; synthetic repro for pull-review event head mismatch ❌ reproduced blocker (`entries ['pr_review:901']`, entry reviewed head `e305f826...`, no ignored audit row).
+  - Key findings:
+    - A19/FB-043 is incomplete for pull-review event head provenance. `_assess_remote_cure_footer_provenance()` collapses footer SHA and event `reviewed_head` with `metadata.get("reviewed_head") or event_reviewed_head` (`cure_subsequent_review/prior_corpus.py:135`), so an official footer that claims the current PR/head masks a foreign pull-review `commit_id`/`reviewed_head`. The accepted path then admits the event to the prior corpus (`cure_subsequent_review/prior_corpus.py:277-289`) and decision intake counts it as an accepted remote CURe marker (`cure_subsequent_review/decision.py:90-100`, `cure_subsequent_review/decision.py:186-198`). Repro: current PR18 head `c3f81e8...`, pull-review event `reviewed_head=e305f826...`, footer `sha c3f81e8 · session grzegorznowak-cure-pr18-...`; `build_prior_review_corpus(..., current_head=c3f81e8...)` admits `pr_review:901` with `reviewed_head=e305f826...` instead of auditing/ignoring it as `foreign_cure_footer_provenance`.
+  - Debt Friction: none; fix should treat footer head and pull-review event head as independent provenance signals, require each present head to be compatible with the current run, audit any mismatch, and add red regressions for footer-current/event-foreign pull-review decision and corpus exclusion.
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to fix the pull-review event-head provenance gap, then rerun the A19 focused suites and static checks.
+
 - 2026-06-14T12:12:38Z PR #22 intake/cache live-audit feedback absorbed
   - Source: `notebook:pr22-live-audit-intake-performance`; latest sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260614-110911-a3ae`
   - Feedback IDs: FB-039, FB-040, FB-041, FB-042

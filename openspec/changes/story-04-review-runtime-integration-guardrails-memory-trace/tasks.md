@@ -31,6 +31,7 @@
 - [x] Keep Story 04 status `🔵 IN PR`; fresh PR #22 live audit remains pending after remap.
 - [ ] Run and audit a fresh PR #22 live review at head `e305f826f3c0ece63be708f7df4b4f54c38b7658` or later, confirming FB-030/031/034/runtime-FB-035/036/038 are closed or explicitly refreshed.
 - [ ] A16 final-output polish: preserve the governor-supplied plain-English reason as the third element in leading `### Prior Review Issue History` bullets. Latest PR #18 benchmark warned that this reason can still be omitted there even after the label fix; treat it as reader-facing output polish rather than a label/provenance failure.
+- [x] A19 footer-provenance hardening: reject remote CURe comments/reviews whose official footer or pull-review event `reviewed_head`/`commit_id` belongs to a different PR/session/head than the current review target/run; exclude them from prior corpus, prior-finding extraction, source verification, disposition, and final carry-forward surfaces; record a visible ignored-comment audit note with a plain-English reason (for example, PR #18 comment `4707013049` carrying a PR #22 footer/session/head, or a pull-review event whose footer claims the current head but whose GitHub event head is foreign). Local fixture proof added 2026-06-15.
 
 ## A20 / FB-039..FB-042 source-verification cache hardening tasks
 

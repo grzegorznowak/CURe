@@ -9908,6 +9908,7 @@ def _pr_flow_impl(
             mode=subsequent_command_mode,
             evidence_policy=policy,
             discussion=prefetched_discussion,
+            current_head=head_sha,
         )
         prefetched_discussion = decision_discussion or prefetched_discussion
         subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
@@ -9967,6 +9968,8 @@ def _pr_flow_impl(
                 "stderr_tail": e.stderr,
             }
         )
+        if (not picker_completed) and session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
         raise
     except Exception as e:
         progress.error(
@@ -9975,6 +9978,8 @@ def _pr_flow_impl(
                 "message": str(e),
             }
         )
+        if (not picker_completed) and session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
         raise
     # TUI/logging is started after meta.json exists (so the dashboard has something to read).
     out = ReviewflowOutput(

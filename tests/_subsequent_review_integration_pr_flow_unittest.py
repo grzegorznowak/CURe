@@ -340,7 +340,14 @@ class SubsequentReviewPrFlowIntegrationTests(SubsequentReviewTestCase):
                         {
                             "id": 777,
                             "user": {"login": "human-operator"},
-                            "body": "CURe Review\n### CURE-777: prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1\n" + CURE_FOOTER_BLOCK,
+                            "body": (
+                                "CURe Review\n### CURE-777: prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1\n"
+                                "<!-- CURE_REVIEW_FOOTER_START -->\n"
+                                "_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4"
+                                " · single-stage · sha abc · model gpt-5.2/high · tok 1k/2k/3k"
+                                " · session example-demo-pr14-20260101-000000-abcd · 5m0s_\n"
+                                "<!-- CURE_REVIEW_FOOTER_END -->"
+                            ),
                             "created_at": "2026-01-01T00:00:00Z",
                         }
                     ]

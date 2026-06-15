@@ -3,6 +3,63 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 
 class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
+    def _footer_block(self, *, session_id: str, review_head_sha: str) -> str:
+        return (
+            "<!-- CURE_REVIEW_FOOTER_START -->\n"
+            "_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4"
+            f" · single-stage · sha {review_head_sha[:7]} · model gpt-5.2/high · tok 1k/2k/3k"
+            f" · session {session_id} · 5m0s_\n"
+            "<!-- CURE_REVIEW_FOOTER_END -->"
+        )
+
+    def test_decision_counts_pull_review_event_head_mismatch_as_foreign_footer_provenance(self) -> None:
+        pr = PR(owner="grzegorznowak", repo="cure", number=18)
+        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        event_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        review_body = (
+            "CURe Review\n"
+            "### CURE-22: Foreign event-head finding\n"
+            "Severity: high\n"
+            "Section: Reliability\n"
+            "Evidence: app/pr22.py:4 belongs to a different head\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr18-20260615-120000-abcd', review_head_sha=current_head)}\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/18/comments"):
+                return []
+            if path.endswith("/pulls/18/reviews"):
+                return [
+                    {
+                        "id": 901,
+                        "html_url": "review-url",
+                        "user": {"login": "human-operator"},
+                        "body": review_body,
+                        "state": "COMMENTED",
+                        "commit_id": event_head,
+                        "submitted_at": "2026-06-15T12:00:00Z",
+                    }
+                ]
+            if path.endswith("/pulls/18/comments"):
+                return []
+            raise AssertionError(path)
+
+        decision, discussion = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+            current_head=current_head,
+        )
+
+        self.assertIsNotNone(discussion)
+        self.assertFalse(decision.enabled)
+        self.assertNotIn("cure_pr_discussion_found", decision.reasons)
+        self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
+        self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 0)
+        self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 1)
+
     def test_decision_service_auto_modes_and_explicit_disabled(self) -> None:
         pr = PR()
         with tempfile.TemporaryDirectory() as tmp:

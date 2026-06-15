@@ -384,7 +384,13 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
                     }
                 ],
                 "ignored_pr_comments": [
-                    {"source_type": "pr_comment", "comment_id": "IC-2", "reason": "cure_authorship_not_established"}
+                    {"source_type": "pr_comment", "comment_id": "IC-2", "reason": "cure_authorship_not_established"},
+                    {
+                        "source_type": "pr_comment",
+                        "comment_id": "IC-3",
+                        "reason": "foreign_cure_footer_provenance",
+                        "audit_reason": "Ignored remote CURe comment IC-3: official footer belongs to PR22/session s-pr22 at sha e305f82, while this run is reviewing PR18 at sha c3f81e8, so it was not used as PR18 prior-review provenance.",
+                    },
                 ],
             }
             (artifact_dir / "prior_review_corpus.json").write_text(json.dumps(corpus), encoding="utf-8")
@@ -393,9 +399,13 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             brief = build_governor_brief(artifact_dir=artifact_dir)
 
             self.assertEqual(package["footer_marker_policy"]["official_footer_remote_entries"], 1)
+            self.assertEqual(package["footer_marker_policy"]["foreign_footer_ignored_comments"], 1)
             self.assertEqual(package["footer_marker_policy"]["body_only_rejected_comments"], 1)
             self.assertIn("official CURe footer", brief)
             self.assertIn("regardless of author/login", brief)
+            self.assertIn("compatible with the current run", brief)
+            self.assertIn("foreign official-footer ignored comments: 1", brief)
+            self.assertIn("Ignored remote CURe comment IC-3", brief)
             self.assertIn("body-only", brief)
 
     def test_governor_off_keeps_prior_review_brief_empty(self) -> None:

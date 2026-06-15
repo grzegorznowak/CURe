@@ -1491,7 +1491,7 @@ def render_prompt(
     text = text.replace("$AGENT_DESC", agent_desc).replace("${AGENT_DESC}", agent_desc)
     return text
 
-def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False) -> str:
+def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False, prior_review_brief: str = "") -> str:
     lines: list[str] = []
     if include_steps_taken:
         lines.extend(["### Steps taken", "- Multipass plan aborted", ""])
@@ -1527,6 +1527,20 @@ def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = Fals
             "- None.",
         ]
     )
+    if prior_review_brief.strip():
+        lines.extend(
+            [
+                "",
+                "### Prior Review Issue History",
+                "- Multipass planning aborted before final review synthesis; prior-review context was present and publication is limited to this guarded abort report.",
+                "",
+                "<details><summary>Prior review context used for this abort</summary>",
+                "",
+                prior_review_brief.strip(),
+                "",
+                "</details>",
+            ]
+        )
     if include_steps_taken:
         lines.extend(["####", ""])
     else:

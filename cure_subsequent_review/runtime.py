@@ -187,13 +187,28 @@ def _footer_marker_policy_summary(corpus_payload: dict[str, Any] | None) -> dict
         for item in ignored
         if isinstance(item, dict) and str(item.get("reason") or "") == "cure_authorship_not_established"
     ) if isinstance(ignored, list) else 0
+    foreign_footer_ignored_comments = sum(
+        1
+        for item in ignored
+        if isinstance(item, dict) and str(item.get("reason") or "") == "foreign_cure_footer_provenance"
+    ) if isinstance(ignored, list) else 0
+    foreign_footer_audit_reasons = [
+        str(item.get("audit_reason"))
+        for item in ignored
+        if isinstance(item, dict)
+        and str(item.get("reason") or "") == "foreign_cure_footer_provenance"
+        and str(item.get("audit_reason") or "").strip()
+    ] if isinstance(ignored, list) else []
     return {
-        "policy": "official_footer_sufficient_regardless_of_author_login_body_only_rejected",
+        "policy": "official_footer_requires_current_pr_provenance_body_only_rejected",
         "official_footer_remote_entries": official_footer_remote_entries,
+        "foreign_footer_ignored_comments": foreign_footer_ignored_comments,
+        "foreign_footer_audit_reasons": foreign_footer_audit_reasons,
         "body_only_rejected_comments": body_only_rejected_comments,
         "summary": (
-            "Official CURe footer markers are accepted as prior-review provenance regardless of author/login; "
-            "generic or body-only CURe-looking text remains rejected."
+            "Official CURe footer markers are accepted as prior-review provenance regardless of author/login only when "
+            "their PR/session/head provenance is compatible with the current run; foreign official footers and generic "
+            "or body-only CURe-looking text remain rejected."
         ),
     }
 
@@ -282,6 +297,7 @@ def _write_context_markdown(*, path: Path, package: dict[str, Any]) -> None:
             "## Footer marker policy",
             f"- {footer_policy.get('summary', 'Official CURe footer markers identify prior CURe reviews; body-only markers are rejected.')}",
             f"- Official-footer remote entries: {footer_policy.get('official_footer_remote_entries', 0)}",
+            f"- Foreign official-footer ignored comments: {footer_policy.get('foreign_footer_ignored_comments', 0)}",
             f"- Body-only/generic rejected comments: {footer_policy.get('body_only_rejected_comments', 0)}",
             "",
             "## FB-010 discussion evidence reuse",
@@ -533,17 +549,26 @@ def _issue_history_rows(dispositions: list[Any], finding_meta: dict[str, dict[st
 
 def _footer_policy_brief(corpus_payload: dict[str, Any] | None) -> list[str]:
     summary = _footer_marker_policy_summary(corpus_payload)
-    if not summary["official_footer_remote_entries"] and not summary["body_only_rejected_comments"]:
+    if (
+        not summary["official_footer_remote_entries"]
+        and not summary["body_only_rejected_comments"]
+        and not summary["foreign_footer_ignored_comments"]
+    ):
         return []
-    return [
+    lines = [
         "### Footer Marker Policy",
         (
             "- Story 02/FB-026 policy: official CURe footer markers are accepted as prior-review provenance "
-            "regardless of author/login; generic/body-only CURe-looking text remains rejected. "
+            "regardless of author/login only when their PR/session/head provenance is compatible with the current run; "
+            "generic/body-only CURe-looking text and foreign official footers remain rejected. "
             f"Accepted official-footer remote entries: {summary['official_footer_remote_entries']}; "
+            f"foreign official-footer ignored comments: {summary['foreign_footer_ignored_comments']}; "
             f"body-only/generic rejected comments: {summary['body_only_rejected_comments']}."
         ),
     ]
+    for reason in summary.get("foreign_footer_audit_reasons", []):
+        lines.append(f"- {reason}")
+    return lines
 
 
 def build_governor_brief(*, artifact_dir: Path) -> str:

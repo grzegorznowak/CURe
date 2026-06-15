@@ -3,6 +3,15 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 
 class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
+    def _footer_block(self, *, session_id: str, review_head_sha: str) -> str:
+        return (
+            "<!-- CURE_REVIEW_FOOTER_START -->\n"
+            "_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4"
+            f" · single-stage · sha {review_head_sha[:7]} · model gpt-5.2/high · tok 1k/2k/3k"
+            f" · session {session_id} · 5m0s_\n"
+            "<!-- CURE_REVIEW_FOOTER_END -->"
+        )
+
     def test_official_footer_pull_review_body_enables_and_enters_prior_corpus_regardless_of_author(self) -> None:
         pr = PR()
         review_body = (
@@ -110,6 +119,182 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
         self.assertEqual(findings.status, ModuleStatus.SUCCESS)
         self.assertNotIn("no_prior_reviews", findings.status_reasons)
         self.assertIn("CURE-78", {item.finding_id for item in findings.findings})
+
+    def test_foreign_official_footer_is_audited_and_excluded_before_prior_finding_extraction(self) -> None:
+        pr = PR(owner="grzegorznowak", repo="cure", number=18)
+        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        compatible_body = (
+            "CURe Review\n"
+            "### CURE-18: Compatible PR18 finding\n"
+            "Severity: medium\n"
+            "Section: Reliability\n"
+            "Evidence: app/pr18.py:9 matches current run\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr18-20260615-120000-abcd', review_head_sha=current_head)}\n"
+        )
+        foreign_body = (
+            "CURe Review\n"
+            "### CURE-22: Foreign PR22 finding\n"
+            "Severity: high\n"
+            "Section: Security\n"
+            "Evidence: app/pr22.py:1 does not belong to PR18\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='e305f826f3c0ece63be708f7df4b4f54c38b7658')}\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/18/comments"):
+                return [
+                    {
+                        "id": 4707013048,
+                        "html_url": "https://github.com/grzegorznowak/CURe/pull/18#issuecomment-4707013048",
+                        "user": {"login": "untrusted-human"},
+                        "body": compatible_body,
+                        "created_at": "2026-06-15T10:30:00Z",
+                    },
+                    {
+                        "id": 4707013049,
+                        "html_url": "https://github.com/grzegorznowak/CURe/pull/18#issuecomment-4707013049",
+                        "user": {"login": "grzegorznowak"},
+                        "body": foreign_body,
+                        "created_at": "2026-06-15T10:34:20Z",
+                    },
+                    {
+                        "id": 4707013050,
+                        "user": {"login": "cure-bot"},
+                        "body": "CURe Review\n### CURE-FAKE: body-only marker",
+                    },
+                ]
+            if path.endswith(("/pulls/18/reviews", "/pulls/18/comments")):
+                return []
+            raise AssertionError(path)
+
+        decision, _discussion_from_decision = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+            current_head=current_head,
+        )
+        self.assertTrue(decision.enabled)
+        self.assertIn("cure_pr_discussion_found", decision.reasons)
+        self.assertEqual(decision.signal_counts["remote_cure_markers"], 2)
+        self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 1)
+        self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 1)
+
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion, current_head=current_head)
+        self.assertEqual([entry.entry_id for entry in corpus.entries], ["pr_comment:4707013048"])
+        self.assertEqual(corpus.entries[0].provenance["footer_session_id"], "grzegorznowak-cure-pr18-20260615-120000-abcd")
+        self.assertEqual(corpus.entries[0].provenance["footer_reviewed_head"], current_head[:7])
+        ignored_by_id = {item.get("comment_id"): item for item in corpus.ignored_pr_comments}
+        self.assertEqual(ignored_by_id["4707013050"]["reason"], "cure_authorship_not_established")
+        foreign = ignored_by_id["4707013049"]
+        self.assertEqual(foreign["reason"], "foreign_cure_footer_provenance")
+        self.assertIn("official footer belongs to PR22/session grzegorznowak-cure-pr22-20260615-103420-b86b", foreign["audit_reason"])
+        self.assertIn("while this run is reviewing PR18", foreign["audit_reason"])
+        self.assertIn("not used as PR18 prior-review provenance", foreign["audit_reason"])
+
+        findings = extract_prior_findings(corpus=corpus)
+        self.assertEqual({item.finding_id for item in findings.findings}, {"CURE-18"})
+        self.assertNotIn("CURE-22", {item.finding_id for item in findings.findings})
+
+    def test_pull_review_event_head_mismatch_is_audited_and_excluded_before_extraction(self) -> None:
+        pr = PR(owner="grzegorznowak", repo="cure", number=18)
+        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        event_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        review_body = (
+            "CURe Review\n"
+            "### CURE-22: Foreign event-head finding\n"
+            "Severity: high\n"
+            "Section: Reliability\n"
+            "Evidence: app/pr22.py:4 belongs to a different head\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr18-20260615-120000-abcd', review_head_sha=current_head)}\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/18/comments"):
+                return []
+            if path.endswith("/pulls/18/reviews"):
+                return [
+                    {
+                        "id": 901,
+                        "html_url": "https://github.com/grzegorznowak/CURe/pull/18#pullrequestreview-901",
+                        "user": {"login": "human-operator"},
+                        "body": review_body,
+                        "state": "COMMENTED",
+                        "commit_id": event_head,
+                        "submitted_at": "2026-06-15T12:00:00Z",
+                    }
+                ]
+            if path.endswith("/pulls/18/comments"):
+                return []
+            raise AssertionError(path)
+
+        decision, discussion_from_decision = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+            current_head=current_head,
+        )
+        self.assertIsNotNone(discussion_from_decision)
+        self.assertFalse(decision.enabled)
+        self.assertNotIn("cure_pr_discussion_found", decision.reasons)
+        self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
+        self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 0)
+        self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 1)
+
+        discussion = collect_pr_discussion(pr=pr, fetch_json=fetch)
+        corpus = build_prior_review_corpus(pr=pr, sessions=[], discussion=discussion, current_head=current_head)
+        self.assertEqual(corpus.entries, ())
+        ignored_by_id = {item.get("review_id"): item for item in corpus.ignored_pr_comments}
+        foreign = ignored_by_id["901"]
+        self.assertEqual(foreign["reason"], "foreign_cure_footer_provenance")
+        self.assertEqual(foreign["footer_session_id"], "grzegorznowak-cure-pr18-20260615-120000-abcd")
+        self.assertEqual(foreign["footer_reviewed_head"], current_head[:7])
+        self.assertEqual(foreign["event_reviewed_head"], event_head)
+        self.assertIn("event reviewed_head e305f82", foreign["audit_reason"])
+        self.assertIn("while this run is reviewing PR18", foreign["audit_reason"])
+        self.assertIn("not used as PR18 prior-review provenance", foreign["audit_reason"])
+
+        findings = extract_prior_findings(corpus=corpus)
+        self.assertEqual(findings.findings, ())
+        self.assertIn("no_prior_reviews", findings.status_reasons)
+
+    def test_foreign_official_footer_alone_does_not_enable_remote_prior_review(self) -> None:
+        pr = PR(owner="grzegorznowak", repo="cure", number=18)
+        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        foreign_body = (
+            "CURe Review\n"
+            "### CURE-22: Foreign PR22 finding\n"
+            "Severity: high\n"
+            "Section: Security\n"
+            "Evidence: app/pr22.py:1 does not belong to PR18\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='e305f826f3c0ece63be708f7df4b4f54c38b7658')}\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/18/comments"):
+                return [{"id": 4707013049, "user": {"login": "grzegorznowak"}, "body": foreign_body}]
+            if path.endswith(("/pulls/18/reviews", "/pulls/18/comments")):
+                return []
+            raise AssertionError(path)
+
+        decision, discussion = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+            current_head=current_head,
+        )
+        self.assertIsNotNone(discussion)
+        self.assertFalse(decision.enabled)
+        self.assertNotIn("cure_pr_discussion_found", decision.reasons)
+        self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
+        self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 0)
+        self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 1)
 
     def test_prior_corpus_rejects_untrusted_pull_review_bodies(self) -> None:
         pr = PR()

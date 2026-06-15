@@ -16,7 +16,7 @@ from meta import write_json
 
 from cure_subsequent_review.contracts import DiscussionArtifact, EvidencePolicy, ModuleStatus
 from cure_subsequent_review.github_history import JsonFetcher, collect_pr_discussion
-from cure_subsequent_review.prior_corpus import _looks_cure_authored
+from cure_subsequent_review.prior_corpus import _assess_remote_cure_footer_provenance
 
 
 class SubsequentReviewCommandMode(str, Enum):
@@ -79,10 +79,26 @@ def _ordered_unique(items: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in items if item))
 
 
-def _is_positive_remote_marker(event: Any) -> bool:
-    if event.kind not in {"issue_comment", "review"}:
-        return False
-    return _looks_cure_authored(author=event.author, body=event.body)
+def _remote_source_type(event: Any) -> str | None:
+    if event.kind == "issue_comment":
+        return "pr_comment"
+    if event.kind == "review":
+        return "pr_review"
+    return None
+
+
+def _remote_footer_assessment(*, pr: Any, event: Any, current_head: str | None) -> Any | None:
+    source_type = _remote_source_type(event)
+    if source_type is None:
+        return None
+    return _assess_remote_cure_footer_provenance(
+        pr=pr,
+        source_type=source_type,
+        event_id=str(event.event_id or ""),
+        body=str(event.body or ""),
+        current_head=current_head,
+        event_reviewed_head=getattr(event, "reviewed_head", None),
+    )
 
 
 _NON_ENABLING_REMOTE_METADATA_REASONS = {"discussion_incomplete", "thread_state_unavailable"}
@@ -100,6 +116,7 @@ def decide_subsequent_review(
     evidence_policy: EvidencePolicy,
     fetch_json: JsonFetcher | None = None,
     discussion: DiscussionArtifact | None = None,
+    current_head: str | None = None,
 ) -> tuple[SubsequentReviewDecision, DiscussionArtifact | None]:
     """Return the command-mode decision plus the discussion artifact used to decide."""
 
@@ -111,6 +128,8 @@ def decide_subsequent_review(
         "sessions_with_subsequent_artifacts": sessions_with_subsequent_artifacts,
         "remote_events": 0,
         "remote_cure_markers": 0,
+        "accepted_remote_cure_markers": 0,
+        "foreign_remote_cure_markers": 0,
     }
 
     if command_mode is SubsequentReviewCommandMode.DISABLED:
@@ -158,14 +177,25 @@ def decide_subsequent_review(
         )
 
     signal_counts["remote_events"] = len(discussion.events)
-    remote_cure_markers = sum(1 for event in discussion.events if _is_positive_remote_marker(event))
+    remote_assessments = [
+        assessment
+        for event in discussion.events
+        if (assessment := _remote_footer_assessment(pr=pr, event=event, current_head=current_head)) is not None
+    ]
+    remote_cure_markers = sum(1 for assessment in remote_assessments if assessment.has_official_footer)
+    accepted_remote_cure_markers = sum(1 for assessment in remote_assessments if assessment.compatible)
+    foreign_remote_cure_markers = sum(
+        1 for assessment in remote_assessments if assessment.has_official_footer and assessment.reason == "foreign_cure_footer_provenance"
+    )
     signal_counts["remote_cure_markers"] = remote_cure_markers
+    signal_counts["accepted_remote_cure_markers"] = accepted_remote_cure_markers
+    signal_counts["foreign_remote_cure_markers"] = foreign_remote_cure_markers
     degraded_reasons = list(discussion.status_reasons)
     for marker in discussion.pagination:
         if not marker.complete and marker.status not in degraded_reasons:
             degraded_reasons.append(marker.status)
 
-    if remote_cure_markers > 0:
+    if accepted_remote_cure_markers > 0:
         return (
             SubsequentReviewDecision(
                 mode=command_mode,

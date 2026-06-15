@@ -4,18 +4,32 @@
 > Canonical story contract: `story.md`. Legacy source remains under `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/`.
 
 ## Current Claim
-- Claimed at: 2026-06-15T07:01:54Z
+- Claimed at: 2026-06-15T15:04:08Z
 - Claimed by: pi child resume session
 - Model: not exposed by pi harness (no `MODEL` environment variable available)
-- Scope: Resolve the 2026-06-14T18:04:59Z story-review request changes for A1/A11 post-review `review_memory_store` disabled override preservation; record that A16/A20 fresh PR #22 live-audit proof remains pending.
+- Scope: Resolve the A19/FB-043 story-review request changes for footer-current/event-foreign pull-review provenance masking; keep A16/A20 fresh PR #22 live-audit proof pending.
 - Main-tree targets: CURe
-- Primary write surfaces: `cure_subsequent_review/runtime.py`, `tests/_subsequent_review_unit_runtime_memory_unittest.py`, OpenSpec progress artifacts.
+- Primary write surfaces: `cure_subsequent_review/prior_corpus.py`, `tests/_subsequent_review_unit_prior_corpus_unittest.py`, `tests/_subsequent_review_unit_decision_unittest.py`, OpenSpec progress/tasks/story artifacts.
 - Status: 🔄 IN PROGRESS
 
 ### Legacy Scaffold Notes
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-15T15:09:16Z **Step**: closed the A19/FB-043 footer-current/event-foreign pull-review masking blocker in the main tree.
+  - Changed: `cure_subsequent_review/prior_corpus.py`, `tests/_subsequent_review_unit_prior_corpus_unittest.py`, `tests/_subsequent_review_unit_decision_unittest.py`, plus Story 04 OpenSpec progress/tasks/story notes.
+  - Test: RED first — new pull-review fixture with current footer sha/session but foreign GitHub `commit_id`/`event.reviewed_head` initially enabled subsequent review and was admitted as accepted provenance (`2 failed`: the decision and prior-corpus red tests failed on `decision.enabled` being true).
+  - Test: PASS — after the fix, targeted red tests passed (`2 passed`), focused prior-corpus/decision suites passed (`14 passed, 8 subtests`), required focused Story 04 runtime suite passed (`40 passed, 8 subtests`), `ruff check .`, `mypy`, and `git diff --check` passed.
+  - Notes: A19 now keeps footer SHA and pull-review event head as independent checked provenance signals. Any present signal mismatching the current head marks the official remote CURe marker as `foreign_cure_footer_provenance`, records the event head in ignored-comment audit metadata, prevents `cure_pr_discussion_found` from enabling on the foreign event alone, and excludes the body before prior-finding extraction. Compatible official footers remain accepted regardless of author/login; generic/body-only CURe-looking text remains rejected.
+- 2026-06-15T14:54:03Z **Step**: closed A19 footer-provenance hardening in the main tree.
+  - Changed: `cure_subsequent_review/prior_corpus.py`, `cure_subsequent_review/decision.py`, `cure_subsequent_review/control_plane.py`, `cure_subsequent_review/runtime.py`, `cure.py`, `tests/_subsequent_review_unit_prior_corpus_unittest.py`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py`, `tests/_subsequent_review_integration_pr_flow_unittest.py`, and this OpenSpec progress/tasks/story set.
+  - Test: PASS — red foreign-footer regressions first failed for missing `current_head` provenance-gate support; after the fix, focused decision/prior-corpus/runtime-packaging/PR-flow suite passed (`38 passed, 8 subtests`), source/disposition/report-governor A19 suite passed (`23 passed, 15 subtests`), public subsequent-review wrapper passed (`135 passed, 36 subtests`), `ruff check .`, `mypy`, and `git diff --check` passed.
+  - Notes: decision now distinguishes official remote CURe markers from accepted provenance (`accepted_remote_cure_markers`) and foreign official footers (`foreign_remote_cure_markers`) so foreign-only comments do not enable subsequent review. Prior-corpus admission requires footer PR/session/head compatibility when the current head is known; foreign official footers are written to `ignored_pr_comments` with a plain-English audit reason and never become corpus entries, so prior-finding extraction and downstream ledgers do not see their bodies. Runtime package/governor policy summaries now include foreign-footer ignored counts and audit reasons. Generic/body-only CURe-looking text remains rejected, and provenance-compatible official footers remain accepted regardless of GitHub author/login.
+- 2026-06-15T11:21:24Z **Audit/planning checkpoint**: inspected PR #18 foreign-footer sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr18-20260615-112124-b86b` after pasting an official PR #22 CURe review comment into PR #18 discussion.
+  - Artifact state: while reviewing PR #18 head `c3f81e8`, the run enabled subsequent review from `cure_pr_discussion_found` / `remote_cure_markers=1` and admitted issue comment `4707013049` into `prior_review_corpus.json` even though the official footer belonged to PR #22/session `grzegorznowak-cure-pr22-...` at sha `e305f82`.
+  - Ledgers/performance: prior-finding extraction produced five unrelated PR #22 groups before the legitimate PR #18 helper findings; the linker correctly tied the foreign comment only to those PR #22-derived groups, but source verification still made 11 provider calls over ~402.9s with all cache misses and the disposition ledger degraded globally.
+  - Output/governor: final `review.md` did not publish the unrelated PR #22 findings, but internal ledgers were polluted. `report_governor_result.json` degraded with partial awareness and warned only that the final review did not mention official footer-marker provenance policy, which catches the output-awareness smell but not the input-admission bug.
+  - OpenSpec update: A19/TAP-20 now require official-footer provenance compatibility with the current PR/session/head before corpus admission, and require foreign official-footer comments to be acknowledged but ignored with a plain-English audit reason.
 - 2026-06-15T10:47:34Z **Audit/planning checkpoint**: inspected latest PR #18 benchmark sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr18-20260615-095138-9664` after the pushed label fix.
   - Artifact state: the local runner used label fix commit `e130543` from the PR #22 branch while reviewing PR #18 head `c3f81e8`. The final review now starts with `### Prior Review Issue History`, appends `(prior review follow-up; still open after re-verification)` to carried-forward/re-reported reader-facing In Scope findings, including the “Contract-violating helper entries...” finding, and keeps raw `DA-*` IDs audit/provenance-only under `Internal DA coverage` details.
   - Lineage: duplicate prior sessions are coherent. Prior `CURE-*` findings from two previous PR #18 sessions become `G-0001`..`G-0004`, `SV-0001`..`SV-0004` all `still_open`, and `DA-0001`..`DA-0004` all `re_report`; the final review dedupes to two reader-facing issues and lists all four DA rows only in audit coverage.
@@ -173,7 +187,7 @@ PR #22 live-run audit reopened Story 04 because the enabled-path runtime artifac
 | F2 | A16 | Final subsequent-review prompts/reports need a human-readable prior-review issue summary that groups DA records into issue clusters with titles/statuses/reasons while preserving complete internal `DA-*` disposition coverage. |
 | F3 | A17 | Report-governor awareness gaps (`partial`, missing DA row, contradiction) should degrade/warn only and never block publication, even in strict mode. |
 | F4 | A18 | Verifier/source-truth must avoid stale duplicate `cure.py` symbol confusion by resolving active import/re-export bindings or degrading inactive-source references. |
-| F5 | A19 | Story 02/FB-026 footer policy must propagate into Story 04 runtime context/governor/final-output checks and semantic disposition: official footer is sufficient regardless of author/login; generic/body-only markers remain rejected; policy-approved footer findings such as `G-0006`/`SV-0006`/`DA-0006` must not remain `still_open` + `re_report`/`carried-forward`. |
+| F5 | A19 | Story 02/FB-026 footer policy must propagate into Story 04 runtime context/governor/final-output checks and semantic disposition: provenance-compatible official footers are accepted regardless of author/login; foreign cross-PR/session/head official footers are ignored/audited before corpus admission; generic/body-only markers remain rejected; policy-approved footer findings such as `G-0006`/`SV-0006`/`DA-0006` must not remain `still_open` + `re_report`/`carried-forward`. |
 
 #### Reopened TAP / Verification Addendum
 
@@ -183,6 +197,7 @@ Follow-up verification rows TAP-16 through TAP-20 are integrated into the canoni
 - A16 live output now starts with human-readable issue history, but the same output still exposes a prominent top-level `### Internal DA coverage` section. Product decision: keep complete DA coverage as audit/provenance, but remove/demote it from ordinary consumer-facing `review.md`; tracked in Story 04 as FB-030 after remap.
 - Broader memory/linker identity, runtime citation enforcement, linker runtime policy, and abort-path hardening from the 2026-06-13 live audit are tracked in Story 04 after remap. Story 01 owns the supporting session-bound path and concise-parser items; Story 03 owns the authority/source-truth invariants.
 - Story 04's previous live gate for `DA-0006` is satisfied: latest artifacts classify `DA-0006` as `out-of-scope` / `move_out_of_scope`, not `carried-forward/re_report`.
+- PR #18 foreign-footer audit found A19 input-boundary debt: a pasted official CURe review footer from PR #22 was acknowledged as remote CURe discussion but admitted as PR #18 prior-review provenance. Track as FB-043 / A19 footer-provenance hardening.
 
 
 ## Live-audit remap progress
