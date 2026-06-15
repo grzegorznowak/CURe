@@ -31,6 +31,7 @@ from cure_subsequent_review.contracts import (
 from cure_subsequent_review.memory_store import ReviewMemoryStore
 
 SOURCE_VERIFICATION_ARTIFACT = "source_verification.json"
+DISCUSSION_SIGNALS_ARTIFACT = "discussion_signals.json"
 DISPOSITION_LEDGER_ARTIFACT = "disposition_ledger.json"
 REVIEW_CONTEXT_PACKAGE_ARTIFACT = "review_context_package.json"
 SUBSEQUENT_REVIEW_CONTEXT_ARTIFACT = "subsequent_review_context.md"
@@ -331,6 +332,14 @@ def _rows_by_id(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return {str(row.get("row_id") or "").strip(): dict(row) for row in rows if isinstance(row, dict)}
 
 
+def _discussion_row_matches_disposition(discussion_row: dict[str, Any], disposition_row: dict[str, Any]) -> bool:
+    group_id = str(disposition_row.get("group_id") or disposition_row.get("reconciliation_group_id") or "").strip()
+    finding_ids = set(_string_tuple(disposition_row.get("finding_ids")))
+    discussion_group_ids = set(_string_tuple(discussion_row.get("group_ids")))
+    discussion_finding_ids = set(_string_tuple(discussion_row.get("finding_ids")))
+    return bool((group_id and group_id in discussion_group_ids) or (finding_ids and finding_ids.intersection(discussion_finding_ids)))
+
+
 def _governor_citation_issue_reasons(*, artifact_dir: Path, disposition_payload: dict[str, Any]) -> tuple[str, ...]:
     """Return missing/malformed citation provenance reasons for governor rows."""
 
@@ -339,6 +348,7 @@ def _governor_citation_issue_reasons(*, artifact_dir: Path, disposition_payload:
     reasons: list[str] = []
     source_row_ids: set[str] = set()
     discussion_row_ids: set[str] = set()
+    reportable_rows_without_discussion_ids: list[tuple[str, dict[str, Any]]] = []
     reportable_actions = {DispositionAction.RE_REPORT.value, DispositionAction.REWORD_PARTIAL.value}
 
     for index, row in enumerate(dispositions, start=1):
@@ -348,11 +358,14 @@ def _governor_citation_issue_reasons(*, artifact_dir: Path, disposition_payload:
             source_row_ids.add(source_row_id)
         else:
             reasons.append(f"missing_source_verification_row_id:{row_id}")
-        row_discussion_ids = _string_tuple(row.get("discussion_signal_row_ids"))
+        raw_discussion_ids = row.get("discussion_signal_row_ids")
+        row_discussion_ids = _string_tuple(raw_discussion_ids)
         discussion_row_ids.update(row_discussion_ids)
         action = str(row.get("action") or "").strip()
         if action in reportable_actions and not row_discussion_ids:
-            reasons.append(f"missing_discussion_signal_row_ids:{row_id}")
+            reportable_rows_without_discussion_ids.append((row_id, row))
+            if not isinstance(raw_discussion_ids, list | tuple):
+                reasons.append(f"missing_discussion_signal_row_ids:{row_id}")
 
     if source_row_ids:
         source_path = artifact_dir / SOURCE_VERIFICATION_ARTIFACT
@@ -367,18 +380,21 @@ def _governor_citation_issue_reasons(*, artifact_dir: Path, disposition_payload:
                 missing_source_rows = tuple(sorted(row_id for row_id in source_row_ids if row_id not in source_rows))
                 reasons.extend(f"missing_source_citation_row:{row_id}" for row_id in missing_source_rows)
 
-    if discussion_row_ids:
-        discussion_path = artifact_dir / "discussion_signals.json"
+    if discussion_row_ids or reportable_rows_without_discussion_ids:
+        discussion_path = artifact_dir / DISCUSSION_SIGNALS_ARTIFACT
         if not discussion_path.is_file():
-            reasons.append("missing_artifact:discussion_signals.json")
+            reasons.append(f"missing_artifact:{DISCUSSION_SIGNALS_ARTIFACT}")
         else:
             discussion_payload = _load_json_object(discussion_path)
             if discussion_payload is None:
-                reasons.append("malformed_artifact:discussion_signals.json")
+                reasons.append(f"malformed_artifact:{DISCUSSION_SIGNALS_ARTIFACT}")
             else:
                 discussion_rows = _rows_by_id(discussion_payload)
                 missing_discussion_rows = tuple(sorted(row_id for row_id in discussion_row_ids if row_id not in discussion_rows))
                 reasons.extend(f"missing_discussion_citation_row:{row_id}" for row_id in missing_discussion_rows)
+                for row_id, row in reportable_rows_without_discussion_ids:
+                    if any(_discussion_row_matches_disposition(discussion_row, row) for discussion_row in discussion_rows.values()):
+                        reasons.append(f"missing_discussion_signal_row_ids:{row_id}")
 
     return tuple(dict.fromkeys(reasons))
 
@@ -409,7 +425,7 @@ def _citation_text(row: dict[str, Any] | None) -> str:
 
 def _discussion_text(row_ids: tuple[str, ...], discussion_rows: dict[str, dict[str, Any]]) -> tuple[str, str | None]:
     if not row_ids:
-        return "none", None
+        return f"none (`{DISCUSSION_SIGNALS_ARTIFACT}` has no linked signal rows)", None
     parts: list[str] = []
     caveats: list[str] = []
     for row_id in row_ids:

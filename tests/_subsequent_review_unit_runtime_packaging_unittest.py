@@ -183,6 +183,33 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             self.assertEqual(manifest["modules"]["review_context_packager"]["status"], "success")
             self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
 
+    def test_strict_governor_accepts_reportable_source_only_rows_when_discussion_has_no_signals(self) -> None:
+        from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_seed_runtime_artifacts(artifact_dir)
+            discussion_payload = json.loads((artifact_dir / "discussion_signals.json").read_text(encoding="utf-8"))
+            discussion_payload["rows"] = []
+            (artifact_dir / "discussion_signals.json").write_text(json.dumps(discussion_payload), encoding="utf-8")
+            disposition_payload = json.loads((artifact_dir / "disposition_ledger.json").read_text(encoding="utf-8"))
+            disposition_payload["dispositions"][1]["discussion_signal_row_ids"] = []
+            disposition_payload["dispositions"][1]["provenance"]["discussion_signal_classes"] = []
+            disposition_payload["dispositions"][1]["provenance"]["discussion_policies"] = []
+            (artifact_dir / "disposition_ledger.json").write_text(json.dumps(disposition_payload), encoding="utf-8")
+
+            result = prepare_review_runtime_pre_prompt(
+                artifact_dir=artifact_dir,
+                governor_mode="strict",
+                manifest_path=manifest_path,
+            )
+
+            self.assertIn("### Still Open", result.prior_review_brief)
+            self.assertIn("Discussion: none", result.prior_review_brief)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
+            self.assertNotIn("reasons", manifest["modules"]["report_governor"])
+
     def test_strict_governor_fails_closed_when_citation_ledger_missing(self) -> None:
         from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
 
