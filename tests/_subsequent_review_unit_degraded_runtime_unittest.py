@@ -34,6 +34,41 @@ class SubsequentReviewDegradedRuntimeTests(SubsequentReviewTestCase):
         self.assertEqual(runtime["status"], "success")
         self.assertEqual([item["choice"] for item in runtime["operator_choices"]], ["retry"])
 
+    def test_controller_accepts_metadata_only_thread_state_gap_without_erasing_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            controller = DiscussionFetchController(
+                fetch_discussion=lambda: DiscussionArtifact(
+                    status=ModuleStatus.DEGRADED,
+                    events=(
+                        DiscussionEvent(
+                            kind="issue_comment",
+                            event_id="official-footer",
+                            author="human-operator",
+                            body=f"CURe Review\n{CURE_FOOTER_BLOCK}",
+                        ),
+                    ),
+                    status_reasons=("thread_state_unavailable",),
+                ),
+                artifact_dir=artifact_dir,
+                interactive=False,
+            )
+            result = controller.fetch()
+
+            decision, _discussion = decide_subsequent_review(
+                pr=PR(),
+                completed_sessions=[],
+                mode=SubsequentReviewCommandMode.AUTO,
+                evidence_policy=EvidencePolicy.UNTRUSTED,
+                discussion=result,
+            )
+
+        self.assertEqual(len(result.events), 1)
+        self.assertFalse((artifact_dir / "degraded_runtime.json").exists())
+        self.assertTrue(decision.enabled)
+        self.assertIn("cure_pr_discussion_found", decision.reasons)
+        self.assertIn("thread_state_unavailable", decision.degraded_reasons)
+
     def test_controller_skip_records_auditable_empty_discussion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             controller = DiscussionFetchController(

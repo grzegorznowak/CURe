@@ -226,6 +226,9 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("Subsequent-review output override", text)
             self.assertIn("MUST begin with `### Prior Review Issue History`", text)
             self.assertIn("preserve the brief's stable issue titles and status labels", text)
+            self.assertIn("Internal DA coverage", text)
+            self.assertIn("collapsible audit/provenance appendix", text)
+            self.assertNotIn("Include `### Internal DA coverage` with every DA-* status before the normal review sections", text)
         for path in schema_bound_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("$PRIOR_REVIEW_BRIEF", text)
@@ -763,6 +766,33 @@ class PromptTemplateTests(unittest.TestCase):
             "$PRIOR_REVIEW_BRIEF",
             (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
         )
+
+    def test_incremental_resume_step_entries_thread_prior_review_brief_into_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step_output = root / "review.step-01.md"
+            entries = rf._build_incremental_resume_step_entries(
+                steps=[{"id": "01", "title": "Routing", "focus": "Inspect routing"}],
+                session_dir=root,
+                resume_plan_json_path=root / "review_resume_plan.json",
+                templates=rf.incremental_resume_prompt_template_names(),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                pr=rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1),
+                agent_desc="agent",
+                review_intelligence_cfg=_review_intelligence_cfg(),
+                review_intelligence_capabilities=None,
+                previous_review_md_path=root / "previous-review.md",
+                previous_review_head_sha="abc123",
+                current_review_head_sha="def456",
+                cod_ledger_enabled=False,
+                prior_review_brief="### Still Open\n- D-0002 — retry gap",
+            )
+
+        self.assertEqual(entries[0].output_path, step_output)
+        self.assertIn("### Still Open\n- D-0002", entries[0].prompt)
+        self.assertNotIn("$PRIOR_REVIEW_BRIEF", entries[0].prompt)
 
     def test_final_review_templates_require_input_boundary_shape_risk_assessment(self) -> None:
         prompt_paths = [

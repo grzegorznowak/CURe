@@ -79,6 +79,7 @@ class ModuleRunRecord:
     status: ModuleStatus
     reasons: tuple[str, ...] = ()
     artifact_path: str | None = None
+    observability: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"status": self.status.value}
@@ -86,6 +87,8 @@ class ModuleRunRecord:
             payload["reasons"] = list(self.reasons)
         if self.artifact_path:
             payload["artifact_path"] = self.artifact_path
+        if self.observability:
+            payload["observability"] = self.observability
         return payload
 
 
@@ -341,14 +344,18 @@ class SourceVerificationLedger:
     status: ModuleStatus
     rows: tuple[SourceVerificationRow, ...] = ()
     status_reasons: tuple[str, ...] = ()
+    observability: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": SUBSEQUENT_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "status": self.status.value,
             "status_reasons": list(self.status_reasons),
             "rows": [item.to_json() for item in self.rows],
         }
+        if self.observability:
+            payload["observability"] = self.observability
+        return payload
 
 
 @dataclass(frozen=True)

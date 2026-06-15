@@ -10,6 +10,7 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
         group_id: str = "G-0001",
         finding_id: str = "A-01",
         fingerprint: str = "",
+        provenance: dict[str, Any] | None = None,
     ) -> Any:
         from cure_subsequent_review.contracts import SourceVerificationLedger, SourceVerificationRow
 
@@ -23,7 +24,7 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
                     source_state=state,
                     current_source_citations=({"path": "app.py", "start_line": 10, "summary": "fixed"},),
                     inspected_source_refs=("app.py:10",),
-                    provenance={"rationale": "source checked", "fingerprint": fingerprint},
+                    provenance={"rationale": "source checked", "fingerprint": fingerprint, **dict(provenance or {})},
                 ),
             ),
         )
@@ -124,6 +125,9 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
             self.assertEqual(ledger.rows[0].provenance["source"], "memory_cache")
             self.assertEqual(ledger.rows[0].provenance["not_source_proof"], True)
             self.assertEqual([call.group_id for call in provider_calls], ["G-0002"])
+            self.assertEqual(ledger.observability["verifier_fanout"]["provider_call_count"], 1)
+            self.assertEqual(ledger.observability["verifier_fanout"]["cache"]["hit_count"], 1)
+            self.assertEqual(ledger.observability["verifier_fanout"]["cache"]["miss_count"], 1)
 
             provider_calls.clear()
             stale = verify_source_truth(
@@ -134,6 +138,68 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
             )
             self.assertEqual([call.group_id for call in provider_calls], ["G-0001", "G-0002"])
             self.assertNotEqual(stale.rows[0].provenance.get("source"), "memory_cache")
+
+    def test_policy_approved_footer_replay_preserves_provenance_and_disposition(self) -> None:
+        from cure_subsequent_review.contracts import (
+            DiscussionSignalLedger,
+            DispositionAction,
+            SourceState,
+        )
+        from cure_subsequent_review.disposition import arbitrate_dispositions
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        finding = self._finding_candidate(
+            finding_id="CURE-001",
+            title="Footer-marked PR comments are accepted without authenticated CURe authorship provenance",
+            evidence="cure_subsequent_review/prior_corpus.py:24",
+        )
+        reconciliation = reconcile_findings(findings=(finding,))
+        discussion = DiscussionSignalLedger(status=ModuleStatus.SUCCESS)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            fresh = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=lambda _request: FindingVerificationResult(source_state=SourceState.STILL_OPEN),
+                memory_store=store,
+                current_head="head-ok",
+            )
+            fresh_disposition = arbitrate_dispositions(
+                reconciliation=reconciliation,
+                source_verification=fresh,
+                discussion_signals=discussion,
+            )
+            self.assertEqual(fresh.rows[0].provenance["policy_override"], "official_footer_marker_acceptance")
+            self.assertEqual(fresh_disposition.dispositions[0].action, DispositionAction.MOVE_OUT_OF_SCOPE)
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=fresh,
+                disposition_ledger=fresh_disposition,
+            )
+
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="would re-report if called")
+
+            replayed = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+            replayed_disposition = arbitrate_dispositions(
+                reconciliation=reconciliation,
+                source_verification=replayed,
+                discussion_signals=discussion,
+            )
+
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(replayed.rows[0].provenance["source"], "memory_cache")
+            self.assertEqual(replayed.rows[0].provenance["policy_override"], "official_footer_marker_acceptance")
+            self.assertEqual(replayed_disposition.dispositions[0].action, DispositionAction.MOVE_OUT_OF_SCOPE)
 
     def test_resolved_replay_rejects_same_ordinal_group_with_different_finding_identity(self) -> None:
         from cure_subsequent_review.contracts import DispositionAction, SourceState
@@ -191,6 +257,262 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
             )
 
             self.assertIsNone(row)
+
+    def test_terminal_non_reportable_replay_uses_stable_identity_and_marks_not_source_proof(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        finding = self._finding_candidate(finding_id="A-01", title="duplicate finding", evidence="app.py:10")
+        reconciliation = reconcile_findings(findings=(finding,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.STILL_OPEN,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=reconciliation.groups[0].fingerprint,
+                ),
+                disposition_ledger=self._disposition_ledger(
+                    action=DispositionAction.SUPPRESS_DUPLICATE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                ),
+            )
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+            ledger = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(ledger.rows[0].source_state, SourceState.STILL_OPEN)
+            self.assertEqual(ledger.rows[0].provenance["source"], "memory_cache")
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "hit")
+            self.assertEqual(ledger.rows[0].provenance["cache_reason"], "terminal_non_reportable_replay")
+            self.assertEqual(ledger.rows[0].provenance["cached_disposition"], "suppress_duplicate")
+            self.assertEqual(ledger.rows[0].provenance["not_source_proof"], True)
+
+    def test_terminal_replay_matrix_only_replays_safe_outcomes(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        cases = (
+            ("resolved_from_source", SourceState.RESOLVED_FROM_SOURCE, DispositionAction.CONFIRM_RESOLVED, True, "resolved_from_source_replay"),
+            ("duplicate", SourceState.STILL_OPEN, DispositionAction.SUPPRESS_DUPLICATE, True, "terminal_non_reportable_replay"),
+            ("out_of_scope", SourceState.STILL_OPEN, DispositionAction.MOVE_OUT_OF_SCOPE, True, "terminal_non_reportable_replay"),
+            ("dropped_not_relevant", SourceState.STILL_OPEN, DispositionAction.MOVE_OUT_OF_SCOPE, True, "terminal_non_reportable_replay"),
+            ("still_open_reportable", SourceState.STILL_OPEN, DispositionAction.RE_REPORT, False, ""),
+            ("source_unknown", SourceState.SOURCE_UNKNOWN, DispositionAction.SUPPRESS_DUPLICATE, False, ""),
+            ("not_verifiable", SourceState.NOT_VERIFIABLE, DispositionAction.MOVE_OUT_OF_SCOPE, False, ""),
+        )
+        for label, cached_state, cached_action, should_replay, expected_reason in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                current = self._finding_candidate(finding_id="A-01", title=f"{label} finding", evidence="app.py:10")
+                reconciliation = reconcile_findings(findings=(current,))
+                store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+                store.update_findings(
+                    current_head="head-ok",
+                    source_verification=self._source_ledger(
+                        state=cached_state,
+                        group_id="G-0001",
+                        finding_id="A-01",
+                        fingerprint=reconciliation.groups[0].fingerprint,
+                    ),
+                    disposition_ledger=self._disposition_ledger(
+                        action=cached_action,
+                        group_id="G-0001",
+                        finding_id="A-01",
+                    ),
+                )
+                provider_calls: list[Any] = []
+
+                def provider(request: Any) -> FindingVerificationResult:
+                    provider_calls.append(request)
+                    return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh verification")
+
+                ledger = verify_source_truth(
+                    reconciliation=reconciliation,
+                    verifier=provider,
+                    memory_store=store,
+                    current_head="head-ok",
+                )
+
+                if should_replay:
+                    self.assertEqual(provider_calls, [])
+                    self.assertEqual(ledger.rows[0].provenance["source"], "memory_cache")
+                    self.assertEqual(ledger.rows[0].provenance["cache_reason"], expected_reason)
+                    if cached_state is not SourceState.RESOLVED_FROM_SOURCE:
+                        self.assertEqual(ledger.rows[0].provenance["not_source_proof"], True)
+                        self.assertEqual(ledger.rows[0].source_state, SourceState.STILL_OPEN)
+                    else:
+                        self.assertEqual(ledger.rows[0].source_state, SourceState.RESOLVED_FROM_SOURCE)
+                else:
+                    self.assertEqual([call.group_id for call in provider_calls], ["G-0001"])
+                    self.assertNotEqual(ledger.rows[0].provenance.get("source"), "memory_cache")
+                    self.assertEqual(ledger.rows[0].provenance["cache_status"], "miss")
+                    self.assertNotIn("not_source_proof", ledger.rows[0].provenance)
+
+    def test_stable_identity_can_hit_after_reordered_group_id(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        current = self._finding_candidate(finding_id="A-01", title="stable finding", evidence="app.py:10")
+        reconciliation = reconcile_findings(findings=(current,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0099",
+                    finding_id="A-01",
+                    fingerprint=reconciliation.groups[0].fingerprint,
+                ),
+                disposition_ledger=self._disposition_ledger(
+                    action=DispositionAction.CONFIRM_RESOLVED,
+                    group_id="G-0099",
+                    finding_id="A-01",
+                ),
+            )
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+            ledger = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(ledger.rows[0].group_id, "G-0001")
+            self.assertEqual(ledger.rows[0].provenance["cached_group_id"], "G-0099")
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "hit")
+            self.assertEqual(ledger.rows[0].source_state, SourceState.RESOLVED_FROM_SOURCE)
+
+    def test_persisting_replayed_row_preserves_stable_identity_for_next_same_head_run(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        current = self._finding_candidate(finding_id="A-01", title="stable replay finding", evidence="app.py:10")
+        reconciliation = reconcile_findings(findings=(current,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=reconciliation.groups[0].fingerprint,
+                ),
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+
+            first_replay = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=lambda _request: FindingVerificationResult(source_state=SourceState.STILL_OPEN),
+                memory_store=store,
+                current_head="head-ok",
+            )
+            self.assertEqual(first_replay.rows[0].provenance["source"], "memory_cache")
+
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=first_replay,
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+            persisted = json.loads(store.path.read_text(encoding="utf-8"))["findings"]["G-0001"]
+            self.assertEqual(persisted["stable_identity"]["fingerprint"], reconciliation.groups[0].fingerprint)
+
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="should not be called")
+
+            second_replay = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(second_replay.rows[0].provenance["source"], "memory_cache")
+
+    def test_cache_miss_records_reason_when_only_ordinal_group_matches(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        current = self._finding_candidate(finding_id="A-01", title="current finding", evidence="app.py:10")
+        reconciliation = reconcile_findings(findings=(current,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint="cached-different-fingerprint",
+                ),
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+            ledger = verify_source_truth(
+                reconciliation=reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual([call.group_id for call in provider_calls], ["G-0001"])
+            self.assertEqual(ledger.rows[0].source_state, SourceState.STILL_OPEN)
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "miss")
+            self.assertEqual(ledger.rows[0].provenance["cache_reason"], "stable_identity_mismatch")
+
+    def test_cache_bypass_reason_is_recorded_when_memory_gate_is_off(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        reconciliation = reconcile_findings(
+            findings=(self._finding_candidate(finding_id="A-01", title="fresh finding", evidence="app.py:10"),)
+        )
+
+        def provider(_request: Any) -> FindingVerificationResult:
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider)
+
+        self.assertEqual(ledger.rows[0].provenance["cache_status"], "bypass")
+        self.assertEqual(ledger.rows[0].provenance["cache_reason"], "memory_store_unavailable")
 
 
 __all__ = ["SubsequentReviewMemoryStoreTests"]

@@ -99,8 +99,67 @@ class SubsequentReviewSourceTruthTests(SubsequentReviewTestCase):
         self.assertIn("official CURe footer", ledger.rows[0].provenance["rationale"])
         self.assertIn("body-only", ledger.rows[0].current_source_citations[0]["summary"])
 
+    def test_official_footer_policy_preempts_untrusted_skip_discussion(self) -> None:
+        from cure_subsequent_review.contracts import (
+            DiscussionSignalClass,
+            DiscussionSignalLedger,
+            DiscussionSignalRow,
+            DispositionAction,
+            EvidencePolicy,
+            SourceState,
+        )
+        from cure_subsequent_review.disposition import arbitrate_dispositions
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        finding = self._finding_candidate(
+            finding_id="CURE-001",
+            title="Footer-marked PR comments are accepted without authenticated CURe authorship provenance",
+            evidence="cure_subsequent_review/prior_corpus.py:24",
+        )
+        reconciliation = reconcile_findings(findings=(finding,))
+        discussion = DiscussionSignalLedger(
+            status=ModuleStatus.SUCCESS,
+            rows=(
+                DiscussionSignalRow(
+                    row_id="DS-0001",
+                    event_id="C-01",
+                    group_ids=("G-0001",),
+                    finding_ids=("CURE-001",),
+                    signal_class=DiscussionSignalClass.PUSHBACK,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    authority="developer",
+                    reasons=("operator_pushback",),
+                    provenance={"rationale": "untrusted pushback is discussion context, not source truth"},
+                ),
+            ),
+        )
+        provider_calls: list[Any] = []
+
+        def provider(request: Any) -> FindingVerificationResult:
+            provider_calls.append(request)
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="would re-report if called")
+
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider, discussion_signals=discussion)
+        disposition = arbitrate_dispositions(
+            reconciliation=reconciliation,
+            source_verification=ledger,
+            discussion_signals=discussion,
+        )
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(ledger.rows[0].source_state, SourceState.RESOLVED_FROM_SOURCE)
+        self.assertEqual(ledger.rows[0].provenance["policy_override"], "official_footer_marker_acceptance")
+        self.assertNotIn("source_verification_skipped_by_discussion_signals", ledger.rows[0].unavailable_reasons)
+        self.assertEqual(disposition.dispositions[0].action, DispositionAction.MOVE_OUT_OF_SCOPE)
+
     def test_body_only_cure_text_finding_still_uses_source_verifier(self) -> None:
-        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.contracts import (
+            DiscussionSignalClass,
+            DiscussionSignalLedger,
+            DiscussionSignalRow,
+            EvidencePolicy,
+            SourceState,
+        )
         from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
 
         finding = self._finding_candidate(
@@ -109,17 +168,58 @@ class SubsequentReviewSourceTruthTests(SubsequentReviewTestCase):
             evidence="cure_subsequent_review/prior_corpus.py:117",
         )
         reconciliation = reconcile_findings(findings=(finding,))
+        discussion = DiscussionSignalLedger(
+            status=ModuleStatus.SUCCESS,
+            rows=(
+                DiscussionSignalRow(
+                    row_id="DS-0001",
+                    event_id="C-01",
+                    group_ids=("G-0001",),
+                    finding_ids=("CURE-002",),
+                    signal_class=DiscussionSignalClass.DEVELOPER_CLAIM_FIXED,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    authority="developer",
+                    reasons=("linked_by_llm",),
+                    provenance={},
+                ),
+            ),
+        )
         provider_calls: list[Any] = []
 
         def provider(request: Any) -> FindingVerificationResult:
             provider_calls.append(request)
             return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="body-only text is still rejected")
 
-        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider)
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider, discussion_signals=discussion)
 
         self.assertEqual([request.group_id for request in provider_calls], ["G-0001"])
         self.assertEqual(ledger.rows[0].source_state, SourceState.STILL_OPEN)
+        self.assertEqual(provider_calls[0].discussion_signals[0]["row_id"], "DS-0001")
         self.assertNotIn("policy_override", ledger.rows[0].provenance)
+
+    def test_verifier_fanout_observability_records_call_counts_cache_and_timing(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        first = self._finding_candidate(finding_id="A-01", title="First prior bug", evidence="src/app.py:10")
+        second = self._finding_candidate(finding_id="A-02", title="Second prior bug", evidence="src/other.py:20")
+        reconciliation = reconcile_findings(findings=(first, second))
+        provider_calls: list[Any] = []
+
+        def provider(request: Any) -> FindingVerificationResult:
+            provider_calls.append(request)
+            return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="checked source")
+
+        ledger = verify_source_truth(reconciliation=reconciliation, verifier=provider)
+
+        fanout = ledger.observability["verifier_fanout"]
+        self.assertEqual([request.group_id for request in provider_calls], ["G-0001", "G-0002"])
+        self.assertEqual(fanout["group_count"], 2)
+        self.assertEqual(fanout["provider_call_count"], 2)
+        self.assertEqual(fanout["cache"]["bypass_count"], 2)
+        self.assertEqual(fanout["cache"]["bypass_reasons"]["memory_store_unavailable"], 2)
+        self.assertIn("elapsed_seconds", fanout["timing"])
+        self.assertIn("provider_seconds", fanout["timing"])
 
     def test_variant_c_request_includes_changed_files_and_linked_discussion_signals(self) -> None:
         from cure_subsequent_review.contracts import (

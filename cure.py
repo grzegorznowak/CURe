@@ -4550,6 +4550,17 @@ def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
     return verdicts.business == "REJECT" or verdicts.technical == "REJECT"
 
 
+def _prior_review_brief_from_meta(meta: dict[str, Any]) -> str:
+    raw_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    governor_brief_text = str((raw_paths or {}).get("subsequent_review_governor_brief") or "").strip()
+    if not governor_brief_text:
+        return ""
+    try:
+        return Path(governor_brief_text).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False, prior_review_brief: str = "") -> str:
     lines: list[str] = []
     if include_steps_taken:
@@ -6536,6 +6547,7 @@ def _build_incremental_resume_step_entries(
     previous_review_head_sha: str,
     current_review_head_sha: str,
     cod_ledger_enabled: bool = False,
+    prior_review_brief: str = "",
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["resume_step"])
     entries: list[MultipassStepEntry] = []
@@ -6562,7 +6574,7 @@ def _build_incremental_resume_step_entries(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
-                "PRIOR_REVIEW_BRIEF": "",
+                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                 "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
                 "PREVIOUS_REVIEW_MD": str(previous_review_md_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": previous_review_head_sha,
@@ -11178,6 +11190,7 @@ def _run_incremental_completed_multipass_resume(
     resume_meta = mp.setdefault("resume", {})
     previous_review_snapshot_path = work_dir / "review.resume.previous.md"
     shutil.copy2(previous_review_point.artifact_path, previous_review_snapshot_path)
+    prior_review_brief = _prior_review_brief_from_meta(meta)
 
     plan_json_text = str(mp.get("plan_json_path") or "").strip()
     existing_plan_path = Path(plan_json_text).resolve() if plan_json_text else (work_dir / "review_plan.json").resolve()
@@ -11232,6 +11245,7 @@ def _run_incremental_completed_multipass_resume(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
+                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -11350,6 +11364,7 @@ def _run_incremental_completed_multipass_resume(
         previous_review_head_sha=str(previous_review_point.head_sha or "").strip(),
         current_review_head_sha=current_review_head_sha,
         cod_ledger_enabled=cod_ledger_enabled,
+        prior_review_brief=prior_review_brief,
     ):
         should_run = False
         if entry.step_id in reopen_step_ids or entry.index > base_step_count:
@@ -11526,6 +11541,7 @@ def _run_incremental_completed_multipass_resume(
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
                 **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
+                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                 "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
                 "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
                 "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
@@ -12758,6 +12774,7 @@ def _followup_flow_impl(
             profile_resolved = "normal"
         followup_template_name = followup_prompt_template_name_for_profile(profile_resolved)
         followup_template = load_builtin_prompt_text(followup_template_name)
+        prior_review_brief = _prior_review_brief_from_meta(meta)
         followup_prompt = render_prompt(
             followup_template,
             base_ref_for_review=base_ref_for_review,
@@ -12777,6 +12794,7 @@ def _followup_flow_impl(
                 **verbose_review_findings_prompt_vars(
                     enabled=bool(getattr(args, "wtf", False))
                 ),
+                "PRIOR_REVIEW_BRIEF": prior_review_brief,
                 "PREVIOUS_REVIEW_MD": str(review_md_path),
                 "HEAD_SHA_BEFORE": head_before,
                 "HEAD_SHA_AFTER": head_after,

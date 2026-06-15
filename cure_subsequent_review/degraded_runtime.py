@@ -105,9 +105,10 @@ class DiscussionFetchController:
 
 
 def _is_degraded_discussion(artifact: DiscussionArtifact) -> bool:
-    return artifact.status is ModuleStatus.DEGRADED or any(
-        reason in _DEGRADED_DISCUSSION_REASONS for reason in artifact.status_reasons
-    )
+    reasons = tuple(str(reason or "").strip() for reason in artifact.status_reasons if str(reason or "").strip())
+    if reasons:
+        return any(reason in _DEGRADED_DISCUSSION_REASONS for reason in reasons)
+    return artifact.status is ModuleStatus.DEGRADED
 
 
 def _skipped_discussion(artifact: DiscussionArtifact) -> DiscussionArtifact:

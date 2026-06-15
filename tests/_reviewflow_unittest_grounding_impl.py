@@ -3110,6 +3110,9 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
             chunkhound_dir.mkdir(parents=True, exist_ok=True)
             review_md = session_dir / "review.md"
             review_md.write_text(_sectioned_review_markdown(business="APPROVE", technical="APPROVE"), encoding="utf-8")
+            governor_brief = work_dir / "subsequent" / "governor_brief.md"
+            governor_brief.parent.mkdir(parents=True, exist_ok=True)
+            governor_brief.write_text("### Still Open\n- D-0002 — retry gap\n", encoding="utf-8")
             meta = {
                 "session_id": "session-1",
                 "status": "done",
@@ -3133,6 +3136,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
                     "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
                     "review_md": str(review_md),
+                    "subsequent_review_governor_brief": str(governor_brief),
                 },
             }
             (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
@@ -3191,6 +3195,14 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     str(current_meta["live_progress"]["current"]["text"]),
                 )
                 return _Result()
+
+            captured_render_extra_vars: dict[str, object] = {}
+
+            def fake_render_prompt(*args: object, **kwargs: object) -> str:
+                extra_vars = kwargs.get("extra_vars")
+                if isinstance(extra_vars, dict):
+                    captured_render_extra_vars.update(extra_vars)
+                return "Prompt"
 
             def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
                 output_path = Path(str(kwargs["output_path"]))
@@ -3258,7 +3270,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight"))
                 stack.enter_context(mock.patch.object(rf, "load_builtin_prompt_text", return_value="Prompt"))
                 stack.enter_context(mock.patch.object(rf, "review_intelligence_prompt_vars", return_value={}))
-                stack.enter_context(mock.patch.object(rf, "render_prompt", return_value="Prompt"))
+                stack.enter_context(mock.patch.object(rf, "render_prompt", side_effect=fake_render_prompt))
                 stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
                 stack.enter_context(
                     mock.patch.object(
@@ -3276,6 +3288,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
             self.assertNotIn("live_progress", refreshed)
             self.assertEqual(refreshed["chunkhound"]["last_index"]["scope"], "followup")
             self.assertEqual(refreshed["phases"]["followup_index"]["status"], "done")
+            self.assertEqual(captured_render_extra_vars["PRIOR_REVIEW_BRIEF"], "### Still Open\n- D-0002 — retry gap\n")
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -16423,6 +16436,9 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 json.dumps({"steps": [{"id": "01", "title": "step one", "focus": "focus"}]}),
                 encoding="utf-8",
             )
+            governor_brief = work_dir / "subsequent" / "governor_brief.md"
+            governor_brief.parent.mkdir(parents=True, exist_ok=True)
+            governor_brief.write_text("### Still Open\n- D-0002 — retry gap\n", encoding="utf-8")
             step_output = session_dir / "review.step-01.md"
             step_output.write_text("step output\n", encoding="utf-8")
             meta_path = session_dir / "meta.json"
@@ -16438,6 +16454,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                         "resume": {},
                         "artifacts": {},
                     },
+                    "paths": {"subsequent_review_governor_brief": str(governor_brief)},
                     "llm": {},
                     "codex": {},
                 }
@@ -16446,10 +16463,14 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             captured: dict[str, str] = {}
 
             def fake_execute_multipass_synth_stage(**kwargs: Any) -> None:
-                captured["prompt"] = str(kwargs["synth_prompt"])
+                captured["synth_prompt"] = str(kwargs["synth_prompt"])
                 return None
 
-            llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
+            def fake_run_llm_exec(**kwargs: Any) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs.get("output_path") or ""))
+                if output_path.name == "review.resume-plan.md":
+                    captured["plan_prompt"] = str(kwargs["prompt"])
+                return rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
             stage_llm = {
                 "resolved": {"provider": "openai", "model": "gpt-5", "reasoning_effort": "medium"},
                 "resolution_meta": {"resolved": {"reasoning_effort": "medium"}},
@@ -16468,7 +16489,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ]
 
             with (
-                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec),
                 mock.patch.object(
                     rf,
                     "parse_incremental_resume_plan_json",
@@ -16520,7 +16541,9 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     cod_ledger_enabled=False,
                 )
 
-            prompt = captured["prompt"]
+            self.assertIn("### Still Open\n- D-0002", captured["plan_prompt"])
+            prompt = captured["synth_prompt"]
+            self.assertIn("### Still Open\n- D-0002", prompt)
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", prompt)
             self.assertIn("<details open>", prompt)
             self.assertIn("SEVERITY_LABEL", prompt)

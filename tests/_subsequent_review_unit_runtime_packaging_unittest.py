@@ -210,6 +210,48 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
                     manifest_path=manifest_path,
                 )
 
+    def test_strict_governor_fails_closed_when_disposition_omits_required_citation_ids(self) -> None:
+        from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_seed_runtime_artifacts(artifact_dir)
+            payload = json.loads((artifact_dir / "disposition_ledger.json").read_text(encoding="utf-8"))
+            payload["dispositions"][1]["source_verification_row_id"] = ""
+            payload["dispositions"][1]["discussion_signal_row_ids"] = []
+            (artifact_dir / "disposition_ledger.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "source_verification_row_id"):
+                prepare_review_runtime_pre_prompt(
+                    artifact_dir=artifact_dir,
+                    governor_mode="strict",
+                    manifest_path=manifest_path,
+                )
+
+    def test_warn_governor_records_degraded_when_disposition_omits_required_citation_ids(self) -> None:
+        from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_seed_runtime_artifacts(artifact_dir)
+            payload = json.loads((artifact_dir / "disposition_ledger.json").read_text(encoding="utf-8"))
+            payload["dispositions"][1]["source_verification_row_id"] = ""
+            payload["dispositions"][1]["discussion_signal_row_ids"] = []
+            (artifact_dir / "disposition_ledger.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            result = prepare_review_runtime_pre_prompt(
+                artifact_dir=artifact_dir,
+                governor_mode="warn",
+                manifest_path=manifest_path,
+            )
+
+            self.assertIn("source citation unavailable", result.prior_review_brief)
+            self.assertIn("Discussion: none", result.prior_review_brief)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["modules"]["report_governor"]["status"], "degraded")
+            self.assertIn("missing_source_verification_row_id:D-0002", manifest["modules"]["report_governor"]["reasons"])
+            self.assertIn("missing_discussion_signal_row_ids:D-0002", manifest["modules"]["report_governor"]["reasons"])
+
     def test_warn_governor_continues_when_citation_ledger_missing(self) -> None:
         from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
 
@@ -228,7 +270,9 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             self.assertIn("source citation unavailable", result.prior_review_brief)
             self.assertIn("Discussion: DS-0001", result.prior_review_brief)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
+            self.assertEqual(manifest["modules"]["report_governor"]["status"], "degraded")
+            self.assertIn("missing_artifact:source_verification.json", manifest["modules"]["report_governor"]["reasons"])
+            self.assertIn("missing_artifact:discussion_signals.json", manifest["modules"]["report_governor"]["reasons"])
 
     def test_runtime_finalization_refreshes_package_context_and_meta_after_late_status_updates(self) -> None:
         from cure_subsequent_review.memory_store import ReviewMemoryStore

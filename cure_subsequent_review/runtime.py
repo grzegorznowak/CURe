@@ -76,6 +76,28 @@ def _load_json_object(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _disabled_review_memory_record_from_manifest(manifest_path: Path | None) -> ModuleRunRecord | None:
+    if manifest_path is None:
+        return None
+    payload = _load_json_object(manifest_path)
+    if payload is None:
+        return None
+    modules = payload.get("modules")
+    if not isinstance(modules, dict):
+        return None
+    raw_record = modules.get(SubsequentReviewModule.REVIEW_MEMORY_STORE.value)
+    if not isinstance(raw_record, dict):
+        return None
+    if str(raw_record.get("status") or "").strip() != ModuleStatus.DISABLED.value:
+        return None
+    return ModuleRunRecord(
+        module=SubsequentReviewModule.REVIEW_MEMORY_STORE,
+        status=ModuleStatus.DISABLED,
+        reasons=_string_tuple(raw_record.get("reasons")),
+        observability=_dict_value(raw_record.get("observability")),
+    )
+
+
 def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, list | tuple):
         return ()
@@ -309,40 +331,64 @@ def _rows_by_id(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return {str(row.get("row_id") or "").strip(): dict(row) for row in rows if isinstance(row, dict)}
 
 
-def _strict_governor_validate_citation_ledgers(*, artifact_dir: Path, disposition_payload: dict[str, Any]) -> None:
-    """Fail closed when strict governor context cannot cite required ledgers."""
+def _governor_citation_issue_reasons(*, artifact_dir: Path, disposition_payload: dict[str, Any]) -> tuple[str, ...]:
+    """Return missing/malformed citation provenance reasons for governor rows."""
 
     raw_dispositions = disposition_payload.get("dispositions")
     dispositions = [dict(row) for row in raw_dispositions if isinstance(row, dict)] if isinstance(raw_dispositions, list) else []
-    source_row_ids = {str(row.get("source_verification_row_id") or "").strip() for row in dispositions}
-    source_row_ids.discard("")
-    discussion_row_ids = {row_id for row in dispositions for row_id in _string_tuple(row.get("discussion_signal_row_ids"))}
+    reasons: list[str] = []
+    source_row_ids: set[str] = set()
+    discussion_row_ids: set[str] = set()
+    reportable_actions = {DispositionAction.RE_REPORT.value, DispositionAction.REWORD_PARTIAL.value}
+
+    for index, row in enumerate(dispositions, start=1):
+        row_id = str(row.get("row_id") or f"disposition-{index}").strip()
+        source_row_id = str(row.get("source_verification_row_id") or "").strip()
+        if source_row_id:
+            source_row_ids.add(source_row_id)
+        else:
+            reasons.append(f"missing_source_verification_row_id:{row_id}")
+        row_discussion_ids = _string_tuple(row.get("discussion_signal_row_ids"))
+        discussion_row_ids.update(row_discussion_ids)
+        action = str(row.get("action") or "").strip()
+        if action in reportable_actions and not row_discussion_ids:
+            reasons.append(f"missing_discussion_signal_row_ids:{row_id}")
 
     if source_row_ids:
         source_path = artifact_dir / SOURCE_VERIFICATION_ARTIFACT
         if not source_path.is_file():
-            raise ValueError(f"missing required subsequent-review artifact: {SOURCE_VERIFICATION_ARTIFACT}")
-        source_payload = _load_json_object(source_path)
-        if source_payload is None:
-            raise ValueError(f"malformed required subsequent-review artifact: {SOURCE_VERIFICATION_ARTIFACT}")
-        source_rows = _rows_by_id(source_payload)
-        missing_source_rows = tuple(sorted(row_id for row_id in source_row_ids if row_id not in source_rows))
-        if missing_source_rows:
-            missing = ", ".join(missing_source_rows)
-            raise ValueError(f"missing required source citation row(s) in {SOURCE_VERIFICATION_ARTIFACT}: {missing}")
+            reasons.append(f"missing_artifact:{SOURCE_VERIFICATION_ARTIFACT}")
+        else:
+            source_payload = _load_json_object(source_path)
+            if source_payload is None:
+                reasons.append(f"malformed_artifact:{SOURCE_VERIFICATION_ARTIFACT}")
+            else:
+                source_rows = _rows_by_id(source_payload)
+                missing_source_rows = tuple(sorted(row_id for row_id in source_row_ids if row_id not in source_rows))
+                reasons.extend(f"missing_source_citation_row:{row_id}" for row_id in missing_source_rows)
 
     if discussion_row_ids:
         discussion_path = artifact_dir / "discussion_signals.json"
         if not discussion_path.is_file():
-            raise ValueError("missing required subsequent-review artifact: discussion_signals.json")
-        discussion_payload = _load_json_object(discussion_path)
-        if discussion_payload is None:
-            raise ValueError("malformed required subsequent-review artifact: discussion_signals.json")
-        discussion_rows = _rows_by_id(discussion_payload)
-        missing_discussion_rows = tuple(sorted(row_id for row_id in discussion_row_ids if row_id not in discussion_rows))
-        if missing_discussion_rows:
-            missing = ", ".join(missing_discussion_rows)
-            raise ValueError(f"missing required discussion citation row(s) in discussion_signals.json: {missing}")
+            reasons.append("missing_artifact:discussion_signals.json")
+        else:
+            discussion_payload = _load_json_object(discussion_path)
+            if discussion_payload is None:
+                reasons.append("malformed_artifact:discussion_signals.json")
+            else:
+                discussion_rows = _rows_by_id(discussion_payload)
+                missing_discussion_rows = tuple(sorted(row_id for row_id in discussion_row_ids if row_id not in discussion_rows))
+                reasons.extend(f"missing_discussion_citation_row:{row_id}" for row_id in missing_discussion_rows)
+
+    return tuple(dict.fromkeys(reasons))
+
+
+def _strict_governor_validate_citation_ledgers(*, artifact_dir: Path, disposition_payload: dict[str, Any]) -> None:
+    """Fail closed when strict governor context cannot cite required ledgers."""
+
+    issue_reasons = _governor_citation_issue_reasons(artifact_dir=artifact_dir, disposition_payload=disposition_payload)
+    if issue_reasons:
+        raise ValueError("missing required governor citation provenance: " + ", ".join(issue_reasons))
 
 
 def _citation_text(row: dict[str, Any] | None) -> str:
@@ -672,6 +718,22 @@ def _actual_disposition_map(review_text: str) -> dict[str, str]:
     return {match.group(1): match.group(2).lower() for match in pattern.finditer(review_text)}
 
 
+def _internal_da_coverage_warnings(*, artifact_dir: Path, review_text: str) -> list[str]:
+    expected = _expected_disposition_map(artifact_dir)
+    if not expected:
+        return []
+    actual = _actual_disposition_map(review_text)
+    warnings: list[str] = []
+    for row_id in sorted(expected):
+        expected_status = expected[row_id]
+        actual_status = actual.get(row_id)
+        if actual_status is None:
+            warnings.append(f"missing_internal_da_coverage:{row_id}")
+        elif actual_status != expected_status:
+            warnings.append(f"contradicted_internal_da_coverage:{row_id}:expected={expected_status}:actual={actual_status}")
+    return warnings
+
+
 def _demote_plain_internal_da_coverage_sections(review_text: str) -> tuple[str, bool]:
     """Move plain Internal DA coverage sections behind an audit-only disclosure.
 
@@ -686,7 +748,7 @@ def _demote_plain_internal_da_coverage_sections(review_text: str) -> tuple[str, 
     output: list[str] = []
     changed = False
     index = 0
-    heading_pattern = re.compile(r"^\s{0,3}###\s+Internal DA coverage\s*$", re.IGNORECASE)
+    heading_pattern = re.compile(r"^\s{0,3}###\s+Internal DA coverage(?:\s*\([^)]*\))?\s*$", re.IGNORECASE)
     stop_heading_pattern = re.compile(r"^\s{0,3}#{1,3}\s+")
     while index < len(lines):
         line = lines[index]
@@ -746,9 +808,10 @@ def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_br
 
 def _disposition_map_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
     warnings = _issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief)
+    warnings.extend(_internal_da_coverage_warnings(artifact_dir=artifact_dir, review_text=review_text))
     for line in str(review_text or "").splitlines():
         stripped = line.strip().lower()
-        if stripped.startswith("### internal da coverage") and "audit" not in stripped:
+        if stripped.startswith("### internal da coverage"):
             warnings.append("prominent_internal_da_coverage")
             break
     return warnings
@@ -935,6 +998,8 @@ def audit_review_report_after_review(
                 "missing_prior_review_issue_clusters:",
                 "prior_review_issue_history_not_first",
                 "raw_da_list_only",
+                "missing_internal_da_coverage:",
+                "contradicted_internal_da_coverage:",
             )
         )
         for warning in warnings
@@ -1036,14 +1101,23 @@ def prepare_review_runtime_pre_prompt(
             records=(packager_record, governor_record),
         )
 
-    if normalized_mode == "strict":
+    citation_issue_reasons: tuple[str, ...] = ()
+    if normalized_mode in {"strict", "warn"}:
         disposition_path = artifact_dir / DISPOSITION_LEDGER_ARTIFACT
-        if not disposition_path.is_file():
+        if normalized_mode == "strict" and not disposition_path.is_file():
             raise ValueError(f"missing required subsequent-review artifact: {DISPOSITION_LEDGER_ARTIFACT}")
-        disposition_payload = _load_json_object(disposition_path)
-        if disposition_payload is None:
+        disposition_payload = _load_json_object(disposition_path) if disposition_path.is_file() else None
+        if normalized_mode == "strict" and disposition_payload is None:
             raise ValueError(f"malformed required subsequent-review artifact: {DISPOSITION_LEDGER_ARTIFACT}")
-        _strict_governor_validate_citation_ledgers(artifact_dir=artifact_dir, disposition_payload=disposition_payload)
+        if disposition_payload is not None:
+            citation_issue_reasons = _governor_citation_issue_reasons(
+                artifact_dir=artifact_dir,
+                disposition_payload=disposition_payload,
+            )
+            if normalized_mode == "strict" and citation_issue_reasons:
+                _strict_governor_validate_citation_ledgers(artifact_dir=artifact_dir, disposition_payload=disposition_payload)
+        elif normalized_mode == "warn":
+            citation_issue_reasons = (f"missing_artifact:{DISPOSITION_LEDGER_ARTIFACT}",)
 
     brief = build_governor_brief(artifact_dir=artifact_dir)
     governor_brief_path = artifact_dir / GOVERNOR_BRIEF_ARTIFACT
@@ -1051,10 +1125,11 @@ def prepare_review_runtime_pre_prompt(
         governor_brief_path.write_text(brief + "\n", encoding="utf-8")
     else:
         governor_brief_path.write_text("", encoding="utf-8")
+    governor_reasons = citation_issue_reasons if citation_issue_reasons else (() if brief else ("empty_disposition_ledger",))
     governor_record = ModuleRunRecord(
         module=SubsequentReviewModule.REPORT_GOVERNOR,
-        status=ModuleStatus.SUCCESS if brief else ModuleStatus.DEGRADED,
-        reasons=() if brief else ("empty_disposition_ledger",),
+        status=ModuleStatus.DEGRADED if governor_reasons else ModuleStatus.SUCCESS,
+        reasons=governor_reasons,
         artifact_path=str(governor_brief_path),
     )
     _record_runtime_module_in_manifest(manifest_path, governor_record)
@@ -1095,6 +1170,7 @@ def _source_verification_from_json(payload: dict[str, Any]) -> SourceVerificatio
         status=ModuleStatus(str(payload.get("status") or ModuleStatus.SUCCESS.value)),
         rows=tuple(rows),
         status_reasons=_string_tuple(payload.get("status_reasons")),
+        observability=_dict_value(payload.get("observability")),
     )
 
 
@@ -1124,7 +1200,7 @@ def _disposition_ledger_from_json(payload: dict[str, Any]) -> DispositionLedger:
     )
 
 
-def update_review_memory_after_review(
+def update_review_memory_after_intake(
     *,
     artifact_dir: Path,
     memory_store: ReviewMemoryStore,
@@ -1132,12 +1208,17 @@ def update_review_memory_after_review(
     run_provenance: dict[str, Any] | None = None,
     manifest_path: Path | None = None,
 ) -> ModuleRunRecord:
-    """Update shared ``cure_memory.json`` from completed review ledgers.
+    """Persist shared ``cure_memory.json`` as soon as semantic intake completes.
 
     Missing or malformed semantic ledgers degrade the memory-store module only;
-    memory is a performance/audit cache and must not fail publication of the
-    review report.
+    memory is a performance/audit cache and must not fail the review runtime.
+    This function deliberately does not require a final ``review.md`` so failed
+    or still-running reviews keep expensive source-verification work.
     """
+
+    disabled_record = _disabled_review_memory_record_from_manifest(manifest_path)
+    if disabled_record is not None:
+        return disabled_record
 
     def finish(record: ModuleRunRecord) -> ModuleRunRecord:
         if manifest_path is None:
@@ -1240,4 +1321,27 @@ def update_review_memory_after_review(
             status=ModuleStatus.SUCCESS,
             artifact_path=str(memory_store.path),
         )
+    )
+
+
+def update_review_memory_after_review(
+    *,
+    artifact_dir: Path,
+    memory_store: ReviewMemoryStore,
+    current_head: str | None,
+    run_provenance: dict[str, Any] | None = None,
+    manifest_path: Path | None = None,
+) -> ModuleRunRecord:
+    """Backward-compatible post-review memory refresh hook.
+
+    The same persistence logic is now safe to run at intake completion, before
+    final review publication, and remains callable from older post-review paths.
+    """
+
+    return update_review_memory_after_intake(
+        artifact_dir=artifact_dir,
+        memory_store=memory_store,
+        current_head=current_head,
+        run_provenance=run_provenance,
+        manifest_path=manifest_path,
     )

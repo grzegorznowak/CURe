@@ -202,7 +202,11 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
             review.write_text("### A-01: Prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1 example\n", encoding="utf-8")
             session = Session("s1", root, review, review_head_sha="abc123")
 
-            def source_verifier(_request: Any) -> FindingVerificationResult:
+            summaries: list[str] = []
+            verifier_calls: list[Any] = []
+
+            def source_verifier(request: Any) -> FindingVerificationResult:
+                verifier_calls.append(request)
                 return FindingVerificationResult(
                     source_state=SourceState.RESOLVED_FROM_SOURCE,
                     current_source_citations=({"path": "app.py", "start_line": 1, "summary": "fixed"},),
@@ -216,17 +220,62 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
                 config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
                 fetch_json=lambda _path: [],
                 source_verifier=source_verifier,
+                summary_writer=summaries.append,
             )
             subsequent = root / "work" / "subsequent"
             manifest = json.loads((subsequent / "run_manifest.json").read_text(encoding="utf-8"))
             source = json.loads((subsequent / "source_verification.json").read_text(encoding="utf-8"))
             dispositions = json.loads((subsequent / "disposition_ledger.json").read_text(encoding="utf-8"))
 
+        self.assertEqual([request.group_id for request in verifier_calls], ["G-0001"])
         self.assertEqual(manifest["modules"]["source_truth_verifier"]["status"], "success")
+        self.assertEqual(manifest["modules"]["source_truth_verifier"]["observability"]["verifier_fanout"]["provider_call_count"], 1)
         self.assertEqual(manifest["modules"]["disposition_arbiter"]["status"], "success")
+        self.assertEqual(source["observability"]["verifier_fanout"]["provider_call_count"], 1)
+        self.assertIn("elapsed_seconds", source["observability"]["verifier_fanout"]["timing"])
+        self.assertIn("source_verifier_calls=1", summaries[0])
         self.assertEqual(source["rows"][0]["source_state"], "resolved_from_source")
         self.assertEqual(dispositions["dispositions"][0]["action"], "confirm_resolved")
         self.assertEqual(dispositions["degraded_findings"], [])
+
+    def test_review_memory_store_override_disabled_skips_intake_memory_write(self) -> None:
+        from cure_subsequent_review.contracts import SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "review.md"
+            review.write_text("### A-01: Prior finding\nSeverity: high\nSection: Security\nEvidence: app.py:1 example\n", encoding="utf-8")
+            session = Session("s1", root, review, review_head_sha="abc123")
+            store = ReviewMemoryStore.for_pr(root=root / "pr", pr=PR())
+
+            def source_verifier(_request: Any) -> FindingVerificationResult:
+                return FindingVerificationResult(
+                    source_state=SourceState.RESOLVED_FROM_SOURCE,
+                    current_source_citations=({"path": "app.py", "start_line": 1, "summary": "fixed"},),
+                    rationale="fixture source proves resolution",
+                )
+
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[session],
+                config=SubsequentReviewConfig(
+                    enabled=True,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    module_overrides={SubsequentReviewModule.REVIEW_MEMORY_STORE: ModuleStatus.DISABLED},
+                ),
+                fetch_json=lambda _path: [],
+                source_verifier=source_verifier,
+                memory_store=store,
+                current_head="abc123",
+            )
+            manifest = json.loads((root / "work" / "subsequent" / "run_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(store.path.exists())
+        self.assertEqual(manifest["modules"]["review_memory_store"]["status"], "disabled")
+        self.assertNotIn("artifact_path", manifest["modules"]["review_memory_store"])
 
     def test_semantic_module_override_disables_source_and_degrades_arbiter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

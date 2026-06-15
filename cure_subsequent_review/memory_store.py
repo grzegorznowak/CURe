@@ -14,6 +14,7 @@ from typing import Any
 
 from cure_subsequent_review.contracts import (
     DiscussionSignalClass,
+    DispositionAction,
     DispositionLedger,
     SourceState,
     SourceVerificationLedger,
@@ -21,6 +22,13 @@ from cure_subsequent_review.contracts import (
 )
 
 MEMORY_SCHEMA_VERSION = 1
+_SAFE_TERMINAL_NON_REPORTABLE_DISPOSITIONS = frozenset(
+    {
+        DispositionAction.SUPPRESS_DUPLICATE.value,
+        DispositionAction.MOVE_OUT_OF_SCOPE.value,
+    }
+)
+_SAFE_TERMINAL_REPLAY_SOURCE_STATES = frozenset({SourceState.STILL_OPEN.value})
 
 
 def _string_attr(obj: Any, name: str) -> str:
@@ -48,14 +56,25 @@ def _finding_identity_matches(cached: object, current: tuple[str, ...]) -> bool:
 def _stable_identity_from_row(row_json: dict[str, Any]) -> dict[str, Any]:
     raw_provenance = row_json.get("provenance")
     provenance: dict[str, Any] = raw_provenance if isinstance(raw_provenance, dict) else {}
+    raw_cached_identity = provenance.get("stable_identity")
+    cached_identity: dict[str, Any] = raw_cached_identity if isinstance(raw_cached_identity, dict) else {}
     raw_citations = row_json.get("current_source_citations")
     citations: list[Any] = raw_citations if isinstance(raw_citations, list) else []
     raw_source_refs = row_json.get("inspected_source_refs")
     source_refs: list[Any] = raw_source_refs if isinstance(raw_source_refs, list) else []
-    return {
+    normalized_source_refs = tuple(str(item).strip() for item in source_refs if str(item).strip())
+    normalized_citations = tuple(_normalized_citation(item) for item in citations if isinstance(item, dict))
+    computed = {
         "fingerprint": str(provenance.get("fingerprint") or "").strip(),
-        "source_refs_digest": _json_digest(tuple(str(item).strip() for item in source_refs if str(item).strip())),
-        "citations_digest": _json_digest(tuple(_normalized_citation(item) for item in citations if isinstance(item, dict))),
+        "source_refs_digest": _json_digest(normalized_source_refs) if normalized_source_refs else "",
+        "citations_digest": _json_digest(normalized_citations) if normalized_citations else "",
+        "origin_digest": "",
+    }
+    return {
+        "fingerprint": computed["fingerprint"] or str(cached_identity.get("fingerprint") or "").strip(),
+        "source_refs_digest": computed["source_refs_digest"] or str(cached_identity.get("source_refs_digest") or "").strip(),
+        "citations_digest": computed["citations_digest"] or str(cached_identity.get("citations_digest") or "").strip(),
+        "origin_digest": computed["origin_digest"] or str(cached_identity.get("origin_digest") or "").strip(),
     }
 
 
@@ -83,6 +102,28 @@ def _stable_identity_matches(cached: object, current: dict[str, Any] | None) -> 
         if cached_value and current_value and cached_value == current_value:
             return True
     return False
+
+
+def _terminal_replay_fingerprint_from_disposition(disposition: Any | None) -> str:
+    if disposition is None:
+        return ""
+    provenance = getattr(disposition, "provenance", {})
+    if not isinstance(provenance, dict):
+        provenance = {}
+    return _json_digest(
+        {
+            "discussion_signal_row_ids": tuple(str(item) for item in getattr(disposition, "discussion_signal_row_ids", ()) or ()),
+            "discussion_signal_classes": tuple(str(item) for item in provenance.get("discussion_signal_classes", ()) or ()),
+            "discussion_policies": tuple(str(item) for item in provenance.get("discussion_policies", ()) or ()),
+            "policy_override": str(provenance.get("policy_override") or ""),
+        }
+    )
+
+
+def _terminal_replay_fingerprint_matches(cached: object, current: str | None) -> bool:
+    cached_value = str(cached or "").strip()
+    current_value = str(current or "").strip()
+    return bool(cached_value and current_value and cached_value == current_value)
 
 
 def group_identity_for_cache(group: Any) -> dict[str, Any]:
@@ -190,9 +231,11 @@ class ReviewMemoryStore:
             disposition = dispositions.get(row.group_id)
             row_json = row.to_json()
             stable_identity = _stable_identity_from_row(row_json)
+            terminal_replay_fingerprint = _terminal_replay_fingerprint_from_disposition(disposition)
             head_entry = {
                 "source_state": row.source_state.value,
                 "disposition": disposition.action.value if disposition is not None else None,
+                "terminal_replay_fingerprint": terminal_replay_fingerprint,
                 "stable_identity": stable_identity,
                 "source_verification_row": row_json,
                 "disposition_row_id": disposition.row_id if disposition is not None else None,
@@ -204,6 +247,7 @@ class ReviewMemoryStore:
                 "finding_ids": list(row.finding_ids),
                 "source_state": row.source_state.value,
                 "disposition": disposition.action.value if disposition is not None else None,
+                "terminal_replay_fingerprint": terminal_replay_fingerprint,
                 "last_seen_head": head,
                 "previous_heads": previous_heads,
                 "heads": heads,
@@ -263,6 +307,130 @@ class ReviewMemoryStore:
         }
         self.save(payload)
 
+    def _matching_head_entry(
+        self,
+        *,
+        group_id: str,
+        current_head: str,
+        current_identity: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        if not isinstance(current_identity, dict):
+            return None
+        findings = self.load().get("findings", {})
+        if not isinstance(findings, dict):
+            return None
+
+        candidates: list[dict[str, Any]] = []
+        direct = findings.get(group_id)
+        if isinstance(direct, dict):
+            candidates.append(direct)
+        candidates.extend(
+            entry
+            for key, entry in findings.items()
+            if key != group_id and isinstance(entry, dict)
+        )
+
+        for entry in candidates:
+            if entry.get("last_seen_head") != current_head:
+                continue
+            head_entry = entry
+            heads = entry.get("heads")
+            if isinstance(heads, dict):
+                candidate = heads.get(current_head)
+                if isinstance(candidate, dict):
+                    head_entry = candidate
+            stable_identity = head_entry.get("stable_identity") or entry.get("stable_identity")
+            if _stable_identity_matches(stable_identity, current_identity):
+                return entry, head_entry
+        return None
+
+    def synthesize_source_row(
+        self,
+        *,
+        group_id: str,
+        finding_ids: tuple[str, ...],
+        row_id: str,
+        current_head: str | None,
+        current_identity: dict[str, Any] | None = None,
+        current_terminal_replay_fingerprint: str | None = None,
+    ) -> SourceVerificationRow | None:
+        head = _clean_head(current_head)
+        if not head:
+            return None
+        match = self._matching_head_entry(group_id=group_id, current_head=head, current_identity=current_identity)
+        if match is None:
+            return None
+        entry, head_entry = match
+        source_state_value = str(head_entry.get("source_state") or "").strip()
+        disposition = str(head_entry.get("disposition") or "").strip()
+        if source_state_value == SourceState.RESOLVED_FROM_SOURCE.value:
+            cache_reason = "resolved_from_source_replay"
+        elif (
+            source_state_value in _SAFE_TERMINAL_REPLAY_SOURCE_STATES
+            and disposition in _SAFE_TERMINAL_NON_REPORTABLE_DISPOSITIONS
+            and _terminal_replay_fingerprint_matches(
+                head_entry.get("terminal_replay_fingerprint"), current_terminal_replay_fingerprint
+            )
+        ):
+            cache_reason = "terminal_non_reportable_replay"
+        else:
+            return None
+
+        try:
+            source_state = SourceState(source_state_value)
+        except ValueError:
+            return None
+
+        cached_row = head_entry.get("source_verification_row")
+        cached_provenance: dict[str, Any] = {}
+        citations: tuple[dict[str, Any], ...] = ()
+        inspected_refs: tuple[str, ...] = ()
+        cached_unavailable: tuple[str, ...] = ()
+        if isinstance(cached_row, dict):
+            raw_provenance = cached_row.get("provenance")
+            if isinstance(raw_provenance, dict):
+                cached_provenance = dict(raw_provenance)
+            raw_citations = cached_row.get("current_source_citations", [])
+            if isinstance(raw_citations, list):
+                citations = tuple(dict(item) for item in raw_citations if isinstance(item, dict))
+            raw_refs = cached_row.get("inspected_source_refs", [])
+            if isinstance(raw_refs, list):
+                inspected_refs = tuple(str(item) for item in raw_refs if str(item).strip())
+            raw_unavailable = cached_row.get("unavailable_reasons", [])
+            if isinstance(raw_unavailable, list):
+                cached_unavailable = tuple(str(item) for item in raw_unavailable if str(item).strip())
+
+        provenance = {
+            "source": "memory_cache",
+            "cache_status": "hit",
+            "cache_reason": cache_reason,
+            "not_source_proof": True,
+            "cached_group_id": str(entry.get("group_id") or group_id),
+            "cached_disposition": disposition or None,
+            "last_seen_head": head,
+            "memory_path": str(self.path),
+            "stable_identity": dict(current_identity or {}),
+            "terminal_replay_fingerprint": str(current_terminal_replay_fingerprint or ""),
+            "rationale": (
+                "unchanged source-verification result replayed from per-PR memory after stable identity match"
+                if cache_reason == "resolved_from_source_replay"
+                else "safe terminal non-reportable disposition replayed from per-PR memory after stable identity match; not source proof"
+            ),
+        }
+        policy_override = str(cached_provenance.get("policy_override") or "").strip()
+        if policy_override:
+            provenance["policy_override"] = policy_override
+        return SourceVerificationRow(
+            row_id=row_id,
+            group_id=group_id,
+            finding_ids=finding_ids,
+            source_state=source_state,
+            current_source_citations=citations if source_state is SourceState.RESOLVED_FROM_SOURCE else (),
+            inspected_source_refs=inspected_refs,
+            unavailable_reasons=cached_unavailable,
+            provenance=provenance,
+        )
+
     def synthesize_resolved_source_row(
         self,
         *,
@@ -272,51 +440,13 @@ class ReviewMemoryStore:
         current_head: str | None,
         current_identity: dict[str, Any] | None = None,
     ) -> SourceVerificationRow | None:
-        head = _clean_head(current_head)
-        if not head:
-            return None
-        entry = self.load().get("findings", {}).get(group_id)
-        if not isinstance(entry, dict):
-            return None
-        if entry.get("last_seen_head") != head:
-            return None
-        head_entry = entry
-        heads = entry.get("heads")
-        if isinstance(heads, dict):
-            candidate = heads.get(head)
-            if isinstance(candidate, dict):
-                head_entry = candidate
-        if head_entry.get("source_state") != SourceState.RESOLVED_FROM_SOURCE.value:
-            return None
-        if not _finding_identity_matches(entry.get("finding_ids"), finding_ids):
-            return None
-        if not _stable_identity_matches(head_entry.get("stable_identity") or entry.get("stable_identity"), current_identity):
-            return None
-
-        cached_row = head_entry.get("source_verification_row")
-        citations: tuple[dict[str, Any], ...] = ()
-        inspected_refs: tuple[str, ...] = ()
-        if isinstance(cached_row, dict):
-            raw_citations = cached_row.get("current_source_citations", [])
-            if isinstance(raw_citations, list):
-                citations = tuple(dict(item) for item in raw_citations if isinstance(item, dict))
-            raw_refs = cached_row.get("inspected_source_refs", [])
-            if isinstance(raw_refs, list):
-                inspected_refs = tuple(str(item) for item in raw_refs if str(item).strip())
-
-        return SourceVerificationRow(
-            row_id=row_id,
+        row = self.synthesize_source_row(
             group_id=group_id,
             finding_ids=finding_ids,
-            source_state=SourceState.RESOLVED_FROM_SOURCE,
-            current_source_citations=citations,
-            inspected_source_refs=inspected_refs,
-            provenance={
-                "source": "memory_cache",
-                "not_source_proof": True,
-                "last_seen_head": head,
-                "memory_path": str(self.path),
-                "stable_identity": dict(current_identity or {}),
-                "rationale": "unchanged resolved finding replayed from per-PR memory after stable group identity match; not fresh source proof",
-            },
+            row_id=row_id,
+            current_head=current_head,
+            current_identity=current_identity,
         )
+        if row is None or row.source_state is not SourceState.RESOLVED_FROM_SOURCE:
+            return None
+        return row

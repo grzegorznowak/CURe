@@ -7,6 +7,9 @@ it does not inspect files or treat PR discussion as source proof.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -54,6 +57,17 @@ FindingVerifier = Callable[[FindingVerificationRequest], FindingVerificationResu
 
 
 class SourceVerificationMemory(Protocol):
+    def synthesize_source_row(
+        self,
+        *,
+        group_id: str,
+        finding_ids: tuple[str, ...],
+        row_id: str,
+        current_head: str | None,
+        current_identity: dict[str, Any] | None = None,
+        current_terminal_replay_fingerprint: str | None = None,
+    ) -> SourceVerificationRow | None: ...
+
     def synthesize_resolved_source_row(
         self,
         *,
@@ -133,6 +147,7 @@ def _footer_marker_policy_row(
     row_id: str,
     group: ReconciledFindingGroup,
     request: FindingVerificationRequest,
+    cache_context: dict[str, Any] | None = None,
 ) -> SourceVerificationRow:
     return SourceVerificationRow(
         row_id=row_id,
@@ -142,6 +157,7 @@ def _footer_marker_policy_row(
         current_source_citations=tuple(_citation_from_source_ref(ref) for ref in request.source_evidence_snippets),
         inspected_source_refs=request.source_evidence_snippets,
         provenance={
+            **dict(cache_context or {}),
             **request.provenance,
             "policy_override": "official_footer_marker_acceptance",
             "rationale": (
@@ -223,11 +239,22 @@ def _discussion_skips_source_verifier(rows: tuple[DiscussionSignalRow, ...]) -> 
     )
 
 
+def _terminal_replay_fingerprint(rows: tuple[DiscussionSignalRow, ...]) -> str:
+    payload = {
+        "discussion_signal_row_ids": tuple(row.row_id for row in rows),
+        "discussion_signal_classes": tuple(row.signal_class.value for row in rows),
+        "discussion_policies": tuple(row.evidence_policy.value for row in rows),
+        "policy_override": "",
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _skipped_by_discussion_row(
     *,
     row_id: str,
     group: ReconciledFindingGroup,
     discussion_rows: tuple[DiscussionSignalRow, ...],
+    cache_context: dict[str, Any] | None = None,
 ) -> SourceVerificationRow:
     return SourceVerificationRow(
         row_id=row_id,
@@ -237,6 +264,7 @@ def _skipped_by_discussion_row(
         inspected_source_refs=_source_refs(group),
         unavailable_reasons=("source_verification_skipped_by_discussion_signals",),
         provenance={
+            **dict(cache_context or {}),
             "reconciliation_group_id": group.group_id,
             "fingerprint": group.fingerprint,
             "discussion_signal_row_ids": [row.row_id for row in discussion_rows],
@@ -249,6 +277,10 @@ def _skipped_by_discussion_row(
             ),
         },
     )
+
+
+def _increment_counter(counters: dict[str, int], key: str) -> None:
+    counters[key] = counters.get(key, 0) + 1
 
 
 def verify_source_truth(
@@ -264,29 +296,55 @@ def verify_source_truth(
     rows: list[SourceVerificationRow] = []
     reasons: list[str] = list(reconciliation.status_reasons)
     discussion_by_group = _discussion_rows_by_group(discussion_signals)
+    started_at = time.perf_counter()
+    provider_seconds = 0.0
+    provider_call_count = 0
+    cache_hit_count = 0
+    cache_miss_count = 0
+    cache_bypass_count = 0
+    cache_hit_reasons: dict[str, int] = {}
+    cache_miss_reasons: dict[str, int] = {}
+    cache_bypass_reasons: dict[str, int] = {}
 
     for index, group in enumerate(reconciliation.groups, start=1):
         row_id = f"SV-{index:04d}"
-        if memory_store is not None and str(current_head or "").strip():
+        cache_context: dict[str, Any]
+        head = str(current_head or "").strip()
+        if memory_store is None:
+            cache_context = {"cache_status": "bypass", "cache_reason": "memory_store_unavailable"}
+        elif not head:
+            cache_context = {"cache_status": "bypass", "cache_reason": "missing_current_head"}
+        else:
+            cache_context = {"cache_status": "miss", "cache_reason": "stable_identity_mismatch"}
+            discussion_rows = discussion_by_group.get(group.group_id, ())
             try:
-                cached_row = memory_store.synthesize_resolved_source_row(
+                cached_row = memory_store.synthesize_source_row(
                     group_id=group.group_id,
                     finding_ids=group.finding_ids,
                     row_id=row_id,
                     current_head=current_head,
                     current_identity=group_identity_for_cache(group),
+                    current_terminal_replay_fingerprint=_terminal_replay_fingerprint(discussion_rows),
                 )
             except Exception:  # noqa: BLE001 - memory is a performance cache; failures disable the gate
                 cached_row = None
+                cache_context = {"cache_status": "bypass", "cache_reason": "memory_store_unreadable"}
             if cached_row is not None:
+                cache_hit_count += 1
+                _increment_counter(cache_hit_reasons, str(cached_row.provenance.get("cache_reason") or "unknown"))
                 rows.append(cached_row)
                 continue
 
-        discussion_rows = discussion_by_group.get(group.group_id, ())
-        if _discussion_skips_source_verifier(discussion_rows):
-            rows.append(_skipped_by_discussion_row(row_id=row_id, group=group, discussion_rows=discussion_rows))
-            continue
+        cache_status = str(cache_context.get("cache_status") or "").strip()
+        cache_reason = str(cache_context.get("cache_reason") or "unknown").strip() or "unknown"
+        if cache_status == "bypass":
+            cache_bypass_count += 1
+            _increment_counter(cache_bypass_reasons, cache_reason)
+        elif cache_status == "miss":
+            cache_miss_count += 1
+            _increment_counter(cache_miss_reasons, cache_reason)
 
+        discussion_rows = discussion_by_group.get(group.group_id, ())
         request = _request(
             group,
             pr_files_changed=pr_files_changed,
@@ -300,18 +358,36 @@ def verify_source_truth(
                     finding_ids=group.finding_ids,
                     source_state=SourceState.NOT_VERIFIABLE,
                     unavailable_reasons=("missing_source_evidence",),
-                    provenance={"rationale": "prior finding has no safe source references", **request.provenance},
+                    provenance={
+                        **cache_context,
+                        "rationale": "prior finding has no safe source references",
+                        **request.provenance,
+                    },
                 )
             )
             if "missing_source_evidence" not in reasons:
                 reasons.append("missing_source_evidence")
             continue
         if _footer_marker_authorship_policy_finding(group):
-            rows.append(_footer_marker_policy_row(row_id=row_id, group=group, request=request))
+            rows.append(_footer_marker_policy_row(row_id=row_id, group=group, request=request, cache_context=cache_context))
+            continue
+        if _discussion_skips_source_verifier(discussion_rows):
+            rows.append(
+                _skipped_by_discussion_row(
+                    row_id=row_id,
+                    group=group,
+                    discussion_rows=discussion_rows,
+                    cache_context=cache_context,
+                )
+            )
             continue
         try:
+            provider_call_count += 1
+            provider_started_at = time.perf_counter()
             result = provider(request)
+            provider_seconds += time.perf_counter() - provider_started_at
         except Exception as exc:  # noqa: BLE001 - provider failure is degraded evidence, not fatal runtime failure
+            provider_seconds += time.perf_counter() - provider_started_at
             rows.append(
                 SourceVerificationRow(
                     row_id=row_id,
@@ -320,7 +396,7 @@ def verify_source_truth(
                     source_state=SourceState.SOURCE_UNKNOWN,
                     inspected_source_refs=request.source_evidence_snippets,
                     unavailable_reasons=(f"provider_unavailable: {exc}",),
-                    provenance={"rationale": "FindingVerifier provider failed", **request.provenance},
+                    provenance={"rationale": "FindingVerifier provider failed", **cache_context, **request.provenance},
                 )
             )
             if "provider_unavailable" not in reasons:
@@ -332,7 +408,7 @@ def verify_source_truth(
             for reason in result_reasons:
                 if reason not in reasons:
                     reasons.append(reason)
-        provenance = {**request.provenance, **result.provenance}
+        provenance = {**cache_context, **request.provenance, **result.provenance}
         if result.rationale:
             provenance["rationale"] = result.rationale
         rows.append(
@@ -349,4 +425,27 @@ def verify_source_truth(
         )
 
     status = ModuleStatus.DEGRADED if reasons else ModuleStatus.SUCCESS
-    return SourceVerificationLedger(status=status, rows=tuple(rows), status_reasons=tuple(dict.fromkeys(reasons)))
+    observability = {
+        "verifier_fanout": {
+            "group_count": len(reconciliation.groups),
+            "provider_call_count": provider_call_count,
+            "cache": {
+                "hit_count": cache_hit_count,
+                "miss_count": cache_miss_count,
+                "bypass_count": cache_bypass_count,
+                "hit_reasons": cache_hit_reasons,
+                "miss_reasons": cache_miss_reasons,
+                "bypass_reasons": cache_bypass_reasons,
+            },
+            "timing": {
+                "elapsed_seconds": round(time.perf_counter() - started_at, 6),
+                "provider_seconds": round(provider_seconds, 6),
+            },
+        }
+    }
+    return SourceVerificationLedger(
+        status=status,
+        rows=tuple(rows),
+        status_reasons=tuple(dict.fromkeys(reasons)),
+        observability=observability,
+    )

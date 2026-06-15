@@ -4,19 +4,72 @@
 > Canonical story contract: `story.md`. Legacy source remains under `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/`.
 
 ## Current Claim
-- Claimed at: 2026-06-13T04:39:52Z
+- Claimed at: 2026-06-15T07:01:54Z
 - Claimed by: pi child resume session
 - Model: not exposed by pi harness (no `MODEL` environment variable available)
-- Scope: Address latest PR #22 feedback FB-027/FB-028/FB-029: make final output lead with prior-review issue history and stable clusters/internal coverage, degrade malformed discussion-linker LLM output, and stabilize memory replay identity when ordinal group IDs shift.
-- Worktrees:
-  - CURe: `/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace`
-- Primary write surfaces: `cure_subsequent_review/runtime.py`, `cure_subsequent_review/discussion_linker.py`, `cure_subsequent_review/discussion_signals.py`, `cure_subsequent_review/memory_store.py`, `prompts/*`, related tests, OpenSpec progress/handoff.
-- Status: 🔵 IN PR
+- Scope: Resolve the 2026-06-14T18:04:59Z story-review request changes for A1/A11 post-review `review_memory_store` disabled override preservation; record that A16/A20 fresh PR #22 live-audit proof remains pending.
+- Main-tree targets: CURe
+- Primary write surfaces: `cure_subsequent_review/runtime.py`, `tests/_subsequent_review_unit_runtime_memory_unittest.py`, OpenSpec progress artifacts.
+- Status: 🔄 IN PROGRESS
 
 ### Legacy Scaffold Notes
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-15T07:04:56Z **Step**: closed the 2026-06-14T18:04:59Z A1/A11 post-review disabled-memory blocker in the main tree.
+  - Changed: `cure_subsequent_review/runtime.py`, `tests/_subsequent_review_unit_runtime_memory_unittest.py`, and this progress file.
+  - Test: PASS — red regression first failed for `update_review_memory_after_review()` overwriting a disabled `review_memory_store` manifest row and writing shared memory; after the fix, targeted runtime-memory tests passed (`4 passed`), focused runtime-memory/control-plane suite passed (`11 passed`), public subsequent-review wrapper passed (`132 passed, 36 subtests`), and `ruff check .`, `git diff --check`, and `mypy` passed.
+  - Notes: runtime memory persistence now short-circuits when the existing manifest records `review_memory_store.status=disabled`, returns a disabled module record without artifact path, leaves the manifest row intact, and does not write `cure_memory.json`. Fresh PR #22 live audit remains pending for A16/A20 proof maturity; story status stays `🔄 IN PROGRESS`. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains untouched.
+- 2026-06-15T07:01:54Z **Resume**: picked up the 2026-06-14T18:04:59Z request-changes review for Story 04.
+  Worktrees: none used; continuing in main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe` despite accumulated Story 04 dirty changes. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains out of scope.
+  Main-tree targets: CURe
+  Claim: add a red-first regression and minimal fix so an existing `review_memory_store=disabled` manifest row remains disabled through `update_review_memory_after_review()`, with no shared `cure_memory.json` write; keep A16/A20 live-audit proof pending.
+- 2026-06-14T17:39:11Z **Resume**: picked up the 2026-06-14T17:23:48Z request-changes review for Story 04.
+  Worktrees: none used; continuing in main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe` per current claim despite existing story-local dirty changes. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains out of scope.
+  Main-tree targets: CURe
+  Claim: add red-first regressions and fixes for metadata-only degraded discussion gating, stable-identity cache replay persistence, strict/warn governor citation omissions, and follow-up/resume `$PRIOR_REVIEW_BRIEF` propagation; then rerun focused suites, public wrapper/static checks as feasible.
+- 2026-06-14T17:52:55Z **Step**: closed the 2026-06-14T17:23:48Z local request-changes blockers in the main tree.
+  - Changed: `cure_subsequent_review/degraded_runtime.py`, `cure_subsequent_review/memory_store.py`, `cure_subsequent_review/runtime.py`, `cure.py`, `tests/_subsequent_review_unit_degraded_runtime_unittest.py`, `tests/_subsequent_review_unit_memory_store_unittest.py`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py`, `tests/_reviewflow_unittest_prompt_session_impl.py`, `tests/_reviewflow_unittest_grounding_impl.py`, and this progress file.
+  - Test: PASS — red regressions first failed for metadata-only `thread_state_unavailable` controller skip, replay-row stable identity self-poisoning, strict omitted citation IDs, and resume-step prior-brief propagation. After fixes: targeted red/green tests passed; focused degraded/memory/runtime/prompt suite passed (`74 passed, 7 subtests`); report-governor/control-plane/runtime-memory/PR-flow suite passed (`35 passed`); A20 memory/runtime/semantic/PR-flow suite passed (`34 passed, 7 subtests`); degraded/control/PR-flow suite passed (`29 passed`); public subsequent-review wrapper passed (`131 passed, 36 subtests`); `ruff check .`, `git diff --check`, and `mypy` passed.
+  - Notes: module-12 degraded gate now prompts only for API/payload availability failures and preserves metadata-only official-footer events; persisted memory-cache replay rows retain stable identity for later same-head hits; strict governor fails closed on omitted required source/reportable discussion citation IDs while warn mode records degraded reasons and continues; follow-up and completed multipass resume plan/step/synth prompts now thread the stored governor brief. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains untouched.
+- 2026-06-14T16:59:06Z **Step**: closed the 2026-06-14T16:05:21Z local request-changes blockers in the main tree.
+  - Changed: `cure_subsequent_review/runtime.py`, `cure_subsequent_review/control_plane.py`, `tests/_subsequent_review_unit_report_governor_unittest.py`, `tests/_subsequent_review_functional_control_plane_unittest.py`, Story 04 `story.md`, and this progress file.
+  - Test: PASS — red tests first failed for missing A17 internal DA row comparison and disabled `review_memory_store` override persistence. After fixes: targeted red/green tests passed; focused report-governor/control-plane/runtime-memory/PR-flow suite passed (`35 passed`); public subsequent-review wrapper passed (`127 passed, 36 subtests`); `ruff check .`, `git diff --check`, and `mypy` passed.
+  - Notes: post-review governor now compares expected `DA-*` statuses from `disposition_ledger.json` against actual rows in final `review.md`, warning/degrading on missing or contradicted internal rows without raising. Intake now records `review_memory_store=disabled` and skips shared `cure_memory.json` writes when that module is explicitly disabled. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains untouched.
+- 2026-06-14T16:54:48Z **Resume**: picked up the 2026-06-14T16:05:21Z request-changes review for Story 04.
+  Worktrees: none used; continuing in main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe` per current claim.
+  Main-tree targets: CURe
+  Claim: add red-first regressions and fixes for A17 internal `DA-*` coverage/contradiction warnings plus A1/A11 disabled `review_memory_store` override behavior; keep unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` untouched.
+- 2026-06-14T15:49:29Z **Step**: closed the 2026-06-14T15:25:11Z request-changes blockers in the main tree.
+  - Changed: `cure_subsequent_review/source_truth.py`, `cure_subsequent_review/memory_store.py`, maintained final PR prompt templates, `tests/_subsequent_review_unit_source_truth_unittest.py`, `tests/_subsequent_review_unit_memory_store_unittest.py`, `tests/_reviewflow_unittest_prompt_session_impl.py`, Story 04 `story.md`, `tasks.md`, and this progress file.
+  - Test: PASS — red tests first failed for A19 fresh official-footer + untrusted `PUSHBACK`, A20 unsafe `source_unknown`/`not_verifiable` terminal replay, and A16 stale prompt guidance; after fixes, focused source/memory/report-governor/runtime/PR-flow suite passed (`62 passed, 22 subtests`), public subsequent wrapper passed (`126 passed, 36 subtests`), prompt/config wrappers passed (`184 passed`), `ruff check .`, `git diff --check`, and `mypy` passed.
+  - Notes: official-footer policy rows are evaluated before untrusted discussion skip rows; generic/body-only CURe-looking findings remain on the verifier path. Maintained final prompts now require DA coverage only in a collapsible audit/provenance appendix or equivalent audit-only artifact. FB-040 now has a literal local replay matrix: source-resolved replay; duplicate/out-of-scope/dropped-not-relevant safe terminal replay with `not_source_proof`; still-open reportable/source-unknown/not-verifiable miss and verify. Unrelated untracked `docs/examples/subsequent-pr-run-flow.svg` remains untouched.
+- 2026-06-14T15:42:46Z **Resume**: picked up the latest 2026-06-14T15:25:11Z request-changes review for Story 04.
+  Worktrees: none used; continuing in main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe` per current claim.
+  Main-tree targets: CURe
+  Claim: fix A19 fresh official-footer policy rows before untrusted discussion skips, align maintained final prompts with A16 DA-coverage demotion, complete or explicitly narrow A20/FB-040 terminal replay matrix proof, and keep the unrelated untracked SVG excluded.
+- 2026-06-14T15:03:07Z **Step**: closed the local request-changes blockers for A19/A16/A20 in the main tree.
+  - Changed: `cure_subsequent_review/contracts.py`, `cure_subsequent_review/source_truth.py`, `cure_subsequent_review/memory_store.py`, `cure_subsequent_review/runtime.py`, `cure_subsequent_review/semantic_pipeline.py`, `cure_subsequent_review/control_plane.py`; tests in `_subsequent_review_unit_memory_store_unittest.py`, `_subsequent_review_unit_source_truth_unittest.py`, `_subsequent_review_unit_report_governor_unittest.py`, `_subsequent_review_functional_control_plane_unittest.py`; OpenSpec `initiative.md`, `story.md`, `tasks.md`, and this progress file.
+  - Test: PASS — focused subsequent-review runtime/source/memory/report-governor/control-plane suite (`53 passed, 5 subtests`); public subsequent-review wrapper (`124 passed, 29 subtests`); prompt/config regressions (`184 passed`); `ruff check .`; `git diff --check`; `mypy`.
+  - Notes: cache replay now preserves `policy_override=official_footer_marker_acceptance` so official-footer policy rows still arbitrate to `move_out_of_scope`; audit-only `### Internal DA coverage (audit only)` headings are demoted to `<details>` before report-governor audit; source verification artifacts/manifest/summary now expose verifier fan-out call counts, cache hit/miss/bypass totals/reasons, and timing. Fresh PR #22 live audit remains pending; no live audit was claimed.
+- 2026-06-14T14:54:04Z **Resume**: picked up the latest request-changes review for Story 04.
+  Worktrees: none used; continuing in main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe` per current claim.
+  Main-tree targets: CURe
+  Claim: fix A19 cache replay policy provenance, A16 audit-heading demotion/warnings, A20 manifest/log verifier fan-out timing observability/proof tasks, and initiative tracker drift while preserving unrelated untracked SVG.
+- 2026-06-14T13:32:31Z **Step**: implemented and verified a local A20 cache-hardening slice in the workspace root while avoiding the stale dirty Story 04 add-worktree.
+  - Changed: `cure_subsequent_review/control_plane.py`, `cure_subsequent_review/runtime.py`, `cure_subsequent_review/memory_store.py`, `cure_subsequent_review/source_truth.py`, `tests/_subsequent_review_unit_memory_store_unittest.py`, `tests/_subsequent_review_unit_runtime_memory_unittest.py`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md`.
+  - Test: PASS — red tests failed first for missing terminal replay/cache telemetry/intake alias, then passed after implementation. Final verification: `python -m pytest tests/_subsequent_review_unit_memory_store_unittest.py tests/_subsequent_review_unit_runtime_memory_unittest.py tests/_subsequent_review_unit_semantic_pipeline_unittest.py tests/_subsequent_review_integration_pr_flow_unittest.py -q`; `python -m pytest tests/test_subsequent_review.py -q`; `ruff check .`; `git diff --check`; `mypy`.
+  - Notes: Local slice persists memory at intake completion before final `review.md`, replays same-head stable-identity source-resolved rows across ordinal group changes, rejects ordinal-only identity drift with `cache_status=miss`, replays safe terminal non-reportable dispositions as `not_source_proof` only when the discussion/disposition replay fingerprint matches, and records per-row `cache_status`/`cache_reason`. Remaining A20 proof still needs fuller policy-provenance coverage, manifest/log fan-out timing, and fresh PR #22 live audit.
+- 2026-06-14T13:26:11Z **Resume**: picked up Story 04 after A20/FB-039..FB-042 plan approval, with implementation intent focused on source-verification cache persistence/replay hardening and telemetry.
+  Worktrees: none used; the stale claimed add-worktree was dirty with unrelated prior product/OpenSpec changes, so this session used main-tree target `CURe` at `/workspaces/cure_workspace/projects/CURe`.
+  Main-tree targets: CURe
+  Claim: implement the first local A20 cache-hardening slice without touching unrelated OpenSpec/SVG changes.
+- 2026-06-14T12:12:38Z **Replanning checkpoint from feedback absorption**:
+  - Feedback IDs: FB-039, FB-040, FB-041, FB-042.
+  - Contract sections updated: Purpose, Triggering Need, Scope, Scenarios / Behavior Examples, Acceptance, Verification, Surface / Branch Proof Matrix, Input Boundary Shape Risk, Fail-open Checks, Risk Lens Inventory, Discovery Notes, Critical Files, Implementation Notes, Locked Decisions, and story-local Feedback Absorption Log.
+  - Risk / miss category: persistence/resource lifecycle/performance/finding-identity.
+  - Plan lane: 🟢 PLAN APPROVED -> 🟠 PLAN CHANGES REQUESTED.
+  - Required next action: `/openspec-story-plan-review cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace`.
 - 2026-06-13T10:05:45Z **Live audit ingestion**: inspected latest PR #22 sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-080828-d739` at head `372b4a753099c4b6e077d98551da51039222a16b`. The run completed with final `review.md` and verdict REQUEST CHANGES. Story 04 closure gates from the previous feedback are now live-proven: strict multipass grounding accepts all five `review.step-*.md` artifacts with first-line `### Step Result:` and no invalid artifacts; A17 post-review governor runs warn-only and succeeds; A19/`DA-0006` is `out-of-scope` / `move_out_of_scope`, no longer `carried-forward/re_report`; FB-028 malformed-linker abort is resolved for the original failure shape; FB-029 is resolved only for the narrow different-`finding_ids` replay case. The audit also found follow-up hardening issues, including visible top-level `### Internal DA coverage` overexposing audit rows, broader memory/linker identity gaps, discussion authority escalation, source/path/citation boundaries, concise prior-review parsing, and planner-abort guardrails. These were initially scaffolded into a synthetic Story 05, then remapped on 2026-06-14 into Stories 01, 03, and 04 so OpenSpec ownership matches the pre-existing story surfaces actually under review.
   - Computed-vs-carried note: the five `### Prior Review Issue History` rows are prior issue identities carried from prior corpus/comments/sessions, but their latest statuses were computed in this run: 14 source-verification rows have `llm_finding_verifier` provenance and `DA-0006` uses the FB-026 official-footer policy override; no `memory_cache` source-verification provenance was found for those history statuses.
 - 2026-06-13T08:04:40Z **Step**: fixed strict multipass prompt/schema regression surfaced by live PR #22 rerun sandbox `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr22-20260613-050345-4d51`.
@@ -69,22 +122,20 @@
 - 2026-06-11T10:05:22Z Recorded readonly plan approval in the tracker, claimed step, and prepared the Story 04 implementation worktree. Focused red seam not chosen yet.
 
 ## Session Handoff
-- **Timestamp**: 2026-06-13T04:47:11Z
-- **Status**: 🔵 IN PR
+- **Timestamp**: 2026-06-15T07:04:56Z
+- **Status**: 🔄 IN PROGRESS locally; A1/A11 post-review disabled-memory blocker fixed. PR/live status remains request-changes until a fresh PR #22 live audit verifies A16/A20 proof rows.
 - **Completed In This Session**:
-  - Addressed FB-027/A16 locally: prompt templates now state that, when the governor brief contains required issue history, final output must begin with `### Prior Review Issue History` before steps/summary/assessments; report-governor audit deterministically degrades if issue history is not first or if stable governor-brief issue clusters/statuses are missing.
-  - Added proof that body-only PR comments remain a carried-forward/re_report issue cluster while official-footer policy findings remain out-of-scope.
-  - Addressed FB-028 locally: malformed/failed LLM discussion-linker output returns a degraded no-link result, preserving semantic artifact generation instead of raising.
-  - Addressed FB-029 locally: memory replay rejects same ordinal `group_id` cache hits when the cached finding identity differs from the current finding IDs.
+  - Added a red-first runtime-memory regression proving an existing `run_manifest.json` row with `review_memory_store.status=disabled` remains disabled after `update_review_memory_after_review()`, has no artifact path added, and does not write shared `cure_memory.json`; confirmed RED.
+  - Implemented the minimal runtime guard: memory persistence reads the manifest before updating and returns the existing disabled module record without mutating the manifest or memory store.
+  - Kept the success-path post-review memory update covered by using a non-disabled manifest in the existing success test.
 - **Remaining**:
-  - Fresh `/openspec-story-review` on the local product/coordinator diff.
-  - If approved, commit/push to PR #22 and rerun/audit live PR #22 output.
-  - Done gate remains a live audit proving `DA-0006` is not carried-forward/re_report and final output leads with human issue history.
-- **Blockers**: none.
-- **Next Steps**: `/openspec-story-review cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` against the active worktree.
+  - Fresh PR #22 live audit at current head `e305f826f3c0ece63be708f7df4b4f54c38b7658` or later is still required before Story 04 can be approved/done; A16/A20 proof rows remain provisional for live-output/performance evidence.
+- **Blockers**: none for the local A1/A11 blocker; external/live audit gate remains pending.
+- **Next Steps**: run `/openspec-story-review cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` for local review, then run the required fresh PR #22 live audit before any approval/done transition.
 - **Worktrees**:
-  - CURe: `/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace`
-- **Proof Statement**: Red regressions for FB-027/FB-028/FB-029 failed before implementation and now pass. Verification passed: targeted report-governor/discussion-linker/discussion-signals/memory/prompt suite (`67 passed`), public subsequent-review wrapper (`115 passed, 29 subtests`), A19 preservation suite (`19 passed, 15 subtests`), `ruff check .`, `git diff --check`, and `mypy`.
+  - Main-tree target: `/workspaces/cure_workspace/projects/CURe`
+  - Stale/dirty claimed worktree not used: `/home/vscode/add-worktrees/CURe-cure-subsequent-pr-review-story-04-review-runtime-integration-guardrails-memory-trace`
+- **Proof Statement**: RED then GREEN targeted regression; `tests/_subsequent_review_unit_runtime_memory_unittest.py` passed (`4 passed`), runtime-memory/control-plane suite passed (`11 passed`), public wrapper passed (`132 passed, 36 subtests`), and `ruff check .`, `git diff --check`, `mypy` passed.
 
 ## PR State
 - PR URL: https://github.com/grzegorznowak/CURe/pull/22
@@ -95,7 +146,7 @@
 - PR status: open; latest audited head is `372b4a753099c4b6e077d98551da51039222a16b`; current pushed hardening head before this remap repair is `ee7410aeedad7e5df92caec90a89ecc28ff89de6`. The 2026-06-13T08:08 live-output audit completed and proved the previous Story 04 gates for strict multipass schema, A17 warn-only governor, and A19/`DA-0006`; however, the final CURe review verdict is REQUEST CHANGES for hardening issues now remapped into Stories 01, 03, and 04. 2026-06-12T18:07Z refresh previously reported `mergeStateStatus=CLEAN` and Detect Secrets success.
 - Merge commit: —
 - Last synced/audited: 2026-06-13T08:44Z; head `372b4a753099c4b6e077d98551da51039222a16b`; pushed to `origin/cure-subsequent-pr-review/story-01-intake`; PR body updated in prior sync. Duplicate PR #23 was already merged into this branch and remains superseded.
-- Coordination note: PR #22 remains the canonical review surface. Story 04 is 🟢 PLAN APPROVED / 🔵 IN PR; the prior live done gate for `DA-0006` and strict multipass step schemas is satisfied in sandbox `grzegorznowak-cure-pr22-20260613-080828-d739`, but the overall PR review remains REQUEST CHANGES until a fresh live audit verifies the remapped runtime hardening.
+- Coordination note: PR #22 remains the canonical review surface. Story 04 is 🟢 PLAN APPROVED / 🔄 IN PROGRESS locally after the 2026-06-14 request-changes repair; the prior live done gate for `DA-0006` and strict multipass step schemas is satisfied in sandbox `grzegorznowak-cure-pr22-20260613-080828-d739`, but the overall PR review remains REQUEST CHANGES until a fresh live audit verifies the remapped runtime hardening and source-verification cache/performance hardening.
 
 ### Reopened PR #22 Live-Run Follow-up Plan
 

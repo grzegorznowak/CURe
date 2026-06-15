@@ -93,11 +93,24 @@ def _summary(*, completed_count: int, discussion_count: int, records: dict[Subse
         f"{module.value}={records[module].status.value if module in records else ModuleStatus.DISABLED.value}"
         for module in SubsequentReviewModule
     )
+    source_observability = records.get(SubsequentReviewModule.SOURCE_TRUTH_VERIFIER)
+    fanout = (source_observability.observability if source_observability is not None else {}).get("verifier_fanout", {})
+    observability_text = ""
+    if isinstance(fanout, dict):
+        cache = fanout.get("cache", {})
+        if isinstance(cache, dict) and "provider_call_count" in fanout:
+            observability_text = (
+                f"; source_verifier_calls={fanout.get('provider_call_count', 0)}"
+                f" cache_hits={cache.get('hit_count', 0)}"
+                f" cache_misses={cache.get('miss_count', 0)}"
+                f" cache_bypasses={cache.get('bypass_count', 0)}"
+            )
     return (
         "Subsequent review intake: "
         f"prior completed sessions: {completed_count}; "
         f"discussion events: {discussion_count}; "
         f"modules: {status_text}"
+        f"{observability_text}"
     )
 
 
@@ -225,6 +238,19 @@ def run_subsequent_review_intake(
         current_head=current_head,
         pr_files_changed=pr_files_changed,
     )
+
+    if config.module_overrides.get(SubsequentReviewModule.REVIEW_MEMORY_STORE) is ModuleStatus.DISABLED:
+        _record(records, SubsequentReviewModule.REVIEW_MEMORY_STORE, ModuleStatus.DISABLED)
+    elif memory_store is not None and hasattr(memory_store, "update_findings") and hasattr(memory_store, "path"):
+        from cure_subsequent_review.runtime import update_review_memory_after_intake
+
+        runtime_memory_store: Any = memory_store
+        records[SubsequentReviewModule.REVIEW_MEMORY_STORE] = update_review_memory_after_intake(
+            artifact_dir=artifact_dir,
+            memory_store=runtime_memory_store,
+            current_head=current_head,
+            run_provenance={"stage": "intake_complete"},
+        )
 
     manifest_path = artifact_dir / "run_manifest.json"
     write_json(manifest_path, _manifest_json(pr=pr, config=config, records=records))

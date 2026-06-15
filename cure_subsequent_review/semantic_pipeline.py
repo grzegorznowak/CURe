@@ -54,12 +54,14 @@ def _record(
     *,
     reasons: tuple[str, ...] = (),
     artifact_path: Path | None = None,
+    observability: dict[str, Any] | None = None,
 ) -> None:
     records[module] = ModuleRunRecord(
         module=module,
         status=status,
         reasons=reasons,
         artifact_path=str(artifact_path) if artifact_path is not None else None,
+        observability=dict(observability or {}),
     )
 
 
@@ -132,4 +134,11 @@ def run_semantic_pipeline(
             )
             context[entry.produces] = ledger
         write_json(artifact_path, ledger.to_json())
-        _record(records, module, ledger.status, reasons=ledger.status_reasons, artifact_path=artifact_path)
+        _record(
+            records,
+            module,
+            ledger.status,
+            reasons=ledger.status_reasons,
+            artifact_path=artifact_path,
+            observability=getattr(ledger, "observability", {}),
+        )
