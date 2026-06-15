@@ -14,6 +14,7 @@ $PRIOR_REVIEW_BRIEF
 Subsequent-review output override:
 - If the prior-review brief above contains `### Prior Review Issue History (required final output)`, your final answer MUST begin with `### Prior Review Issue History` before any `### Steps taken`, summary, assessment, or other section.
 - preserve the brief's stable issue titles and status labels, including `carried-forward/re_report` body-only PR-comment clusters and `out-of-scope` official-footer policy clusters.
+- For any carried-forward issue that the brief marks with `Reader-facing label: (prior review follow-up; still open after re-verification)`, append that small parenthetical label to the matching issue title when it appears in normal reader-facing sections such as `### In Scope Issues`; keep raw DA-* IDs only in audit/provenance surfaces.
 - Put complete DA-* status coverage only in a collapsible audit/provenance appendix (for example `<details><summary>Internal DA coverage (audit/provenance only)</summary>...`) or another clearly audit-only provenance artifact; do not emit `### Internal DA coverage` as an ordinary top-level primary review section. If no prior-review issue-history brief is present, use the normal output format below.
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 

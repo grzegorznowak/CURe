@@ -47,6 +47,7 @@ ALLOWED_DISPOSITION_MAP_STATUSES = (
 )
 ISSUE_HISTORY_HEADING = "### Prior Review Issue History (required final output)"
 INTERNAL_DA_COVERAGE_HEADING = "### Internal DA coverage (audit only)"
+CARRIED_FORWARD_READER_LABEL = "(prior review follow-up; still open after re-verification)"
 
 
 @dataclass(frozen=True)
@@ -496,6 +497,10 @@ def _issue_history_reason(status: str) -> str:
     }.get(status, "current status is uncertain")
 
 
+def _issue_history_reader_label(status: str) -> str:
+    return CARRIED_FORWARD_READER_LABEL if status == "carried-forward/re_report" else ""
+
+
 def _issue_history_rows(dispositions: list[Any], finding_meta: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
     clusters: dict[str, dict[str, Any]] = {}
     for raw in dispositions:
@@ -519,6 +524,7 @@ def _issue_history_rows(dispositions: list[Any], finding_meta: dict[str, dict[st
                 "title": str(cluster["title"]),
                 "status": status,
                 "reason": _issue_history_reason(status),
+                "reader_label": _issue_history_reader_label(status),
                 "row_ids": row_ids,
             }
         )
@@ -608,9 +614,11 @@ def build_governor_brief(*, artifact_dir: Path) -> str:
         lines.append("Raw DA IDs are internal provenance anchors; the final review should lead with these human-readable issue clusters.")
         lines.append("Allowed statuses: " + " | ".join(ALLOWED_DISPOSITION_MAP_STATUSES))
         for row in issue_rows:
+            reader_label = str(row.get("reader_label") or "").strip()
+            reader_label_text = f" Reader-facing label: {reader_label}." if reader_label else ""
             lines.append(
-                f"- {row['title']} — status: {row['status']}. Reason: {row['reason']}. "
-                f"Internal rows: {', '.join(row['row_ids'])}."
+                f"- {row['title']} — status: {row['status']}. Reason: {row['reason']}."
+                f"{reader_label_text} Internal rows: {', '.join(row['row_ids'])}."
             )
     if map_rows:
         if lines:
@@ -654,6 +662,7 @@ def build_report_governor_sanitization_prompt(*, governor_brief: str, review_tex
             "",
             "The final review must lead with a human-readable Prior Review Issue History: stable issue titles first, current status second, and plain-English reason third.",
             "Raw DA-* row IDs are internal provenance anchors only; they must not be a prominent top-level reader-facing section.",
+            f"When the prior review context brief supplies a Reader-facing label such as {CARRIED_FORWARD_READER_LABEL}, matching carried-forward issues in normal sections such as `### In Scope Issues` should include that unobtrusive parenthetical label without exposing raw DA IDs.",
             "Complete DA-* row coverage remains mandatory in audit/provenance artifacts (for example governor_brief.md or report_governor_result.json), not in the ordinary visible review body.",
             "Official CURe footer markers are valid prior-review provenance regardless of author/login; body-only CURe-looking text remains rejected.",
             "",

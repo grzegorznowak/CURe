@@ -226,6 +226,8 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("Subsequent-review output override", text)
             self.assertIn("MUST begin with `### Prior Review Issue History`", text)
             self.assertIn("preserve the brief's stable issue titles and status labels", text)
+            self.assertIn("Reader-facing label", text)
+            self.assertIn("prior review follow-up; still open after re-verification", text)
             self.assertIn("Internal DA coverage", text)
             self.assertIn("collapsible audit/provenance appendix", text)
             self.assertNotIn("Include `### Internal DA coverage` with every DA-* status before the normal review sections", text)
