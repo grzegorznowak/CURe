@@ -10,6 +10,7 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
         group_id: str = "G-0001",
         finding_id: str = "A-01",
         fingerprint: str = "",
+        source_ref: str = "app.py:10",
         provenance: dict[str, Any] | None = None,
     ) -> Any:
         from cure_subsequent_review.contracts import SourceVerificationLedger, SourceVerificationRow
@@ -22,8 +23,8 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
                     group_id=group_id,
                     finding_ids=(finding_id,),
                     source_state=state,
-                    current_source_citations=({"path": "app.py", "start_line": 10, "summary": "fixed"},),
-                    inspected_source_refs=("app.py:10",),
+                    current_source_citations=({"path": source_ref.split(":", 1)[0], "start_line": int(source_ref.split(":", 1)[1]), "summary": "fixed"},),
+                    inspected_source_refs=(source_ref,),
                     provenance={"rationale": "source checked", "fingerprint": fingerprint, **dict(provenance or {})},
                 ),
             ),
@@ -459,6 +460,139 @@ class SubsequentReviewMemoryStoreTests(SubsequentReviewTestCase):
 
             self.assertEqual(provider_calls, [])
             self.assertEqual(second_replay.rows[0].provenance["source"], "memory_cache")
+
+    def test_replay_persisted_row_with_changed_source_reference_misses_cache(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        cached = self._finding_candidate(finding_id="A-01", title="same finding title", evidence="app.py:10")
+        cached_reconciliation = reconcile_findings(findings=(cached,))
+        changed_source = self._finding_candidate(finding_id="A-01", title="same finding title", evidence="app.py:44")
+        changed_reconciliation = reconcile_findings(findings=(changed_source,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=cached_reconciliation.groups[0].fingerprint,
+                    source_ref="app.py:10",
+                ),
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+
+            first_replay = verify_source_truth(
+                reconciliation=cached_reconciliation,
+                verifier=lambda _request: FindingVerificationResult(source_state=SourceState.STILL_OPEN),
+                memory_store=store,
+                current_head="head-ok",
+            )
+            self.assertEqual(first_replay.rows[0].provenance["source"], "memory_cache")
+
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=first_replay,
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh source reference check")
+
+            ledger = verify_source_truth(
+                reconciliation=changed_reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual([call.group_id for call in provider_calls], ["G-0001"])
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "miss")
+            self.assertEqual(ledger.rows[0].provenance["cache_reason"], "stable_identity_mismatch")
+
+    def test_repeated_display_id_with_different_stable_identity_misses_cache(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        cached = self._finding_candidate(finding_id="A-01", title="cached display id finding", evidence="app.py:10")
+        cached_reconciliation = reconcile_findings(findings=(cached,))
+        current = self._finding_candidate(finding_id="A-01", title="new repeated display id finding", evidence="worker.py:30")
+        current_reconciliation = reconcile_findings(findings=(current,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=cached_reconciliation.groups[0].fingerprint,
+                ),
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+            ledger = verify_source_truth(
+                reconciliation=current_reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual([call.group_id for call in provider_calls], ["G-0001"])
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "miss")
+            self.assertEqual(ledger.rows[0].provenance["cache_reason"], "stable_identity_mismatch")
+
+    def test_changed_source_reference_with_same_display_id_misses_cache(self) -> None:
+        from cure_subsequent_review.contracts import DispositionAction, SourceState
+        from cure_subsequent_review.memory_store import ReviewMemoryStore
+        from cure_subsequent_review.source_truth import FindingVerificationResult, verify_source_truth
+
+        cached = self._finding_candidate(finding_id="A-01", title="same finding title", evidence="app.py:10")
+        cached_reconciliation = reconcile_findings(findings=(cached,))
+        current = self._finding_candidate(finding_id="A-01", title="same finding title", evidence="app.py:44")
+        current_reconciliation = reconcile_findings(findings=(current,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            store.update_findings(
+                current_head="head-ok",
+                source_verification=self._source_ledger(
+                    state=SourceState.RESOLVED_FROM_SOURCE,
+                    group_id="G-0001",
+                    finding_id="A-01",
+                    fingerprint=cached_reconciliation.groups[0].fingerprint,
+                ),
+                disposition_ledger=self._disposition_ledger(action=DispositionAction.CONFIRM_RESOLVED),
+            )
+            provider_calls: list[Any] = []
+
+            def provider(request: Any) -> FindingVerificationResult:
+                provider_calls.append(request)
+                return FindingVerificationResult(source_state=SourceState.STILL_OPEN, rationale="fresh check")
+
+            ledger = verify_source_truth(
+                reconciliation=current_reconciliation,
+                verifier=provider,
+                memory_store=store,
+                current_head="head-ok",
+            )
+
+            self.assertEqual([call.group_id for call in provider_calls], ["G-0001"])
+            self.assertEqual(ledger.rows[0].provenance["cache_status"], "miss")
+            self.assertEqual(ledger.rows[0].provenance["cache_reason"], "stable_identity_mismatch")
 
     def test_cache_miss_records_reason_when_only_ordinal_group_matches(self) -> None:
         from cure_subsequent_review.contracts import DispositionAction, SourceState

@@ -299,6 +299,12 @@ def _write_context_markdown(*, path: Path, package: dict[str, Any]) -> None:
             f"- Official-footer remote entries: {footer_policy.get('official_footer_remote_entries', 0)}",
             f"- Foreign official-footer ignored comments: {footer_policy.get('foreign_footer_ignored_comments', 0)}",
             f"- Body-only/generic rejected comments: {footer_policy.get('body_only_rejected_comments', 0)}",
+        ]
+    )
+    for reason in footer_policy.get("foreign_footer_audit_reasons", []):
+        lines.append(f"- {reason}")
+    lines.extend(
+        [
             "",
             "## FB-010 discussion evidence reuse",
             f"- Decision remote events: {package.get('fb_010', {}).get('decision_remote_events', 0)}",
@@ -676,6 +682,18 @@ def _record_runtime_module_in_manifest(manifest_path: Path | None, record: Modul
             return
 
 
+def _runtime_module_disabled(
+    module_overrides: dict[Any, Any] | None,
+    module: SubsequentReviewModule,
+) -> bool:
+    if not module_overrides:
+        return False
+    status = module_overrides.get(module)
+    if status is None:
+        status = module_overrides.get(module.value)
+    return status is ModuleStatus.DISABLED or str(status) == ModuleStatus.DISABLED.value
+
+
 def build_report_governor_sanitization_prompt(*, governor_brief: str, review_text: str) -> str:
     """Build the module-10 post-review sanitization prompt."""
 
@@ -685,11 +703,12 @@ def build_report_governor_sanitization_prompt(*, governor_brief: str, review_tex
             "Answer this exact question:",
             REPORT_GOVERNOR_AWARENESS_QUESTION,
             "",
-            "The final review must lead with a human-readable Prior Review Issue History: stable issue titles first, current status second, and plain-English reason third.",
+            "The final review must lead with a human-readable Prior Review Issue History: stable issue titles first, current status second, and the governor-supplied plain-English `Reason:` text third.",
             "Raw DA-* row IDs are internal provenance anchors only; they must not be a prominent top-level reader-facing section.",
             f"When the prior review context brief supplies a Reader-facing label such as {CARRIED_FORWARD_READER_LABEL}, matching carried-forward issues in normal sections such as `### In Scope Issues` should include that unobtrusive parenthetical label without exposing raw DA IDs.",
             "Complete DA-* row coverage remains mandatory in audit/provenance artifacts (for example governor_brief.md or report_governor_result.json), not in the ordinary visible review body.",
             "Official CURe footer markers are valid prior-review provenance regardless of author/login; body-only CURe-looking text remains rejected.",
+            "If the brief reports foreign official-footer ignored comments, the final review must include a concise reader-facing provenance/audit note with the ignored count and plain-English audit reason, while excluding the foreign findings themselves.",
             "",
             "Return JSON only with these fields:",
             '- awareness: one of "demonstrated", "partial", "missing", or "unknown"',
@@ -740,7 +759,10 @@ def _expected_issue_history_rows_from_brief(governor_brief: str) -> list[dict[st
     rows: list[dict[str, Any]] = []
     in_issue_history = False
     statuses = "|".join(re.escape(status) for status in ALLOWED_DISPOSITION_MAP_STATUSES)
-    pattern = re.compile(rf"^-\s+(?P<title>.+?)\s+—\s+status:\s*(?P<status>{statuses})\b", re.IGNORECASE)
+    pattern = re.compile(
+        rf"^-\s+(?P<title>.+?)\s+—\s+status:\s*(?P<status>{statuses})\b(?:.*?\bReason:\s*(?P<reason>.*?)(?:\.\s+(?:Reader-facing label|Internal rows)|\.\s*$|$))?",
+        re.IGNORECASE,
+    )
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("### "):
@@ -750,7 +772,13 @@ def _expected_issue_history_rows_from_brief(governor_brief: str) -> list[dict[st
             continue
         match = pattern.search(stripped)
         if match:
-            rows.append({"title": match.group("title").strip(), "status": match.group("status").lower()})
+            rows.append(
+                {
+                    "title": match.group("title").strip(),
+                    "status": match.group("status").lower(),
+                    "reason": str(match.group("reason") or "").strip(),
+                }
+            )
     return rows
 
 
@@ -829,11 +857,29 @@ def _demote_plain_internal_da_coverage_sections(review_text: str) -> tuple[str, 
     return demoted, True
 
 
+def _issue_history_section_lines(review_text: str) -> list[str]:
+    lines = str(review_text or "").splitlines()
+    in_section = False
+    section: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            if in_section:
+                break
+            in_section = stripped.lower().startswith("### prior review issue history")
+            continue
+        if in_section:
+            section.append(stripped)
+    return section
+
+
 def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
     expected = _expected_issue_history_rows_from_brief(governor_brief) or _expected_issue_history_rows(artifact_dir)
     if not expected:
         return []
     normalized_review = re.sub(r"\s+", " ", review_text).lower()
+    issue_history_lines = _issue_history_section_lines(review_text)
+    normalized_issue_lines = [re.sub(r"\s+", " ", line).lower() for line in issue_history_lines]
     has_issue_history_heading = "prior review issue history" in normalized_review
     has_da_map_heading = "prior review disposition map" in normalized_review or "internal da coverage" in normalized_review
     warnings: list[str] = []
@@ -847,17 +893,114 @@ def _issue_history_warnings(*, artifact_dir: Path, review_text: str, governor_br
             if str(row["title"]).lower() not in normalized_review or str(row["status"]).lower() not in normalized_review
         )
     )
+    missing_reasons = tuple(
+        sorted(
+            str(row["title"])
+            for row in expected
+            if str(row.get("reason") or "").strip()
+            and not any(
+                str(row["title"]).lower() in line
+                and str(row["status"]).lower() in line
+                and str(row.get("reason") or "").lower() in line
+                for line in normalized_issue_lines
+            )
+        )
+    )
     if not has_issue_history_heading or missing_titles:
         warnings.append("missing_prior_review_issue_history")
     if missing_titles:
         warnings.append("missing_prior_review_issue_clusters:" + ",".join(missing_titles))
+    for title in missing_reasons:
+        warnings.append(f"missing_prior_review_issue_history_reason:{title}")
     if has_da_map_heading and (not has_issue_history_heading or missing_titles):
         warnings.append("raw_da_list_only")
     return warnings
 
 
+def _footer_marker_policy_from_brief(governor_brief: str) -> dict[str, Any]:
+    text = str(governor_brief or "")
+    match = re.search(r"foreign official-footer ignored comments:\s*(?P<count>\d+)", text, re.IGNORECASE)
+    count = int(match.group("count")) if match is not None else 0
+    reasons = [line.strip().lstrip("- ").strip() for line in text.splitlines() if "Ignored remote CURe" in line]
+    return {"foreign_footer_ignored_comments": count, "foreign_footer_audit_reasons": reasons}
+
+
+def _footer_marker_policy_warnings(*, review_text: str, governor_brief: str = "") -> list[str]:
+    policy = _footer_marker_policy_from_brief(governor_brief)
+    count = int(policy.get("foreign_footer_ignored_comments") or 0)
+    if count <= 0:
+        return []
+    normalized = re.sub(r"\s+", " ", str(review_text or "")).lower()
+    summary_count_visible = re.search(
+        rf"\bforeign official[- ]footer ignored comments:\s*{count}\b",
+        normalized,
+    ) is not None
+    count_visible = f"ignored {count}" in normalized or f"{count} foreign official" in normalized or summary_count_visible
+    policy_visible = "foreign official" in normalized or "official footer" in normalized
+    exclusion_visible = any(
+        phrase in normalized
+        for phrase in (
+            "ignored",
+            "excluded",
+            "rejected",
+            "not used",
+            "not admitted",
+            "not included",
+            "not carried forward",
+            "never used",
+            "never admitted",
+            "never included",
+            "never carried forward",
+        )
+    )
+    positive_foreign_finding_action = (
+        r"(?<!not )(?<!never )\b(?:carried forward|carry forward|re[- ]?reported|included|admitted|accepted)\b"
+    )
+    positive_foreign_footer_action = (
+        r"(?<!not )(?<!never )\b(?:carried forward|carry forward|re[- ]?reported|includ(?:e|ed|es|ing)|admitted|accepted)\b"
+    )
+    contradiction_text = re.sub(
+        r"\baccepted official-footer remote entries:\s*\d+\s*;\s*foreign official-footer ignored comments:\s*\d+\b",
+        " ",
+        normalized,
+    )
+    contradiction_text = re.sub(
+        r"\bno\s+foreign findings?\s+(?:were|was|are|is|be|been|being)?\s*"
+        r"(?:carried forward|carry forward|re[- ]?reported|included|admitted|accepted)\b",
+        " ",
+        contradiction_text,
+    )
+    foreign_footer_terms = r"\b(?:foreign official|official footer)\b"
+    contradiction_visible = any(
+        re.search(pattern, contradiction_text)
+        for pattern in (
+            rf"{positive_foreign_footer_action}.{{0,80}}{foreign_footer_terms}",
+            rf"{foreign_footer_terms}.{{0,80}}{positive_foreign_footer_action}",
+            rf"\bforeign findings?\b.{{0,80}}{positive_foreign_finding_action}",
+            rf"{positive_foreign_finding_action}.{{0,80}}\bforeign findings?\b",
+        )
+    )
+    reason_visible = False
+    for reason in policy.get("foreign_footer_audit_reasons", []):
+        tokens = [token.lower() for token in re.findall(r"\b(?:PR\d+|[0-9a-f]{7,40}|[A-Za-z0-9_.-]+-pr\d+-[A-Za-z0-9_.-]+)\b", str(reason))]
+        durable_tokens = [
+            token
+            for token in tokens
+            if token.startswith("pr") or "-pr" in token or (re.fullmatch(r"[0-9a-f]{7,40}", token) and not token.isdigit())
+        ]
+        if durable_tokens and all(token in normalized for token in durable_tokens[:6]):
+            reason_visible = True
+            break
+    if contradiction_visible:
+        return ["contradicted_footer_marker_policy_audit_note"]
+    if not (count_visible and policy_visible and reason_visible and exclusion_visible):
+        return ["missing_footer_marker_policy_audit_note"]
+    return []
+
+
 def _disposition_map_warnings(*, artifact_dir: Path, review_text: str, governor_brief: str = "") -> list[str]:
     warnings = _issue_history_warnings(artifact_dir=artifact_dir, review_text=review_text, governor_brief=governor_brief)
+    warnings.extend(_footer_marker_policy_warnings(review_text=review_text, governor_brief=governor_brief))
     warnings.extend(_internal_da_coverage_warnings(artifact_dir=artifact_dir, review_text=review_text))
     for line in str(review_text or "").splitlines():
         stripped = line.strip().lower()
@@ -1046,6 +1189,9 @@ def audit_review_report_after_review(
                 "prominent_internal_da_coverage",
                 "missing_prior_review_issue_history",
                 "missing_prior_review_issue_clusters:",
+                "missing_prior_review_issue_history_reason:",
+                "missing_footer_marker_policy_audit_note",
+                "contradicted_footer_marker_policy_audit_note",
                 "prior_review_issue_history_not_first",
                 "raw_da_list_only",
                 "missing_internal_da_coverage:",
@@ -1115,34 +1261,45 @@ def prepare_review_runtime_pre_prompt(
     governor_mode: str,
     memory_store_path: Path | None = None,
     manifest_path: Path | None = None,
+    module_overrides: dict[Any, Any] | None = None,
 ) -> ReviewRuntimePrePromptResult:
     """Run module-9/10 pre-prompt transformations and return prompt vars."""
 
     normalized_mode = str(governor_mode or "strict").strip().lower()
     context_package_path = artifact_dir / REVIEW_CONTEXT_PACKAGE_ARTIFACT
     context_markdown_path = artifact_dir / SUBSEQUENT_REVIEW_CONTEXT_ARTIFACT
-    package = build_review_context_package(artifact_dir=artifact_dir, memory_store_path=memory_store_path)
-    _write_json_object(context_package_path, package)
-    _write_context_markdown(path=context_markdown_path, package=package)
-    packager_record = ModuleRunRecord(
-        module=SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
-        status=ModuleStatus.SUCCESS,
-        artifact_path=str(context_package_path),
-    )
+    packager_disabled = _runtime_module_disabled(module_overrides, SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER)
+    if packager_disabled:
+        packager_record = ModuleRunRecord(
+            module=SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
+            status=ModuleStatus.DISABLED,
+            reasons=("module_override_disabled",),
+        )
+    else:
+        package = build_review_context_package(artifact_dir=artifact_dir, memory_store_path=memory_store_path)
+        _write_json_object(context_package_path, package)
+        _write_context_markdown(path=context_markdown_path, package=package)
+        packager_record = ModuleRunRecord(
+            module=SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
+            status=ModuleStatus.SUCCESS,
+            artifact_path=str(context_package_path),
+        )
     _record_runtime_module_in_manifest(manifest_path, packager_record)
 
-    if normalized_mode == "off":
+    governor_disabled = _runtime_module_disabled(module_overrides, SubsequentReviewModule.REPORT_GOVERNOR)
+    if governor_disabled or normalized_mode == "off":
         governor_record = ModuleRunRecord(
             module=SubsequentReviewModule.REPORT_GOVERNOR,
             status=ModuleStatus.DISABLED,
-            reasons=("governor_mode_off",),
+            reasons=("module_override_disabled",) if governor_disabled else ("governor_mode_off",),
         )
         _record_runtime_module_in_manifest(manifest_path, governor_record)
-        finalize_review_runtime_context(
-            artifact_dir=artifact_dir,
-            memory_store_path=memory_store_path,
-            manifest_path=manifest_path,
-        )
+        if not packager_disabled:
+            finalize_review_runtime_context(
+                artifact_dir=artifact_dir,
+                memory_store_path=memory_store_path,
+                manifest_path=manifest_path,
+            )
         return ReviewRuntimePrePromptResult(
             prior_review_brief="",
             context_package_path=context_package_path,
@@ -1183,11 +1340,12 @@ def prepare_review_runtime_pre_prompt(
         artifact_path=str(governor_brief_path),
     )
     _record_runtime_module_in_manifest(manifest_path, governor_record)
-    finalize_review_runtime_context(
-        artifact_dir=artifact_dir,
-        memory_store_path=memory_store_path,
-        manifest_path=manifest_path,
-    )
+    if not packager_disabled:
+        finalize_review_runtime_context(
+            artifact_dir=artifact_dir,
+            memory_store_path=memory_store_path,
+            manifest_path=manifest_path,
+        )
     return ReviewRuntimePrePromptResult(
         prior_review_brief=brief,
         context_package_path=context_package_path,

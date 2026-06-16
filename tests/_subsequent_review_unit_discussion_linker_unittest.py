@@ -117,5 +117,139 @@ class SubsequentReviewDiscussionLinkerTests(SubsequentReviewTestCase):
             self.assertEqual(result.signal_class, DiscussionSignalClass.DUPLICATE_SUPERSEDED)
             self.assertEqual(result.rationale, "cached")
 
+    def test_llm_linker_replays_cached_no_link_for_same_event_body_head_and_group_universe(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass
+        from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
+        from cure_subsequent_review.memory_store import ReviewMemoryStore, group_identity_for_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            event = DiscussionEvent(kind="issue_comment", event_id="C-05", author="developer", body="This is by design")
+            groups = self._groups()
+            store.update_linker_result(
+                event_id="C-05",
+                body=event.body,
+                current_head="head-1",
+                group_ids=(),
+                signal_class=DiscussionSignalClass.BY_DESIGN,
+                rationale="cached no confident group",
+                group_identities={group.group_id: group_identity_for_cache(group) for group in groups},
+            )
+            calls: list[str] = []
+            linker = LlmDiscussionLinker(classifier=calls.append, current_head="head-1", memory_store=store)
+
+            result = linker(event, groups)
+
+            self.assertEqual(calls, [])
+            self.assertEqual(result.group_ids, ())
+            self.assertEqual(result.signal_class, DiscussionSignalClass.BY_DESIGN)
+            self.assertEqual(result.rationale, "cached no confident group")
+
+    def test_llm_linker_invalidates_cached_no_link_when_group_universe_changes(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass
+        from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
+        from cure_subsequent_review.memory_store import ReviewMemoryStore, group_identity_for_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            event = DiscussionEvent(kind="issue_comment", event_id="C-06", author="developer", body="Parser null check is fixed")
+            stale_groups = reconcile_findings(
+                findings=(self._finding_candidate(finding_id="OLD-01", title="Old UI bug", evidence="src/old_ui.py:9"),)
+            ).groups
+            current_groups = self._groups()
+            store.update_linker_result(
+                event_id="C-06",
+                body=event.body,
+                current_head="head-1",
+                group_ids=(),
+                signal_class=DiscussionSignalClass.BY_DESIGN,
+                rationale="cached no confident group",
+                group_identities={group.group_id: group_identity_for_cache(group) for group in stale_groups},
+            )
+            calls: list[str] = []
+
+            def llm(prompt: str) -> str:
+                calls.append(prompt)
+                return json.dumps(
+                    {
+                        "group_ids": ["G-0001"],
+                        "signal_class": "developer_claim_fixed",
+                        "rationale": "current parser group is relevant",
+                    }
+                )
+
+            linker = LlmDiscussionLinker(classifier=llm, current_head="head-1", memory_store=store)
+
+            result = linker(event, current_groups)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(result.group_ids, ("G-0001",))
+            self.assertEqual(result.signal_class, DiscussionSignalClass.DEVELOPER_CLAIM_FIXED)
+            self.assertEqual(result.rationale, "current parser group is relevant")
+
+    def test_llm_linker_invalidates_cached_no_link_when_same_group_origin_has_identity_drift(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionEvent, DiscussionSignalClass
+        from cure_subsequent_review.discussion_linker import LlmDiscussionLinker
+        from cure_subsequent_review.memory_store import ReviewMemoryStore, group_identity_for_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReviewMemoryStore(path=Path(tmp) / "cure_memory.json")
+            event = DiscussionEvent(kind="issue_comment", event_id="C-07", author="developer", body="Parser null check is fixed")
+            stale_groups = reconcile_findings(
+                findings=(
+                    self._finding_candidate(
+                        finding_id="A-01",
+                        title="Parser null check",
+                        evidence="src/parser.py:42",
+                        entry_id="session-same-origin",
+                    ),
+                )
+            ).groups
+            current_groups = reconcile_findings(
+                findings=(
+                    self._finding_candidate(
+                        finding_id="A-01",
+                        title="Parser null check",
+                        evidence="src/parser.py:84",
+                        entry_id="session-same-origin",
+                    ),
+                )
+            ).groups
+            stale_identity = group_identity_for_cache(stale_groups[0])
+            current_identity = group_identity_for_cache(current_groups[0])
+            self.assertEqual(stale_groups[0].group_id, current_groups[0].group_id)
+            self.assertEqual(stale_identity["origin_digest"], current_identity["origin_digest"])
+            self.assertNotEqual(stale_identity["fingerprint"], current_identity["fingerprint"])
+            self.assertNotEqual(stale_identity["source_refs_digest"], current_identity["source_refs_digest"])
+            store.update_linker_result(
+                event_id="C-07",
+                body=event.body,
+                current_head="head-1",
+                group_ids=(),
+                signal_class=DiscussionSignalClass.BY_DESIGN,
+                rationale="cached no confident group for old source reference",
+                group_identities={stale_groups[0].group_id: stale_identity},
+            )
+            calls: list[str] = []
+
+            def llm(prompt: str) -> str:
+                calls.append(prompt)
+                return json.dumps(
+                    {
+                        "group_ids": ["G-0001"],
+                        "signal_class": "developer_claim_fixed",
+                        "rationale": "current parser location is relevant",
+                    }
+                )
+
+            linker = LlmDiscussionLinker(classifier=llm, current_head="head-1", memory_store=store)
+
+            result = linker(event, current_groups)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(result.group_ids, ("G-0001",))
+            self.assertEqual(result.signal_class, DiscussionSignalClass.DEVELOPER_CLAIM_FIXED)
+            self.assertEqual(result.rationale, "current parser location is relevant")
+
 
 __all__ = ["SubsequentReviewDiscussionLinkerTests"]

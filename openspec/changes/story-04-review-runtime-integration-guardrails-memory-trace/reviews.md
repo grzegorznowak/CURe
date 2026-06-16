@@ -5,6 +5,604 @@
 
 ## Review Log
 
+- 2026-06-16T15:11:09Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; PR18/PR22 live-audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: OpenSpec proof/status/tasks/progress/reviews/proposal/design; `git status --short`, `git diff --numstat`, `git diff --stat`, `git diff --check`; focused multipass passes over proof/status, discussion-linker/cache identity, report-governor/final-output/footer policy, and runtime/control-plane/degraded/memory/source replay; parent source/test searches for A12 identity drift and A17/A19 footer regressions.
+  - Risk lenses reviewed: proof maturity/live-audit gate, dirty main-tree review hygiene, discussion-linker no-link cache identity drift, source-verification cache identity drift and safe terminal replay, prompt/final-output footer-governor false positives/contradictions, post-review warn-only degradation, degraded discussion artifact lifecycle, disabled-path cleanup, package/context status finalization, active duplicate-source handling, and verifier fan-out observability.
+  - Finding closure: 2026-06-16T13:50 A12 same-origin no-link identity-drift blocker is resolved locally by source/test inspection and parent targeted regression run (`26 passed, 2 subtests`); prior A17/A19 copied-summary and no-subject negated-footer blockers are resolved locally by source/test inspection and parent targeted regression run; prior A1 healthy-empty discussion and A20 replay-persisted source-reference blockers remain locally resolved by focused pass evidence; A16/A17/A19/A20 proof/live-audit gate remains open.
+  - Evidence quality: confirmed direct OpenSpec/source/test reads, chunkhound research saved to notebook, four focused multipass passes, parent targeted tests (`26 passed, 2 subtests`), and `git diff --check`; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 proof rows remain.
+  - Files reviewed: `AGENTS.md`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `cure.py`; `cure_subsequent_review/contracts.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure_subsequent_review/discussion_linker.py`; `cure_subsequent_review/discussion_signals.py`; `cure_subsequent_review/llm_verifier.py`; maintained PR prompt templates; Story 04 focused tests including report-governor, discussion-linker, discussion-signals, memory-store, runtime-memory, source-truth, runtime-packaging, degraded-runtime, control-plane, PR-flow, prompt/config, and landmark-trace fixtures.
+  - Hypothesis triage:
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows to final only with evidence.
+    - suspicious surface: `_cached_group_identity_matches()` / `LlmDiscussionLinker` no-link replay; tentative issue: prior same-event/body/head no-link cache identity drift could suppress a fresh linker call; next proof target: checked regression for same group id + same origin + changed fingerprint/source refs.
+    - suspicious surface: `_footer_marker_policy_warnings()` copied-summary and no-subject negation; tentative issue: prior valid footer audit notes could still false-degrade or positive contradictions could be missed; next proof target: checked report-governor regressions for copied count, `no foreign findings were carried forward`, and positive contradictions.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:23`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:102`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:446`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:450`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The current local code blockers checked in the latest reviews appear resolved, but the review skill still forbids approval while required proof remains unresolved. Story 04 still records A16, A17, A19, and A20 as provisional, leaves the fresh PR #22 live-audit task unchecked, and the latest progress entry explicitly says no fresh PR #22 live audit was run after the A12 fix.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only completion split from live PR-stage proof, the story/proof matrix must explicitly rescope those rows before review can approve.
+
+      **Code Trail:** The story header names the pending PR #22 live-audit gate; the proof matrix marks A16/A17/A19/A20 provisional; `tasks.md` leaves the live-audit row unchecked; `progress.md` preserves the same pending state after the latest fix; the review skill requires unresolved proof contracts to fail approval and every proof row to be final.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|No fresh PR #22 live audit|Approval is not allowed|every proof row|proof row is still" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and approval rule.
+
+      </details>
+  - Debt Friction: none
+  - Next action: Run and audit a fresh PR #22 live review at head `e305f826f3c0ece63be708f7df4b4f54c38b7658` or later, then update the A16/A17/A19/A20 proof rows/tasks from provisional/pending to final only with artifact evidence.
+
+- 2026-06-16T13:50:51Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; prior PR18/PR22 live-audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: OpenSpec proof/status/tasks/progress/reviews; `git status --short`, `git diff --numstat`, `git diff --check`; focused passes over proof/status, report-governor/final-output/footer, discussion-linker/memory/source/semantic replay, and runtime/control-plane/degraded/prompt integration; parent targeted tests and A12 stale no-link identity-drift probe.
+  - Risk lenses reviewed: proof maturity/live-audit gate, dirty main-tree review hygiene, prompt/final-output footer-governor false positives/contradictions, post-review warn-only degradation, discussion-linker no-link cache staleness, current group identity drift, shared memory/source cache identity drift, non-source-proof replay, semantic pipeline ordering, degraded discussion artifact lifecycle, disabled-path cleanup, package/context status consistency, and verifier fan-out observability.
+  - Finding closure: 2026-06-16T13:16 footer-governor `no foreign findings were carried forward` false-degradation is resolved locally by source/test inspection and parent targeted tests/probe; the exact stale no-link cache case where the current group set changes is resolved locally, but A12 remains open for same group-id/current-universe cache replay when fingerprint/source-reference identity changes under the same origin; A16/A17/A19/A20 proof/live-audit gate remains open.
+  - Evidence quality: confirmed direct OpenSpec/source/test reads, four focused multipass passes, parent targeted tests (`25 passed, 2 subtests`), parent A12 same-origin identity-drift probe (`classifier_calls=0` stale cache replay), and `git diff --check`; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 proof rows remain.
+  - Files reviewed: `AGENTS.md`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `cure.py`; `cure_runtime.py`; `cure_subsequent_review/contracts.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure_subsequent_review/discussion_linker.py`; `cure_subsequent_review/llm_verifier.py`; maintained PR prompt templates; Story 04 focused tests including report-governor, discussion-linker, memory-store, semantic-pipeline, source-truth, llm-verifier, runtime-packaging, degraded-runtime, control-plane, PR-flow, prompt/config, and landmark-trace suites.
+  - Hypothesis triage:
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows to final only with evidence.
+    - suspicious surface: `_cached_group_identity_matches()` / `LlmDiscussionLinker` no-link replay; tentative issue: same event/body/head no-link cache can replay when the group id and origin match but fingerprint/source-reference identity changed, suppressing a fresh linker call; next proof target: regression for same group id + same origin + changed fingerprint/source refs.
+    - suspicious surface: `_footer_marker_policy_warnings()` copied-summary and no-subject negation; tentative issue: prior footer false-degradation blockers may still be open; next proof target: targeted report-governor tests/probe for copied count, `no foreign findings were carried forward`, and positive contradictions.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:23`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:446`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review skill forbids approval while required proof remains unresolved. Story 04 still records A16, A17, A19, and A20 as provisional, leaves the fresh PR #22 live-audit task unchecked, and the latest progress entry explicitly says no fresh PR #22 live audit was run after the local fixes.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage proof, the story/proof matrix must explicitly rescope those rows before review can approve.
+
+      **Code Trail:** The story header names the pending PR #22 live-audit gate; the proof matrix marks A16/A17/A19/A20 provisional; `tasks.md` leaves the live-audit row unchecked; `progress.md` preserves the same pending state after the latest fixes; the review skill requires every proof row to be final before approval.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|Approval is not allowed|every proof row" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and approval rule.
+
+      </details>
+    - A12 no-link discussion-linker cache can still replay stale results when the current group id/universe is unchanged but the current group identity changed under the same origin. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:38`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:114`, `cure_subsequent_review/discussion_linker.py:84`, `cure_subsequent_review/discussion_linker.py:91`, `cure_subsequent_review/discussion_linker.py:96`, `cure_subsequent_review/discussion_linker.py:172`, `cure_subsequent_review/discussion_linker.py:182`, `cure_subsequent_review/memory_store.py:169`, `cure_subsequent_review/memory_store.py:172`, `cure_subsequent_review/memory_store.py:173`, `cure_subsequent_review/memory_store.py:321`, `tests/_subsequent_review_unit_discussion_linker_unittest.py:148`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+      **Why:** Story 04 says linker results are cached by event/body/head plus current group identities. The latest fix stores identities for no-link rows and invalidates when the current group set differs, but identity matching still falls back to `origin_digest` after fingerprint mismatch. A no-link row for `G-0001` can therefore replay when the same origin/comment produced an updated current group with a different fingerprint or source-reference digest, suppressing the classifier call that could attach the now-relevant event.
+
+      **Assumptions / Preconditions:** Same `event_id + body_hash + head`, cached `group_ids=[]`, same current group id and same prior-corpus origin, but changed finding fingerprint and/or source references.
+
+      **Downgrade Factors:** If origin-only identity is intentionally considered sufficient for linker no-link replay, the story/design must explicitly narrow the `current group identities` requirement and document why fingerprint/source-reference drift is safe for no-link rows.
+
+      **Code Trail:** `group_identity_for_cache()` records canonical id, finding ids, fingerprint, source-reference digest, and origin digest. `_cached_group_identity_matches()` first accepts exact fingerprint equality, then falls back to matching origin digest. `_cached_group_universe_matches()` only checks the group-id set and that matcher; `_cached()` accepts no-link payloads when the universe matcher passes. The checked-in stale-cache regression covers a different group set, not same group id with changed fingerprint/source refs.
+
+      **Reproduction:** Parent read-only probe seeded `cure_memory.json` with a no-link cached result for `G-0001` at `head-1` whose identity had fingerprint `old-fingerprint` and `src/parser.py:42`; it then called `LlmDiscussionLinker` with the same event/body/head and current `G-0001` from the same origin but fingerprint `new-fingerprint` and `src/parser.py:84`. Because `origin_digest` matched, the cached no-link replayed with `classifier_calls=0`, `result_group_ids=()`, and `result_signal_class=by_design`.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to fix the A12 same-origin identity-drift no-link cache replay and keep A16/A17/A19/A20 proof rows provisional until a fresh PR #22 live audit is actually run or the story is explicitly rescoped.
+
+- 2026-06-16T13:16:40Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; PR18/PR22 live-audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: OpenSpec proof/status/tasks/progress/reviews; `git status --short`, `git diff --numstat`, `git diff --stat`, `git diff --check`; focused pass over `cure.py`, `cure_subsequent_review/control_plane.py`, `degraded_runtime.py`, `runtime.py`, runtime-packaging/control-plane/degraded/PR-flow tests; focused pass over report-governor/final-output/footer policy paths and maintained prompts; focused pass over `memory_store.py`, `semantic_pipeline.py`, `source_truth.py`, `discussion_linker.py`, `llm_verifier.py`, and related tests; parent probes for `_footer_marker_policy_warnings()` and `LlmDiscussionLinker` cache replay.
+  - Risk lenses reviewed: proof maturity/live-audit gate, dirty main-tree review hygiene, prompt/final-output false-positive/false-negative footer-governor behavior, post-review warn-only degradation, foreign-footer provenance final-output visibility, module-12 artifact lifecycle, disabled decision-only artifact cleanup, shared memory/cache identity drift, no-link linker cache replay, safe terminal replay categories, verifier fan-out telemetry, semantic pipeline ordering, and LLM verifier inactive-source handling.
+  - Finding closure: 2026-06-16T12:06 copied-summary-only ignored-footer count blocker is resolved locally by source/test inspection, targeted test, and parent probe (`footer_valid_copied=[]`); prior A1/module-12 healthy-empty and A20 replay-persisted source-reference blockers remain locally resolved; A16/A17/A19/A20 proof/live-audit gate remains open; new local issues found for `no foreign findings were carried forward` false-degradation and A12 discussion-linker no-link cache staleness.
+  - Evidence quality: confirmed direct source/OpenSpec/test reads, four focused multipass passes, parent targeted tests (`7 passed, 2 subtests`), parent `_footer_marker_policy_warnings()` probe, parent `LlmDiscussionLinker` no-link cache probe, and `git diff --check`; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 proof rows remain.
+  - Files reviewed: `AGENTS.md`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `cure.py`; `cure_subsequent_review/contracts.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure_subsequent_review/discussion_linker.py`; `cure_subsequent_review/llm_verifier.py`; maintained PR prompt templates; `tests/_subsequent_review_unit_degraded_runtime_unittest.py`; `tests/_subsequent_review_functional_control_plane_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_unit_runtime_memory_unittest.py`; `tests/_subsequent_review_integration_pr_flow_unittest.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_memory_store_unittest.py`; `tests/_subsequent_review_unit_semantic_pipeline_unittest.py`; `tests/_subsequent_review_unit_discussion_linker_unittest.py`; `tests/_subsequent_review_unit_source_truth_unittest.py`; `tests/_subsequent_review_unit_llm_verifier_unittest.py`; `tests/_reviewflow_unittest_prompt_session_impl.py`.
+  - Hypothesis triage:
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows to final only with evidence.
+    - suspicious surface: `_footer_marker_policy_warnings()` negation handling; tentative issue: valid `no foreign findings were carried forward` wording is read as a positive contradiction; next proof target: report-governor regression for `no foreign findings were carried forward` with copied count, durable reason, and explicit exclusion.
+    - suspicious surface: `LlmDiscussionLinker` cached no-link results; tentative issue: same `event_id + body_hash + head` can replay an empty `group_ids` result even when current reconciliation groups changed and now include a relevant group; next proof target: no-link cache invalidation keyed by current group identities or explicit safe scope.
+    - suspicious surface: copied footer-policy summary count visibility; tentative issue: previous missing-count finding may still be open; next proof target: source/test/probe around `foreign official-footer ignored comments: 1` copied summary only.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:23`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:446`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:450`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review skill forbids approval while required proof remains unresolved. Story 04 still records A16, A17, A19, and A20 as provisional, leaves the fresh PR #22 live-audit row unchecked, and current progress explicitly says no fresh PR #22 live audit was run after the latest local fixes.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage proof, the story/proof matrix must explicitly rescope those rows before review can approve.
+
+      **Code Trail:** The story header names the pending PR #22 live-audit gate; the proof matrix marks A16/A17/A19/A20 provisional; `tasks.md` leaves the live-audit row unchecked; `progress.md` preserves the same pending state after the latest fix; the review skill requires unresolved proof contracts to fail approval and every proof row to be final.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|Approval is not allowed|every proof row" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and approval rule.
+
+      </details>
+    - A17/A19 footer-governor false-degrades a valid audit note that says no foreign findings were carried forward. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:98`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:119`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:121`, `cure_subsequent_review/runtime.py:934`, `cure_subsequent_review/runtime.py:938`, `cure_subsequent_review/runtime.py:956`, `cure_subsequent_review/runtime.py:957`, `cure_subsequent_review/runtime.py:967`, `cure_subsequent_review/runtime.py:973`, `cure_subsequent_review/runtime.py:974`, `cure_subsequent_review/runtime.py:989`, `tests/_subsequent_review_unit_report_governor_unittest.py:550`, `tests/_subsequent_review_unit_report_governor_unittest.py:643`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A17/A19 require final reviews to include an ignored foreign-footer count/reason while excluding foreign findings. The copied-summary count fix is now good, but the contradiction regex only suppresses verbs immediately preceded by `not` or `never`; a natural valid sentence such as `no foreign findings were carried forward` still matches as a positive contradiction and records `contradicted_footer_marker_policy_audit_note`.
+
+      **Assumptions / Preconditions:** `governor_brief.md` reports at least one ignored foreign official-footer comment, and final `review.md` uses the copied `foreign official-footer ignored comments: 1` summary plus durable PR/session/head reason tokens and `no foreign findings were carried forward` / foreign footer excluded wording.
+
+      **Downgrade Factors:** Post-review governor findings are warn-only and do not block publication, so this is not a publication stop. It still weakens A17/A19 proof because valid final-output text can be falsely degraded.
+
+      **Code Trail:** `_footer_marker_policy_warnings()` now accepts the copied summary count, but `positive_foreign_finding_action` uses only `(?<!not )(?<!never )` lookbehinds and the broad `foreign findings` patterns. Existing positive and negated tests cover `not included` / `not carried forward` and positive admitted/carried-forward wording, but not `no foreign findings were carried forward`.
+
+      **Reproduction:** Parent probe: copied summary + PR22/session/head vs PR18 reason + `foreign findings were excluded ... were not carried forward` returned `[]`; copied summary + same durable reason + `no foreign findings were carried forward ... foreign official footer was excluded` returned `['contradicted_footer_marker_policy_audit_note']`; positive `carried forward 1 foreign official CURe footer comment` returned `['contradicted_footer_marker_policy_audit_note']`.
+
+      </details>
+    - A12 discussion-linker cache can replay stale no-link results after current group identity changes. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:38`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:91`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:114`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:182`, `cure_subsequent_review/discussion_linker.py:84`, `cure_subsequent_review/discussion_linker.py:91`, `cure_subsequent_review/discussion_linker.py:162`, `cure_subsequent_review/discussion_linker.py:167`, `cure_subsequent_review/discussion_linker.py:172`, `cure_subsequent_review/discussion_linker.py:175`, `cure_subsequent_review/discussion_linker.py:191`, `cure_subsequent_review/discussion_linker.py:197`, `cure_subsequent_review/memory_store.py:140`, `cure_subsequent_review/memory_store.py:173`, `cure_subsequent_review/memory_store.py:286`, `cure_subsequent_review/memory_store.py:321`, `cure_subsequent_review/memory_store.py:325`, `cure_subsequent_review/memory_store.py:326`, `tests/_subsequent_review_unit_discussion_linker_unittest.py:92`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+      **Why:** Story 04 says linker results are cached by event/body/head plus current group identities. The current cache validation checks identities only for cached non-empty `group_ids`; a cached low-confidence/no-link result stores an empty identity map and replays without comparing the current candidate group universe. If reconciliation groups change at the same head, a stale no-link can suppress the LLM linker call and prevent a newly relevant discussion signal from attaching to a group.
+
+      **Assumptions / Preconditions:** Same event id/body/head; an earlier run cached `group_ids=()`; a later run at the same head has different/current reconciliation groups that should be presented to the linker.
+
+      **Downgrade Factors:** If no-link replay is intentionally allowed regardless of current group identity, the story/design should explicitly narrow the `current group identities` requirement and document the stale-no-link risk.
+
+      **Code Trail:** `_cached()` reads a linker result by event/body/head, extracts cached `group_ids`, and validates only listed group ids against `group_identities`. When `group_ids` is empty, `valid_group_ids` is empty but the `if group_ids and not valid_group_ids` guard is false, so it returns the cached no-link result. `_store()` persists identities only for `result.group_ids`, and `update_linker_result()` accepts an empty `group_identities` map.
+
+      **Reproduction:** Parent temp-store probe seeded `event_id=C-99`, same body/head, `group_ids=()`, `signal_class=by_design`, then called `LlmDiscussionLinker` with a current parser group and a classifier that would return `G-0001`; result replayed the cache with `calls=0`, `group_ids=()`, and rationale `cached no confident group`.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add red regressions/fixes for the A17/A19 `no foreign findings were carried forward` false-degradation and A12 no-link cache staleness; keep A16/A17/A19/A20 proof rows provisional until a fresh PR #22 live audit is actually run or the story is explicitly rescoped.
+
+- 2026-06-16T12:06:47Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; prior PR18/PR22 live-audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: OpenSpec proof/status/tasks/progress/reviews; `git status --short`, `git diff --numstat`, `git diff --stat`, and `git diff --check`; focused pass over `cure_subsequent_review/degraded_runtime.py`, `control_plane.py`, `_pr_flow_impl`, and runtime manifest/disabled paths; focused pass over `cure_subsequent_review/runtime.py` footer-governor/final-output checks, maintained prompts, and A16/A17/A19 tests; focused pass over `cure_subsequent_review/memory_store.py`, `source_truth.py`, `semantic_pipeline.py`, `discussion_linker.py`, `llm_verifier.py`, and A20/A12-A14/A18 tests; direct parent probe of `_footer_marker_policy_warnings()` for copied-summary count visibility.
+  - Risk lenses reviewed: proof maturity/live-audit gate, dirty main-tree review hygiene, prompt/final-output fail-open and false-positive footer-governor behavior, foreign-footer provenance final-output visibility, module-12 healthy-empty discussion artifact lifecycle, disabled decision-only artifact cleanup, shared memory/cache identity drift after replay persistence, safe terminal replay categories, verifier fan-out telemetry, semantic pipeline ordering, and LLM verifier inactive-source handling.
+  - Finding closure: A1/module-12 healthy-empty fetch blocker resolved locally by source/test inspection and focused runtime suite (`47 passed, 4 subtests`); A20 replay-persisted changed-source-reference blocker resolved locally by source/test inspection and focused memory/semantic suites (`38 passed, 12 subtests`; PR-flow `17 passed`); A17/A19 prior contradiction-specific copied-summary false positive is partially resolved, but the copied summary still fails the required audit-note count check unless the final output repeats an extra `Ignored 1 foreign official...` phrase; A16/A17/A19/A20 proof/live-audit gate remains open.
+  - Evidence quality: confirmed direct source/OpenSpec/test reads, four focused multipass passes, parent `git diff --check`, and parent `_footer_marker_policy_warnings()` reproduction; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 proof rows remain.
+  - Files reviewed: `AGENTS.md`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `cure.py`; `cure_runtime.py`; `cure_subsequent_review/contracts.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure_subsequent_review/discussion_linker.py`; `cure_subsequent_review/llm_verifier.py`; maintained PR prompt templates; `tests/_subsequent_review_unit_degraded_runtime_unittest.py`; `tests/_subsequent_review_functional_control_plane_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_unit_runtime_memory_unittest.py`; `tests/_subsequent_review_integration_pr_flow_unittest.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_memory_store_unittest.py`; `tests/_subsequent_review_unit_semantic_pipeline_unittest.py`; `tests/_subsequent_review_unit_discussion_linker_unittest.py`; `tests/_subsequent_review_unit_source_truth_unittest.py`; `tests/_subsequent_review_unit_llm_verifier_unittest.py`; `tests/_reviewflow_unittest_prompt_session_impl.py`.
+  - Hypothesis triage:
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows to final only with evidence.
+    - suspicious surface: `_footer_marker_policy_warnings()` copied-summary path; tentative issue: the contradiction regex fix removes the policy summary phrase, but the count-visible check still requires a second `Ignored 1` / `1 foreign official` phrase; next proof target: regression for copied `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1` plus PR/session/head reason and excluded/not-carried-forward wording without duplicate count wording.
+    - suspicious surface: `DiscussionFetchController.fetch()` and `_pr_flow_impl` disabled cleanup; tentative issue: success artifacts might be missing for empty healthy fetches or leak into auto-disabled decision-only runs; next proof target: focused runtime pass and empty-success/auto-disabled regressions.
+    - suspicious surface: A20 replay-persisted cache identity; tentative issue: origin digest could mask source-reference drift after replay persistence; next proof target: replay-persisted changed-source-reference regression and stable identity source-ref digest code.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:23`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:446`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review skill forbids approval while required proof remains unresolved. Story 04 still records A16, A17, A19, and A20 as provisional, leaves the fresh PR #22 live-audit task unchecked, and current progress says no fresh PR #22 live audit was run after the latest local fixes.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage proof, the story/proof matrix must explicitly rescope those rows before review can approve.
+
+      **Code Trail:** The story header names the pending PR #22 live-audit gate; the proof matrix marks A16/A17/A19/A20 provisional; `tasks.md` leaves the live-audit row unchecked; `progress.md` preserves the same pending state after the latest fixes; the review skill states every proof row must be final before approval.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|Approval is not allowed" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and approval rule.
+
+      </details>
+    - A17/A19 copied-summary hardening is incomplete: a valid final note that includes the copied `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1` summary, PR/session/head reason, and excluded/not-carried-forward wording still degrades as a missing audit note unless it repeats an extra count phrase. Sources: `cure_subsequent_review/runtime.py:934`, `cure_subsequent_review/runtime.py:958`, `cure_subsequent_review/runtime.py:986`, `tests/_subsequent_review_unit_report_governor_unittest.py:620`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A17/A19 require final reviews to surface the ignored foreign-footer count and plain-English reason while excluding those foreign findings. The implementation no longer calls the copied summary a contradiction, but it still treats the same copied summary as not showing the count unless the review also says something like `Ignored 1 foreign official...`. A natural valid final note can therefore be degraded incorrectly.
+
+      **Assumptions / Preconditions:** `governor_brief.md` has one ignored foreign official-footer comment; the final review copies the governor policy summary count and includes the durable PR/session/head reason plus exclusion/not-carried-forward wording, but does not duplicate the count in a second sentence.
+
+      **Downgrade Factors:** If the intended final-output contract requires the exact additional `Ignored N foreign official...` wording and forbids relying on the copied summary count, the story/tests should say that explicitly. Current task text says the copied summary phrase may appear while explicitly excluding/not carrying forward foreign findings.
+
+      **Code Trail:** `_footer_marker_policy_warnings()` parses the expected ignored count from the brief, then requires `count_visible` to match only `ignored {count}` or `{count} foreign official`. The implementation strips the copied summary phrase before contradiction scanning, but it does not let that phrase satisfy `count_visible`; the checked-in passing regression includes both the copied summary and an extra `Ignored 1 foreign official...` phrase, so it misses the valid copied-summary-only count shape.
+
+      **Reproduction:** A read-only parent probe calling `_footer_marker_policy_warnings()` with a final note containing `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1`, the PR22/session/head vs PR18 reason tokens, and `foreign findings were excluded ... not carried forward` returned `['missing_footer_marker_policy_audit_note']`; adding only `Ignored 1 foreign official...` changed the result to `[]`.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add a red regression/fix for the copied-summary-only ignored-footer count visibility path; keep A16/A17/A19/A20 proof rows provisional until a fresh PR #22 live audit is actually run or the story is explicitly rescoped.
+
+- 2026-06-16T10:29:26Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; prior PR18/PR22 live-audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: OpenSpec proof/status/tasks/progress/reviews; `git status --short`, `git diff --stat`, `git diff --numstat`; `cure_subsequent_review/memory_store.py` stable identity/replay persistence; `cure_subsequent_review/source_truth.py` cache lookup; `cure_subsequent_review/control_plane.py` runtime module manifest/default status and intake paths; `cure_subsequent_review/degraded_runtime.py` controller success/degraded paths; `cure_subsequent_review/runtime.py` issue-history/footer-governor audit logic; `cure.py` PR-flow runtime callsites via focused pass; maintained final prompt templates; Story 04 focused tests in memory-store, degraded-runtime, control-plane, runtime-packaging, report-governor, PR-flow, and prompt suites.
+  - Risk lenses reviewed: source-verification cache identity drift after replay persistence, prompt/template fail-open, report-governor false positives/contradictions, foreign-footer provenance final-output visibility, module-12 artifact lifecycle for successful empty discussion, runtime manifest status honesty, disabled/degraded branch coverage, dirty main-tree review hygiene, and proof-maturity/live-audit gate.
+  - Finding closure: 2026-06-16T08:35:12Z A20 replay-persisted changed-source-reference blocker is resolved locally by direct source/test inspection and memory-store suite (`14 passed, 7 subtests`); A16/A17/A19/A20 live-proof gate remains open; new local blockers found for module-12 healthy empty fetch manifest/artifact recording and report-governor copied footer-summary false positives.
+  - Evidence quality: confirmed direct source/OpenSpec/test reads, four focused multipass child passes, parent memory-store test `14 passed, 7 subtests`, parent `git diff --check`, parent deterministic probes for module-12 empty success and footer-governor copied-summary false positive, focused pass reported runtime unittest suite `43 tests OK`, and focused pass reported report-governor/runtime-packaging/prompt suite `158 passed, 8 subtests`; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 live proof remains.
+  - Files reviewed: `AGENTS.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `cure_subsequent_review/contracts.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure.py`; maintained prompt templates; `tests/_subsequent_review_unit_memory_store_unittest.py`; `tests/_subsequent_review_unit_degraded_runtime_unittest.py`; `tests/_subsequent_review_functional_control_plane_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_integration_pr_flow_unittest.py`; `tests/_reviewflow_unittest_prompt_session_impl.py`; `tests/fixtures/subsequent_review/landmark_trace/artifacts/review.md`.
+  - Hypothesis triage:
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows to final only with evidence.
+    - suspicious surface: `DiscussionFetchController.fetch()` success path with zero discussion events; tentative issue: module 12 can execute successfully without writing `degraded_runtime.json`, leaving the manifest row at default `enabled` instead of an observed `success`; next proof target: empty-events success regression through controller plus `run_subsequent_review_intake()`.
+    - suspicious surface: `_footer_marker_policy_warnings()` positive foreign-footer regex; tentative issue: a valid final note that copies the governor policy summary can be falsely classified as a contradicted ignored-footer note; next proof target: regression for copied `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1` summary plus excluded/not-carried-forward wording.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:23`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:446`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The story-review approval gate requires final proof rows. Story 04 still records A16, A17, A19, and A20 as provisional, leaves the fresh PR #22 live-audit task unchecked, and current progress says no fresh PR #22 live audit was run after the latest local A20 fix.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage proof, the story/proof matrix must explicitly rescope those rows before review can approve.
+
+      **Code Trail:** The story header names the pending PR #22 live-audit gate; the proof matrix marks A16/A17/A19/A20 provisional; `tasks.md` leaves the live-audit row unchecked; `progress.md` preserves the same pending state after the latest local fix; the review skill says approval is allowed only when every proof row is final.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|every proof row is final" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and approval rule.
+
+      </details>
+    - A1/module-12 remains incomplete for a healthy empty discussion fetch: the controller succeeds without a `degraded_runtime.json`, so the manifest records only default `enabled` instead of success. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:103`, `cure_subsequent_review/degraded_runtime.py:54`, `cure_subsequent_review/degraded_runtime.py:55`, `cure_subsequent_review/degraded_runtime.py:56`, `cure_subsequent_review/control_plane.py:177`, `cure_subsequent_review/control_plane.py:179`, `cure_subsequent_review/control_plane.py:180`, `cure_subsequent_review/control_plane.py:186`, `cure_subsequent_review/control_plane.py:81`, `cure_subsequent_review/control_plane.py:86`, `cure_subsequent_review/control_plane.py:87`, `tests/_subsequent_review_unit_degraded_runtime_unittest.py:9`, `tests/_subsequent_review_functional_control_plane_unittest.py:152`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+      **Why:** A1 requires modules 9-12 to be first-class runtime modules with manifest records. A successful PR-discussion fetch with zero events is still module-12 execution, especially for runs enabled by prior completed sessions rather than current PR discussion. Current code returns without writing the module-12 artifact when `events` is empty and no prior retry/choice occurred, so intake has no `degraded_runtime_path` to record and the manifest fabricates the row as merely `enabled`.
+
+      **Assumptions / Preconditions:** Subsequent review is enabled by completed-session evidence or other prior-review state, and `collect_pr_discussion()` succeeds with no current discussion events.
+
+      **Downgrade Factors:** If Story 04 intentionally only requires a success artifact for healthy fetches with at least one event, A1/progress should be narrowed because current wording says module records, not eventful-only records.
+
+      **Code Trail:** `DiscussionFetchController.fetch()` writes success only when choices exist or the successful artifact has events; `run_subsequent_review_intake()` records `DEGRADED_RUNTIME_MANAGER` only when a path is passed; missing module rows default to `ModuleStatus.ENABLED` in `_manifest_json()`. Existing tests cover a healthy first fetch with an event and an intake call with a prewritten controller artifact, but not the empty successful fetch branch.
+
+      **Reproduction:** A read-only probe using `DiscussionArtifact(status=success, events=())` returned `controller_status success events 0 artifact_exists False`; passing that prefetched discussion into `run_subsequent_review_intake()` for an enabled run produced `manifest_degraded {'status': 'enabled'}` and no `degraded_runtime.json`.
+
+      </details>
+    - A17/A19 report-governor can falsely degrade a valid ignored-foreign-footer audit note when the final review copies the governor policy summary. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:119`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:121`, `cure_subsequent_review/runtime.py:569`, `cure_subsequent_review/runtime.py:570`, `cure_subsequent_review/runtime.py:571`, `cure_subsequent_review/runtime.py:952`, `cure_subsequent_review/runtime.py:956`, `cure_subsequent_review/runtime.py:958`, `cure_subsequent_review/runtime.py:962`, `cure_subsequent_review/runtime.py:963`, `cure_subsequent_review/runtime.py:979`, `cure_subsequent_review/runtime.py:980`, `prompts/default.md:20`, `tests/_subsequent_review_unit_report_governor_unittest.py:550`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+      **Why:** A17/A19 require final reviews to include a concise ignored-foreign-footer note with count and plain-English reason while excluding foreign findings. The maintained prompt asks for that note, and the governor brief itself emits the summary phrase `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1`. If a valid final review copies that summary and then says the foreign findings were excluded/not carried forward, the deterministic checker sees `accepted` within 80 characters of `foreign official` and records `contradicted_footer_marker_policy_audit_note`.
+
+      **Assumptions / Preconditions:** `governor_brief.md` has one or more ignored foreign official-footer comments; the final report includes the required ignored count/reason and copies or paraphrases the policy summary containing `Accepted official-footer remote entries: 0` near `foreign official-footer ignored comments`.
+
+      **Downgrade Factors:** If final-output guidance forbids copying the governor summary phrase and requires only a narrower ignored-note wording, the impact narrows, but current prompts/tests require the count/reason surface and do not prohibit that natural wording.
+
+      **Code Trail:** The brief builder prints `Accepted official-footer remote entries: ...; foreign official-footer ignored comments: ...`; `_footer_marker_policy_warnings()` treats accepted/admitted/included/carried-forward verbs near `foreign official`/`official footer` as a contradiction before checking count/reason/exclusion completeness. The positive contradiction and negated-exclusion tests cover simpler notes, but no test covers a valid note that includes the policy summary phrase.
+
+      **Reproduction:** A parent probe calling `_footer_marker_policy_warnings()` with a valid final note containing `Accepted official-footer remote entries: 0; foreign official-footer ignored comments: 1... Ignored 1 foreign official CURe footer comment ... foreign findings were excluded and not carried forward` returned `['contradicted_footer_marker_policy_audit_note']`.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add red regressions/fixes for module-12 healthy empty fetch artifact/manifest recording and the footer-governor copied-summary false positive; keep A16/A17/A19/A20 proof rows provisional until a fresh PR #22 live audit is actually run or the story is explicitly rescoped.
+
+- 2026-06-16T08:35:12Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; prior PR18/PR22 audit intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward complete for reviewed local surfaces
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: current OpenSpec proof/status/task rows; `cure_subsequent_review/memory_store.py` stable-identity/cache replay/persistence paths; `tests/_subsequent_review_unit_memory_store_unittest.py` A20 replay/miss fixtures; focused child-pass coverage over runtime/control-plane/degraded discussion, report governor/final-output packaging, semantic/source/linker/memory, and proof/status state.
+  - Risk lenses reviewed: source-verification cache identity drift after replay persistence, origin-only source-reference masking, verifier fan-out/performance proof honesty, final-output proof maturity, dirty main-tree review hygiene, and live-audit readiness.
+  - Finding closure: 2026-06-16T08:00:02Z local A1 module override/healthy module-12 manifest blocker is resolved by focused runtime/control-plane pass; A17/A19 positive and negated foreign-footer final-output wording blockers are resolved by focused governor/packager pass; A20 remains open through a deeper replay-persistence variant; A16/A17/A19/A20 live-proof rows remain provisional.
+  - Evidence quality: confirmed direct OpenSpec/source/test reads, four focused multipass child passes, targeted suites reported `47 passed, 4 subtests`, `76 passed, 2 subtests`, and `37 passed, 7 subtests`, plus the preserved direct Python probe reproducing the A20 replay-persisted changed-source-reference cache hit; inferred none material; unknown fresh PR22 live-output/cache behavior because live audit intentionally not run; provisional A16/A17/A19/A20 live proof remains.
+  - Files reviewed: `AGENTS.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure.py`; maintained prompt templates; `tests/_subsequent_review_unit_memory_store_unittest.py`; `tests/_subsequent_review_unit_runtime_memory_unittest.py`; `tests/_subsequent_review_unit_semantic_pipeline_unittest.py`; `tests/_subsequent_review_integration_pr_flow_unittest.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_functional_control_plane_unittest.py`; `tests/test_subsequent_review.py`.
+  - Hypothesis triage:
+    - suspicious surface: `ReviewMemoryStore.synthesize_source_row()` followed by `update_findings()`; tentative issue: replayed rows persist current provenance with a same-origin digest that lets a later changed source reference hit cache; next proof target: red regression that seeds same-head source memory, persists a replay row, then changes `inspected_source_refs` and expects verifier invocation / `stable_identity_mismatch`.
+    - suspicious surface: OpenSpec proof matrix/live-audit tasks; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and an unchecked fresh PR #22 live audit; next proof target: run or explicitly rescope the PR #22 live audit and convert proof rows from provisional to final only with evidence.
+  - Key findings:
+    - A20 replay-persisted memory rows can mask changed source references via an origin-only stable-identity match. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:122`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:41`, `cure_subsequent_review/memory_store.py:56`, `cure_subsequent_review/memory_store.py:77`, `cure_subsequent_review/memory_store.py:92`, `cure_subsequent_review/memory_store.py:99`, `cure_subsequent_review/memory_store.py:129`, `cure_subsequent_review/memory_store.py:152`, `cure_subsequent_review/memory_store.py:197`, `cure_subsequent_review/memory_store.py:233`, `cure_subsequent_review/memory_store.py:347`, `cure_subsequent_review/memory_store.py:412`, `tests/_subsequent_review_unit_memory_store_unittest.py:410`, `tests/_subsequent_review_unit_memory_store_unittest.py:463`, `tests/_subsequent_review_unit_memory_store_unittest.py:502`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A20 requires source-verification cache replay to use stable finding identity/fingerprint/source-reference identity plus current head, and to miss when source-reference identity drifts. The latest explicit repeated-display-ID and changed-source-reference tests cover fresh lookup ingredients, but not the sequence where a memory-cache replay row is itself persisted. In that sequence, a changed `app.py:44` source reference can reuse a previous `app.py:10` source-resolved row without any verifier call, so the cache can silently mask changed source evidence and undercut the PR #22 verifier-storm/performance proof.
+
+      **Assumptions / Preconditions:** Same PR/head; a prior source-resolved memory row exists; a subsequent run replays and persists that row; a later reconciliation group has the same display/title/origin metadata but different inspected source reference or source-reference digest.
+
+      **Downgrade Factors:** If `origin_digest` is intentionally allowed to override source-reference drift, A20/tasks must be narrowed because current text says source-reference identity drift records a miss and verifies.
+
+      **Code Trail:** `_stable_identity_from_row()` preserves nested cached identity fields from replay provenance; `group_identity_for_cache()` computes an `origin_digest` from prior-corpus origin metadata; `_stable_identity_matches()` returns true when any one of `source_refs_digest`, `citations_digest`, or `origin_digest` matches; `synthesize_source_row()` writes the current identity into replay provenance; `update_findings()` then persists that replayed row and its nested identity. The standalone tests cover replay persistence, repeated-display-ID miss, and changed-source-reference miss separately, but no test composes replay persistence with a later changed source reference.
+
+      **Reproduction:** Seed memory for finding `A-01` at `app.py:10`; run same-head replay and persist the replayed row; rerun with the same display/title/origin but changed source ref `app.py:44`. The direct probe observed `second_calls []`, `second_source memory_cache`, `second_cache_status hit`, and `second_cache_reason resolved_from_source_replay`; expected behavior is a fresh verifier call and a `stable_identity_mismatch` miss.
+
+      </details>
+    - A16/A17/A19/A20 proof maturity and the fresh PR #22 live-audit gate still block approval. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:190`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:449`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review gate allows approval only when every proof row is final. Story 04 still records A16, A17, A19, and A20 as `provisional`, leaves the fresh PR #22 live review unchecked, and says PR/live status remains request-changes until that fresh audit verifies the provisional rows. Local focused suites are useful evidence, but they do not satisfy the story's own live-output/cache closure condition.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage evidence, the story/proof matrix must explicitly rescope those rows before a review can approve.
+
+      **Code Trail:** The story header names the pending fresh PR #22 live-audit gate, the proof matrix marks A16/A17/A19/A20 provisional, `tasks.md` leaves the live-audit task unchecked, and `progress.md` keeps PR/live status at request-changes pending the audit. The review skill's approval checklist requires every proof row to be final.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|every proof row is final" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the cited provisional rows, pending task/progress statements, and gate.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add the replay-persisted changed-source-reference regression/fix, keep A16/A17/A19/A20 proof rows provisional until a fresh PR #22 live audit is actually run (or explicitly rescope the story), and then return for review.
+
+- 2026-06-16T08:00:02Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: workspace `AGENTS.md`; initiative/story/proposal/design/tasks/progress/reviews; local PR18/PR22 intent recorded in OpenSpec artifacts. No fresh live PR18/PR22 audit was run.
+  - Traceability: forward gaps; backward gaps
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: `git status --short`, `git diff --stat`, `git diff --numstat`, acceptance/proof matrix lines, `cure_subsequent_review/runtime.py` footer-policy/report-governor paths, `control_plane.py` module override and degraded-runtime manifest paths, `degraded_runtime.py` fetch controller, `_pr_flow_impl` degraded-controller wiring, maintained final prompt templates, A16/A17/A19 report-governor tests, A19 runtime-packaging/prior-corpus/decision replay tests, A20 memory-store/source-truth/control-plane tests, and OpenSpec proof/status tasks.
+  - Risk lenses reviewed: prompt/template fail-open, runtime module override/manifest ownership, degraded PR-discussion controller artifact lifecycle, post-review governor contradiction false negatives/false positives, foreign-footer provenance final-output visibility, source-verification cache identity/proof honesty, dirty main-tree review hygiene, and proof-maturity/live-audit gate.
+  - Finding closure: the 2026-06-16T07:39:27Z valid negated ignored-footer false-positive is resolved for `not included` / `not carried forward`; A16 reason-preservation and A19 replay proof look locally covered; newly found A17/A19 positive `admitted` / `carried forward` foreign-official wording still passes incorrectly; A1 module override/manifest completeness is incomplete; A20 FB-041 proof wording overclaims visible tests; A16/A17/A19/A20 live proof remains provisional.
+  - Evidence quality: confirmed direct OpenSpec/source/test reads, four focused multipass child passes verified against primary anchors, parent repro of `_footer_marker_policy_warnings()`, parent focused suite `24 passed`, focused children reported `192 passed, 7 subtests`, `64 passed, 5 subtests`, `38 passed, 8 subtests`, `43 passed, 12 subtests`, public wrapper `144 passed, 36 subtests`, and parent `git diff --check` clean; inferred none material; unknown fresh PR22 live-output behavior because live audit intentionally not run; provisional A16/A17/A19/A20 live proof remains.
+  - Files reviewed: `AGENTS.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `cure_subsequent_review/runtime.py`; `cure_subsequent_review/control_plane.py`; `cure_subsequent_review/degraded_runtime.py`; `cure_subsequent_review/memory_store.py`; `cure_subsequent_review/source_truth.py`; `cure_subsequent_review/semantic_pipeline.py`; `cure.py`; maintained prompt templates; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_unit_memory_store_unittest.py`; `tests/_subsequent_review_unit_runtime_memory_unittest.py`; `tests/_subsequent_review_unit_semantic_pipeline_unittest.py`; `tests/_subsequent_review_integration_pr_flow_unittest.py`; `tests/_reviewflow_unittest_prompt_session_impl.py`.
+  - Hypothesis triage:
+    - suspicious surface: modules 9-12 runtime module ownership; tentative issue: module override support and healthy module-12 manifest/artifact recording are incomplete; next proof target: `SubsequentReviewConfig.module_enabled()`, `prepare_review_runtime_pre_prompt()`, `DiscussionFetchController.fetch()`, and `run_subsequent_review_intake()` manifest recording.
+    - suspicious surface: `_footer_marker_policy_warnings()` contradiction detection; tentative issue: positive `admitted` / `carried forward` wording tied to `foreign official` comments is not classified as a contradicted ignored-footer audit note; next proof target: regex patterns and a positive-verb regression.
+    - suspicious surface: OpenSpec proof matrix/live audit; tentative issue: local approval would ignore provisional A16/A17/A19/A20 rows and unchecked PR #22 live audit; next proof target: proof rows, live-audit task, and review-skill approval gate.
+    - suspicious surface: A20 FB-041 proof wording; tentative issue: checked task claims repeated-display-ID and changed-source-reference regressions that are not visible in current tests; next proof target: memory-store test names/fixtures or narrowed OpenSpec wording.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity still blocks approval under the story-review gate. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:181`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:189`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review gate cannot approve while the story itself records provisional proof rows and an unchecked fresh PR #22 live audit. The OpenSpec state is honest, but it means Story 04 remains in progress until the live-output/cache proof is run and rows become final, or the story is explicitly rescoped.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team wants a local-only approval split from live PR-stage proof, the proof matrix/status policy must explicitly record that scope before a review can approve.
+
+      **Code Trail:** The proof matrix marks A16, A17, A19, and A20 as `provisional`; `tasks.md` leaves the fresh PR #22 live review unchecked; `progress.md` says PR/live status remains request-changes until that audit verifies the provisional rows.
+
+      **Reproduction:** `grep -nE "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|live audit" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md}` returns the cited provisional rows and pending live-audit statements.
+
+      </details>
+    - A1 is incomplete: modules 9/10/12 do not share runtime module override support, and module 12 can execute without a healthy-run manifest/artifact record. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:103`, `cure_subsequent_review/control_plane.py:44`, `cure_subsequent_review/control_plane.py:48`, `cure_subsequent_review/runtime.py:1228`, `cure_subsequent_review/runtime.py:1248`, `cure_subsequent_review/runtime.py:1250`, `cure.py:9885`, `cure.py:9902`, `cure_subsequent_review/degraded_runtime.py:54`, `cure_subsequent_review/degraded_runtime.py:56`, `cure_subsequent_review/control_plane.py:170`, `cure_subsequent_review/control_plane.py:178`, `cure_subsequent_review/control_plane.py:242`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A1 requires modules 9-12 to be first-class runtime modules with manifest records and module override support. Current code only checks override state generically for Story 01 and semantic-registry modules, special-cases module 11, and runs modules 9/10 plus the module-12 controller without an override path. On a non-degraded discussion fetch, module 12 returns without writing `degraded_runtime.json`; `_pr_flow_impl` then passes `degraded_runtime_path=None`, and intake only records module 12 when that path exists.
+
+      **Assumptions / Preconditions:** Enabled subsequent review with a healthy PR discussion fetch, or an operator/runtime configuration that disables one of modules 9/10/12.
+
+      **Downgrade Factors:** If module override support is intentionally scoped only to Story 01/semantic modules plus module 11, A1 needs to be narrowed; as written, A1 names modules 9-12.
+
+      **Code Trail:** `SubsequentReviewConfig.module_enabled()` returns enabled only for Story 01 modules and `semantic_pipeline.MODULE_REGISTRY`, not runtime modules 9/10/12. `prepare_review_runtime_pre_prompt()` has no config/override parameter and always writes the packager record before only considering governor mode `off`. `_pr_flow_impl` always constructs/fetches through `DiscussionFetchController` when subsequent-review mode is not disabled, but only retains `degraded_runtime_path` if the controller wrote an artifact. `DiscussionFetchController.fetch()` writes success only after prior degraded choices, not on a healthy first fetch. `run_subsequent_review_intake()` records module 12 only when a degraded-runtime artifact path is passed, while module 11 alone has a disabled-override special case.
+
+      **Reproduction:** Inspect the cited call path or run an enabled healthy discussion fetch: the controller returns the artifact without writing `degraded_runtime.json`, `_pr_flow_impl` leaves `degraded_runtime_path=None`, and no `DEGRADED_RUNTIME_MANAGER` success record is added by intake.
+
+      </details>
+    - A17/A19 still miss positive ignored-footer contradictions when the final output says a foreign official footer was `admitted` or `carried forward`. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:119`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:121`, `cure_subsequent_review/runtime.py:924`, `cure_subsequent_review/runtime.py:940`, `cure_subsequent_review/runtime.py:947`, `cure_subsequent_review/runtime.py:949`, `cure_subsequent_review/runtime.py:964`, `cure_subsequent_review/runtime.py:966`, `tests/_subsequent_review_unit_report_governor_unittest.py:461`, `tests/_subsequent_review_unit_report_governor_unittest.py:485`, `tests/_subsequent_review_unit_report_governor_unittest.py:505`, `tests/_subsequent_review_unit_report_governor_unittest.py:529`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A17/A19 require final-output contradictions about ignored foreign official-footers to degrade. The latest fix correctly allows valid negated wording such as `not included` / `not carried forward`, and it degrades the existing positive `Included 1 foreign official... foreign findings were carried forward` fixture. However, the regex only applies the broad positive verb set to `foreign findings?`, while `foreign official` only checks the `include*` verb. A final review can therefore say `Admitted 1 foreign official CURe footer comment ... foreign findings were excluded` or `Carried forward 1 foreign official CURe footer comment ... foreign findings were excluded`; the deterministic checker returns success.
+
+      **Assumptions / Preconditions:** `governor_brief.md` reports one or more ignored foreign official-footer comments and final `review.md` includes the count/reason tokens plus positive action wording attached to the foreign official footer while separately saying findings were excluded.
+
+      **Downgrade Factors:** If the contract only wants to reject contradictions about `foreign findings` and not contradictions about the ignored `foreign official` comment itself, A17/A19 should say so. Current wording requires omitted or contradicted foreign-footer audit notes to degrade.
+
+      **Code Trail:** `_footer_marker_policy_warnings()` treats exclusion phrases, including negated terms, as valid. It defines `positive_include` separately from a broader `positive_foreign_finding_action`; the `foreign official` regexes use only `positive_include`, while `admitted` / `carried forward` are only matched near `foreign findings?`. The function returns a contradiction only when `contradiction_visible` is true, otherwise it accepts any count/policy/reason/exclusion-visible note.
+
+      **Reproduction:** Parent probe with the same brief shape as the tests returned `[]` for `_footer_marker_policy_warnings()` on `Admitted 1 foreign official CURe footer comment ...; foreign findings were excluded.` and `Carried forward 1 foreign official CURe footer comment ...; foreign findings were excluded.`, while the valid negated note returned `[]` and the existing included/carry-forward fixture returned `['contradicted_footer_marker_policy_audit_note']`.
+
+      </details>
+    - A20 FB-041 task/proof wording overclaims visible regression coverage for repeated-display-ID and changed-source-reference cases. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:41`, `tests/_subsequent_review_unit_memory_store_unittest.py:204`, `tests/_subsequent_review_unit_memory_store_unittest.py:367`, `tests/_subsequent_review_unit_memory_store_unittest.py:463`, `cure_subsequent_review/memory_store.py:63`, `cure_subsequent_review/memory_store.py:129`, `cure_subsequent_review/memory_store.py:343`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>Medium</b> likelihood</summary>
+
+      **Why:** The task checklist says FB-041 added reordered-group, repeated-display-ID, changed-source-reference, and ordinal-only-match cases. The current tests visibly cover same-ordinal different identity, reordered group hit, and ordinal-only mismatch, and the implementation includes source-reference digest fields in stable identity. A repo-wide search did not find explicit repeated-display-ID or changed-source-reference regression cases, so the checked task and proof narrative are stronger than the available tests.
+
+      **Assumptions / Preconditions:** The task checkbox is intended to mean each named variant has an explicit local regression, not merely that the implementation contains the source-reference digest mechanism.
+
+      **Downgrade Factors:** If repeated-display-ID and changed-source-reference are intentionally covered by the generic stable-identity mismatch fixture, narrow the task/proof wording to that actual proof boundary.
+
+      **Code Trail:** `tasks.md` names four FB-041 variants. The memory-store tests around the cited anchors cover different finding identity at same ordinal, stable-identity hit after reordered `group_id`, and ordinal-only mismatch. The stable identity builder does include `inspected_source_refs` digesting, but no explicit changed-source-reference regression was found in the test file.
+
+      **Reproduction:** `rg -n "repeated|display|source.ref|source_reference|changed.*source|ordinal|group_id" tests/_subsequent_review_unit_memory_store_unittest.py cure_subsequent_review/memory_store.py openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md` returns the task wording, stable-identity source-reference implementation, and ordinal/reordered tests, but no explicit repeated-display-ID or changed-source-reference test case.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add/fix module override + healthy module-12 manifest support, broaden A17/A19 positive footer contradiction tests/fix, align A20 FB-041 proof wording or tests, and keep the fresh PR #22 live-audit gate pending until it is actually run.
+
+- 2026-06-16T07:39:27Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: initiative/story/proposal/design/tasks/progress/reviews and PR #22 / PR #18 intent recorded in OpenSpec artifacts; no fresh live PR18/PR22 audit run.
+  - Traceability: forward gaps; backward complete for current dirty files reviewed
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: `git status --short`, `git diff --stat`, `git diff --numstat`, OpenSpec proof/status/progress/reviews, `cure_subsequent_review/runtime.py` issue-history/footer/governor paths, maintained final prompt templates, `tests/_subsequent_review_unit_report_governor_unittest.py`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py`, `tests/_reviewflow_unittest_prompt_session_impl.py`, landmark review fixture, and prior-corpus/runtime replay assertions.
+  - Risk lenses reviewed: prompt/template fail-open, post-review governor false positives/contradictions, foreign-footer provenance audit visibility, pre-corpus exclusion and downstream pollution, verifier fan-out proof, proof-maturity/live-audit gate, dirty main-tree review hygiene.
+  - Finding closure: prior 2026-06-16T06:57:53Z positive contradicted-note blocker is fixed for included/carried-forward wording; PR18/PR22 replay now directly reads `prior_review_corpus.json` and covers an issue-comment foreign footer plus pull-review event-head mismatch; provisional live-output/live-audit proof remains still open; a new valid-note false-positive was found in the contradiction regex.
+  - Evidence quality: confirmed direct OpenSpec/source/test reads, three focused multipass child passes verified against primary anchors, targeted focused tests from child passes (`23 passed`; `155 passed, 6 subtests`), and parent read-only probes of `_issue_history_warnings()` / `_footer_marker_policy_warnings()`; inferred none material; unknown fresh PR22 live-output behavior because live audit intentionally not run; provisional A16/A17/A19/A20 proof remains.
+  - Files reviewed: `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md`; `cure_subsequent_review/runtime.py`; maintained prompt templates under `prompts/`; `tests/_reviewflow_unittest_prompt_session_impl.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/fixtures/subsequent_review/landmark_trace/artifacts/review.md`.
+  - Hypothesis triage:
+    - suspicious surface: `_footer_marker_policy_warnings()` contradiction detection; tentative issue: negated valid phrasing such as “foreign findings were not included” is classified as a contradicted ignored-footer note; next proof target: footer-policy regex and a valid negated-inclusion regression.
+    - suspicious surface: A16 exact `Reason:` marker; tentative issue: deterministic validator accepts preserved reason text without the literal label; next proof target: A16 wording and prompt/tests. Not promoted because the story acceptance requires the reason content, not exact punctuation.
+    - suspicious surface: PR18/PR22 replay fixture; tentative issue: prior proof did not inspect corpus or event-head mismatch; next proof target: runtime replay test. Resolved by direct corpus assertions and pull-review event-head mismatch coverage.
+    - suspicious surface: OpenSpec proof matrix/live audit; tentative issue: local review would approve while proof rows remain provisional; next proof target: A16/A17/A19/A20 proof rows, live-audit task, and review-skill gate.
+  - Key findings:
+    - A16/A17/A19/A20 proof maturity still blocks approval under the story-review gate. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:8`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:172`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:102`, `/home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md:450`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review gate requires final proof rows before approval. Story 04 still says the local implementation remains in progress until a fresh PR #22 live audit closes the runtime-owned guardrails, and A16/A17/A19/A20 remain provisional with the fresh live audit task unchecked.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the team intentionally wants a local-only approval split from the PR-stage live audit, the story/proof matrix must explicitly rescope those provisional rows before approval can rely on that distinction.
+
+      **Code Trail:** The story header names the pending PR #22 live audit gate; the proof matrix keeps A16/A17/A19/A20 provisional; `tasks.md` leaves the fresh PR #22 live review unchecked; progress says PR/live status remains request-changes until the fresh audit verifies the provisional rows; the review skill forbids approval while proof rows remain provisional and requires every proof row to be final.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22|fresh PR #22 live audit|any proof row is still|every proof row is final" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md} /home/vscode/.pi/agent/skills/openspec-story-review/SKILL.md` returns the provisional rows, pending task/progress statements, and review gate.
+
+      </details>
+    - A17/A19 footer-policy checker falsely degrades a valid ignored-foreign-footer audit note that says foreign findings were “not included.” Sources: `cure_subsequent_review/runtime.py:928`, `cure_subsequent_review/runtime.py:932`, `cure_subsequent_review/runtime.py:945`, `cure_subsequent_review/runtime.py:961`, `cure_subsequent_review/runtime.py:1150`, `cure_subsequent_review/runtime.py:1158`, `tests/_subsequent_review_unit_report_governor_unittest.py:521`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** A17/A19 require the final review to include a concise ignored-foreign-footer audit note while excluding foreign findings, and the current test suite expects a valid note to pass. The implementation lists “not included” / “not carried forward” as acceptable exclusion language, but the contradiction regex still matches the positive words `included` / `carried forward` inside those negated phrases and forces `contradicted_footer_marker_policy_audit_note`.
+
+      **Assumptions / Preconditions:** `governor_brief.md` reports one or more ignored foreign official-footer comments and final `review.md` uses common negated wording such as “foreign findings were not included in prior-review provenance” while otherwise including the count and durable reason tokens.
+
+      **Downgrade Factors:** If final-output guidance forbids negated inclusion phrasing and requires only words like “excluded,” the impact narrows; the code currently treats “not included” as an accepted exclusion phrase, so the intended boundary is inconsistent.
+
+      **Code Trail:** `_footer_marker_policy_warnings()` computes `exclusion_visible` from phrases including `not included` and `not carried forward`, then computes `contradiction_visible` from regexes that match `foreign findings ... included` and `foreign findings ... carried forward` without excluding negation. Because `contradiction_visible` is checked first, the valid note is reported as a contradiction; `audit_review_report_after_review()` hard-degrades on that warning.
+
+      **Reproduction:** A read-only parent probe called `_footer_marker_policy_warnings()` with a brief containing `foreign official-footer ignored comments: 1` plus the PR22/PR18 audit reason, and a final note saying `Ignored 1 foreign official CURe footer comment ... foreign findings were not included in prior-review provenance`; the function returned `['contradicted_footer_marker_policy_audit_note']`.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add a red regression/fix for the negated ignored-footer note false positive, then run/record the required fresh PR #22 live audit (or explicitly rescope the live proof rows) before seeking approval.
+
+- 2026-06-16T06:57:53Z Review run by fresh maintainer session
+  - Decision: request_changes
+  - Approval gate: fail
+  - Product verdict: request_changes
+  - Technical verdict: request_changes
+  - Multipass review: completed
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: Purpose, Actors, Triggering Need, Expected Prerequisites, Scope, Out of Scope, Scenarios / Behavior Examples, Acceptance, Verification, Critical Files, Implementation Notes, Locked Decisions, Discovery Notes
+  - Original intent checked: initiative.md, story/proposal/design/tasks/progress/reviews, dependency Story 01/02/03 status and footer/source/discussion separation anchors, PR18 benchmark notebook orientation; no fresh live PR18/PR22 audit run.
+  - Traceability: forward gaps; backward complete for reviewed changed files
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: `git status --short`, `git diff --stat`, `git diff --numstat`, `cure_subsequent_review/runtime.py` footer-policy/issue-history/report-governor paths, maintained final prompt templates, schema-bound and zip prompt exclusions, focused report-governor/runtime-packaging/prompt/prior-corpus/decision tests, OpenSpec A16/A17/A19/A20 proof rows and tasks.
+  - Risk lenses reviewed: prompt/template fail-open, final-output contradiction detection, foreign-footer provenance audit visibility, pre-corpus exclusion and downstream pollution, verifier fan-out, proof-maturity/live-audit gate, dirty main-tree review hygiene.
+  - Finding closure: A16 title/status/reason reason-preservation checks look locally covered; previous A19 footer-current/event-foreign provenance blocker remains closed by prior focused tests; A17/A19 contradiction detection and mandatory replay proof remain open; A16/A17/A19/A20 live-output proof maturity remains provisional.
+  - Evidence quality: confirmed direct source/test/OpenSpec reads, multipass focused child passes checked against primary anchors, local contradiction repro, targeted focused suite `154 passed, 6 subtests`, `git diff --check` clean; inferred none material; unknown fresh PR22 live-output behavior because live audit intentionally not run; provisional A16/A17/A19/A20 live proof remains.
+  - Files reviewed: `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`; dependency story headers for Stories 01-03; `cure_subsequent_review/runtime.py`; maintained prompt templates under `prompts/`; `tests/_reviewflow_unittest_prompt_session_impl.py`; `tests/_subsequent_review_unit_report_governor_unittest.py`; `tests/_subsequent_review_unit_runtime_packaging_unittest.py`; `tests/_subsequent_review_unit_prior_corpus_unittest.py`; `tests/fixtures/subsequent_review/landmark_trace/artifacts/review.md`.
+  - Hypothesis triage:
+    - suspicious surface: report-governor ignored-foreign-footer audit checker; tentative issue: a final review can include the same count/tokens while saying the foreign footer was included/carried forward; next proof target: `_footer_marker_policy_warnings()` plus a contradicted-note fixture.
+    - suspicious surface: mandatory PR18/PR22 replay proof; tentative issue: exact PR18/PR22 fixture can pass without proving corpus-level exclusion or generalized mismatch variants; next proof target: runtime replay's `prior_review_corpus.json` assertions and parameterized PR/session/head/footer/event-head variants.
+    - suspicious surface: OpenSpec proof maturity; tentative issue: local approval would ignore provisional live-output rows; next proof target: APM A16/A17/A19/A20 rows and live-audit task state.
+  - Key findings:
+    - A17/A19 post-review governor accepts a contradicted ignored-foreign-footer note as success. Sources: `cure_subsequent_review/runtime.py:916`, `cure_subsequent_review/runtime.py:922`, `cure_subsequent_review/runtime.py:935`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:98`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:164`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** Story A17/A19 requires the post-review governor to degrade when the final report omits or contradicts the ignored-foreign-footer audit note. The current deterministic checker only verifies that the final report contains a visible count, “foreign official” / “official footer” wording, and durable tokens from the ignored reason; it does not require ignored/excluded semantics or reject included/carried-forward semantics.
+
+      **Assumptions / Preconditions:** `governor_brief.md` contains `foreign official-footer ignored comments: 1` plus an `Ignored remote CURe ...` audit reason; final `review.md` includes the same count/PR/session/SHA tokens while saying the foreign footer was included or foreign findings were carried forward; the auditor JSON reports awareness demonstrated.
+
+      **Downgrade Factors:** If contradiction detection is intentionally delegated wholly to the LLM auditor, the story contract and deterministic proof need to record that narrower boundary. Current TAP-18/TAP-20 wording requires deterministic negative/positive final-output fixtures for omitted or contradicted notes.
+
+      **Code Trail:** `_footer_marker_policy_warnings()` derives the expected count/reason from the brief, normalizes the final review, and returns success when `count_visible`, `policy_visible`, and `reason_visible` are true. It never checks for exclusion terms or contradictory terms. The report-governor hard-degrade list only includes `missing_footer_marker_policy_audit_note`, so a contradicted note with the right tokens writes `report_governor_result.json` as success.
+
+      **Reproduction:** A temp-artifact probe wrote a brief with `foreign official-footer ignored comments: 1` and a final review line `Included 1 foreign official CURe footer comment ... foreign findings were carried forward.` Calling `audit_review_report_after_review(..., governor_mode="strict", auditor=lambda ... awareness=demonstrated ...)` returned `record.status=success` and `warnings=[]`.
+
+      </details>
+    - A19 mandatory PR18/PR22 replay proof is still too exact and does not directly prove corpus exclusion in the replay path. Sources: `tests/_subsequent_review_unit_runtime_packaging_unittest.py:422`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py:436`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py:460`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py:508`, `tests/_subsequent_review_unit_runtime_packaging_unittest.py:516`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:164`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:341`
+
+      <details open>
+      <summary><b>Medium</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The story asks for mandatory PR18/PR22-style replay coverage generalized beyond exact IDs and proving no foreign PR22 findings reach corpus, extraction, source, disposition, final output, or verifier fan-out. The main replay fixture is hard-coded to PR18/PR22/comment `4707013049` and asserts downstream `prior_findings`, `source_verification`, `disposition`, final text, and fan-out, but it does not inspect `prior_review_corpus.json` in that replay. Separate prior-corpus tests cover exact PR18/PR22 and event-head cases, but they do not close the stated end-to-end replay/matrix claim.
+
+      **Assumptions / Preconditions:** The OpenSpec wording remains as-is: mandatory replay should prove `decision → prior corpus → extraction/source/disposition/package/governor` and generalized mismatched PR/session/head/footer-SHA or event-head invariants.
+
+      **Downgrade Factors:** If the team accepts exact PR18/PR22 fixture coverage plus separate prior-corpus unit tests as sufficient, narrow `story.md`/`tasks.md` to that proof boundary instead of claiming generalized replay.
+
+      **Code Trail:** `test_pr18_pr22_foreign_footer_replay_keeps_foreign_findings_out_but_surfaces_reason()` drives intake and checks `prior_findings.json`, `source_verification.json`, `disposition_ledger.json`, package/context/brief, final text, and verifier calls. It never reads `prior_review_corpus.json`; the PR numbers, heads, session ids, comment ids, and finding ids are literal PR18/PR22 values.
+
+      **Reproduction:** `rg -n "prior_review_corpus|4707013049|PR18|PR22|CURE-22" tests/_subsequent_review_unit_runtime_packaging_unittest.py tests/_subsequent_review_unit_prior_corpus_unittest.py` shows the runtime replay’s exact fixture and absence of corpus-read assertions in that path, while corpus assertions live in separate exact unit fixtures.
+
+      </details>
+    - Full story approval remains blocked by provisional live-output proof rows. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:186`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:187`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:189`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:190`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** `/openspec-story-review` approval requires final proof rows. Story 04 still marks A16/A17/A19/A20 as provisional and leaves the fresh PR22 live audit unchecked. This is honest and appropriate, but it means the story cannot be approved or moved done from this local review.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If the story is intentionally split into local-only approval plus a separate PR-stage live-audit gate, update the proof matrix/status policy first so provisional rows no longer block the local review.
+
+      **Code Trail:** The proof matrix records A16/A17/A19/A20 as provisional pending fresh live output/performance proof, and tasks.md keeps the fresh PR22 live review unchecked.
+
+      **Reproduction:** `rg -n "A16 \\| provisional|A17 \\| provisional|A19 \\| provisional|A20 \\| provisional|Run and audit a fresh PR #22" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md}` returns the provisional rows and pending live-audit task.
+
+      </details>
+  - Debt Friction: none
+  - Next action: `/openspec-story-resume cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace` to add contradicted-note governor regression/fix and either strengthen or narrow the mandatory replay proof; after local blockers are closed, run/record the pending fresh PR22 live audit before seeking final approval.
+
 - 2026-06-15T15:29:26Z A19/FB-043 footer-provenance hardening follow-up review
   - Feedback IDs: FB-043
   - Decision: approve

@@ -92,16 +92,27 @@ def _normalized_citation(citation: dict[str, Any]) -> dict[str, Any]:
 def _stable_identity_matches(cached: object, current: dict[str, Any] | None) -> bool:
     if not isinstance(cached, dict) or not isinstance(current, dict):
         return False
-    cached_fingerprint = str(cached.get("fingerprint") or "").strip()
-    current_fingerprint = str(current.get("fingerprint") or "").strip()
-    if cached_fingerprint and current_fingerprint and cached_fingerprint == current_fingerprint:
-        return True
-    for key in ("source_refs_digest", "citations_digest", "origin_digest"):
+    rich_keys = ("fingerprint", "source_refs_digest", "citations_digest")
+    matched_rich_identity = False
+    for key in rich_keys:
         cached_value = str(cached.get(key) or "").strip()
         current_value = str(current.get(key) or "").strip()
-        if cached_value and current_value and cached_value == current_value:
-            return True
-    return False
+        if not cached_value or not current_value:
+            continue
+        if cached_value != current_value:
+            return False
+        matched_rich_identity = True
+    if matched_rich_identity:
+        return True
+
+    cached_has_rich_identity = any(str(cached.get(key) or "").strip() for key in rich_keys)
+    current_has_rich_identity = any(str(current.get(key) or "").strip() for key in rich_keys)
+    if cached_has_rich_identity or current_has_rich_identity:
+        return False
+
+    cached_origin = str(cached.get("origin_digest") or "").strip()
+    current_origin = str(current.get("origin_digest") or "").strip()
+    return bool(cached_origin and current_origin and cached_origin == current_origin)
 
 
 def _terminal_replay_fingerprint_from_disposition(disposition: Any | None) -> str:
@@ -128,6 +139,16 @@ def _terminal_replay_fingerprint_matches(cached: object, current: str | None) ->
 
 def group_identity_for_cache(group: Any) -> dict[str, Any]:
     provenance = getattr(group, "provenance", ()) or ()
+    source_refs: list[str] = []
+    for finding in getattr(group, "local_findings", ()) or ():
+        if not isinstance(finding, dict):
+            continue
+        raw_refs = finding.get("source_evidence_snippets", ())
+        if isinstance(raw_refs, str):
+            raw_refs = (raw_refs,)
+        if isinstance(raw_refs, list | tuple):
+            source_refs.extend(str(ref).strip() for ref in raw_refs if str(ref).strip())
+    normalized_source_refs = tuple(dict.fromkeys(source_refs))
     origins: list[dict[str, Any]] = []
     for item in provenance:
         if hasattr(item, "to_json"):
@@ -149,6 +170,7 @@ def group_identity_for_cache(group: Any) -> dict[str, Any]:
         "canonical_id": str(getattr(group, "canonical_id", "") or "").strip(),
         "finding_ids": [str(item).strip() for item in (getattr(group, "finding_ids", ()) or ()) if str(item).strip()],
         "fingerprint": str(getattr(group, "fingerprint", "") or "").strip(),
+        "source_refs_digest": _json_digest(normalized_source_refs) if normalized_source_refs else "",
         "origin_digest": _json_digest(tuple(origins)) if origins else "",
     }
 

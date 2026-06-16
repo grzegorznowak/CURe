@@ -1,8 +1,8 @@
 ### Prior Review Issue History
-- Parser now rejects unsafe input — status: confirmed-resolved. Reason: fixed in the current source. Internal rows: D-001.
-- Auth retry still accepts weak token — status: carried-forward/re_report. Reason: F-002 remains open at src/auth.py:42. Internal rows: D-002.
-- Duplicate logging finding — status: out-of-scope. Reason: suppressed as duplicate/out of scope. Internal rows: D-003.
-- Generated docs are out of scope — status: out-of-scope. Reason: moved out of review scope. Internal rows: D-004.
+- Parser now rejects unsafe input — status: confirmed-resolved. Reason: confirmed resolved in the current source or policy context. Internal rows: D-001.
+- Auth retry still accepts weak token — status: carried-forward/re_report. Reason: carried forward because the prior issue remains open or needs re-reporting. Internal rows: D-002.
+- Duplicate logging finding — status: out-of-scope. Reason: resolved, suppressed, or moved out of scope for this review. Internal rows: D-003.
+- Generated docs are out of scope — status: out-of-scope. Reason: resolved, suppressed, or moved out of scope for this review. Internal rows: D-004.
 
 ### Internal DA coverage (audit only)
 - D-001: confirmed-resolved

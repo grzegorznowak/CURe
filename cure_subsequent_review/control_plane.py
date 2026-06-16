@@ -34,6 +34,13 @@ _STORY_01_MODULES = {
     SubsequentReviewModule.FINDING_RECONCILER,
 }
 
+_RUNTIME_MODULES = {
+    SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
+    SubsequentReviewModule.REPORT_GOVERNOR,
+    SubsequentReviewModule.REVIEW_MEMORY_STORE,
+    SubsequentReviewModule.DEGRADED_RUNTIME_MANAGER,
+}
+
 
 @dataclass(frozen=True)
 class SubsequentReviewConfig:
@@ -45,7 +52,7 @@ class SubsequentReviewConfig:
         status = self.module_overrides.get(module)
         if status is ModuleStatus.DISABLED:
             return False
-        return module in _STORY_01_MODULES or module in MODULE_REGISTRY
+        return module in _STORY_01_MODULES or module in MODULE_REGISTRY or module in _RUNTIME_MODULES
 
 
 @dataclass(frozen=True)
@@ -167,7 +174,9 @@ def run_subsequent_review_intake(
     else:
         _record(records, SubsequentReviewModule.PR_HISTORY_COLLECTOR, ModuleStatus.DISABLED)
 
-    if degraded_runtime_path is not None:
+    if not config.module_enabled(SubsequentReviewModule.DEGRADED_RUNTIME_MANAGER):
+        _record(records, SubsequentReviewModule.DEGRADED_RUNTIME_MANAGER, ModuleStatus.DISABLED)
+    elif degraded_runtime_path is not None:
         status = ModuleStatus.DEGRADED if discussion is not None and discussion.status is ModuleStatus.DEGRADED else ModuleStatus.SUCCESS
         _record(
             records,

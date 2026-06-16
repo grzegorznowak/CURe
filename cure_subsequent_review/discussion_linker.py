@@ -84,13 +84,35 @@ def _group_ids(value: object, *, known_group_ids: set[str]) -> tuple[str, ...]:
 def _cached_group_identity_matches(cached: object, current: dict[str, Any] | None) -> bool:
     if not isinstance(cached, dict) or not isinstance(current, dict):
         return False
-    cached_fingerprint = str(cached.get("fingerprint") or "").strip()
-    current_fingerprint = str(current.get("fingerprint") or "").strip()
-    if cached_fingerprint and current_fingerprint and cached_fingerprint == current_fingerprint:
+    rich_keys = ("fingerprint", "source_refs_digest")
+    matched_rich_identity = False
+    for key in rich_keys:
+        cached_value = str(cached.get(key) or "").strip()
+        current_value = str(current.get(key) or "").strip()
+        if not cached_value or not current_value:
+            continue
+        if cached_value != current_value:
+            return False
+        matched_rich_identity = True
+    if matched_rich_identity:
         return True
+
+    cached_has_rich_identity = any(str(cached.get(key) or "").strip() for key in rich_keys)
+    current_has_rich_identity = any(str(current.get(key) or "").strip() for key in rich_keys)
+    if cached_has_rich_identity or current_has_rich_identity:
+        return False
+
     cached_origin = str(cached.get("origin_digest") or "").strip()
     current_origin = str(current.get("origin_digest") or "").strip()
     return bool(cached_origin and current_origin and cached_origin == current_origin)
+
+
+def _cached_group_universe_matches(cached: dict[str, Any], current: dict[str, dict[str, Any]]) -> bool:
+    if not cached and not current:
+        return True
+    if set(cached) != set(current):
+        return False
+    return all(_cached_group_identity_matches(cached.get(group_id), current.get(group_id)) for group_id in current)
 
 
 def _prompt(event: DiscussionEvent, groups: tuple[ReconciledFindingGroup, ...]) -> str:
@@ -171,6 +193,8 @@ class LlmDiscussionLinker:
         )
         if group_ids and not valid_group_ids:
             return None
+        if not group_ids and not _cached_group_universe_matches(cached_identities, current_identities):
+            return None
         return DiscussionLinkResult(
             group_ids=valid_group_ids,
             signal_class=signal_class,
@@ -194,7 +218,7 @@ class LlmDiscussionLinker:
                 group_ids=result.group_ids,
                 signal_class=result.signal_class,
                 rationale=result.rationale,
-                group_identities={group_id: current_identities[group_id] for group_id in result.group_ids if group_id in current_identities},
+                group_identities=current_identities,
             )
         except Exception:  # noqa: BLE001 - cache failure must not block linking
             return

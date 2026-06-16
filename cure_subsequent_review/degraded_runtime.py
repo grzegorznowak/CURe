@@ -52,7 +52,7 @@ class DiscussionFetchController:
             artifact = self.fetch_discussion()
             self._record_attempt(attempt=attempt, artifact=artifact)
             if not _is_degraded_discussion(artifact):
-                if self._choices:
+                if self._choices or artifact.status is ModuleStatus.SUCCESS:
                     self._write(status=ModuleStatus.SUCCESS, final_reason="discussion_available")
                 return artifact
 

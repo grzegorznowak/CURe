@@ -3,6 +3,24 @@ from _subsequent_review_test_support import *  # noqa: F401, F403
 
 
 class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
+    def test_runtime_modules_are_enabled_by_default_and_respect_disabled_overrides(self) -> None:
+        config = SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED)
+        for module in (
+            SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER,
+            SubsequentReviewModule.REPORT_GOVERNOR,
+            SubsequentReviewModule.REVIEW_MEMORY_STORE,
+            SubsequentReviewModule.DEGRADED_RUNTIME_MANAGER,
+        ):
+            with self.subTest(module=module.value):
+                self.assertTrue(config.module_enabled(module))
+                disabled = SubsequentReviewConfig(
+                    enabled=True,
+                    evidence_policy=EvidencePolicy.UNTRUSTED,
+                    module_overrides={module: ModuleStatus.DISABLED},
+                )
+                self.assertFalse(disabled.module_enabled(module))
+        self.assertFalse(config.module_enabled(SubsequentReviewModule.LANDMARK_TRACE_RUNNER))
+
     def test_new_sandbox_intake_receives_unavailable_completed_sessions_for_degradation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -130,6 +148,33 @@ class SubsequentReviewControlPlaneTests(SubsequentReviewTestCase):
             discussion = json.loads((root / "work" / "subsequent" / "pr_discussion.json").read_text(encoding="utf-8"))
 
         self.assertEqual([event["event_id"] for event in discussion["events"]], ["prefetched-1"])
+
+    def test_intake_records_degraded_runtime_manager_success_for_healthy_empty_controller_artifact(self) -> None:
+        from cure_subsequent_review.contracts import DiscussionArtifact
+        from cure_subsequent_review.degraded_runtime import DiscussionFetchController
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "work" / "subsequent"
+            controller = DiscussionFetchController(
+                fetch_discussion=lambda: DiscussionArtifact(status=ModuleStatus.SUCCESS, events=()),
+                artifact_dir=artifact_dir,
+                interactive=False,
+            )
+            discussion = controller.fetch()
+            self.assertTrue(controller.artifact_path.is_file())
+            run_subsequent_review_intake(
+                pr=PR(),
+                work_dir=root / "work",
+                completed_sessions=[],
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
+                prefetched_discussion=discussion,
+                degraded_runtime_path=controller.artifact_path,
+            )
+            manifest = json.loads((artifact_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["modules"]["degraded_runtime_manager"]["status"], "success")
+        self.assertEqual(manifest["modules"]["degraded_runtime_manager"]["artifact_path"], str(controller.artifact_path))
 
     def test_control_plane_writes_story_01_artifacts_only_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

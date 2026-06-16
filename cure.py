@@ -9792,7 +9792,7 @@ def _pr_flow_impl(
     progress.meta.setdefault("paths", {})["pr_context"] = str(pr_context_path)
     progress.meta.setdefault("agent_desc", {})["sha256"] = sha256_text(agent_desc)
     progress.flush()
-    from cure_subsequent_review.contracts import EvidencePolicy
+    from cure_subsequent_review.contracts import EvidencePolicy, ModuleStatus
     from cure_subsequent_review.control_plane import SubsequentReviewConfig, run_subsequent_review_intake
     from cure_subsequent_review.decision import (
         decision_meta_json,
@@ -9911,6 +9911,15 @@ def _pr_flow_impl(
             current_head=head_sha,
         )
         prefetched_discussion = decision_discussion or prefetched_discussion
+        if (
+            not subsequent_decision.enabled
+            and degraded_runtime_path is not None
+            and prefetched_discussion is not None
+            and prefetched_discussion.status is ModuleStatus.SUCCESS
+        ):
+            degraded_runtime_path.unlink(missing_ok=True)
+            progress.meta.setdefault("paths", {}).pop("subsequent_review_degraded_runtime", None)
+            degraded_runtime_path = None
         subsequent_decision_path = write_decision_artifact(work_dir=work_dir, pr=pr, decision=subsequent_decision)
         progress.meta.setdefault("paths", {})["subsequent_review_decision"] = str(subsequent_decision_path)
         progress.meta["subsequent_review"] = decision_meta_json(

@@ -183,6 +183,32 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             self.assertEqual(manifest["modules"]["review_context_packager"]["status"], "success")
             self.assertEqual(manifest["modules"]["report_governor"]["status"], "success")
 
+    def test_pre_prompt_runtime_module_overrides_disable_packager_and_governor(self) -> None:
+        from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "work" / "subsequent"
+            manifest_path = self._write_seed_runtime_artifacts(artifact_dir)
+
+            result = prepare_review_runtime_pre_prompt(
+                artifact_dir=artifact_dir,
+                governor_mode="strict",
+                manifest_path=manifest_path,
+                module_overrides={
+                    SubsequentReviewModule.REVIEW_CONTEXT_PACKAGER: ModuleStatus.DISABLED,
+                    SubsequentReviewModule.REPORT_GOVERNOR: ModuleStatus.DISABLED,
+                },
+            )
+
+            self.assertEqual(result.prior_review_brief, "")
+            self.assertIsNone(result.governor_brief_path)
+            self.assertFalse((artifact_dir / "review_context_package.json").exists())
+            self.assertFalse((artifact_dir / "subsequent_review_context.md").exists())
+            self.assertFalse((artifact_dir / "governor_brief.md").exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["modules"]["review_context_packager"]["status"], "disabled")
+            self.assertEqual(manifest["modules"]["report_governor"]["status"], "disabled")
+
     def test_strict_governor_accepts_reportable_source_only_rows_when_discussion_has_no_signals(self) -> None:
         from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt
 
@@ -398,15 +424,197 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             package = build_review_context_package(artifact_dir=artifact_dir)
             brief = build_governor_brief(artifact_dir=artifact_dir)
 
+            context_md = (artifact_dir / "subsequent_review_context.md")
+            from cure_subsequent_review.runtime import _write_context_markdown
+
+            _write_context_markdown(path=context_md, package=package)
+            context_text = context_md.read_text(encoding="utf-8")
+
             self.assertEqual(package["footer_marker_policy"]["official_footer_remote_entries"], 1)
             self.assertEqual(package["footer_marker_policy"]["foreign_footer_ignored_comments"], 1)
             self.assertEqual(package["footer_marker_policy"]["body_only_rejected_comments"], 1)
+            self.assertTrue(
+                any("Ignored remote CURe comment IC-3" in reason for reason in package["footer_marker_policy"]["foreign_footer_audit_reasons"])
+            )
+            self.assertIn("Foreign official-footer ignored comments: 1", context_text)
+            self.assertIn("Ignored remote CURe comment IC-3", context_text)
             self.assertIn("official CURe footer", brief)
             self.assertIn("regardless of author/login", brief)
             self.assertIn("compatible with the current run", brief)
             self.assertIn("foreign official-footer ignored comments: 1", brief)
             self.assertIn("Ignored remote CURe comment IC-3", brief)
             self.assertIn("body-only", brief)
+
+    def test_pr18_pr22_foreign_footer_replay_keeps_foreign_findings_out_but_surfaces_reason(self) -> None:
+        from cure_subsequent_review.runtime import audit_review_report_after_review, prepare_review_runtime_pre_prompt
+        from cure_subsequent_review.source_truth import FindingVerificationResult
+        from cure_subsequent_review.contracts import SourceState
+
+        def footer(*, session_id: str, review_head_sha: str) -> str:
+            return (
+                "<!-- CURE_REVIEW_FOOTER_START -->\n"
+                "_review generated with [CURe](https://github.com/grzegorznowak/CURe) v. 0.1.4"
+                f" · single-stage · sha {review_head_sha[:7]} · model gpt-5.2/high · tok 1k/2k/3k"
+                f" · session {session_id} · 5m0s_\n"
+                "<!-- CURE_REVIEW_FOOTER_END -->"
+            )
+
+        pr = PR(owner="grzegorznowak", repo="cure", number=18)
+        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        foreign_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        compatible_body = (
+            "CURe Review\n"
+            "### CURE-18: Compatible PR18 finding\n"
+            "Severity: medium\n"
+            "Section: Reliability\n"
+            "Evidence: app/pr18.py:9 matches current run\n"
+            f"\n{footer(session_id='grzegorznowak-cure-pr18-20260615-120000-abcd', review_head_sha=current_head)}\n"
+        )
+        foreign_body = (
+            "CURe Review\n"
+            "### CURE-22: Foreign PR22 finding\n"
+            "Severity: high\n"
+            "Section: Security\n"
+            "Evidence: app/pr22.py:1 does not belong to PR18\n"
+            f"\n{footer(session_id='grzegorznowak-cure-pr22-20260614-110911-a3ae', review_head_sha=foreign_head)}\n"
+        )
+        foreign_event_body = (
+            "CURe Review\n"
+            "### CURE-23: Foreign event-head finding\n"
+            "Severity: high\n"
+            "Section: Reliability\n"
+            "Evidence: app/pr22.py:4 belongs to a different reviewed head\n"
+            f"\n{footer(session_id='grzegorznowak-cure-pr18-20260615-120000-abcd', review_head_sha=current_head)}\n"
+        )
+
+        def fetch(path: str) -> Any:
+            if path.endswith("/issues/18/comments"):
+                return [
+                    {"id": 4707013048, "user": {"login": "operator"}, "body": compatible_body},
+                    {"id": 4707013049, "user": {"login": "operator"}, "body": foreign_body},
+                ]
+            if path.endswith("/pulls/18/reviews"):
+                return [
+                    {
+                        "id": 901,
+                        "user": {"login": "operator"},
+                        "body": foreign_event_body,
+                        "state": "COMMENTED",
+                        "commit_id": foreign_head,
+                    }
+                ]
+            if path.endswith("/pulls/18/comments"):
+                return []
+            raise AssertionError(path)
+
+        decision, _discussion = decide_subsequent_review(
+            pr=pr,
+            completed_sessions=[],
+            mode=SubsequentReviewCommandMode.AUTO,
+            evidence_policy=EvidencePolicy.UNTRUSTED,
+            fetch_json=fetch,
+            current_head=current_head,
+        )
+        self.assertTrue(decision.enabled)
+        self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 1)
+        self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 2)
+
+        verifier_calls: list[tuple[str, ...]] = []
+
+        def verifier(request: Any) -> FindingVerificationResult:
+            verifier_calls.append(request.finding_ids)
+            return FindingVerificationResult(
+                source_state=SourceState.STILL_OPEN,
+                current_source_citations=({"path": "app/pr18.py", "start_line": 9, "summary": "still open"},),
+                rationale="PR18 finding remains open",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            result = run_subsequent_review_intake(
+                pr=pr,
+                work_dir=work_dir,
+                completed_sessions=[],
+                config=SubsequentReviewConfig(enabled=True, evidence_policy=EvidencePolicy.UNTRUSTED),
+                fetch_json=fetch,
+                current_head=current_head,
+                source_verifier=verifier,
+            )
+            self.assertIsNotNone(result)
+            assert result is not None
+            artifact_dir = result.artifact_dir
+            pre_prompt = prepare_review_runtime_pre_prompt(
+                artifact_dir=artifact_dir,
+                governor_mode="strict",
+                manifest_path=result.manifest_path,
+            )
+
+            prior_review_corpus = json.loads((artifact_dir / "prior_review_corpus.json").read_text(encoding="utf-8"))
+            prior_findings = json.loads((artifact_dir / "prior_findings.json").read_text(encoding="utf-8"))
+            source_verification = json.loads((artifact_dir / "source_verification.json").read_text(encoding="utf-8"))
+            disposition = json.loads((artifact_dir / "disposition_ledger.json").read_text(encoding="utf-8"))
+            package = json.loads((artifact_dir / "review_context_package.json").read_text(encoding="utf-8"))
+            context_text = (artifact_dir / "subsequent_review_context.md").read_text(encoding="utf-8")
+            brief = pre_prompt.prior_review_brief
+            combined_machine_text = json.dumps([prior_findings, source_verification, disposition])
+
+            fanout = source_verification["observability"]["verifier_fanout"]
+            self.assertNotIn(("CURE-22",), verifier_calls)
+            self.assertNotIn(("CURE-23",), verifier_calls)
+            self.assertEqual(fanout["group_count"], 1)
+            self.assertEqual([entry["entry_id"] for entry in prior_review_corpus["entries"]], ["pr_comment:4707013048"])
+            self.assertIn("CURE-18", prior_review_corpus["entries"][0]["body"])
+            self.assertNotIn("CURE-22", prior_review_corpus["entries"][0]["body"])
+            self.assertNotIn("CURE-23", prior_review_corpus["entries"][0]["body"])
+            ignored_by_comment = {item.get("comment_id"): item for item in prior_review_corpus["ignored_pr_comments"]}
+            ignored_by_review = {item.get("review_id"): item for item in prior_review_corpus["ignored_pr_comments"]}
+            self.assertIn("4707013049", ignored_by_comment)
+            self.assertIn("901", ignored_by_review)
+            self.assertEqual(ignored_by_comment["4707013049"]["reason"], "foreign_cure_footer_provenance")
+            self.assertEqual(ignored_by_review["901"]["reason"], "foreign_cure_footer_provenance")
+            self.assertIn("event reviewed_head e305f82", ignored_by_review["901"]["audit_reason"])
+            self.assertIn("CURE-18", combined_machine_text)
+            self.assertNotIn("CURE-22", combined_machine_text)
+            self.assertNotIn("CURE-23", combined_machine_text)
+            self.assertEqual(package["footer_marker_policy"]["foreign_footer_ignored_comments"], 2)
+            self.assertIn("Ignored remote CURe comment 4707013049", context_text)
+            self.assertIn("Ignored remote CURe review 901", context_text)
+            self.assertIn("Ignored remote CURe comment 4707013049", brief)
+            self.assertIn("Ignored remote CURe review 901", brief)
+
+            review_path = Path(tmp) / "review.md"
+            review_path.write_text(
+                "### Prior Review Issue History\n"
+                "- Compatible PR18 finding — status: carried-forward/re_report. Reason: carried forward because the prior issue remains open or needs re-reporting.\n\n"
+                "### Prior Review Provenance Audit\n"
+                "- Ignored 2 foreign official CURe footer comments: official footer belongs to PR22/session "
+                "grzegorznowak-cure-pr22-20260614-110911-a3ae at sha e305f82, and one pull review had event "
+                "reviewed_head e305f82, while this run is reviewing PR18 at sha c3f81e8; foreign findings were excluded "
+                "from prior-review provenance.\n\n"
+                "<details>\n"
+                "<summary>Internal DA coverage (audit/provenance only)</summary>\n\n"
+                "- DA-0001: carried-forward/re_report\n"
+                "</details>\n\n"
+                "### In Scope Issues\n"
+                "- CURE-18 remains open.\n",
+                encoding="utf-8",
+            )
+            record = audit_review_report_after_review(
+                artifact_dir=artifact_dir,
+                review_path=review_path,
+                governor_mode="strict",
+                auditor=lambda _prompt: json.dumps(
+                    {"awareness": "demonstrated", "judgment": "foreign footer surfaced", "evidence": ["Ignored 1"]}
+                ),
+                manifest_path=result.manifest_path,
+            )
+
+            final_text = review_path.read_text(encoding="utf-8")
+            self.assertEqual(record.status.value, "success")
+            self.assertIn("Ignored 2 foreign official CURe footer comments", final_text)
+            self.assertIn("CURE-18", final_text)
+            self.assertNotIn("CURE-22", final_text)
+            self.assertNotIn("CURE-23", final_text)
 
     def test_governor_off_keeps_prior_review_brief_empty(self) -> None:
         from cure_subsequent_review.runtime import prepare_review_runtime_pre_prompt

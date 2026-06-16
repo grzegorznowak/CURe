@@ -6,6 +6,24 @@ from cure_subsequent_review.degraded_runtime import DiscussionFetchAborted, Disc
 
 
 class SubsequentReviewDegradedRuntimeTests(SubsequentReviewTestCase):
+    def test_controller_writes_success_artifact_for_healthy_empty_first_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            controller = DiscussionFetchController(
+                fetch_discussion=lambda: DiscussionArtifact(status=ModuleStatus.SUCCESS, events=()),
+                artifact_dir=artifact_dir,
+                interactive=False,
+            )
+            result = controller.fetch()
+            runtime = json.loads((artifact_dir / "degraded_runtime.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, ModuleStatus.SUCCESS)
+        self.assertEqual(result.events, ())
+        self.assertEqual(runtime["status"], "success")
+        self.assertEqual(runtime["final_reason"], "discussion_available")
+        self.assertEqual(runtime["attempts"][0]["status"], "success")
+        self.assertEqual(runtime["attempts"][0]["event_count"], 0)
+
     def test_controller_retries_degraded_discussion_before_accepting_success(self) -> None:
         attempts: list[int] = []
         choices = iter(["retry"])
