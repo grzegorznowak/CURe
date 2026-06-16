@@ -14,8 +14,8 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
 
     def test_decision_counts_pull_review_event_head_mismatch_as_foreign_footer_provenance(self) -> None:
         pr = PR(owner="grzegorznowak", repo="cure", number=18)
-        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
-        event_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        current_head = "a" * 40
+        event_head = "b" * 40
         review_body = (
             "CURe Review\n"
             "### CURE-22: Foreign event-head finding\n"

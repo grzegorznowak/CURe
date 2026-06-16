@@ -460,8 +460,8 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             )
 
         pr = PR(owner="grzegorznowak", repo="cure", number=18)
-        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
-        foreign_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        current_head = "a" * 40
+        foreign_head = "b" * 40
         compatible_body = (
             "CURe Review\n"
             "### CURE-18: Compatible PR18 finding\n"
@@ -572,7 +572,7 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
             self.assertIn("901", ignored_by_review)
             self.assertEqual(ignored_by_comment["4707013049"]["reason"], "foreign_cure_footer_provenance")
             self.assertEqual(ignored_by_review["901"]["reason"], "foreign_cure_footer_provenance")
-            self.assertIn("event reviewed_head e305f82", ignored_by_review["901"]["audit_reason"])
+            self.assertIn("event reviewed_head bbbbbbb", ignored_by_review["901"]["audit_reason"])
             self.assertIn("CURE-18", combined_machine_text)
             self.assertNotIn("CURE-22", combined_machine_text)
             self.assertNotIn("CURE-23", combined_machine_text)
@@ -588,8 +588,8 @@ class SubsequentReviewRuntimePackagingTests(SubsequentReviewTestCase):
                 "- Compatible PR18 finding — status: carried-forward/re_report. Reason: carried forward because the prior issue remains open or needs re-reporting.\n\n"
                 "### Prior Review Provenance Audit\n"
                 "- Ignored 2 foreign official CURe footer comments: official footer belongs to PR22/session "
-                "grzegorznowak-cure-pr22-20260614-110911-a3ae at sha e305f82, and one pull review had event "
-                "reviewed_head e305f82, while this run is reviewing PR18 at sha c3f81e8; foreign findings were excluded "
+                "grzegorznowak-cure-pr22-20260614-110911-a3ae at sha bbbbbbb, and one pull review had event "
+                "reviewed_head bbbbbbb, while this run is reviewing PR18 at sha aaaaaaa; foreign findings were excluded "
                 "from prior-review provenance.\n\n"
                 "<details>\n"
                 "<summary>Internal DA coverage (audit/provenance only)</summary>\n\n"

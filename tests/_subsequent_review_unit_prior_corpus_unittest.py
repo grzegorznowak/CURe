@@ -122,7 +122,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
 
     def test_foreign_official_footer_is_audited_and_excluded_before_prior_finding_extraction(self) -> None:
         pr = PR(owner="grzegorznowak", repo="cure", number=18)
-        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        current_head = "a" * 40
         compatible_body = (
             "CURe Review\n"
             "### CURE-18: Compatible PR18 finding\n"
@@ -137,7 +137,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
             "Severity: high\n"
             "Section: Security\n"
             "Evidence: app/pr22.py:1 does not belong to PR18\n"
-            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='e305f826f3c0ece63be708f7df4b4f54c38b7658')}\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='b' * 40)}\n"
         )
 
         def fetch(path: str) -> Any:
@@ -200,8 +200,8 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
 
     def test_pull_review_event_head_mismatch_is_audited_and_excluded_before_extraction(self) -> None:
         pr = PR(owner="grzegorznowak", repo="cure", number=18)
-        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
-        event_head = "e305f826f3c0ece63be708f7df4b4f54c38b7658"
+        current_head = "a" * 40
+        event_head = "b" * 40
         review_body = (
             "CURe Review\n"
             "### CURE-22: Foreign event-head finding\n"
@@ -254,7 +254,7 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
         self.assertEqual(foreign["footer_session_id"], "grzegorznowak-cure-pr18-20260615-120000-abcd")
         self.assertEqual(foreign["footer_reviewed_head"], current_head[:7])
         self.assertEqual(foreign["event_reviewed_head"], event_head)
-        self.assertIn("event reviewed_head e305f82", foreign["audit_reason"])
+        self.assertIn("event reviewed_head bbbbbbb", foreign["audit_reason"])
         self.assertIn("while this run is reviewing PR18", foreign["audit_reason"])
         self.assertIn("not used as PR18 prior-review provenance", foreign["audit_reason"])
 
@@ -264,14 +264,14 @@ class SubsequentReviewPriorCorpusTests(SubsequentReviewTestCase):
 
     def test_foreign_official_footer_alone_does_not_enable_remote_prior_review(self) -> None:
         pr = PR(owner="grzegorznowak", repo="cure", number=18)
-        current_head = "c3f81e8ee4158adb62b615094b10dfd592ab4a5a"
+        current_head = "a" * 40
         foreign_body = (
             "CURe Review\n"
             "### CURE-22: Foreign PR22 finding\n"
             "Severity: high\n"
             "Section: Security\n"
             "Evidence: app/pr22.py:1 does not belong to PR18\n"
-            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='e305f826f3c0ece63be708f7df4b4f54c38b7658')}\n"
+            f"\n{self._footer_block(session_id='grzegorznowak-cure-pr22-20260615-103420-b86b', review_head_sha='b' * 40)}\n"
         )
 
         def fetch(path: str) -> Any:
