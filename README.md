@@ -1,3 +1,10 @@
+> [!WARNING]
+> **Read this first: ChunkHound and disk requirements.** CURe cannot run reviews until ChunkHound is fully installed, configured, and confirmed working end-to-end. When possible, use the latest ChunkHound `main` branch so CURe gets current indexing and research behavior.
+>
+> CURe creates ChunkHound-backed indexes and ad-hoc DuckDB databases inside review sandboxes. On large repositories, these artifacts can consume vast disk space; CURe is best suited to small and medium projects where the ChunkHound index is measured in a few GB, not hundreds.
+>
+> Use a fast, spacious SSD, and run `cure clean` regularly to remove old sandboxes and cached state you no longer need.
+
 # CURe
 
 CURe ("Code Under Review") is a CLI for running pull request reviews inside isolated sandboxes, with ChunkHound-backed code search/research and a configurable review agent on top.
@@ -7,12 +14,6 @@ It is for two audiences:
 - agentic sessions that need a clear, reusable bootstrap contract for fresh or partially configured environments
 
 If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
-
-> **Disk space and ChunkHound readiness:** CURe requires a fully verified, working ChunkHound setup before reviews can run. When possible, use the latest ChunkHound `main` branch to pick up current indexing and research behavior.
->
-> CURe also creates ChunkHound-backed indexes and ad-hoc DuckDB databases for review sandboxes. On very large repositories, those artifacts can consume substantial disk space; CURe is best suited to small and medium projects where the ChunkHound index is measured in a few GB, not hundreds.
->
-> Use a fast, spacious SSD, and run `cure clean` regularly to remove old sandboxes and cached state you no longer need.
 
 ## Quick Links
 
