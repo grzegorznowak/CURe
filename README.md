@@ -8,7 +8,9 @@ It is for two audiences:
 
 If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
 
-> **Disk space warning:** CURe relies on ChunkHound-backed indexes and ad-hoc DuckDB databases for review sandboxes. On very large repositories, those artifacts can consume substantial disk space; CURe is best suited to small and medium projects where the ChunkHound index is measured in a few GB, not hundreds.
+> **Disk space and ChunkHound readiness:** CURe requires a fully verified, working ChunkHound setup before reviews can run. When possible, use the latest ChunkHound `main` branch to pick up current indexing and research behavior.
+>
+> CURe also creates ChunkHound-backed indexes and ad-hoc DuckDB databases for review sandboxes. On very large repositories, those artifacts can consume substantial disk space; CURe is best suited to small and medium projects where the ChunkHound index is measured in a few GB, not hundreds.
 >
 > Use a fast, spacious SSD, and run `cure clean` regularly to remove old sandboxes and cached state you no longer need.
 
