@@ -4,18 +4,34 @@
 > Canonical story contract: `story.md`. Legacy source remains under `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/`.
 
 ## Current Claim
-- Claimed at: 2026-06-16T14:04:47Z
-- Claimed by: pi child resume session
+- Claimed at: 2026-06-17T11:10:50Z
+- Claimed by: pi execution session
 - Model: not exposed by pi harness (no `MODEL` environment variable available)
-- Scope: Resolve the 2026-06-16T13:50:51Z A12 request-changes blocker: cached discussion-linker no-link results must invalidate when the same group id and origin digest remain but current finding fingerprint/source-reference identity changed; keep fresh PR #22 live-audit proof pending/provisional.
+- Scope: Owner resume after the 2026-06-17T10:58:55Z NOT REVIEWABLE gate; verify A21 local implementation proof, identify remaining live-audit/provisional proof gates, and update durable readiness state without fabricating live evidence.
 - Main-tree targets: CURe
-- Primary write surfaces: `cure_subsequent_review/discussion_linker.py`, `tests/_subsequent_review_unit_discussion_linker_unittest.py`, OpenSpec progress/tasks artifacts.
+- Primary write surfaces: OpenSpec progress/story proof notes only; implementation files remain as produced by the prior A21 slice.
 - Status: 🔄 IN PROGRESS
 
 ### Legacy Scaffold Notes
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-17T11:10:50Z **Resume/readiness gate**: executed the owner-side follow-up to the 2026-06-17T10:58:55Z `/openspec-story-review` NOT REVIEWABLE result.
+  - Finding: the A21/TAP-22 implementation slice is locally present and its focused proof still passes, but the story is not genuinely ready for implementation review because `tasks.md` still leaves the fresh PR #22 live-audit row unchecked and Acceptance Proof Matrix rows A16, A17, A19, A20, and A21 remain `provisional`.
+  - Live state checked: `gh pr view 22 --json number,state,headRefOid,headRefName,mergeStateStatus,url` reports PR #22 open/clean at head `489feb77366d455762b35947695a52e7dee82227`; no fresh local PR #22 sandbox artifact was found under `/home/vscode/.local/state/cure/sandboxes/` during this resume.
+  - Decision: leave `story.md` and progress status at `🔄 IN PROGRESS`; do not mark the live-audit task complete and do not set `Status: 🟣 IN REVIEW` until the required live-output/performance proof is run/recorded or the proof matrix is explicitly re-scoped by a future approved plan.
+  - Verification rerun: `python -m pytest tests/_subsequent_review_unit_decision_unittest.py tests/_reviewflow_unittest_runtime_ui_impl.py tests/_subsequent_review_integration_pr_flow_unittest.py -q` (`180 passed, 12 subtests`); `python -m pytest tests/test_subsequent_review.py -q` (`159 passed, 42 subtests`); `git diff --check`; `ruff check .`; `mypy` all passed.
+  - Remaining owner action: run and audit a fresh PR #22 live review at head `489feb77366d455762b35947695a52e7dee82227` or later, plus the A21 disabled-path live-output/copy-boundary artifact audit, then finalize or deliberately re-scope the provisional A16/A17/A19/A20/A21 proof rows before re-running story review.
+- 2026-06-17T10:15:39Z **Step**: implemented the approved A21/TAP-22 MVP in the main tree.
+  - Changed: `cure_subsequent_review/decision.py`, `cure.py`, `cure_output.py`, `tests/_subsequent_review_unit_decision_unittest.py`, `tests/_reviewflow_unittest_runtime_ui_impl.py`, and this OpenSpec progress/tasks set.
+  - Test: RED first — focused decision and TUI-renderer regressions failed for missing `decision.rejected_remote_cure_markers` / `decision.json`+`meta.json` mirroring and missing pre-markdown notice support.
+  - Test: PASS — targeted A21 regressions passed; focused decision + TUI renderer suite passed (`8 passed, 8 subtests`); PR-flow integration suite passed (`17 passed`); public subsequent-review wrapper passed (`159 passed, 42 subtests`); `git diff --check`, `ruff check .`, and `mypy` passed.
+  - Notes: disabled foreign-official-footer-only decisions now persist sanitized per-marker metadata without rejected body text; `_pr_flow_impl` formats an operator-only `CURe Operator Notice — Not part of the review`, emits it to stderr when not using the TUI, and passes it to the TUI markdown renderer before the rendered review body. Body-only/generic CURe-looking text still does not increment `remote_cure_markers` or enable intake. Fresh PR #22 live audit remains unchecked; Story 04 status stays `🔄 IN PROGRESS`.
+- 2026-06-17T05:28:01Z **Planning checkpoint**: incorporated the latest PR #18 disabled-path official-footer remote-marker audit into Story 04 as A21/TAP-22.
+  - Sandbox: `/home/vscode/.local/state/cure/sandboxes/grzegorznowak-cure-pr18-20260617-052801-06dc` reviewed PR #18 at head `c3f81e8` with no local completed sessions. It observed one pasted official CURe footer whose provenance belonged to another PR/run. `work/subsequent/decision.json` recorded `remote_events=1`, `remote_cure_markers=1`, `accepted_remote_cure_markers=0`, `foreign_remote_cure_markers=1`, `enabled=false`, and `reasons=["no_prior_review_signals"]`; no runtime/intake artifacts were produced.
+  - MVP decision: A21/TAP-22 covers only disabled/first-run runs where official-footer remote markers are counted (`remote_cure_markers > 0`) but all are rejected (`accepted_remote_cure_markers == 0`) for current-run provenance mismatch. Body-only/generic CURe-looking text without an official footer remains out of scope for this MVP, must stay `remote_cure_markers == 0`, must not enable intake, and would require a future separate non-positive audit signal if an operator notice is desired.
+  - Output/metadata decision: `_pr_flow_impl` should consume durable disabled-path per-marker rejection metadata (`decision.json.rejected_remote_cure_markers[]` mirrored to `meta.json.subsequent_review.rejected_remote_cure_markers[]`) and pass an operator notice to the existing stderr/TUI renderer before rendered review markdown. The notice must be clearly labeled `not part of the review`, list actionable ids/URLs and PR/head/footer mismatch details, preserve session-dir-only success stdout, and remain outside `review.md`, prompt variables, copyable GitHub review output, and rejected body text.
+  - Changed planning artifacts: `story.md`, `design.md`, `tasks.md`, and this progress file. Implementation remains pending; the new task is intentionally unchecked.
 - 2026-06-16T14:07:10Z **Step**: closed the local 2026-06-16T13:50:51Z A12 same-origin no-link discussion-linker cache blocker.
   - Changed: `cure_subsequent_review/discussion_linker.py`, `tests/_subsequent_review_unit_discussion_linker_unittest.py`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md`, and this progress file.
   - Test: RED first — new `test_llm_linker_invalidates_cached_no_link_when_same_group_origin_has_identity_drift` failed because a cached no-link row for `G-0001` with stale fingerprint/source reference replayed on the same event/body/head and suppressed the classifier (`len(calls)=0`).

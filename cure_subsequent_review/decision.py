@@ -32,6 +32,7 @@ class SubsequentReviewDecision:
     reasons: tuple[str, ...]
     signal_counts: dict[str, int]
     degraded_reasons: tuple[str, ...] = ()
+    rejected_remote_cure_markers: tuple[dict[str, Any], ...] = ()
 
     def to_json(self, *, pr: Any | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -43,6 +44,8 @@ class SubsequentReviewDecision:
             "signal_counts": dict(self.signal_counts),
             "degraded_reasons": list(self.degraded_reasons),
         }
+        if self.rejected_remote_cure_markers:
+            payload["rejected_remote_cure_markers"] = [dict(item) for item in self.rejected_remote_cure_markers]
         if pr is not None:
             payload["pr"] = {"host": pr.host, "owner": pr.owner, "repo": pr.repo, "number": pr.number}
         return payload
@@ -99,6 +102,30 @@ def _remote_footer_assessment(*, pr: Any, event: Any, current_head: str | None) 
         current_head=current_head,
         event_reviewed_head=getattr(event, "reviewed_head", None),
     )
+
+
+def _rejected_remote_marker_metadata(*, pr: Any, event: Any, assessment: Any, current_head: str | None) -> dict[str, Any]:
+    source_type = _remote_source_type(event) or "remote"
+    id_field = "review_id" if source_type == "pr_review" else "comment_id"
+    event_timestamp = getattr(event, "created_at", None)
+    item: dict[str, Any] = {
+        "source_type": source_type,
+        id_field: str(getattr(event, "event_id", "") or ""),
+        "url": getattr(event, "url", None),
+        "author": getattr(event, "author", None),
+        "created_at": event_timestamp,
+        "reason": str(getattr(assessment, "reason", None) or "foreign_cure_footer_provenance"),
+        "audit_reason": getattr(assessment, "audit_reason", None),
+        "current_pr_number": getattr(pr, "number", None),
+        "current_head": str(current_head or "").strip() or None,
+        "footer_pr_number": getattr(assessment, "footer_pr_number", None),
+        "footer_session_id": getattr(assessment, "footer_session_id", None),
+        "footer_reviewed_head": getattr(assessment, "footer_reviewed_head", None),
+        "event_reviewed_head": getattr(assessment, "event_reviewed_head", None),
+    }
+    if source_type == "pr_review" and event_timestamp:
+        item["submitted_at"] = event_timestamp
+    return {key: value for key, value in item.items() if value not in (None, "")}
 
 
 _NON_ENABLING_REMOTE_METADATA_REASONS = {"discussion_incomplete", "thread_state_unavailable"}
@@ -177,11 +204,17 @@ def decide_subsequent_review(
         )
 
     signal_counts["remote_events"] = len(discussion.events)
-    remote_assessments = [
-        assessment
-        for event in discussion.events
-        if (assessment := _remote_footer_assessment(pr=pr, event=event, current_head=current_head)) is not None
-    ]
+    remote_assessments: list[Any] = []
+    rejected_remote_cure_markers: list[dict[str, Any]] = []
+    for event in discussion.events:
+        assessment = _remote_footer_assessment(pr=pr, event=event, current_head=current_head)
+        if assessment is None:
+            continue
+        remote_assessments.append(assessment)
+        if assessment.has_official_footer and assessment.reason == "foreign_cure_footer_provenance":
+            rejected_remote_cure_markers.append(
+                _rejected_remote_marker_metadata(pr=pr, event=event, assessment=assessment, current_head=current_head)
+            )
     remote_cure_markers = sum(1 for assessment in remote_assessments if assessment.has_official_footer)
     accepted_remote_cure_markers = sum(1 for assessment in remote_assessments if assessment.compatible)
     foreign_remote_cure_markers = sum(
@@ -190,6 +223,11 @@ def decide_subsequent_review(
     signal_counts["remote_cure_markers"] = remote_cure_markers
     signal_counts["accepted_remote_cure_markers"] = accepted_remote_cure_markers
     signal_counts["foreign_remote_cure_markers"] = foreign_remote_cure_markers
+    disabled_rejected_remote_cure_markers = (
+        tuple(rejected_remote_cure_markers)
+        if remote_cure_markers > 0 and accepted_remote_cure_markers == 0 and foreign_remote_cure_markers == remote_cure_markers
+        else ()
+    )
     degraded_reasons = list(discussion.status_reasons)
     for marker in discussion.pagination:
         if not marker.complete and marker.status not in degraded_reasons:
@@ -241,6 +279,7 @@ def decide_subsequent_review(
                 reasons=_ordered_unique(reasons) or ("no_prior_review_signals",),
                 signal_counts=signal_counts,
                 degraded_reasons=ordered_degraded_reasons,
+                rejected_remote_cure_markers=disabled_rejected_remote_cure_markers,
             ),
             discussion,
         )
@@ -251,6 +290,7 @@ def decide_subsequent_review(
             evidence_policy=evidence_policy,
             reasons=_ordered_unique(reasons) or ("no_prior_review_signals",),
             signal_counts=signal_counts,
+            rejected_remote_cure_markers=disabled_rejected_remote_cure_markers,
         ),
         discussion,
     )
@@ -260,6 +300,74 @@ def write_decision_artifact(*, work_dir: Path, pr: Any, decision: SubsequentRevi
     path = work_dir / "subsequent" / "decision.json"
     write_json(path, decision.to_json(pr=pr))
     return path
+
+
+def _marker_label(marker: dict[str, Any]) -> str:
+    source_type = str(marker.get("source_type") or "remote marker")
+    source_label = "review" if source_type == "pr_review" else "comment"
+    marker_id = str(marker.get("review_id") or marker.get("comment_id") or "").strip()
+    return f"{source_label} {marker_id}" if marker_id else source_label
+
+
+def _marker_location(marker: dict[str, Any]) -> str:
+    parts: list[str] = []
+    current_pr = marker.get("current_pr_number")
+    current_head = str(marker.get("current_head") or "").strip()
+    if current_pr or current_head:
+        current = f"current PR {current_pr}" if current_pr else "current PR"
+        if current_head:
+            current = f"{current} at {current_head[:12]}"
+        parts.append(current)
+    footer_pr = marker.get("footer_pr_number")
+    footer_session = str(marker.get("footer_session_id") or "").strip()
+    footer_head = str(marker.get("footer_reviewed_head") or "").strip()
+    if footer_pr or footer_session or footer_head:
+        footer = f"footer PR {footer_pr}" if footer_pr else "footer PR unknown"
+        if footer_session:
+            footer = f"{footer}, session {footer_session}"
+        if footer_head:
+            footer = f"{footer}, head {footer_head[:12]}"
+        parts.append(footer)
+    event_head = str(marker.get("event_reviewed_head") or "").strip()
+    if event_head:
+        parts.append(f"event head {event_head[:12]}")
+    return "; ".join(parts)
+
+
+def format_rejected_remote_cure_marker_notice(markers: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> str | None:
+    sanitized = [dict(marker) for marker in markers if isinstance(marker, dict)]
+    if not sanitized:
+        return None
+    count = len(sanitized)
+    plural = "s" if count != 1 else ""
+    lines = [
+        "CURe Operator Notice — Not part of the review",
+        "",
+        (
+            f"CURe found {count} official-footer remote CURe marker{plural} but rejected "
+            "them for current-run provenance mismatch. They were not used as prior-review context "
+            "and are not included in the GitHub review body below."
+        ),
+        "",
+        "Rejected marker details:",
+    ]
+    for marker in sanitized:
+        label = _marker_label(marker)
+        url = str(marker.get("url") or "").strip()
+        author = str(marker.get("author") or "").strip()
+        created_at = str(marker.get("created_at") or "").strip()
+        reason = str(marker.get("audit_reason") or marker.get("reason") or "foreign provenance mismatch").strip()
+        location = _marker_location(marker)
+        details = [part for part in (url, f"author {author}" if author else "", created_at, location) if part]
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"- {label}{suffix}: {reason}")
+    lines.extend(
+        [
+            "",
+            "Cleanup guidance: remove, update, or move the foreign CURe footer/comment if it should not appear in future audits; then rerun CURe.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def decision_meta_json(
@@ -279,6 +387,7 @@ def decision_meta_json(
             "signal_counts": dict(decision.signal_counts),
             "degraded_reasons": list(decision.degraded_reasons),
         },
+        "rejected_remote_cure_markers": [dict(item) for item in decision.rejected_remote_cure_markers],
         "decision_path": str(decision_path),
         "artifact_dir": str(artifact_dir),
         "manifest_path": str(manifest_path) if manifest_path is not None else None,

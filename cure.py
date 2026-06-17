@@ -9797,6 +9797,7 @@ def _pr_flow_impl(
     from cure_subsequent_review.decision import (
         decision_meta_json,
         decide_subsequent_review,
+        format_rejected_remote_cure_marker_notice,
         summarize_decision,
         write_decision_artifact,
     )
@@ -9822,6 +9823,7 @@ def _pr_flow_impl(
     subsequent_manifest_path: Path | None = None
     subsequent_intake_pending = False
     subsequent_pr_files_changed: tuple[str, ...] = ()
+    rejected_remote_marker_notice: str | None = None
     prior_review_brief = ""
     llm_resolved: dict[str, Any] | None = None
     llm_resolution_meta: dict[str, Any] | None = None
@@ -9930,6 +9932,11 @@ def _pr_flow_impl(
         )
         progress.flush()
         _eprint(summarize_decision(subsequent_decision))
+        rejected_remote_marker_notice = format_rejected_remote_cure_marker_notice(
+            subsequent_decision.rejected_remote_cure_markers
+        )
+        if rejected_remote_marker_notice and not ui_enabled:
+            _eprint(rejected_remote_marker_notice)
 
         def run_enabled_subsequent_intake(*, source_verifier: Any | None) -> None:
             nonlocal subsequent_artifact_dir, subsequent_manifest_path
@@ -11157,7 +11164,10 @@ def _pr_flow_impl(
         clear_active_output(out)
         out.stop()
         maybe_print_markdown_after_tui(
-            ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
+            ui_enabled=ui_enabled,
+            stderr=out.stderr,
+            markdown_path=success_markdown_path,
+            pre_markdown_notice=rejected_remote_marker_notice,
         )
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 

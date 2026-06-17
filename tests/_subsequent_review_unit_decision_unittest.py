@@ -59,6 +59,43 @@ class SubsequentReviewDecisionTests(SubsequentReviewTestCase):
         self.assertEqual(decision.signal_counts["remote_cure_markers"], 1)
         self.assertEqual(decision.signal_counts["accepted_remote_cure_markers"], 0)
         self.assertEqual(decision.signal_counts["foreign_remote_cure_markers"], 1)
+        rejected = decision.rejected_remote_cure_markers
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["source_type"], "pr_review")
+        self.assertEqual(rejected[0]["review_id"], "901")
+        self.assertEqual(rejected[0]["url"], "review-url")
+        self.assertEqual(rejected[0]["author"], "human-operator")
+        self.assertEqual(rejected[0]["created_at"], "2026-06-15T12:00:00Z")
+        self.assertEqual(rejected[0]["submitted_at"], "2026-06-15T12:00:00Z")
+        self.assertEqual(rejected[0]["reason"], "foreign_cure_footer_provenance")
+        self.assertEqual(rejected[0]["current_pr_number"], 18)
+        self.assertEqual(rejected[0]["current_head"], current_head)
+        self.assertEqual(rejected[0]["footer_pr_number"], 18)
+        self.assertEqual(rejected[0]["footer_session_id"], "grzegorznowak-cure-pr18-20260615-120000-abcd")
+        self.assertEqual(rejected[0]["footer_reviewed_head"], current_head[:7])
+        self.assertEqual(rejected[0]["event_reviewed_head"], event_head)
+        self.assertNotIn("body", rejected[0])
+        serialized = decision.to_json(pr=pr)
+        self.assertEqual(serialized["rejected_remote_cure_markers"], list(rejected))
+        self.assertNotIn("Foreign event-head finding", json.dumps(serialized))
+        from cure_subsequent_review.decision import decision_meta_json
+
+        meta_payload = decision_meta_json(
+            decision=decision,
+            decision_path=Path("work/subsequent/decision.json"),
+            artifact_dir=Path("work/subsequent"),
+            manifest_path=None,
+        )
+        self.assertEqual(meta_payload["rejected_remote_cure_markers"], list(rejected))
+        from cure_subsequent_review.decision import format_rejected_remote_cure_marker_notice
+
+        notice = format_rejected_remote_cure_marker_notice(rejected)
+        self.assertIsNotNone(notice)
+        self.assertIn("CURe Operator Notice — Not part of the review", notice or "")
+        self.assertIn("review 901", notice or "")
+        self.assertIn("review-url", notice or "")
+        self.assertIn("Cleanup guidance", notice or "")
+        self.assertNotIn("Foreign event-head finding", notice or "")
 
     def test_decision_service_auto_modes_and_explicit_disabled(self) -> None:
         pr = PR()

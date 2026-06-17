@@ -6577,6 +6577,24 @@ class TuiPrintFinalMarkdownTests(unittest.TestCase):
         finally:
             md.unlink(missing_ok=True)
 
+    def test_maybe_print_markdown_after_tui_prints_notice_before_body(self) -> None:
+        md = ROOT / ".tmp_test_tui_print_notice.md"
+        try:
+            md.write_text("review body", encoding="utf-8")
+            err = self._FakeTtyStderr(is_tty=True)
+            rf.maybe_print_markdown_after_tui(
+                ui_enabled=True,
+                stderr=err,
+                markdown_path=md,
+                pre_markdown_notice="CURe Operator Notice — Not part of the review\n- cleanup guidance",
+            )
+            self.assertEqual(
+                err.getvalue(),
+                "\x1b[2J\x1b[HCURe Operator Notice — Not part of the review\n- cleanup guidance\n\nreview body\n",
+            )
+        finally:
+            md.unlink(missing_ok=True)
+
     def test_maybe_print_markdown_after_tui_noop_when_stderr_not_tty(self) -> None:
         md = ROOT / ".tmp_test_tui_print3.md"
         try:

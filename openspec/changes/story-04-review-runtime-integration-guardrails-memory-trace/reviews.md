@@ -5,6 +5,47 @@
 
 ## Review Log
 
+- 2026-06-17T10:58:55Z Review run by fresh oblivious maintainer session
+  - Decision: not_reviewable
+  - Approval gate: fail
+  - Product verdict: not_assessed
+  - Technical verdict: not_assessed
+  - Multipass review: not_triggered
+  - Prior review concerns: still_open
+  - Plan lane at review time: 🟢 PLAN APPROVED
+  - Initiative contract drift: none
+  - Status transition: 🔄 IN PROGRESS -> 🔄 IN PROGRESS
+  - Sections reviewed: readiness gate only: story Status/Plan headers, initiative tracker, proposal/design context, tasks, progress Current Claim, latest review log, and Acceptance Proof Matrix rows; full implementation section review not started after readiness abort.
+  - Original intent checked: workspace/project `AGENTS.md`, initiative/story/proposal/design/tasks/progress/reviews; no external issue/PR/Jira mining beyond OpenSpec links because readiness failed before implementation review.
+  - Traceability: forward gaps; backward not_assessed
+  - Design trace: not applicable; rendered evidence: not applicable
+  - Code surfaces searched: readiness/preflight only: `git status --short`, branch name, story/progress/tasks/proof rows, prior review log; no source implementation review beyond dirty-target awareness.
+  - Risk lenses reviewed: review-readiness status gate, proof-maturity/live-audit gate, main-tree target hygiene; implementation risk lenses not assessed due readiness abort.
+  - Finding closure: prior proof-maturity concern remains still_open; current A21 implementation claim was not assessed because the story is still `🔄 IN PROGRESS` and several proof rows remain provisional.
+  - Evidence quality: confirmed story/status/progress/tasks/proof-row evidence; inferred none material; unknown implementation correctness and test freshness; provisional A16/A17/A19/A20/A21 proof rows remain.
+  - Files reviewed: `AGENTS.md`; `openspec/initiatives/cure-subsequent-pr-review/initiative.md`; `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,proposal.md,design.md,tasks.md,progress.md,reviews.md}`.
+  - Hypothesis triage:
+    - suspicious surface: story readiness/status gate; tentative issue: review was invoked while implementation ownership still records `🔄 IN PROGRESS` rather than `🟣 IN REVIEW`; next proof target: story header, progress Current Claim, pending live-audit/provisional proof rows.
+  - Key findings:
+    - Story 04 is not reviewable from `/openspec-story-review` because it is still marked `🔄 IN PROGRESS`, with current progress also in progress and live/proof rows still provisional. Sources: `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:4`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/progress.md:13`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/tasks.md:32`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:192`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:193`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:195`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:196`, `openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/story.md:197`
+
+      <details open>
+      <summary><b>High</b> severity · <b>High</b> likelihood</summary>
+
+      **Why:** The review command only reviews stories already handed off as `🟣 IN REVIEW` or already `✅ DONE`. This story is still explicitly in implementation ownership, and its proof matrix still records live-output/live-audit rows as provisional, so approving or requesting implementation changes from this review would bypass the readiness gate.
+
+      **Assumptions / Preconditions:** None.
+
+      **Downgrade Factors:** If implementation ownership has actually completed, the durable OpenSpec state needs to be updated first: finish/record the remaining proof, set the story to `🟣 IN REVIEW`, and then rerun review.
+
+      **Code Trail:** `story.md` has `Status: 🔄 IN PROGRESS`; `progress.md` Current Claim also records `Status: 🔄 IN PROGRESS`; `tasks.md` leaves the fresh PR #22 live review unchecked; proof rows A16/A17/A19/A20/A21 remain `provisional`, including A21's live-output artifact audit row.
+
+      **Reproduction:** `rg -n "^(Plan:|Status:)|Run and audit a fresh PR #22|^\\| A(16|17|19|20|21) \\|" openspec/changes/story-04-review-runtime-integration-guardrails-memory-trace/{story.md,tasks.md,progress.md}` shows the in-progress status, pending live-audit task, and provisional proof rows.
+
+      </details>
+  - Debt Friction: none
+  - Next action: finish implementation/proof ownership, update durable OpenSpec state to `Status: 🟣 IN REVIEW` only when ready, then rerun `/openspec-story-review cure-subsequent-pr-review story-04-review-runtime-integration-guardrails-memory-trace`.
+
 - 2026-06-16T15:11:09Z Review run by fresh maintainer session
   - Decision: request_changes
   - Approval gate: fail

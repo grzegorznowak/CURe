@@ -1252,7 +1252,13 @@ def _eprint(*args: object) -> None:
     print(*args, file=sys.stderr, flush=True)
 
 
-def maybe_print_markdown_after_tui(*, ui_enabled: bool, stderr: TextIO, markdown_path: Path | None) -> None:
+def maybe_print_markdown_after_tui(
+    *,
+    ui_enabled: bool,
+    stderr: TextIO,
+    markdown_path: Path | None,
+    pre_markdown_notice: str | None = None,
+) -> None:
     if not ui_enabled:
         return
     if markdown_path is None:
@@ -1274,6 +1280,9 @@ def maybe_print_markdown_after_tui(*, ui_enabled: bool, stderr: TextIO, markdown
     try:
         stderr.write("\x1b[2J\x1b[H")
         stderr.flush()
+        if pre_markdown_notice:
+            notice = str(pre_markdown_notice).rstrip() + "\n\n"
+            stderr.write(notice)
         stderr.write(body)
         stderr.flush()
     except Exception:
