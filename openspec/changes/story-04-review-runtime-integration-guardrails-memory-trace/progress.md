@@ -4,18 +4,28 @@
 > Canonical story contract: `story.md`. Legacy source remains under `/workspaces/cure_workspace/agent_coordination/epics/cure-subsequent-pr-review/`.
 
 ## Current Claim
-- Claimed at: 2026-06-17T11:10:50Z
+- Claimed at: 2026-06-17T12:45:03Z
 - Claimed by: pi execution session
 - Model: not exposed by pi harness (no `MODEL` environment variable available)
-- Scope: Owner resume after the 2026-06-17T10:58:55Z NOT REVIEWABLE gate; verify A21 local implementation proof, identify remaining live-audit/provisional proof gates, and update durable readiness state without fabricating live evidence.
+- Scope: Implement the owner-approved A21 final-stdout sandbox proof artifact and leave remaining live-audit/provisional gates honest.
 - Main-tree targets: CURe
-- Primary write surfaces: OpenSpec progress/story proof notes only; implementation files remain as produced by the prior A21 slice.
+- Primary write surfaces: `cure.py`, `tests/_reviewflow_unittest_grounding_impl.py`, and Story 04 OpenSpec progress/tasks.
 - Status: 🔄 IN PROGRESS
 
 ### Legacy Scaffold Notes
 > Story scaffolded by `/epic-story-plan` and refined through `/grillme` session. Stories 01-03 delivered intake, auto-mode, and semantic dispositions. This story connects them to runtime prompts, pre-review intelligence, shared PR memory, interactive degraded UX, and deterministic local landmark verification.
 
 ## Progress Timeline
+- 2026-06-17T12:45:03Z **Step**: implemented the A21 final-stdout sandbox proof artifact in the main tree.
+  - Test: RED first — extended `test_pr_flow_no_review_skips_review_only_setup` to require `work/logs/stdout.txt`, `meta.json.logs.stdout`, exact captured stdout bytes (`<session_dir>\n`), and absence of operator notice/review-body/rejected-marker text; it failed with `KeyError: 'stdout'` before implementation.
+  - Changed: `_pr_flow_impl` now persists the known machine-friendly success stdout bytes to `work/logs/stdout.txt` through `_persist_success_stdout_artifact()` and flushes `meta.json.logs.stdout` before the successful `print(str(session_dir))`; the multipass-abort PR-flow success path uses the same helper.
+  - Test: PASS — targeted red/green test passed; focused A21/renderer suites passed (`163 passed, 12 subtests`); PR-flow integration passed (`17 passed`); public subsequent-review wrapper passed (`159 passed, 42 subtests`); `git diff --check`; `ruff check .`.
+  - Static check note: `mypy .` still fails with pre-existing repository-wide typing errors across `cure_runtime.py`, `cure_llm.py`, `cure_flows.py`, `cure_commands.py`, and `cure.py`; none of the reported errors point at the new stdout helper/test lines.
+  - Remaining: fresh PR #22 live audit remains unchecked; Story 04 stays `🔄 IN PROGRESS` and must not be marked in review/done from this local proof alone.
+- 2026-06-17T12:25:42Z **Planning update**: incorporated the PR #18 A21 live-audit stdout proof gap into Story 04 before implementation work.
+  - Live-audit finding: the TUI rendered the rejected-marker operator notice, and durable decision/meta/runtime semantics were good, but the sandbox did not retain a final stdout artifact; process stdout could not be proven from sandbox files alone.
+  - Requirement added: sandbox-backed PR-flow success must persist the exact final stdout bytes (session-dir line plus newline) to `work/logs/stdout.txt`, reference that path from `meta.json.logs.stdout`, and prove the artifact contains no operator notice, rendered review markdown, or rejected-marker body text while actual stdout remains unchanged.
+  - OpenSpec surfaces updated: A21 scenario/acceptance/proof matrix, TAP-22 verification wording, design implementation notes, and `tasks.md` now carry an unchecked A21 final-stdout sandbox proof artifact task. Story status remains `🔄 IN PROGRESS`.
 - 2026-06-17T11:10:50Z **Resume/readiness gate**: executed the owner-side follow-up to the 2026-06-17T10:58:55Z `/openspec-story-review` NOT REVIEWABLE result.
   - Finding: the A21/TAP-22 implementation slice is locally present and its focused proof still passes, but the story is not genuinely ready for implementation review because `tasks.md` still leaves the fresh PR #22 live-audit row unchecked and Acceptance Proof Matrix rows A16, A17, A19, A20, and A21 remain `provisional`.
   - Live state checked: `gh pr view 22 --json number,state,headRefOid,headRefName,mergeStateStatus,url` reports PR #22 open/clean at head `489feb77366d455762b35947695a52e7dee82227`; no fresh local PR #22 sandbox artifact was found under `/home/vscode/.local/state/cure/sandboxes/` during this resume.

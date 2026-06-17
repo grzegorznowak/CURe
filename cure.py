@@ -2915,6 +2915,16 @@ class SessionProgress:
             self._flush_locked()
 
 
+def _persist_success_stdout_artifact(
+    *, progress: SessionProgress, session_dir: Path, stdout_text: str
+) -> None:
+    stdout_path = session_dir / "work" / "logs" / "stdout.txt"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_bytes(stdout_text.encode("utf-8"))
+    progress.meta.setdefault("logs", {})["stdout"] = str(stdout_path)
+    progress.flush()
+
+
 @contextlib.contextmanager
 def phase(name: str, *, progress: SessionProgress | None, quiet: bool):
     started = time.perf_counter()
@@ -10786,6 +10796,10 @@ def _pr_flow_impl(
                         progress.done()
                         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
                         success_markdown_path = review_md_path
+                        stdout_text = f"{session_dir}\n"
+                        _persist_success_stdout_artifact(
+                            progress=progress, session_dir=session_dir, stdout_text=stdout_text
+                        )
                         print(str(session_dir))
                         return 0
 
@@ -11172,6 +11186,8 @@ def _pr_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
     # Success: keep stdout machine-friendly for scripting.
+    stdout_text = f"{session_dir}\n"
+    _persist_success_stdout_artifact(progress=progress, session_dir=session_dir, stdout_text=stdout_text)
     print(str(session_dir))
     return 0
 

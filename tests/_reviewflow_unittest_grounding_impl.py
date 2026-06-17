@@ -5688,12 +5688,21 @@ class RefactorRegressionTests(unittest.TestCase):
                 stack.enter_context(mock.patch("sys.stderr", stderr))
                 rc = rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
 
-            session_dir = Path(stdout.getvalue().strip())
+            captured_stdout = stdout.getvalue()
+            session_dir = Path(captured_stdout.strip())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
             self.assertTrue(session_dir.is_dir())
             self.assertTrue((session_dir / "work" / "logs" / "cure.log").is_file())
             self.assertTrue((session_dir / "work" / "chunkhound" / "chunkhound.json").is_file())
+            stdout_log = session_dir / "work" / "logs" / "stdout.txt"
+            self.assertEqual(Path(meta["logs"]["stdout"]), stdout_log)
+            self.assertEqual(captured_stdout, f"{session_dir}\n")
+            stdout_artifact = stdout_log.read_text(encoding="utf-8")
+            self.assertEqual(stdout_artifact, captured_stdout)
+            self.assertNotIn("CURe Operator Notice", stdout_artifact)
+            self.assertNotIn("### Prior Review Issue History", stdout_artifact)
+            self.assertNotIn("Foreign event-head finding", stdout_artifact)
             self.assertTrue(meta["notes"]["no_review"])
             self.assertEqual(meta["status"], "done")
         finally:
