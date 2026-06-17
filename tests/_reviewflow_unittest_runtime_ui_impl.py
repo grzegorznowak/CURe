@@ -1242,7 +1242,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
             helper_text = (
                 helper_path.read_text(encoding="utf-8")
-                .replace('"search": 15.0', '"search": 0.4')
+                .replace('"search": 60.0', '"search": 0.4')
                 .replace('"code_research": 1200.0', '"code_research": 0.2')
             )
             helper_path.write_text(helper_text, encoding="utf-8")
