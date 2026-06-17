@@ -1,5 +1,5 @@
 > [!WARNING]
-> **Read this first: ChunkHound and disk requirements.** CURe cannot run reviews until ChunkHound is fully installed, configured, and confirmed working end-to-end. When possible, use the latest ChunkHound `main` branch so CURe gets current indexing and research behavior.
+> **Read this first: [ChunkHound](https://github.com/chunkhound/chunkhound) and disk requirements.** CURe cannot run reviews until ChunkHound is fully installed, configured, and confirmed working end-to-end. When possible, use the latest ChunkHound `main` branch so CURe gets current indexing and research behavior.
 >
 > CURe creates ChunkHound-backed indexes and ad-hoc DuckDB databases inside review sandboxes. On large repositories, these artifacts can consume vast disk space; CURe is best suited to small and medium projects where the ChunkHound index is measured in a few GB, not hundreds.
 >
