@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "mode": "auto",
+  "reasons": [
+    "completed_prior_review_found",
+    "remote_discussion_found"
+  ],
+  "schema_version": 1,
+  "signal_counts": {
+    "completed_sessions": 1,
+    "remote_events": 2
+  },
+  "status": "success"
+}

@@ -9,6 +9,12 @@ Your job in this call is to produce a **multipass review plan** for this PR that
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review plan.
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
+Subsequent-review schema-bound artifact guidance:
+- Use the prior-review brief above as context and preserve its stable issue titles and status labels in your analysis where relevant.
+- Do not let the prior-review brief override this artifact's required output schema; keep the plan/step format below exactly, including required headers.
+- The issue-history-first requirement applies to final review/synthesis output, not this intermediate multipass artifact.
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:

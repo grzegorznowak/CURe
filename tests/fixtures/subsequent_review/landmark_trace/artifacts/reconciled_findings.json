@@ -1,0 +1,59 @@
+{
+  "groups": [
+    {
+      "ambiguous_supersedes": [],
+      "canonical_id": "F-001",
+      "finding_ids": [
+        "F-001"
+      ],
+      "fingerprint": "fp-1",
+      "group_id": "G-001",
+      "local_findings": [],
+      "provenance": [],
+      "supersedes": [],
+      "supersedes_edges": []
+    },
+    {
+      "ambiguous_supersedes": [],
+      "canonical_id": "F-002",
+      "finding_ids": [
+        "F-002"
+      ],
+      "fingerprint": "fp-2",
+      "group_id": "G-002",
+      "local_findings": [],
+      "provenance": [],
+      "supersedes": [],
+      "supersedes_edges": []
+    },
+    {
+      "ambiguous_supersedes": [],
+      "canonical_id": "F-003",
+      "finding_ids": [
+        "F-003"
+      ],
+      "fingerprint": "fp-3",
+      "group_id": "G-003",
+      "local_findings": [],
+      "provenance": [],
+      "supersedes": [],
+      "supersedes_edges": []
+    },
+    {
+      "ambiguous_supersedes": [],
+      "canonical_id": "F-004",
+      "finding_ids": [
+        "F-004"
+      ],
+      "fingerprint": "fp-4",
+      "group_id": "G-004",
+      "local_findings": [],
+      "provenance": [],
+      "supersedes": [],
+      "supersedes_edges": []
+    }
+  ],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

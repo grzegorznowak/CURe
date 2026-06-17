@@ -966,6 +966,48 @@ class CodexConfigTests(unittest.TestCase):
             cfg.unlink(missing_ok=True)
 
 
+class SubsequentReviewConfigTests(unittest.TestCase):
+    def test_load_reviewflow_subsequent_review_config_defaults_governor_mode_to_strict(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_subsequent_review_default.toml"
+        try:
+            cfg.write_text("[subsequent_review]\n", encoding="utf-8")
+            sr, meta = rf.load_reviewflow_subsequent_review_config(config_path=cfg)
+            self.assertEqual(sr["governor_mode"], "strict")
+            self.assertEqual(meta["subsequent_review"]["governor_mode"], "strict")
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_subsequent_review_config_accepts_valid_governor_modes(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_subsequent_review_valid.toml"
+        try:
+            for mode in ("strict", "warn", "off"):
+                cfg.write_text(f'[subsequent_review]\ngovernor_mode = "{mode.upper()}"\n', encoding="utf-8")
+                sr, _ = rf.load_reviewflow_subsequent_review_config(config_path=cfg)
+                self.assertEqual(sr["governor_mode"], mode)
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_subsequent_review_config_rejects_invalid_governor_mode(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_subsequent_review_invalid.toml"
+        try:
+            cfg.write_text('[subsequent_review]\ngovernor_mode = "audit"\n', encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_subsequent_review_config(config_path=cfg)
+            self.assertIn("[subsequent_review].governor_mode", str(ctx.exception))
+            self.assertIn("strict, warn, off", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_subsequent_review_config_rejects_non_string_governor_mode(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_subsequent_review_non_string.toml"
+        try:
+            cfg.write_text("[subsequent_review]\ngovernor_mode = true\n", encoding="utf-8")
+            with self.assertRaises(rf.ReviewflowError):
+                rf.load_reviewflow_subsequent_review_config(config_path=cfg)
+        finally:
+            cfg.unlink(missing_ok=True)
+
+
 class LlmPresetConfigTests(unittest.TestCase):
     def test_resolve_multipass_stage_llm_config_defaults_step_to_medium_while_synth_stays_xhigh(
         self,

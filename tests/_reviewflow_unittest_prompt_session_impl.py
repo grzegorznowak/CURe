@@ -204,6 +204,55 @@ class PromptTemplateTests(unittest.TestCase):
         zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
         self.assertIn("$REVIEW_CITATION_CONTRACT", zip_template)
 
+    def test_subsequent_review_templates_override_output_order_for_issue_history(self) -> None:
+        final_output_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        schema_bound_paths = [
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+        ]
+        for path in final_output_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$PRIOR_REVIEW_BRIEF", text)
+            self.assertIn("Subsequent-review output override", text)
+            self.assertIn("MUST begin with `### Prior Review Issue History`", text)
+            self.assertIn("preserve the brief's stable issue titles, status labels, and plain-English `Reason:` text", text)
+            self.assertIn("If the brief reports foreign official-footer ignored comments", text)
+            self.assertIn("ignored count and plain-English audit reason", text)
+            self.assertIn("Reader-facing label", text)
+            self.assertIn("prior review follow-up; still open after re-verification", text)
+            self.assertIn("Internal DA coverage", text)
+            self.assertIn("collapsible audit/provenance appendix", text)
+            self.assertNotIn("Include `### Internal DA coverage` with every DA-* status before the normal review sections", text)
+        for path in schema_bound_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$PRIOR_REVIEW_BRIEF", text)
+            self.assertNotIn("MUST begin with `### Prior Review Issue History`", text)
+            self.assertNotIn("Subsequent-review output override", text)
+        self.assertIn(
+            "### Step Result: $STEP_ID — $STEP_TITLE",
+            (ROOT / "prompts" / "mrereview_gh_local_big_step.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "### Step Result: $STEP_ID — $STEP_TITLE",
+            (ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertNotIn(
+            "Subsequent-review output override",
+            (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
+        )
+
     def test_final_review_templates_expose_verbose_finding_placeholder(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "default.md",
@@ -664,6 +713,90 @@ class PromptTemplateTests(unittest.TestCase):
             )
             self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", default_rendered)
             self.assertNotIn("<details open>", default_rendered)
+
+    def test_subsequent_review_prior_brief_placeholder_renders_in_pr_prompts(self) -> None:
+        prompt_paths = [
+            ROOT / "prompts" / "default.md",
+            ROOT / "prompts" / "mrereview_gh_local.md",
+            ROOT / "prompts" / "mrereview_gh_local_big.md",
+            ROOT / "prompts" / "mrereview_gh_local_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_plan.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_step.md",
+            ROOT / "prompts" / "mrereview_gh_local_big_resume_synth.md",
+        ]
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("$PRIOR_REVIEW_BRIEF", text)
+            self.assertLess(text.index("$REVIEW_INTELLIGENCE_GUIDANCE"), text.index("$PRIOR_REVIEW_BRIEF"))
+            rendered = rf.render_prompt(
+                text,
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                gh_host="github.com",
+                gh_owner="acme",
+                gh_repo_name="repo",
+                gh_repo="acme/repo",
+                agent_desc="agent",
+                head_ref="HEAD",
+                extra_vars={
+                    "REVIEW_INTELLIGENCE_GUIDANCE": "Use the staged PR context first.",
+                    "PRIOR_REVIEW_BRIEF": "### Still Open\n- D-0002 — retry gap",
+                    "MAX_STEPS": "4",
+                    "PLAN_JSON_PATH": "/tmp/plan.json",
+                    "RESUME_PLAN_JSON_PATH": "/tmp/resume-plan.json",
+                    "STEP_ID": "01",
+                    "STEP_TITLE": "Routing",
+                    "STEP_FOCUS": "Inspect routing",
+                    "PREVIOUS_REVIEW_MD": "/tmp/previous.md",
+                    "PREVIOUS_REVIEW_HEAD_SHA": "abc123",
+                    "CURRENT_REVIEW_HEAD_SHA": "def456",
+                    "EXISTING_PLAN_JSON_PATH": "/tmp/existing-plan.json",
+                    "EXISTING_STEP_CATALOG": "- 01 Routing",
+                    "PRIOR_STEP_OUTPUT_PATH": "/tmp/prior-step.md",
+                    "STEP_OUTPUT_PATHS": "- `/tmp/step-01.md`",
+                    "GROUNDING_SKIPPED_STEPS": "- None.",
+                    **rf.verbose_review_findings_prompt_vars(enabled=False),
+                    **rf.cod_hypothesis_ledger_prompt_vars(enabled=False),
+                },
+            )
+            self.assertIn("### Still Open\n- D-0002", rendered)
+            self.assertNotIn("$PRIOR_REVIEW_BRIEF", rendered)
+        self.assertNotIn(
+            "$PRIOR_REVIEW_BRIEF",
+            (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
+        )
+
+    def test_incremental_resume_step_entries_thread_prior_review_brief_into_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step_output = root / "review.step-01.md"
+            entries = rf._build_incremental_resume_step_entries(
+                steps=[{"id": "01", "title": "Routing", "focus": "Inspect routing"}],
+                session_dir=root,
+                resume_plan_json_path=root / "review_resume_plan.json",
+                templates=rf.incremental_resume_prompt_template_names(),
+                base_ref_for_review="cure_base__main",
+                pr_url="https://github.com/acme/repo/pull/1",
+                pr_number=1,
+                pr=rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=1),
+                agent_desc="agent",
+                review_intelligence_cfg=_review_intelligence_cfg(),
+                review_intelligence_capabilities=None,
+                previous_review_md_path=root / "previous-review.md",
+                previous_review_head_sha="abc123",
+                current_review_head_sha="def456",
+                cod_ledger_enabled=False,
+                prior_review_brief="### Still Open\n- D-0002 — retry gap",
+            )
+
+        self.assertEqual(entries[0].output_path, step_output)
+        self.assertIn("### Still Open\n- D-0002", entries[0].prompt)
+        self.assertNotIn("$PRIOR_REVIEW_BRIEF", entries[0].prompt)
 
     def test_final_review_templates_require_input_boundary_shape_risk_assessment(self) -> None:
         prompt_paths = [

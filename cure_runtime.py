@@ -87,6 +87,8 @@ DEFAULT_MULTIPASS_STEP_WORKERS = 4
 MULTIPASS_STEP_WORKERS_HARD_CAP = 8
 DEFAULT_MULTIPASS_GROUNDING_MODE = "strict"
 MULTIPASS_GROUNDING_MODES = {"strict", "warn", "off"}
+DEFAULT_SUBSEQUENT_REVIEW_GOVERNOR_MODE = "strict"
+SUBSEQUENT_REVIEW_GOVERNOR_MODES = {"strict", "warn", "off"}
 REVIEW_INTELLIGENCE_SOURCE_MODES = {"off", "auto", "when-referenced", "required"}
 _BUILTIN_REVIEW_INTELLIGENCE_SOURCE_NAMES = {"github", "jira"}
 REVIEW_INTELLIGENCE_CAPABILITY_STATES = {"available", "unavailable", "unknown"}
@@ -939,6 +941,39 @@ def load_reviewflow_multipass_defaults(
         "config_path": str(path),
         "loaded": bool(raw),
         "multipass": dict(cfg),
+    }
+    return cfg, meta
+
+
+def load_reviewflow_subsequent_review_config(
+    *, config_path: Path | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = config_path or _default_reviewflow_config_path()
+    raw = load_toml(path)
+    section = raw.get("subsequent_review", {}) if isinstance(raw, dict) else {}
+    section = section if isinstance(section, dict) else {}
+
+    governor_mode_raw = section.get("governor_mode")
+    if governor_mode_raw is None:
+        governor_mode = DEFAULT_SUBSEQUENT_REVIEW_GOVERNOR_MODE
+    elif isinstance(governor_mode_raw, str):
+        governor_mode = governor_mode_raw.strip().lower()
+        if governor_mode not in SUBSEQUENT_REVIEW_GOVERNOR_MODES:
+            raise ReviewflowError(
+                "Invalid [subsequent_review].governor_mode in reviewflow config. "
+                "Expected one of: strict, warn, off."
+            )
+    else:
+        raise ReviewflowError(
+            "Invalid [subsequent_review].governor_mode in reviewflow config. "
+            "Expected one of: strict, warn, off."
+        )
+
+    cfg: dict[str, Any] = {"governor_mode": governor_mode}
+    meta: dict[str, Any] = {
+        "config_path": str(path),
+        "loaded": bool(raw),
+        "subsequent_review": dict(cfg),
     }
     return cfg, meta
 
@@ -3326,6 +3361,7 @@ __all__ = [
     "DEFAULT_MULTIPASS_MAX_STEPS",
     "DEFAULT_MULTIPASS_STEP_WORKERS",
     "DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE",
+    "DEFAULT_SUBSEQUENT_REVIEW_GOVERNOR_MODE",
     "DoctorCheck",
     "HTTP_LLM_PROVIDERS",
     "LLM_RESUME_PROVIDERS",
@@ -3364,6 +3400,7 @@ __all__ = [
     "load_reviewflow_llm_config",
     "load_reviewflow_multipass_defaults",
     "load_reviewflow_paths_defaults",
+    "load_reviewflow_subsequent_review_config",
     "load_toml",
     "parse_llm_header_overrides",
     "parse_llm_key_value",

@@ -1,0 +1,15 @@
+{
+  "entries": [
+    {
+      "body": "Prior review found F-001, F-002, F-003, and F-004.",
+      "entry_id": "session-1",
+      "provenance": {},
+      "reviewed_head": "prior-head",
+      "source_type": "session_review"
+    }
+  ],
+  "ignored_pr_comments": [],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

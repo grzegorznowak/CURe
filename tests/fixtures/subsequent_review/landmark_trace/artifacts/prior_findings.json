@@ -1,0 +1,84 @@
+{
+  "artifact_statuses": [],
+  "findings": [
+    {
+      "finding_id": "F-001",
+      "fingerprint_hints": {},
+      "provenance": {
+        "artifact_path": "review.md",
+        "comment_url": null,
+        "corpus_entry_id": "session-1",
+        "reviewed_head": "prior-head",
+        "source_type": "session_review"
+      },
+      "reviewed_head": "prior-head",
+      "section": "Technical Assessment",
+      "severity": "high",
+      "source_evidence_snippets": [
+        "src/parser.py:10"
+      ],
+      "supersedes": [],
+      "title": "Parser now rejects unsafe input"
+    },
+    {
+      "finding_id": "F-002",
+      "fingerprint_hints": {},
+      "provenance": {
+        "artifact_path": "review.md",
+        "comment_url": null,
+        "corpus_entry_id": "session-1",
+        "reviewed_head": "prior-head",
+        "source_type": "session_review"
+      },
+      "reviewed_head": "prior-head",
+      "section": "Technical Assessment",
+      "severity": "medium",
+      "source_evidence_snippets": [
+        "src/auth.py:42"
+      ],
+      "supersedes": [],
+      "title": "Auth retry still accepts weak token"
+    },
+    {
+      "finding_id": "F-003",
+      "fingerprint_hints": {},
+      "provenance": {
+        "artifact_path": "review.md",
+        "comment_url": null,
+        "corpus_entry_id": "session-1",
+        "reviewed_head": "prior-head",
+        "source_type": "session_review"
+      },
+      "reviewed_head": "prior-head",
+      "section": "Technical Assessment",
+      "severity": "low",
+      "source_evidence_snippets": [
+        "src/logging.py:8"
+      ],
+      "supersedes": [],
+      "title": "Duplicate logging finding"
+    },
+    {
+      "finding_id": "F-004",
+      "fingerprint_hints": {},
+      "provenance": {
+        "artifact_path": "review.md",
+        "comment_url": null,
+        "corpus_entry_id": "session-1",
+        "reviewed_head": "prior-head",
+        "source_type": "session_review"
+      },
+      "reviewed_head": "prior-head",
+      "section": "Technical Assessment",
+      "severity": "info",
+      "source_evidence_snippets": [
+        "docs/generated.md:1"
+      ],
+      "supersedes": [],
+      "title": "Generated docs are out of scope"
+    }
+  ],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

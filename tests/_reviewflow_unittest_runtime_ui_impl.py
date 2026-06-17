@@ -1242,7 +1242,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
             helper_text = (
                 helper_path.read_text(encoding="utf-8")
-                .replace('"search": 15.0', '"search": 0.4')
+                .replace('"search": 60.0', '"search": 0.4')
                 .replace('"code_research": 1200.0', '"code_research": 0.2')
             )
             helper_path.write_text(helper_text, encoding="utf-8")
@@ -6574,6 +6574,24 @@ class TuiPrintFinalMarkdownTests(unittest.TestCase):
             err = self._FakeTtyStderr(is_tty=True)
             rf.maybe_print_markdown_after_tui(ui_enabled=True, stderr=err, markdown_path=md)
             self.assertEqual(err.getvalue(), "\x1b[2J\x1b[H" + "line1\nline2\n")
+        finally:
+            md.unlink(missing_ok=True)
+
+    def test_maybe_print_markdown_after_tui_prints_notice_before_body(self) -> None:
+        md = ROOT / ".tmp_test_tui_print_notice.md"
+        try:
+            md.write_text("review body", encoding="utf-8")
+            err = self._FakeTtyStderr(is_tty=True)
+            rf.maybe_print_markdown_after_tui(
+                ui_enabled=True,
+                stderr=err,
+                markdown_path=md,
+                pre_markdown_notice="CURe Operator Notice — Not part of the review\n- cleanup guidance",
+            )
+            self.assertEqual(
+                err.getvalue(),
+                "\x1b[2J\x1b[HCURe Operator Notice — Not part of the review\n- cleanup guidance\n\nreview body\n",
+            )
         finally:
             md.unlink(missing_ok=True)
 

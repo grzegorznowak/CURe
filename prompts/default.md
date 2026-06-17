@@ -12,6 +12,14 @@ You are reviewing a GitHub PR checked out locally in an **isolated sandbox** (no
   - `git diff <base>...HEAD`
 Use the configured review-intelligence guidance below when you need PR, ticket, or external context:
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+$PRIOR_REVIEW_BRIEF
+Subsequent-review output override:
+- If the prior-review brief above contains `### Prior Review Issue History (required final output)`, your final answer MUST begin with `### Prior Review Issue History` before any `### Steps taken`, summary, assessment, or other section.
+- preserve the brief's stable issue titles, status labels, and plain-English `Reason:` text, including `carried-forward/re_report` body-only PR-comment clusters and `out-of-scope` official-footer policy clusters.
+- If the brief reports foreign official-footer ignored comments, include a concise reader-facing provenance/audit note with the ignored count and plain-English audit reason, and do not carry the foreign findings into normal issue sections.
+- For any carried-forward issue that the brief marks with `Reader-facing label: (prior review follow-up; still open after re-verification)`, append that small parenthetical label to the matching issue title when it appears in normal reader-facing sections such as `### In Scope Issues`; keep raw DA-* IDs only in audit/provenance surfaces.
+- Put complete DA-* status coverage only in a collapsible audit/provenance appendix (for example `<details><summary>Internal DA coverage (audit/provenance only)</summary>...`) or another clearly audit-only provenance artifact; do not emit `### Internal DA coverage` as an ordinary top-level primary review section. If no prior-review issue-history brief is present, use the normal output format below.
 - Prefer the staged ChunkHound helper for fast context (`search` + `research`).
   - The helper path is provided in `CURE_CHUNKHOUND_HELPER`; run `"$CURE_CHUNKHOUND_HELPER" search ...` or `"$CURE_CHUNKHOUND_HELPER" research ...`.
   - Treat helper `research` as satisfying the `code_research` requirement.

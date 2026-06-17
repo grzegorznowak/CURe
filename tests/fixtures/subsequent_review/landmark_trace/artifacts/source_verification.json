@@ -1,0 +1,92 @@
+{
+  "rows": [
+    {
+      "current_source_citations": [
+        {
+          "path": "src/parser.py",
+          "start_line": 10,
+          "summary": "guard now present"
+        }
+      ],
+      "finding_ids": [
+        "F-001"
+      ],
+      "group_id": "G-001",
+      "inspected_source_refs": [
+        "src/parser.py:10"
+      ],
+      "provenance": {
+        "not_source_proof": true,
+        "source": "memory_cache"
+      },
+      "row_id": "SV-001",
+      "source_state": "resolved_from_source",
+      "unavailable_reasons": []
+    },
+    {
+      "current_source_citations": [
+        {
+          "path": "src/auth.py",
+          "start_line": 42,
+          "summary": "weak token path remains"
+        }
+      ],
+      "finding_ids": [
+        "F-002"
+      ],
+      "group_id": "G-002",
+      "inspected_source_refs": [
+        "src/auth.py:42"
+      ],
+      "provenance": {
+        "source": "llm_verifier"
+      },
+      "row_id": "SV-002",
+      "source_state": "still_open",
+      "unavailable_reasons": []
+    },
+    {
+      "current_source_citations": [
+        {
+          "path": "src/logging.py",
+          "start_line": 8,
+          "summary": "duplicate of F-009"
+        }
+      ],
+      "finding_ids": [
+        "F-003"
+      ],
+      "group_id": "G-003",
+      "inspected_source_refs": [
+        "src/logging.py:8"
+      ],
+      "provenance": {
+        "source": "llm_verifier"
+      },
+      "row_id": "SV-003",
+      "source_state": "still_open",
+      "unavailable_reasons": []
+    },
+    {
+      "current_source_citations": [],
+      "finding_ids": [
+        "F-004"
+      ],
+      "group_id": "G-004",
+      "inspected_source_refs": [
+        "docs/generated.md:1"
+      ],
+      "provenance": {
+        "source": "llm_verifier"
+      },
+      "row_id": "SV-004",
+      "source_state": "source_unknown",
+      "unavailable_reasons": [
+        "generated_file_out_of_scope"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "status": "success",
+  "status_reasons": []
+}

@@ -148,7 +148,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "name": "pr",
                 "summary": "Create a new review session for a PR.",
                 "targets": ["PR_URL"],
-                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics.",
+                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics; subsequent-review intake is automatic by default and `--no-subsequent-review` opts out.",
                 "tty": "Optional TUI on stderr when running in a real terminal.",
                 "stdout": "Prints the created session directory path on success.",
                 "exit_codes": {"0": "review started", "2": "usage or runtime error"},
@@ -156,8 +156,13 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "variants": [
                     {
                         "name": "compatibility",
-                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
+                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior with automatic subsequent-review detection.",
                         "invocation": preferred_cli_invocation("pr <PR_URL>"),
+                    },
+                    {
+                        "name": "opt_out_subsequent_review",
+                        "summary": "Create a new sandbox but skip automatic subsequent-review intake.",
+                        "invocation": preferred_cli_invocation("pr <PR_URL> --if-reviewed new --no-subsequent-review"),
                     },
                 ],
             },
