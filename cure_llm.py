@@ -1778,7 +1778,7 @@ _PREFLIGHT_STAGE_TIMEOUTS = {{
     "daemon_metadata": 5.0,
 }}
 _TOOL_CALL_TIMEOUTS = {{
-    "search": 15.0,
+    "search": 60.0,
     "code_research": 1200.0,
 }}
 _TRANSPORT_MODES = ("json_line", "mcp_framed")
