@@ -4053,17 +4053,6 @@ def build_commands_catalog_payload() -> dict[str, Any]:
                 ],
             },
             {
-                "name": "zip",
-                "summary": "Synthesize a final arbiter review for the PR's current HEAD.",
-                "targets": ["PR_URL"],
-                "safety": "Reads existing review artifacts; does not create a new sandbox.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Prints the generated zip markdown path on success.",
-                "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("zip <PR_URL>"),
-                "variants": [],
-            },
-            {
                 "name": "clean",
                 "summary": "Delete an exact session, preview closed-session cleanup, or use the TTY cleaner.",
                 "targets": ["session_id", "closed"],
@@ -4535,12 +4524,6 @@ def _parse_on_off_bool(value: str) -> bool:
     if normalized in {"off", "0"}:
         return False
     raise argparse.ArgumentTypeError("must be one of: on, off, 1, 0")
-
-
-def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
-    if verdicts is None:
-        return False
-    return verdicts.business == "REJECT" or verdicts.technical == "REJECT"
 
 
 def build_abort_review_markdown(*, reason: str, include_steps_taken: bool = False) -> str:
@@ -12291,81 +12274,6 @@ def _followup_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
-@dataclass(frozen=True)
-class ZipSourceArtifact:
-    session_id: str
-    session_dir: Path
-    kind: str  # "review" | "followup"
-    artifact_path: Path
-    completed_at: str | None
-    verdicts: ReviewVerdicts | None
-    target_head_sha: str
-
-    def sort_dt(self) -> datetime:
-        return _parse_iso_dt(self.completed_at) or datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _short_sha(value: str | None, *, length: int = 12) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "?"
-    return text[: max(1, int(length))]
-
-
-def _zip_input_display_line(entry: dict[str, Any], *, markdown: bool) -> str:
-    session_id = str(entry.get("session_id") or "?").strip() or "?"
-    kind = str(entry.get("kind") or "?").strip() or "?"
-    verdicts = normalize_review_verdicts(entry.get("verdicts"))
-    if verdicts is None:
-        legacy = normalize_review_verdict(entry.get("decision"))
-        if legacy is not None:
-            verdicts = ReviewVerdicts(business=legacy, technical=legacy)
-    verdicts_text = format_review_verdicts_compact(verdicts)
-    completed_at = str(entry.get("completed_at") or "?").strip() or "?"
-    target_head_sha = _short_sha(str(entry.get("target_head_sha") or "").strip(), length=12)
-    path = str(entry.get("path") or "?").strip() or "?"
-    if markdown:
-        return (
-            f"- `{session_id}`"
-            f" • `{kind}`"
-            f" • {verdicts_text}"
-            f" • {completed_at}"
-            f" • head `{target_head_sha}`"
-            f" • `{path}`"
-        )
-    return (
-        f"- {session_id}"
-        f" [{kind}]"
-        f" {verdicts_text}"
-        f" {completed_at}"
-        f" head {target_head_sha}"
-        f" {path}"
-    )
-
-
-def build_zip_input_display_lines(
-    *, inputs_meta: list[dict[str, Any]], markdown: bool = False
-) -> list[str]:
-    return [
-        _zip_input_display_line(entry, markdown=markdown)
-        for entry in inputs_meta
-        if isinstance(entry, dict)
-    ]
-
-
-def append_zip_inputs_provenance(*, markdown_path: Path, inputs_meta: list[dict[str, Any]]) -> None:
-    if not markdown_path.is_file():
-        raise ReviewflowError(f"zip: output markdown missing: {markdown_path}")
-    body = markdown_path.read_text(encoding="utf-8")
-    if not body.endswith("\n"):
-        body += "\n"
-    lines = build_zip_input_display_lines(inputs_meta=inputs_meta, markdown=True)
-    if not lines:
-        return
-    section = "\n".join(["---", "## Inputs Processed", *lines]) + "\n"
-    markdown_path.write_text(body + "\n" + section, encoding="utf-8")
-
-
 def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, default: Path) -> Path:
     if raw:
         p = Path(str(raw)).expanduser()
@@ -12373,451 +12281,6 @@ def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, defaul
             return (session_dir / p).resolve()
         return p.resolve()
     return default.resolve()
-
-
-def select_zip_sources_for_pr_head(
-    *, sandbox_root: Path, pr: PullRequestRef, head_sha: str
-) -> list[ZipSourceArtifact]:
-    """Select one newest artifact per completed session, filtered to the given PR + target head SHA."""
-    head = str(head_sha or "").strip().lower()
-    if not head:
-        raise ReviewflowError("zip: missing head SHA")
-
-    root = sandbox_root
-    if not root.is_dir():
-        return []
-
-    selected_by_session: dict[str, ZipSourceArtifact] = {}
-    kind_rank = {"review": 0, "followup": 1}
-
-    for entry in root.iterdir():
-        if not entry.is_dir():
-            continue
-        meta = _load_session_meta(entry / "meta.json")
-        if not meta:
-            continue
-        if str(meta.get("status") or "") != "done":
-            continue
-        if not _meta_matches_pr(meta=meta, pr=pr):
-            continue
-
-        session_id = str(meta.get("session_id") or entry.name)
-        session_dir = entry
-
-        # Candidate: main review.md (if it targets this head SHA).
-        meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-        review_md_raw = str((meta_paths or {}).get("review_md") or "").strip()
-        review_md_default = session_dir / "review.md"
-        review_md_path = _resolve_session_relative_path(
-            session_dir=session_dir, raw=review_md_raw, default=review_md_default
-        )
-        review_head_sha = str(meta.get("head_sha") or "").strip().lower()
-        review_completed_at = str(meta.get("completed_at") or meta.get("created_at") or "").strip() or None
-        if review_md_path.is_file() and review_head_sha and (review_head_sha == head):
-            review_verdicts = _resolve_session_verdicts(
-                meta_path=entry / "meta.json",
-                meta=meta,
-                review_md_path=review_md_path,
-            )
-            if not review_verdicts_include_reject(review_verdicts):
-                cand = ZipSourceArtifact(
-                    session_id=session_id,
-                    session_dir=session_dir,
-                    kind="review",
-                    artifact_path=review_md_path,
-                    completed_at=review_completed_at,
-                    verdicts=review_verdicts,
-                    target_head_sha=review_head_sha,
-                )
-                selected_by_session[session_id] = cand
-
-        # Candidates: followups that target this head SHA.
-        followups = meta.get("followups") if isinstance(meta.get("followups"), list) else []
-        for fu in followups:
-            if not isinstance(fu, dict):
-                continue
-            fu_head_sha = str(fu.get("head_sha_after") or "").strip().lower()
-            if not fu_head_sha or fu_head_sha != head:
-                continue
-            fu_completed_at = str(fu.get("completed_at") or "").strip() or None
-            fu_output_raw = str(fu.get("output_path") or "").strip()
-            if not fu_output_raw:
-                continue
-            fu_path = _resolve_session_relative_path(
-                session_dir=session_dir, raw=fu_output_raw, default=session_dir / fu_output_raw
-            )
-            if not fu_path.is_file():
-                continue
-            fu_verdicts = _resolve_artifact_verdicts(meta=fu, artifact_path=fu_path)
-            if review_verdicts_include_reject(fu_verdicts):
-                continue
-            cand = ZipSourceArtifact(
-                session_id=session_id,
-                session_dir=session_dir,
-                kind="followup",
-                artifact_path=fu_path,
-                completed_at=fu_completed_at,
-                verdicts=fu_verdicts,
-                target_head_sha=fu_head_sha,
-            )
-            prev = selected_by_session.get(session_id)
-            if prev is None:
-                selected_by_session[session_id] = cand
-                continue
-            if cand.sort_dt() > prev.sort_dt():
-                selected_by_session[session_id] = cand
-                continue
-            if cand.sort_dt() == prev.sort_dt() and kind_rank.get(cand.kind, 0) > kind_rank.get(prev.kind, 0):
-                selected_by_session[session_id] = cand
-
-    sources = list(selected_by_session.values())
-    sources.sort(key=lambda s: s.sort_dt(), reverse=True)
-    return sources
-
-
-def _zip_flow_impl(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    config_path: Path | None = None,
-    codex_base_config_path: Path | None = None,
-) -> int:
-    effective_config_path = config_path or default_reviewflow_config_path()
-    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
-    verbosity = resolve_verbosity(args)
-    quiet = verbosity is Verbosity.quiet
-    no_stream = bool(getattr(args, "no_stream", False))
-    ui_enabled = resolve_ui_enabled(args, verbosity=verbosity)
-    stream = (not quiet) and (not no_stream)
-
-    pr_url = str(getattr(args, "pr_url", "") or "").strip()
-    if not pr_url:
-        raise ReviewflowError("zip requires a PR URL.")
-    pr = parse_pr_url(pr_url)
-
-    with phase("zip_resolve_pr_head", progress=None, quiet=quiet):
-        pr_meta = gh_api_json(
-            host=pr.host,
-            path=f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
-            allow_public_fallback=True,
-        )
-        head = pr_meta.get("head")
-        head_sha = str((head.get("sha") if isinstance(head, dict) else "") or "").strip()
-        title = str(pr_meta.get("title") or "").strip()
-
-    if not head_sha:
-        raise ReviewflowError("zip: failed to resolve PR head SHA from PR metadata.")
-
-    sources = select_zip_sources_for_pr_head(
-        sandbox_root=paths.sandbox_root, pr=pr, head_sha=head_sha
-    )
-    if not sources:
-        raise ReviewflowError(
-            f"zip: no completed non-rejected review artifacts found for PR HEAD {head_sha[:12]}.\n"
-            "Run a fresh review or follow-up first:\n"
-            f"  {PRIMARY_CLI_COMMAND} pr {pr_url}\n"
-            "  # or\n"
-            f"  {PRIMARY_CLI_COMMAND} followup <session_id>"
-        )
-
-    host_session_dir = sources[0].session_dir
-    host_meta_path = host_session_dir / "meta.json"
-    host_meta = _load_session_meta(host_meta_path)
-    if not host_meta:
-        raise ReviewflowError(f"zip: failed to load host meta.json: {host_meta_path}")
-    host_paths = host_meta.get("paths") if isinstance(host_meta.get("paths"), dict) else {}
-    host_repo_dir = Path(str((host_paths or {}).get("repo_dir") or (host_session_dir / "repo"))).resolve()
-    host_work_dir = Path(str((host_paths or {}).get("work_dir") or (host_session_dir / "work"))).resolve()
-    if not host_repo_dir.is_dir():
-        raise ReviewflowError(f"zip: host repo_dir missing: {host_repo_dir}")
-    host_work_dir.mkdir(parents=True, exist_ok=True)
-
-    base_ref_for_review = str(host_meta.get("base_ref_for_review") or "").strip()
-    base_ref = str(host_meta.get("base_ref") or "").strip()
-    if not base_ref_for_review:
-        base_ref_for_review = "HEAD"
-    if not base_ref:
-        base_ref = "HEAD"
-
-    zip_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    zip_run_id = (
-        f"zip-{pr.owner}-{pr.repo}-pr{pr.number}-"
-        f"{zip_ts}-"
-        f"{secrets.token_hex(2)}"
-    )
-    zips_dir = host_session_dir / "zips"
-    zips_dir.mkdir(parents=True, exist_ok=True)
-    output_md_path = zips_dir / f"zip-{zip_ts}.md"
-    zip_meta_path = zips_dir / f"zip-{zip_ts}.meta.json"
-    zip_logs_dir = zips_dir / "logs" / f"zip-{zip_ts}"
-    zip_logs_dir.mkdir(parents=True, exist_ok=True)
-
-    zip_started_at = _utc_now_iso()
-    inputs_meta: list[dict[str, Any]] = []
-    inputs_lines: list[str] = []
-    for src in sources:
-        inputs_meta.append(
-            {
-                "session_id": src.session_id,
-                "kind": src.kind,
-                "path": str(src.artifact_path),
-                "completed_at": src.completed_at,
-                "verdicts": review_verdicts_to_meta(src.verdicts) if src.verdicts is not None else None,
-                "target_head_sha": src.target_head_sha,
-            }
-        )
-        when = src.completed_at or ""
-        verdicts = format_review_verdicts_compact(src.verdicts)
-        inputs_lines.append(
-            f"- {src.session_id} ({src.kind}, {when}, {verdicts})  `{src.artifact_path}`"
-        )
-    zip_inputs_text = "\n".join(inputs_lines)
-    zip_display_inputs = build_zip_input_display_lines(inputs_meta=inputs_meta)
-
-    zip_progress = SessionProgress(zip_meta_path, quiet=quiet)
-    zip_progress.init(
-        {
-            "session_id": zip_run_id,
-            "created_at": zip_started_at,
-            "status": "running",
-            "phase": "init",
-            "kind": "zip",
-            "pr_url": pr_url,
-            "host": pr.host,
-            "owner": pr.owner,
-            "repo": pr.repo,
-            "number": pr.number,
-            "title": title,
-            "head_sha": head_sha,
-            "host_session_id": str(host_meta.get("session_id") or host_session_dir.name),
-            "paths": {
-                "host_session_dir": str(host_session_dir),
-                "repo_dir": str(host_repo_dir),
-                "work_dir": str(host_work_dir),
-                "logs_dir": str(zip_logs_dir),
-                "output_md": str(output_md_path),
-            },
-            "zip": {
-                "inputs": inputs_meta,
-                "display_inputs": zip_display_inputs,
-                "selected_input_count": len(inputs_meta),
-            },
-            "options": {
-                "quiet": quiet,
-                "no_stream": no_stream,
-                "ui": str(getattr(args, "ui", "auto") or "auto"),
-                "ui_enabled": bool(ui_enabled),
-                "verbosity": verbosity.value,
-            },
-        }
-    )
-
-    out = ReviewflowOutput(
-        ui_enabled=ui_enabled,
-        no_stream=no_stream,
-        stderr=sys.stderr,
-        meta_path=zip_progress.meta_path,
-        logs_dir=zip_logs_dir,
-        verbosity=verbosity,
-    )
-    set_active_output(out)
-    zip_progress.meta["logs"] = {
-        "cure": str(zip_logs_dir / "cure.log"),
-        "chunkhound": str(zip_logs_dir / "chunkhound.log"),
-        "codex": str(zip_logs_dir / "codex.log"),
-    }
-    zip_progress.flush()
-    out.start()
-    log(
-        f"zip selected {len(inputs_meta)} input artifact(s) for HEAD {_short_sha(head_sha, length=12)}",
-        quiet=quiet,
-    )
-    for line in zip_display_inputs:
-        log(f"zip input {line[2:] if line.startswith('- ') else line}", quiet=quiet)
-
-    success_markdown_path: Path | None = None
-    success_resume_command: str | None = None
-    runtime_policy: dict[str, Any] | None = None
-    try:
-        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
-            args,
-            reviewflow_config_path=effective_config_path,
-            base_codex_config_path=effective_codex_base_config_path,
-        )
-        runtime_policy = prepare_review_agent_runtime(
-            args=args,
-            resolved=llm_resolved,
-            resolution_meta=llm_resolution_meta,
-            reviewflow_config_path=effective_config_path,
-            config_enabled=True,
-            repo_dir=host_repo_dir,
-            session_dir=host_session_dir,
-            work_dir=host_work_dir,
-            base_env={},
-            chunkhound_config_path=None,
-            chunkhound_db_path=None,
-            chunkhound_cwd=None,
-            enable_mcp=False,
-            interactive=False,
-            paths=paths,
-        )
-        env = dict(runtime_policy["env"])
-        codex_flags = list(runtime_policy.get("codex_flags") or [])
-        codex_meta: dict[str, Any] | None = None
-        if str(llm_resolved.get("provider") or "") == "codex":
-            codex_meta = build_codex_flags_from_llm_config(
-                resolved=llm_resolved,
-                resolution_meta=llm_resolution_meta,
-                include_sandbox=False,
-            )[1]
-
-        template_name = "mrereview_zip.md"
-        template_text = load_builtin_prompt_text(template_name)
-        rendered = render_prompt(
-            template_text,
-            base_ref_for_review=base_ref_for_review,
-            pr_url=pr_url,
-            pr_number=int(pr.number),
-            gh_host=str(pr.host),
-            gh_owner=str(pr.owner),
-            gh_repo_name=str(pr.repo),
-            gh_repo=str(pr.gh_repo),
-            agent_desc="",
-            head_ref="HEAD",
-            extra_vars={
-                "HEAD_SHA": head_sha,
-                "ZIP_INPUTS": zip_inputs_text,
-            },
-        )
-
-        zip_progress.meta["prompt"] = {
-            "template_id": builtin_prompt_id(template_name),
-            "prompt_chars": len(rendered),
-            "prompt_sha256": sha256_text(rendered),
-        }
-        zip_progress.meta["llm"] = build_llm_meta(
-            resolved=llm_resolved,
-            resolution_meta=llm_resolution_meta,
-            env=env,
-            adapter_meta={
-                "transport": f"cli-{llm_resolved.get('provider')}",
-                "runtime_policy": runtime_policy["metadata"],
-                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
-                "flags": codex_flags,
-            },
-        )
-        zip_progress.meta["agent_runtime"] = runtime_policy["metadata"]
-        if codex_meta is not None:
-            zip_progress.meta["codex"] = {
-                "config": codex_meta,
-                "dangerously_bypass_approvals_and_sandbox": runtime_policy[
-                    "dangerously_bypass_approvals_and_sandbox"
-                ],
-                "config_overrides": list(runtime_policy.get("codex_config_overrides") or []),
-                "flags": codex_flags,
-                "env": {
-                    "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
-                },
-            }
-        zip_progress.flush()
-
-        zip_progress.set_phase("codex_zip")
-        with phase("codex_zip", progress=zip_progress, quiet=quiet):
-            zip_result = run_llm_exec(
-                repo_dir=host_repo_dir,
-                resolved=llm_resolved,
-                resolution_meta=llm_resolution_meta,
-                output_path=output_md_path,
-                prompt=rendered,
-                env=env,
-                stream=stream,
-                progress=zip_progress,
-                add_dirs=list(runtime_policy.get("add_dirs") or []),
-                codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-                runtime_policy=runtime_policy,
-            )
-        success_resume_command = record_llm_resume(
-            zip_progress.meta.setdefault("llm", {}), zip_result.resume
-        )
-        if codex_meta is not None:
-            codex_resume = (
-                CodexResumeInfo(
-                    session_id=zip_result.resume.session_id,
-                    cwd=zip_result.resume.cwd,
-                    command=zip_result.resume.command,
-                )
-                if zip_result.resume is not None and zip_result.resume.provider == "codex"
-                else None
-            )
-            record_codex_resume(zip_progress.meta.setdefault("codex", {}), codex_resume)
-        zip_progress.flush()
-
-        normalize_markdown_artifact(markdown_path=output_md_path, session_dir=host_session_dir)
-        append_zip_inputs_provenance(markdown_path=output_md_path, inputs_meta=inputs_meta)
-        verdicts = persist_review_verdicts_from_markdown(meta=zip_progress.meta, markdown_path=output_md_path)
-        if verdicts is not None:
-            zip_progress.flush()
-
-        zip_progress.done()
-        zip_completed_at = zip_progress.meta.get("completed_at")
-
-        # Record provenance in the host session meta.json.
-        host_meta2 = _load_session_meta(host_meta_path) or host_meta
-        zip_entry: dict[str, Any] = {
-            "started_at": zip_started_at,
-            "completed_at": zip_completed_at,
-            "head_sha": head_sha,
-            "output_path": str(output_md_path),
-            "verdicts": review_verdicts_to_meta(verdicts) if verdicts is not None else None,
-            "inputs": inputs_meta,
-            "prompt": zip_progress.meta.get("prompt"),
-            "llm": {
-                "preset": llm_resolved.get("preset"),
-                "transport": llm_resolved.get("transport"),
-                "provider": llm_resolved.get("provider"),
-                "model": llm_resolved.get("model"),
-                "reasoning_effort": llm_resolved.get("reasoning_effort"),
-                "capabilities": llm_resolved.get("capabilities"),
-            },
-        }
-        if codex_meta is not None:
-            zip_entry["codex"] = {"config": codex_meta, "flags": codex_flags}
-            zip_codex_meta = zip_entry.get("codex")
-            if isinstance(zip_codex_meta, dict):
-                record_codex_resume(zip_codex_meta, codex_resume)
-        zip_llm_meta = zip_entry.get("llm")
-        if isinstance(zip_llm_meta, dict):
-            record_llm_resume(zip_llm_meta, zip_result.resume)
-        host_meta2.setdefault("zips", []).append(zip_entry)
-        write_redacted_json(host_meta_path, host_meta2)
-
-        success_markdown_path = output_md_path
-        print(str(output_md_path))
-        return 0
-    except ReviewflowSubprocessError as e:
-        zip_progress.error(
-            {
-                "type": "subprocess",
-                "message": str(e),
-                "cmd": safe_cmd_for_meta(e.cmd),
-                "cwd": str(e.cwd) if e.cwd else None,
-                "exit_code": e.exit_code,
-                "stdout_tail": e.stdout,
-                "stderr_tail": e.stderr,
-            }
-        )
-        raise
-    except Exception as e:
-        zip_progress.error({"type": "exception", "message": str(e)})
-        raise
-    finally:
-        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        clear_active_output(out)
-        out.stop()
-        maybe_print_markdown_after_tui(
-            ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
-        )
-        maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
 def _parse_iso_dt(value: str | None) -> datetime | None:
@@ -13257,19 +12720,6 @@ def _resolve_session_verdicts(
         except Exception:
             pass
     return extracted
-
-
-def _resolve_artifact_verdicts(*, meta: dict[str, Any], artifact_path: Path) -> ReviewVerdicts | None:
-    stored = normalize_review_verdicts(meta.get("verdicts"))
-    if stored is not None:
-        return stored
-    legacy = normalize_review_verdict(meta.get("decision"))
-    if legacy is not None:
-        return ReviewVerdicts(business=legacy, technical=legacy)
-    try:
-        return extract_review_verdicts_from_markdown(artifact_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
 
 
 def _resolve_session_review_head_sha(*, meta: dict[str, Any]) -> str | None:
@@ -15156,7 +14606,6 @@ from cure_sessions import (
     PullRequestRef,
     ResolvedObservationTarget,
     ReviewVerdicts,
-    ZipSourceArtifact,
     _load_session_meta,
     _load_session_meta_strict,
     _meta_matches_pr,
@@ -15170,9 +14619,7 @@ from cure_sessions import (
     _resolve_session_review_head_sha,
     _resolve_session_review_md_path,
     _resolve_session_verdicts,
-    append_zip_inputs_provenance,
     build_status_payload,
-    build_zip_input_display_lines,
     extract_review_verdicts_from_markdown,
     format_review_verdicts_compact,
     normalize_review_verdict,
@@ -15185,12 +14632,10 @@ from cure_sessions import (
     resolve_observation_target,
     resolve_resume_session_id,
     resolve_resume_target,
-    review_verdicts_include_reject,
     review_verdicts_to_meta,
     scan_cleanup_sessions,
     scan_completed_sessions_for_pr,
     scan_interactive_review_sessions,
-    select_zip_sources_for_pr_head,
 )
 from cure_runtime import (
     AGENT_RUNTIME_PROFILE_CHOICES,
@@ -15327,7 +14772,6 @@ from cure_commands import (
     set_agent_flow,
     status_flow,
     watch_flow,
-    zip_flow,
 )
 
 
@@ -15564,23 +15008,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    zp = sub.add_parser("zip", help="Synthesize a final review from the latest generated reviews for a PR", parents=[runtime_parent])
-    zp.add_argument("pr_url", help="GitHub PR URL")
-    add_llm_override_args(zp)
-    add_agent_runtime_args(zp)
-    zp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    zp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
-    zp.add_argument(
-        "--codex-plan-effort",
-        dest="codex_plan_effort",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    zp.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    zp.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
-    zp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
-    zp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-
     upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
     upp.add_argument("session_id", help="Session id (folder name)")
     upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
@@ -15739,13 +15166,6 @@ def main(
             )
         if args.cmd == "followup":
             return command_surface.followup_flow(
-                args,
-                paths=paths,
-                config_path=runtime.config_path,
-                codex_base_config_path=runtime.codex_base_config_path,
-            )
-        if args.cmd == "zip":
-            return command_surface.zip_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,

@@ -213,12 +213,6 @@ Resume a session:
 cure resume <session_id|PR_URL>
 ```
 
-Synthesize a final review:
-
-```bash
-cure zip <PR_URL>
-```
-
 Clean up old sessions:
 
 ```bash

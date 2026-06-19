@@ -28,8 +28,6 @@ from _reviewflow_unittest_prompt_session_impl import (
     StagedAuthCleanupTests,
     StorageMigrationTests,
     WorkflowContractTests,
-    ZipFlowTests,
-    ZipSelectionTests,
 )
 from _reviewflow_unittest_runtime_ui_impl import (
     ChunkHoundAccessPreflightTests,
@@ -75,6 +73,4 @@ __all__ = [
     "TuiDashboardTests",
     "TuiPrintFinalMarkdownTests",
     "WorkflowContractTests",
-    "ZipFlowTests",
-    "ZipSelectionTests",
 ]
