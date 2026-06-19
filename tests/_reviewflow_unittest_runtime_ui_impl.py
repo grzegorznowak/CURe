@@ -2826,7 +2826,6 @@ class TuiDashboardTests(unittest.TestCase):
         pr_help = subparsers.choices["pr"].format_help()
         resume_help = subparsers.choices["resume"].format_help()
         followup_help = subparsers.choices["followup"].format_help()
-        zip_help = subparsers.choices["zip"].format_help()
         doctor_help = subparsers.choices["doctor"].format_help()
 
         self.assertIn("--no-index", pr_help)
@@ -2848,12 +2847,10 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("default: on", followup_help)
         self.assertNotIn("--cod-ledger", followup_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", followup_help)
-        self.assertIn("Do not stream review-agent output", zip_help)
         self.assertNotIn("codex review", pr_help.lower())
         self.assertNotIn("chunkhound/codex output", pr_help.lower())
         self.assertNotIn("chunkhound/codex output", resume_help.lower())
         self.assertNotIn("chunkhound/codex output", followup_help.lower())
-        self.assertNotIn("codex output", zip_help.lower())
         self.assertIn("--llm-preset", doctor_help)
         self.assertIn("--llm-model", doctor_help)
         self.assertIn("--llm-effort", doctor_help)
@@ -2945,46 +2942,6 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(rc, 9)
         self.assertEqual(stderr.getvalue(), "")
         main_mock.assert_called_once_with(["commands"], prog="cure")
-
-    def test_parser_accepts_zip_flags(self) -> None:
-        p = rf.build_parser()
-        args = p.parse_args(
-            [
-                "zip",
-                "https://github.com/acme/repo/pull/9",
-                "--llm-preset",
-                "openrouter_grok",
-                "--llm-model",
-                "x-ai/grok-4.1-fast",
-                "--llm-effort",
-                "high",
-                "--llm-plan-effort",
-                "xhigh",
-                "--llm-verbosity",
-                "low",
-                "--llm-max-output-tokens",
-                "9000",
-                "--llm-set",
-                "top_p=0.9",
-                "--llm-header",
-                "HTTP-Referer=https://example.com",
-                "--codex-model",
-                "gpt-5.3-codex-spark",
-                "--codex-effort",
-                "low",
-                "--ui",
-                "off",
-                "--verbosity",
-                "debug",
-            ]
-        )
-        self.assertEqual(args.pr_url, "https://github.com/acme/repo/pull/9")
-        self.assertEqual(args.llm_preset, "openrouter_grok")
-        self.assertEqual(args.llm_model, "x-ai/grok-4.1-fast")
-        self.assertEqual(args.llm_effort, "high")
-        self.assertEqual(args.llm_plan_effort, "xhigh")
-        self.assertEqual(args.llm_verbosity, "low")
-        self.assertEqual(args.llm_max_output_tokens, 9000)
 
     def test_parser_accepts_doctor_llm_override_flags(self) -> None:
         p = rf.build_parser()
@@ -5960,45 +5917,6 @@ class InstallAndDoctorTests(unittest.TestCase):
         for line in lines:
             visible = ansi.sub("", line)
             self.assertLessEqual(len(visible), width)
-
-    def test_dashboard_renders_zip_inputs_in_context(self) -> None:
-        meta = {
-            "host": "github.com",
-            "owner": "acme",
-            "repo": "repo",
-            "number": 9,
-            "title": "Zip PR",
-            "session_id": "zip-run",
-            "created_at": "2026-03-04T00:00:00+00:00",
-            "status": "running",
-            "phase": "codex_zip",
-            "kind": "zip",
-            "phases": {"codex_zip": {"status": "running"}},
-            "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "zip": {
-                "display_inputs": [
-                    "- host-session [review] biz=APPROVE tech=REQUEST CHANGES 2026-03-04T01:00:00+00:00 head bbbbbbbbbbbb /tmp/host/review.md",
-                    "- other-session [followup] biz=REQUEST CHANGES tech=REJECT 2026-03-05T01:00:00+00:00 head bbbbbbbbbbbb /tmp/other/followup.md",
-                ],
-                "selected_input_count": 2,
-            },
-            "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
-        }
-        lines = rui.build_dashboard_lines(
-            meta=meta,
-            snapshot=rui.UiSnapshot(verbosity=rui.Verbosity.normal, show_help=False),
-            chunkhound_tail=[],
-            codex_tail=["cx-1"],
-            no_stream=False,
-            width=160,
-            height=35,
-            color=False,
-        )
-        joined = "\n".join(lines)
-        self.assertIn("Zip:", joined)
-        self.assertIn("Inputs:", joined)
-        self.assertIn("host-session [review] biz=APPROVE tech=REQUEST CHANGES", joined)
-        self.assertIn("other-session [followup] biz=REQUEST CHANGES tech=REJECT", joined)
 
     def test_dashboard_footer_is_dimmed_in_color_mode(self) -> None:
         meta = {

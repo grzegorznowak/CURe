@@ -779,12 +779,6 @@ def resolve_codex_summary(meta: dict[str, Any]) -> str:
     return f"llm={preset}/?"
 
 
-def review_verdicts_include_reject(verdicts: ReviewVerdicts | None) -> bool:
-    if verdicts is None:
-        return False
-    return verdicts.business == "REJECT" or verdicts.technical == "REJECT"
-
-
 def persist_review_verdicts_from_markdown(*, meta: dict[str, Any], markdown_path: Path) -> ReviewVerdicts | None:
     try:
         verdicts = extract_review_verdicts_from_markdown(markdown_path.read_text(encoding="utf-8"))
@@ -793,59 +787,6 @@ def persist_review_verdicts_from_markdown(*, meta: dict[str, Any], markdown_path
     if verdicts is not None:
         meta["verdicts"] = review_verdicts_to_meta(verdicts)
     return verdicts
-
-
-@dataclass(frozen=True)
-class ZipSourceArtifact:
-    session_id: str
-    session_dir: Path
-    kind: str
-    artifact_path: Path
-    completed_at: str | None
-    verdicts: ReviewVerdicts | None
-    target_head_sha: str
-
-    def sort_dt(self) -> datetime:
-        return _parse_iso_dt(self.completed_at) or datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _short_sha(value: str | None, *, length: int = 12) -> str:
-    text = str(value or "").strip()
-    return text[: max(1, int(length))] if text else "?"
-
-
-def _zip_input_display_line(entry: dict[str, Any], *, markdown: bool) -> str:
-    session_id = str(entry.get("session_id") or "?").strip() or "?"
-    kind = str(entry.get("kind") or "?").strip() or "?"
-    verdicts = normalize_review_verdicts(entry.get("verdicts"))
-    if verdicts is None:
-        legacy = normalize_review_verdict(entry.get("decision"))
-        if legacy is not None:
-            verdicts = ReviewVerdicts(business=legacy, technical=legacy)
-    verdicts_text = format_review_verdicts_compact(verdicts)
-    completed_at = str(entry.get("completed_at") or "?").strip() or "?"
-    target_head_sha = _short_sha(str(entry.get("target_head_sha") or "").strip(), length=12)
-    path = str(entry.get("path") or "?").strip() or "?"
-    if markdown:
-        return f"- `{session_id}` • `{kind}` • {verdicts_text} • {completed_at} • head `{target_head_sha}` • `{path}`"
-    return f"- {session_id} [{kind}] {verdicts_text} {completed_at} head {target_head_sha} {path}"
-
-
-def build_zip_input_display_lines(*, inputs_meta: list[dict[str, Any]], markdown: bool = False) -> list[str]:
-    return [_zip_input_display_line(entry, markdown=markdown) for entry in inputs_meta if isinstance(entry, dict)]
-
-
-def append_zip_inputs_provenance(*, markdown_path: Path, inputs_meta: list[dict[str, Any]]) -> None:
-    if not markdown_path.is_file():
-        raise ReviewflowError(f"zip: output markdown missing: {markdown_path}")
-    body = markdown_path.read_text(encoding="utf-8")
-    if not body.endswith("\n"):
-        body += "\n"
-    lines = build_zip_input_display_lines(inputs_meta=inputs_meta, markdown=True)
-    if not lines:
-        return
-    section = "\n".join(["---", "## Inputs Processed", *lines]) + "\n"
-    markdown_path.write_text(body + "\n" + section, encoding="utf-8")
 
 
 def _resolve_session_review_md_path(*, session_dir: Path, meta: dict[str, Any]) -> Path | None:
@@ -886,19 +827,6 @@ def _resolve_session_verdicts(*, meta_path: Path, meta: dict[str, Any], review_m
         except Exception:
             pass
     return extracted
-
-
-def _resolve_artifact_verdicts(*, meta: dict[str, Any], artifact_path: Path) -> ReviewVerdicts | None:
-    stored = normalize_review_verdicts(meta.get("verdicts"))
-    if stored is not None:
-        return stored
-    legacy = normalize_review_verdict(meta.get("decision"))
-    if legacy is not None:
-        return ReviewVerdicts(business=legacy, technical=legacy)
-    try:
-        return extract_review_verdicts_from_markdown(artifact_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
 
 
 def _resolve_session_review_head_sha(*, meta: dict[str, Any]) -> str | None:
@@ -1163,80 +1091,6 @@ def scan_cleanup_sessions(*, sandbox_root: Path) -> list[CleanupSession]:
         )
     sessions.sort(key=lambda item: (-item.activity_dt().timestamp(), item.session_id))
     return sessions
-
-
-def select_zip_sources_for_pr_head(*, sandbox_root: Path, pr: PullRequestRef, head_sha: str) -> list[ZipSourceArtifact]:
-    head = str(head_sha or "").strip().lower()
-    if not head:
-        raise ReviewflowError("zip: missing head SHA")
-    if not sandbox_root.is_dir():
-        return []
-
-    selected_by_session: dict[str, ZipSourceArtifact] = {}
-    kind_rank = {"review": 0, "followup": 1}
-    for entry in sandbox_root.iterdir():
-        if not entry.is_dir():
-            continue
-        meta = _load_session_meta(entry / "meta.json")
-        if not meta or str(meta.get("status") or "") != "done" or (not _meta_matches_pr(meta=meta, pr=pr)):
-            continue
-
-        session_id = str(meta.get("session_id") or entry.name)
-        review_md_path = _resolve_session_relative_path(
-            session_dir=entry,
-            raw=str(((meta.get("paths") or {}).get("review_md") if isinstance(meta.get("paths"), dict) else "") or "").strip(),
-            default=entry / "review.md",
-        )
-        review_head_sha = str(meta.get("head_sha") or "").strip().lower()
-        review_completed_at = str(meta.get("completed_at") or meta.get("created_at") or "").strip() or None
-        if review_md_path.is_file() and review_head_sha == head:
-            review_verdicts = _resolve_session_verdicts(meta_path=entry / "meta.json", meta=meta, review_md_path=review_md_path)
-            if not review_verdicts_include_reject(review_verdicts):
-                selected_by_session[session_id] = ZipSourceArtifact(
-                    session_id=session_id,
-                    session_dir=entry,
-                    kind="review",
-                    artifact_path=review_md_path,
-                    completed_at=review_completed_at,
-                    verdicts=review_verdicts,
-                    target_head_sha=review_head_sha,
-                )
-
-        raw_followups = meta.get("followups")
-        followups = raw_followups if isinstance(raw_followups, list) else []
-        for followup in followups:
-            if not isinstance(followup, dict):
-                continue
-            followup_head_sha = str(followup.get("head_sha_after") or "").strip().lower()
-            if followup_head_sha != head:
-                continue
-            output_path = str(followup.get("output_path") or "").strip()
-            if not output_path:
-                continue
-            artifact_path = _resolve_session_relative_path(session_dir=entry, raw=output_path, default=entry / output_path)
-            if not artifact_path.is_file():
-                continue
-            verdicts = _resolve_artifact_verdicts(meta=followup, artifact_path=artifact_path)
-            if review_verdicts_include_reject(verdicts):
-                continue
-            candidate = ZipSourceArtifact(
-                session_id=session_id,
-                session_dir=entry,
-                kind="followup",
-                artifact_path=artifact_path,
-                completed_at=str(followup.get("completed_at") or "").strip() or None,
-                verdicts=verdicts,
-                target_head_sha=followup_head_sha,
-            )
-            previous = selected_by_session.get(session_id)
-            if previous is None or candidate.sort_dt() > previous.sort_dt() or (
-                candidate.sort_dt() == previous.sort_dt() and kind_rank.get(candidate.kind, 0) > kind_rank.get(previous.kind, 0)
-            ):
-                selected_by_session[session_id] = candidate
-
-    sources = list(selected_by_session.values())
-    sources.sort(key=lambda item: item.sort_dt(), reverse=True)
-    return sources
 
 
 def build_status_payload(target: str, *, sandbox_root: Path, command_name: str = "status") -> dict[str, Any]:
