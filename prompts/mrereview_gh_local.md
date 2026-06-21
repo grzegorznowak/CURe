@@ -16,7 +16,7 @@ CURe may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
 # Prior PR context (discussion + past CURe reviews)
 $PRIOR_CONTEXT
 
-- Treat the prior context above as orientation: use it to avoid re-requesting resolved work and to prioritize unresolved risks. The orientation scan has already confirmed these findings against the discussion and past reviews. If this section is blank, proceed with the normal review flow.
+- Treat the prior context above as orientation: use it to avoid re-requesting resolved work and to prioritize unresolved risks; verify every finding against the current checkout.
 - If this section is blank, proceed with the normal review flow.
 - Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.
 - Do not ABORT solely because GitHub MCP or `gh` is unavailable if the staged PR context plus the local git history/diff provide enough context for this review.

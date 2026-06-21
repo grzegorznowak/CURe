@@ -13,7 +13,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 # Prior PR context (discussion + past CURe reviews)
 $PRIOR_CONTEXT
 
-Use this prior context as orientation: avoid re-requesting resolved work and prioritize unresolved risks. The orientation scan has already confirmed these findings against the discussion and past reviews. If this section is blank, proceed with the normal review flow.
+Use this prior context as orientation: avoid re-requesting resolved work, prioritize unresolved risks, and verify every finding against the current checkout. If this section is blank, proceed with the normal review flow.
 
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
