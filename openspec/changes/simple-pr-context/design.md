@@ -134,21 +134,21 @@ Where:
 4. Returns the brief string directly. When there are zero discussion events and zero past reviews, returns `""` (empty string).
 
 **Sections:**
-- `## Áreas resueltas` — areas already addressed in prior reviews or resolved discussion threads
-- `## Áreas problemáticas` — areas with unresolved concerns, repeated feedback, or CHANGE_REQUESTED
-- `## Issues pendientes` — open questions or requested changes not yet addressed
-- `## Patrones repetidos` — cross-cutting themes in feedback (e.g., "consistently asked for more tests")
-- `## Decisiones ya tomadas` — design decisions confirmed in prior reviews that should not be re-litigated
+- `## Resolved areas` — areas already addressed in prior reviews or resolved discussion threads
+- `## Problem areas` — areas with unresolved concerns, repeated feedback, or CHANGE_REQUESTED
+- `## Pending issues` — open questions or requested changes not yet addressed
+- `## Repeated patterns` — cross-cutting themes in feedback (e.g., "consistently asked for more tests")
+- `## Decisions made` — design decisions confirmed in prior reviews that should not be re-litigated
 
 **Usage instructions (inline in the output):**
 ```
-INSTRUCCIONES PARA USAR EL PRIOR_CONTEXT:
-- "Áreas resueltas": no dediques tiempo a re-evaluarlas, salvo que el diff las toque
-- "Áreas problemáticas": priorízalas en tu plan de revisión
-- "Issues pendientes": verifica si el diff los resolvió o no
-- "Patrones repetidos": menciónalos como tema transversal si siguen presentes
-- "Decisiones ya tomadas": no las cuestiones, acéptalas como contexto
-- Si una sección está vacía, ignórala
+INSTRUCTIONS FOR USING PRIOR_CONTEXT:
+- "Resolved areas": do not spend time re-evaluating them unless the diff touches them
+- "Problem areas": prioritize them in your review plan
+- "Pending issues": verify whether the diff resolved them or not
+- "Repeated patterns": mention them as a cross-cutting theme if still present
+- "Decisions made": do not question them, accept them as context
+- If a section is empty, ignore it
 ```
 
 ### __init__.py

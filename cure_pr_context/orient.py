@@ -8,16 +8,24 @@ from typing import Any, Callable
 RunLlm = Callable[[str], str]
 
 _SECTION_HEADERS = (
-    "Áreas resueltas",
-    "Problemáticas",
-    "Pendientes",
-    "Patrones",
-    "Decisiones",
+    "Resolved areas",
+    "Problem areas",
+    "Pending issues",
+    "Repeated patterns",
+    "Decisions made",
 )
 _USAGE_NOTE = (
     "Use this prior context as orientation only: avoid re-requesting resolved work, "
     "prioritize unresolved risks, and verify every finding against the current checkout."
 )
+
+_USAGE_INSTRUCTIONS = """INSTRUCTIONS FOR USING PRIOR_CONTEXT:
+- "Resolved areas": do not spend time re-evaluating them unless the diff touches them
+- "Problem areas": prioritize them in your review plan
+- "Pending issues": verify whether the diff resolved them or not
+- "Repeated patterns": mention them as a cross-cutting theme if still present
+- "Decisions made": do not question them, accept them as context
+- If a section is empty, ignore it"""
 
 
 def _payload(discussion: list[dict[str, Any]], past_reviews: list[dict[str, Any]], pr_stats: dict[str, Any]) -> str:
@@ -64,11 +72,14 @@ You are preparing concise prior PR context for a code review agent.
 
 Summarize only information useful for reviewing the current diff. Return Markdown
 with these exact section headings:
-- Áreas resueltas
-- Problemáticas
-- Pendientes
-- Patrones
-- Decisiones
+- Resolved areas
+- Problem areas
+- Pending issues
+- Repeated patterns
+- Decisions made
+
+Also include the following usage instructions block verbatim at the top of your output:
+{_USAGE_INSTRUCTIONS}
 
 Input JSON:
 ```json

@@ -7,96 +7,96 @@ Status: ✅ DONE
 
 ## Actors
 
-- **Primary:** CURe operator running `cure pr` — recibe reviews informadas por discussion context sin flags adicionales
-- **Secondary:** Review agent (LLM) — consume `$PRIOR_CONTEXT` como guía de orientación
-- **Affected:** PR author / reviewers — sus comments y reviews pasados ahora influyen en futuras reviews automáticas
-- **Reviewer:** CURe maintainer — verifica que el package no rompa el flow existente y que los tests pasan
+- **Primary:** CURe operator running `cure pr` — receives reviews informed by discussion context without additional flags
+- **Secondary:** Review agent (LLM) — consumes `$PRIOR_CONTEXT` as orientation guidance
+- **Affected:** PR author / reviewers — their past comments and reviews now influence future automated reviews
+- **Reviewer:** CURe maintainer — verifies that the package does not break the existing flow and that tests pass
 
 ## Triggering Need
 
-La iniciativa `cure-subsequent-pr-review` (38 commits) construyó un pipeline de 18 archivos que resultó sobre-ingeniería para el problema real. Los usuarios reportaron que lo que necesitan es orientación simple sobre la discusión del PR, no un sistema multi-etapa de clasificación y verificación. Este story implementa la versión simplificada desde cero, portando solo el código reutilizable del viejo branch.
+The `cure-subsequent-pr-review` initiative (38 commits) built an 18-file pipeline that turned out to be over-engineering for the real problem. Users reported that what they need is simple orientation about the PR discussion, not a multi-stage classification and verification system. This story implements the simplified version from scratch, porting only the reusable code from the old branch.
 
 ## Expected Prerequisites
 
-None. Este es el primer y único story de la iniciativa. El viejo branch `cure-subsequent-pr-review/story-01-intake` es referencia histórica, no un prerequisite vivo.
+None. This is the first and only story of the initiative. The old branch `cure-subsequent-pr-review/story-01-intake` is a historical reference, not a live prerequisite.
 
 ## Scope
 
-- Crear `cure_pr_context/` package con 4 archivos: `__init__.py`, `fetcher.py`, `corpus.py`, `orient.py`
-- Registrar `cure_pr_context` en `pyproject.toml` para que installs/wheels incluyan el package
-- Añadir `gh_api_list`/`gh_fetch` list-capable en `cure.py`; no reutilizar `gh_api_json` para endpoints que devuelven arrays
-- `fetch_pr_discussion()`: 3 endpoints GitHub → dicts planos
-- `find_past_reviews(..., head_sha)`: sesiones locales bajo `sandbox_root` + footers CURe remotos actuales + compatibilidad de head + dedup Jaccard
-- `build_orientation_brief()`: LLM scan → secciones fijas con instrucciones inline
-- `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm)`: orquestación, retorna dict con `orientation_brief`, `discussion`, `past_reviews`, `meta`; `discussion` ya viene sin eventos duplicados contra `past_reviews`
-- Inyectar llamada en `cure.py::_pr_flow_impl` después de `compute_pr_stats`, pasando `head_sha` efectivo
-- `$PRIOR_CONTEXT` en los 5 templates built-in de review: normal singlepass, big singlepass, multipass plan, multipass step, multipass synth
+- Create `cure_pr_context/` package with 4 files: `__init__.py`, `fetcher.py`, `corpus.py`, `orient.py`
+- Register `cure_pr_context` in `pyproject.toml` so installs/wheels include the package
+- Add list-capable `gh_api_list`/`gh_fetch` in `cure.py`; do not reuse `gh_api_json` for endpoints that return arrays
+- `fetch_pr_discussion()`: 3 GitHub endpoints → flat dicts
+- `find_past_reviews(..., head_sha)`: local sessions under `sandbox_root` + current remote CURe footers + head compatibility + Jaccard dedup
+- `build_orientation_brief()`: LLM scan → fixed sections with inline instructions
+- `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm)`: orchestration, returns dict with `orientation_brief`, `discussion`, `past_reviews`, `meta`; `discussion` already comes without events duplicated against `past_reviews`
+- Inject call in `cure.py::_pr_flow_impl` after `compute_pr_stats`, passing effective `head_sha`
+- `$PRIOR_CONTEXT` in the 5 built-in review templates: normal singlepass, big singlepass, multipass plan, multipass step, multipass synth
 - Debug artifacts: `work/pr_context_discussion.json`, `work/pr_context_past_reviews.json`
-- Tests unitarios + integración con fixtures deterministas
-- Fail hard en cualquier error
+- Unit tests + integration with deterministic fixtures
+- Fail hard on any error
 
 ## Out of Scope
 
-- Cache o almacenamiento persistente
-- Flags CLI nuevos
-- Cambios en `cure_flows.py` más allá del template variable `$PRIOR_CONTEXT`
+- Cache or persistent storage
+- New CLI flags
+- Changes in `cure_flows.py` beyond the template variable `$PRIOR_CONTEXT`
 - UI/TUI changes
-- Truncamiento de discussion larga
-- Modelo separado para el scan (usa el mismo LLM que la review)
-- Garantizar que prompts custom (`--prompt` / `--prompt-file`) contengan `$PRIOR_CONTEXT`; el `extra_vars` seguro puede estar disponible, pero templates de usuario son responsabilidad del operador
-- Templates de follow-up/resume que no forman parte del nuevo review prompt path de `cure pr`
+- Truncation of long discussion
+- Separate model for the scan (uses the same LLM as the review)
+- Guaranteeing that custom prompts (`--prompt` / `--prompt-file`) contain `$PRIOR_CONTEXT`; the safe `extra_vars` can be available, but user templates are the operator's responsibility
+- Follow-up/resume templates that are not part of the new `cure pr` review prompt path
 
 ## Scenarios / Behavior Examples
 
-### S1 — Baseline: PR sin discussion ni past reviews
-- Given: PR nuevo, 0 comments, 0 reviews, 0 sesiones locales previas
-- When: `cure pr` corre
-- Then: `build_pr_context()` retorna `orientation_brief = ""`. `extra_vars["PRIOR_CONTEXT"]` se pasa como `""` y `render_prompt` reemplaza `$PRIOR_CONTEXT` sin dejar tokens crudos. La review corre semánticamente como hoy.
+### S1 — Baseline: PR with no discussion or past reviews
+- Given: new PR, 0 comments, 0 reviews, 0 prior local sessions
+- When: `cure pr` runs
+- Then: `build_pr_context()` returns `orientation_brief = ""`. `extra_vars["PRIOR_CONTEXT"]` is passed as `""` and `render_prompt` replaces `$PRIOR_CONTEXT` without leaving raw tokens. The review runs semantically as it does today.
 - Covers: A6
 
-### S2 — PR con discussion activa, sin past CURe reviews
-- Given: PR con 15 comments de 3 autores, 2 reviews (CHANGES_REQUESTED + APPROVED), 8 review comments inline. Sin sesiones locales previas.
-- When: `cure pr` corre
-- Then: `$PRIOR_CONTEXT` contiene briefing basado en los 25 eventos. Secciones "Problemáticas" y "Pendientes" reflejan los review comments que pidieron cambios. Sección "Resueltas" refleja threads marcados como resueltos.
+### S2 — PR with active discussion, no past CURe reviews
+- Given: PR with 15 comments from 3 authors, 2 reviews (CHANGES_REQUESTED + APPROVED), 8 inline review comments. No prior local sessions.
+- When: `cure pr` runs
+- Then: `$PRIOR_CONTEXT` contains a briefing based on the 25 events. Sections "Problem areas" and "Pending issues" reflect the review comments that requested changes. Section "Resolved areas" reflects threads marked as resolved.
 - Covers: A5
 
-### S3 — PR con past CURe review (sesión local + footer remoto), dedup
-- Given: PR con una review CURe anterior (sesión local + comment/review body con footer CURe oficial). El footer CURe aparece también como comment en la discussion. Otros 5 comments normales.
-- When: `cure pr` corre
-- Then: El footer CURe se detecta como past review. La past review es el lado retenido: el comment duplicado se elimina de `discussion` output/debug/LLM input (quedan la past review + los 5 comments normales). `meta.n_deduped = 1`.
+### S3 — PR with past CURe review (local session + remote footer), dedup
+- Given: PR with one prior CURe review (local session + comment/review body with official CURe footer). The CURe footer also appears as a comment in the discussion. 5 other normal comments.
+- When: `cure pr` runs
+- Then: The CURe footer is detected as a past review. The past review is the retained side: the duplicate comment is removed from `discussion` output/debug/LLM input (the past review + the 5 normal comments remain). `meta.n_deduped = 1`.
 - Covers: A4
 
-### S4 — Error: GitHub API falla
-- Given: PR sin acceso a GitHub API (sin conexión, o token inválido)
-- When: `cure pr` corre
-- Then: `build_pr_context()` lanza excepción. La review aborta con mensaje de error. No se crean debug artifacts parciales.
+### S4 — Error: GitHub API fails
+- Given: PR without access to the GitHub API (no connection, or invalid token)
+- When: `cure pr` runs
+- Then: `build_pr_context()` raises an exception. The review aborts with an error message. No partial debug artifacts are created.
 - Covers: A2
 
-### S5 — Multipass review recibe `$PRIOR_CONTEXT`
-- Given: PR grande que dispara el perfil `big` y multipass está habilitado
-- When: `cure pr` corre en modo multipass
-- Then: Los prompts multipass (plan, cada step renderizado desde el step template, synth) contienen `$PRIOR_CONTEXT` con el mismo orientation brief
+### S5 — Multipass review receives `$PRIOR_CONTEXT`
+- Given: large PR that triggers the `big` profile and multipass is enabled
+- When: `cure pr` runs in multipass mode
+- Then: The multipass prompts (plan, each step rendered from the step template, synth) contain `$PRIOR_CONTEXT` with the same orientation brief
 - Covers: A8
 
-### S6 — Big singlepass review recibe `$PRIOR_CONTEXT`
-- Given: PR grande que dispara el perfil `big`, pero multipass está deshabilitado por config o CLI
-- When: `cure pr` corre en modo singlepass con `prompts/mrereview_gh_local_big.md`
-- Then: El prompt big singlepass contiene `$PRIOR_CONTEXT` con el mismo orientation brief o `""` seguro
+### S6 — Big singlepass review receives `$PRIOR_CONTEXT`
+- Given: large PR that triggers the `big` profile, but multipass is disabled by config or CLI
+- When: `cure pr` runs in singlepass mode with `prompts/mrereview_gh_local_big.md`
+- Then: The big singlepass prompt contains `$PRIOR_CONTEXT` with the same orientation brief or safe `""`
 - Covers: A8
 
 ## Acceptance
 
-- **A1:** `cure_pr_context/` package existe con 4 archivos: `__init__.py`, `fetcher.py`, `corpus.py`, `orient.py`
-- **A2:** `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm)` retorna dict con keys `orientation_brief`, `discussion`, `past_reviews`, `meta`, o lanza excepción en error; `head_sha` es el SHA actual de la PR/review para verificar compatibilidad de footers remotos; `gh_fetch` es list-capable (`gh_api_list`/bound callable), no `gh_api_json`
-- **A3:** `fetch_pr_discussion()` llama a 3 endpoints GitHub vía `gh_fetch` y retorna lista de dicts planos con keys `kind`, `author`, `body`, `created_at`, `url`, `path`, `line`, `review_state`
-- **A4:** `find_past_reviews()` detecta sesiones locales (`review.md`) bajo `sandbox_root` y footers CURe remotos oficiales (en issue comments y review bodies) delimitados por `CURE_REVIEW_FOOTER_START` / `CURE_REVIEW_FOOTER_END` con token `sha <short>`, verifica compatibilidad por prefijo contra `head_sha` cuando footer y head son conocidos, y deduplica vs discussion con Jaccard ≥ 0.85 reteniendo `past_reviews` y removiendo los eventos duplicados de `discussion`
-- **A5:** `build_orientation_brief()` produce un string con secciones fijas (Áreas resueltas, Problemáticas, Pendientes, Patrones, Decisiones) e instrucciones de uso inline
-- **A6:** Cuando no hay discussion ni past reviews, `orientation_brief` es `""` y `PRIOR_CONTEXT` se añade igualmente a `extra_vars` como `""`; ningún `$PRIOR_CONTEXT` crudo queda en prompts renderizados
-- **A7:** `build_pr_context()` se llama desde `_pr_flow_impl` después de `compute_pr_stats`, antes de la decisión multipass/singlepass final, y recibe `head_sha` efectivo (`review_head_sha` si existe, si no PR API `head_sha`)
-- **A8:** `$PRIOR_CONTEXT` aparece en los 5 templates built-in de review: normal singlepass, big singlepass, multipass plan, multipass step, multipass synth; custom prompts y follow-up/resume templates quedan excluidos explícitamente
-- **A9:** Debug artifacts `work/pr_context_discussion.json` (discussion pruned) y `work/pr_context_past_reviews.json` (past reviews retained) se escriben incluso cuando `orientation_brief` es `""` (siempre que haya datos)
-- **A10:** Tests unitarios por módulo (`fetcher`, `corpus`, `orient`) + test de integración end-to-end con fixtures deterministas
-- **A11:** `pyproject.toml` incluye `cure_pr_context` en la metadata explícita de setuptools y un install/wheel smoke puede importar `cure_pr_context`
+- **A1:** `cure_pr_context/` package exists with 4 files: `__init__.py`, `fetcher.py`, `corpus.py`, `orient.py`
+- **A2:** `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm)` returns a dict with keys `orientation_brief`, `discussion`, `past_reviews`, `meta`, or raises an exception on error; `head_sha` is the current PR/review SHA for verifying remote footer compatibility; `gh_fetch` is list-capable (`gh_api_list`/bound callable), not `gh_api_json`
+- **A3:** `fetch_pr_discussion()` calls 3 GitHub endpoints via `gh_fetch` and returns a list of flat dicts with keys `kind`, `author`, `body`, `created_at`, `url`, `path`, `line`, `review_state`
+- **A4:** `find_past_reviews()` detects local sessions (`review.md`) under `sandbox_root` and official remote CURe footers (in issue comments and review bodies) delimited by `CURE_REVIEW_FOOTER_START` / `CURE_REVIEW_FOOTER_END` with token `sha <short>`, verifies compatibility by prefix against `head_sha` when footer and head are known, and deduplicates vs discussion with Jaccard ≥ 0.85 retaining `past_reviews` and removing duplicate events from `discussion`
+- **A5:** `build_orientation_brief()` produces a string with fixed sections (Resolved areas, Problem areas, Pending issues, Repeated patterns, Decisions made) and inline usage instructions
+- **A6:** When there is no discussion or past reviews, `orientation_brief` is `""` and `PRIOR_CONTEXT` is still added to `extra_vars` as `""`; no raw `$PRIOR_CONTEXT` remains in rendered prompts
+- **A7:** `build_pr_context()` is called from `_pr_flow_impl` after `compute_pr_stats`, before the final multipass/singlepass decision, and receives effective `head_sha` (`review_head_sha` if it exists, otherwise PR API `head_sha`)
+- **A8:** `$PRIOR_CONTEXT` appears in the 5 built-in review templates: normal singlepass, big singlepass, multipass plan, multipass step, multipass synth; custom prompts and follow-up/resume templates are explicitly excluded
+- **A9:** Debug artifacts `work/pr_context_discussion.json` (pruned discussion) and `work/pr_context_past_reviews.json` (retained past reviews) are written even when `orientation_brief` is `""` (as long as there is data)
+- **A10:** Unit tests per module (`fetcher`, `corpus`, `orient`) + end-to-end integration test with deterministic fixtures
+- **A11:** `pyproject.toml` includes `cure_pr_context` in the explicit setuptools metadata and an install/wheel smoke can import `cure_pr_context`
 
 ## Verification
 
@@ -182,7 +182,7 @@ python -m pip wheel . -w .tmp_package_smoke/wheelhouse
 python -m pip install --no-deps --target .tmp_package_smoke/install .tmp_package_smoke/wheelhouse/cureview-*.whl
 PYTHONPATH=.tmp_package_smoke/install python -c "import cure_pr_context"
 
-# Full CURe test suite (asegurar no regresión)
+# Full CURe test suite (ensure no regressions)
 python -m pytest tests/ -x --timeout=120
 ```
 
@@ -190,40 +190,40 @@ python -m pytest tests/ -x --timeout=120
 
 | Row ID | Layer / Scope | Behavior / Acceptance Slice | Owning Suite / File(s) | Boundary Exercised | Assertions / Observability | Fixture / Test Data Strategy | CI Lane / Command | Fallback Plan | Split / Merge Rationale |
 |--------|--------------|---------------------------|----------------------|-------------------|--------------------------|----------------------------|-------------------|---------------|------------------------|
-| TAP-01 | Unit | `fetch_pr_discussion` — 3 endpoints, normalización, list-capable caller | `tests/cure_pr_context/test_fetcher.py` | GitHub API boundary (mocked `gh_fetch`/`gh_api_list`) | dict keys, event count, field types, caller paths, array handling | Mock `gh_fetch` returning list payloads por endpoint | `pytest tests/cure_pr_context/test_fetcher.py` | Si mock se vuelve frágil, usar respuestas grabadas | Un test por endpoint + test de fallo |
-| TAP-02 | Unit | `find_past_reviews` + `deduplicate` — local sandbox sessions + remote official footers; retained side is `past_reviews`, duplicate discussion events are pruned | `tests/cure_pr_context/test_corpus.py` | Filesystem (`sandbox_root` session dirs) + discusión en memoria + current `head_sha` | past review count, footer detection, SHA/session metadata, head-SHA compatibility, retained-side/pruned-discussion, dedup count | Directorios temporales con `review.md` fake; discussion events en memoria con `CURE_REVIEW_FOOTER_START/END`; compatible and incompatible footer SHA fixtures | `pytest tests/cure_pr_context/test_corpus.py` | Si el scan de sesiones es lento, reducir fixtures sin eliminar retained-side/head-SHA cases | Tests separados: local, remote, dedup/head compatibility |
-| TAP-03 | Unit | `build_orientation_brief` — LLM scan con secciones fijas | `tests/cure_pr_context/test_orient.py` | LLM boundary (mocked) | Output contiene las 5 secciones, instrucciones de uso presentes | Mock `run_llm` que retorna brief predefinido | `pytest tests/cure_pr_context/test_orient.py` | Si el formato cambia, actualizar mock | Un test por sección + test de prompt construction |
-| TAP-04 | Unit | `build_pr_context` — integración interna de los 3 módulos | `tests/cure_pr_context/test_init.py` | API pública completa, including explicit `head_sha` parameter | Dict keys, meta values, `head_sha` propagated to corpus, fail-hard en errores, debug artifact paths, `PRIOR_CONTEXT` empty path | `pr_stats` fixture + `head_sha` fixture + mock `gh_fetch` + mock `run_llm` + tmp sandbox/work dirs | `pytest tests/cure_pr_context/test_init.py` | Convertir a integración real si mock se vuelve frágil | Cubre A2, A6, A7 |
-| TAP-05 | Integration | Pipeline end-to-end con fixtures deterministas | `tests/cure_pr_context/test_integration.py` | End-to-end: fetch → corpus/head-SHA check → retained-side dedup → orient → build | A1-A10 verificables sin GitHub real, including pruned discussion output and retained past review | Fixtures JSON para las 3 API responses; compatible/incompatible footer SHA bodies; mock LLM; tmp sandbox dirs | `pytest tests/cure_pr_context/test_integration.py` | Añadir más escenarios si fallan en live | Cubre todos los S1-S5 con fixtures |
-| TAP-06 | Integration | `$PRIOR_CONTEXT` presente y renderizado en 5 templates built-in | `tests/cure_pr_context/test_templates.py` | `render_prompt` con `extra_vars` | `$PRIOR_CONTEXT` reemplazado correctamente con brief y con `""`; no raw token queda en 5 templates | Templates built-in reales, `extra_vars` siempre con `PRIOR_CONTEXT` | `pytest tests/cure_pr_context/test_templates.py` | Si templates se mueven, actualizar paths | Cubre A6, A8 |
-| TAP-07 | Integration | `cure.py` llama `build_pr_context` en el punto correcto y propaga extra vars | `tests/test_cure_pr_flow.py` | `_pr_flow_impl` flow + multipass step helper | Runtime test monkeypatches `compute_pr_stats` and `build_pr_context` and stops after render, proving call order, effective `review_head_sha`, and rendered `PRIOR_CONTEXT`; helper tests cover multipass plan/synth/step extra vars | Mock `build_pr_context`, PR URL sintético, prompt-profile/multipass branch fixtures | `pytest tests/test_cure_pr_flow.py` | Helper seams/monkeypatch cover the flow without a nonexistent generic `--dry-run` (only `--dry-run-chunkhound` exists) | Cubre A7, A8 |
-| TAP-08 | Lint/Type | Ruff formatting + mypy type checking | `cure_pr_context/` | Estilo y tipos | Ruff clean, mypy clean | N/A | `ruff check cure_pr_context/ && mypy cure_pr_context/` | N/A | Calidad |
-| TAP-09 | Packaging | Installed package contains/imports `cure_pr_context` | `pyproject.toml` + packaging smoke command | setuptools explicit package list / wheel install | `pyproject.toml` includes `cure_pr_context`; `python -c "import cure_pr_context"` succeeds from wheel target | Local wheel built into `.tmp_package_smoke/` | packaging smoke commands above | If wheel tooling unavailable, `pip install -e .` smoke in disposable env | Cubre A11 |
+| TAP-01 | Unit | `fetch_pr_discussion` — 3 endpoints, normalization, list-capable caller | `tests/cure_pr_context/test_fetcher.py` | GitHub API boundary (mocked `gh_fetch`/`gh_api_list`) | dict keys, event count, field types, caller paths, array handling | Mock `gh_fetch` returning list payloads per endpoint | `pytest tests/cure_pr_context/test_fetcher.py` | If mock becomes fragile, use recorded responses | One test per endpoint + failure test |
+| TAP-02 | Unit | `find_past_reviews` + `deduplicate` — local sandbox sessions + remote official footers; retained side is `past_reviews`, duplicate discussion events are pruned | `tests/cure_pr_context/test_corpus.py` | Filesystem (`sandbox_root` session dirs) + in-memory discussion + current `head_sha` | past review count, footer detection, SHA/session metadata, head-SHA compatibility, retained-side/pruned-discussion, dedup count | Temporary directories with fake `review.md`; in-memory discussion events with `CURE_REVIEW_FOOTER_START/END`; compatible and incompatible footer SHA fixtures | `pytest tests/cure_pr_context/test_corpus.py` | If the session scan is slow, reduce fixtures without removing retained-side/head-SHA cases | Separate tests: local, remote, dedup/head compatibility |
+| TAP-03 | Unit | `build_orientation_brief` — LLM scan with fixed sections | `tests/cure_pr_context/test_orient.py` | LLM boundary (mocked) | Output contains the 5 sections, usage instructions present | Mock `run_llm` that returns predefined brief | `pytest tests/cure_pr_context/test_orient.py` | If the format changes, update mock | One test per section + prompt construction test |
+| TAP-04 | Unit | `build_pr_context` — internal integration of the 3 modules | `tests/cure_pr_context/test_init.py` | Full public API, including explicit `head_sha` parameter | Dict keys, meta values, `head_sha` propagated to corpus, fail-hard on errors, debug artifact paths, `PRIOR_CONTEXT` empty path | `pr_stats` fixture + `head_sha` fixture + mock `gh_fetch` + mock `run_llm` + tmp sandbox/work dirs | `pytest tests/cure_pr_context/test_init.py` | Convert to real integration if mock becomes fragile | Covers A2, A6, A7 |
+| TAP-05 | Integration | End-to-end pipeline with deterministic fixtures | `tests/cure_pr_context/test_integration.py` | End-to-end: fetch → corpus/head-SHA check → retained-side dedup → orient → build | A1-A10 verifiable without real GitHub, including pruned discussion output and retained past review | JSON fixtures for the 3 API responses; compatible/incompatible footer SHA bodies; mock LLM; tmp sandbox dirs | `pytest tests/cure_pr_context/test_integration.py` | Add more scenarios if they fail live | Covers all S1-S5 with fixtures |
+| TAP-06 | Integration | `$PRIOR_CONTEXT` present and rendered in 5 built-in templates | `tests/cure_pr_context/test_templates.py` | `render_prompt` with `extra_vars` | `$PRIOR_CONTEXT` correctly replaced with brief and with `""`; no raw token remains in 5 templates | Real built-in templates, `extra_vars` always with `PRIOR_CONTEXT` | `pytest tests/cure_pr_context/test_templates.py` | If templates move, update paths | Covers A6, A8 |
+| TAP-07 | Integration | `cure.py` calls `build_pr_context` at the correct point and propagates extra vars | `tests/test_cure_pr_flow.py` | `_pr_flow_impl` flow + multipass step helper | Runtime test monkeypatches `compute_pr_stats` and `build_pr_context` and stops after render, proving call order, effective `review_head_sha`, and rendered `PRIOR_CONTEXT`; helper tests cover multipass plan/synth/step extra vars | Mock `build_pr_context`, synthetic PR URL, prompt-profile/multipass branch fixtures | `pytest tests/test_cure_pr_flow.py` | Helper seams/monkeypatch cover the flow without a nonexistent generic `--dry-run` (only `--dry-run-chunkhound` exists) | Covers A7, A8 |
+| TAP-08 | Lint/Type | Ruff formatting + mypy type checking | `cure_pr_context/` | Style and types | Ruff clean, mypy clean | N/A | `ruff check cure_pr_context/ && mypy cure_pr_context/` | N/A | Quality |
+| TAP-09 | Packaging | Installed package contains/imports `cure_pr_context` | `pyproject.toml` + packaging smoke command | setuptools explicit package list / wheel install | `pyproject.toml` includes `cure_pr_context`; `python -c "import cure_pr_context"` succeeds from wheel target | Local wheel built into `.tmp_package_smoke/` | packaging smoke commands above | If wheel tooling unavailable, `pip install -e .` smoke in disposable env | Covers A11 |
 
 ### Acceptance Proof Matrix
 
 | Acceptance ID | Proof Maturity | Proof Method | Reviewer Action | Expected Evidence | Relevant Surfaces | Open Detail |
 |--------------|---------------|-------------|-----------------|------------------|------------------|-------------|
-| A1 | final | `ls cure_pr_context/` + TAP-05 | Verificar 4 archivos y ejecutar tests | Listado de archivos, tests pasan | `cure_pr_context/` | — |
-| A2 | final | TAP-04 + TAP-05 | Ejecutar tests, revisar signature | Tests pasan, dict keys verificados, signature incluye `head_sha`, `gh_fetch` list-capable usado | `__init__.py`, `cure.py` | — |
-| A3 | final | TAP-01 | Ejecutar tests + revisar código | Tests de fetch pasan, 3 llamadas mock verificadas | `fetcher.py` | — |
-| A4 | final | TAP-02 | Ejecutar tests | Tests de corpus pasan, `sandbox_root` y footer oficial verificados, compatibilidad `head_sha` probada, `past_reviews` retenido y duplicate discussion pruned con fixtures | `corpus.py`, `cure_sessions.py`, `cure_output.py`, `cure.py` | — |
-| A5 | final | TAP-03 | Ejecutar tests | Mocked LLM output contiene secciones e instrucciones | `orient.py` | — |
-| A6 | final | TAP-04 + TAP-06 | Ejecutar tests | `orientation_brief=""` → `PRIOR_CONTEXT` es `""` y no queda `$PRIOR_CONTEXT` raw | `__init__.py`, templates, `cure_flows.py` | — |
-| A7 | final | TAP-07 | Ejecutar tests de flow + revisión de código | Runtime mocked `_pr_flow_impl` proof shows `build_pr_context` called after `compute_pr_stats`, before prompt render, with effective `review_head_sha`; prompt receives rendered `PRIOR_CONTEXT` | `cure.py`, `tests/test_cure_pr_flow.py` | — |
-| A8 | final | TAP-06 + TAP-07 + Surface / Branch Proof Matrix | Ejecutar tests + revisar templates | 5 templates built-in contienen `$PRIOR_CONTEXT`; custom/follow-up exclusions documentadas | templates, `cure.py` | — |
-| A9 | final | TAP-04 + TAP-05 | Ejecutar tests, verificar archivos escritos | `work/pr_context_discussion.json` existe con discussion pruned y `work/pr_context_past_reviews.json` existe con past reviews retained | `__init__.py`, `work/` | — |
-| A10 | final | TAP-01..TAP-05 | Ejecutar `pytest tests/cure_pr_context/` | Todos los tests pasan, coverage ≥ 80% | `tests/cure_pr_context/` | — |
-| A11 | final | TAP-09 | Revisar `pyproject.toml`, ejecutar smoke | Package incluido en wheel/install e importable | `pyproject.toml`, wheel smoke | — |
+| A1 | final | `ls cure_pr_context/` + TAP-05 | Verify 4 files and run tests | File listing, tests pass | `cure_pr_context/` | — |
+| A2 | final | TAP-04 + TAP-05 | Run tests, review signature | Tests pass, dict keys verified, signature includes `head_sha`, list-capable `gh_fetch` used | `__init__.py`, `cure.py` | — |
+| A3 | final | TAP-01 | Run tests + review code | Fetch tests pass, 3 mock calls verified | `fetcher.py` | — |
+| A4 | final | TAP-02 | Run tests | Corpus tests pass, `sandbox_root` and official footer verified, `head_sha` compatibility tested, `past_reviews` retained and duplicate discussion pruned with fixtures | `corpus.py`, `cure_sessions.py`, `cure_output.py`, `cure.py` | — |
+| A5 | final | TAP-03 | Run tests | Mocked LLM output contains sections and instructions | `orient.py` | — |
+| A6 | final | TAP-04 + TAP-06 | Run tests | `orientation_brief=""` → `PRIOR_CONTEXT` is `""` and no raw `$PRIOR_CONTEXT` remains | `__init__.py`, templates, `cure_flows.py` | — |
+| A7 | final | TAP-07 | Run flow tests + code review | Runtime mocked `_pr_flow_impl` proof shows `build_pr_context` called after `compute_pr_stats`, before prompt render, with effective `review_head_sha`; prompt receives rendered `PRIOR_CONTEXT` | `cure.py`, `tests/test_cure_pr_flow.py` | — |
+| A8 | final | TAP-06 + TAP-07 + Surface / Branch Proof Matrix | Run tests + review templates | 5 built-in templates contain `$PRIOR_CONTEXT`; custom/follow-up exclusions documented | templates, `cure.py` | — |
+| A9 | final | TAP-04 + TAP-05 | Run tests, verify written files | `work/pr_context_discussion.json` exists with pruned discussion and `work/pr_context_past_reviews.json` exists with retained past reviews | `__init__.py`, `work/` | — |
+| A10 | final | TAP-01..TAP-05 | Run `pytest tests/cure_pr_context/` | All tests pass, coverage ≥ 80% | `tests/cure_pr_context/` | — |
+| A11 | final | TAP-09 | Review `pyproject.toml`, run smoke | Package included in wheel/install and importable | `pyproject.toml`, wheel smoke | — |
 
 ## Critical Files
 
-**Nuevos:**
+**New:**
 | Path | Role |
 |------|------|
-| `cure_pr_context/__init__.py` (new) | API pública `build_pr_context(..., head_sha, ...)`, orquestación de módulos |
-| `cure_pr_context/fetcher.py` (new) | `fetch_pr_discussion()` — 3 endpoints GitHub vía `gh_fetch`/`gh_api_list` |
-| `cure_pr_context/corpus.py` (new) | `find_past_reviews(..., head_sha)` + dedup Jaccard, usando `sandbox_root`, footers oficiales CURe, compatibilidad de head por prefijo y pruning de discussion duplicada |
+| `cure_pr_context/__init__.py` (new) | Public API `build_pr_context(..., head_sha, ...)`, module orchestration |
+| `cure_pr_context/fetcher.py` (new) | `fetch_pr_discussion()` — 3 GitHub endpoints via `gh_fetch`/`gh_api_list` |
+| `cure_pr_context/corpus.py` (new) | `find_past_reviews(..., head_sha)` + Jaccard dedup, using `sandbox_root`, official CURe footers, head compatibility by prefix, and duplicate discussion pruning |
 | `cure_pr_context/orient.py` (new) | `build_orientation_brief()` — LLM scan |
 | `tests/cure_pr_context/test_fetcher.py` (new) | Unit tests fetcher |
 | `tests/cure_pr_context/test_corpus.py` (new) | Unit tests corpus |
@@ -232,36 +232,36 @@ python -m pytest tests/ -x --timeout=120
 | `tests/cure_pr_context/test_integration.py` (new) | Integration end-to-end |
 | `tests/cure_pr_context/test_templates.py` (new) | Template variable injection |
 
-**Modificados:**
+**Modified:**
 | Path | Role |
 |------|------|
-| `pyproject.toml` | Añadir `cure_pr_context` a `packages` explícitos y habilitar packaging smoke |
-| `cure.py` | Insertar `build_pr_context()` call después de `compute_pr_stats`, pasar `head_sha` efectivo, inyectar `$PRIOR_CONTEXT` siempre en `extra_vars`, añadir helper `gh_api_list` |
-| `prompts/mrereview_gh_local.md` | Añadir `$PRIOR_CONTEXT` (normal singlepass) |
-| `prompts/mrereview_gh_local_big.md` | Añadir `$PRIOR_CONTEXT` (big singlepass cuando multipass está deshabilitado) |
-| `prompts/mrereview_gh_local_big_plan.md` | Añadir `$PRIOR_CONTEXT` (multipass plan) |
-| `prompts/mrereview_gh_local_big_step.md` | Añadir `$PRIOR_CONTEXT` (multipass step) |
-| `prompts/mrereview_gh_local_big_synth.md` | Añadir `$PRIOR_CONTEXT` (multipass synth) |
+| `pyproject.toml` | Add `cure_pr_context` to explicit `packages` and enable packaging smoke |
+| `cure.py` | Insert `build_pr_context()` call after `compute_pr_stats`, pass effective `head_sha`, always inject `$PRIOR_CONTEXT` in `extra_vars`, add `gh_api_list` helper |
+| `prompts/mrereview_gh_local.md` | Add `$PRIOR_CONTEXT` (normal singlepass) |
+| `prompts/mrereview_gh_local_big.md` | Add `$PRIOR_CONTEXT` (big singlepass when multipass is disabled) |
+| `prompts/mrereview_gh_local_big_plan.md` | Add `$PRIOR_CONTEXT` (multipass plan) |
+| `prompts/mrereview_gh_local_big_step.md` | Add `$PRIOR_CONTEXT` (multipass step) |
+| `prompts/mrereview_gh_local_big_synth.md` | Add `$PRIOR_CONTEXT` (multipass synth) |
 
-**Referencia (solo lectura):**
+**Reference (read-only):**
 | Path | Role |
 |------|------|
-| `cure_subsequent_review/github_history.py` (old branch) | Portar lógica de fetch/list helper como orientación |
-| `cure_subsequent_review/prior_corpus.py` (old branch) | Portar detección de footers oficiales y scan de sesiones como orientación |
+| `cure_subsequent_review/github_history.py` (old branch) | Port fetch/list helper logic as orientation |
+| `cure_subsequent_review/prior_corpus.py` (old branch) | Port official footer detection and session scan as orientation |
 
 ## Implementation Notes
 
-**Orden de implementación (dependencias):**
-1. `cure.py::gh_api_list` — portar/ajustar helper list-capable antes de implementar fetcher live
-2. `fetcher.py` — usa `gh_fetch`, no tiene dependencias internas, testable aislado
-3. `corpus.py` — depende de `fetcher` para recibir discussion events; usa `sandbox_root`, `head_sha` efectivo y footers oficiales actuales
-4. `orient.py` — depende de `fetcher` + `corpus` para recibir datos → LLM
-5. `__init__.py` — integra los 3, orquesta `build_pr_context(..., head_sha, ...)` y escribe debug artifacts deduplicados en `work_dir`
-6. `pyproject.toml` — añadir `cure_pr_context` al package list explícito
-7. Templates — añadir `$PRIOR_CONTEXT` a los 5 built-in review templates (paralelo a 1-6)
-8. `cure.py` — inyectar la llamada y pasar `head_sha` efectivo (último, cuando el package está listo)
+**Implementation order (dependencies):**
+1. `cure.py::gh_api_list` — port/adapt list-capable helper before implementing live fetcher
+2. `fetcher.py` — uses `gh_fetch`, has no internal dependencies, testable in isolation
+3. `corpus.py` — depends on `fetcher` to receive discussion events; uses `sandbox_root`, effective `head_sha`, and current official footers
+4. `orient.py` — depends on `fetcher` + `corpus` to receive data → LLM
+5. `__init__.py` — integrates the 3, orchestrates `build_pr_context(..., head_sha, ...)`, and writes deduplicated debug artifacts in `work_dir`
+6. `pyproject.toml` — add `cure_pr_context` to the explicit package list
+7. Templates — add `$PRIOR_CONTEXT` to the 5 built-in review templates (parallel to 1-6)
+8. `cure.py` — inject the call and pass effective `head_sha` (last, once the package is ready)
 
-**Red-first seam más pequeño:** `fetcher.py` con mock de `gh_fetch`/`gh_api_list` que retorna arrays.
+**Smallest red-first seam:** `fetcher.py` with mock `gh_fetch`/`gh_api_list` that returns arrays.
 
 **Phases:**
 - Phase 0: `gh_api_list` + packaging metadata smoke (TAP-09 setup)
@@ -273,28 +273,28 @@ python -m pytest tests/ -x --timeout=120
 - Phase 6: Ruff + mypy clean (TAP-08), packaging smoke (TAP-09), full test suite
 
 **Constraints:**
-- El viejo `github_history.py` usa `DiscussionEvent` dataclass con 15 campos; simplificar a dicts con 6-8 keys
-- El viejo `prior_corpus.py` tiene lógica de footer detection ya probada, pero la fuente normativa es el footer actual de CURe (`CURE_REVIEW_FOOTER_START/END` + `sha <short>`)
-- `render_prompt` en `cure_flows.py:1437` ya soporta `extra_vars` — no requiere cambios, pero `PRIOR_CONTEXT` debe estar siempre presente en `extra_vars`
+- The old `github_history.py` uses a `DiscussionEvent` dataclass with 15 fields; simplify to dicts with 6-8 keys
+- The old `prior_corpus.py` has already-tested footer detection logic, but the normative source is the current CURe footer (`CURE_REVIEW_FOOTER_START/END` + `sha <short>`)
+- `render_prompt` in `cure_flows.py:1437` already supports `extra_vars` — no changes required, but `PRIOR_CONTEXT` must always be present in `extra_vars`
 
 ## Locked Decisions
 
-Un solo package `cure_pr_context/` con 4 archivos. La API pública es `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `sandbox_root` es el root real de sandboxes/sesiones completadas (`paths.sandbox_root`), `work_dir` es el directorio `work/` de la sesión actual para debug artifacts, `pr_stats` es el resultado ya computado por `compute_pr_stats`, `head_sha` es el SHA efectivo de la PR/review que `_pr_flow_impl` pasa explícitamente para compatibilidad de footers remotos, y `gh_fetch` es un callable list-capable basado en `gh_api_list` (no `gh_api_json`). El brief es producido por un solo LLM scan con secciones fijas e instrucciones de uso inline; se inyecta como `$PRIOR_CONTEXT` en los 5 templates built-in de review. `PRIOR_CONTEXT` se pasa siempre en `extra_vars` como `""` o contenido para evitar leaks de tokens crudos. La deduplicación de past reviews usa char n-grams + Jaccard sin dependencias externas; `past_reviews` es el lado retenido y los eventos duplicados se eliminan del `discussion` retornado/escrito/pasado al LLM. El LLM se recibe como `Callable` inyectado desde `cure.py`. Cualquier error aborta la review. Sin cache, sin flags CLI nuevos, sin cambios a `cure_flows.py`.
+A single `cure_pr_context/` package with 4 files. The public API is `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `sandbox_root` is the real root of completed sandboxes/sessions (`paths.sandbox_root`), `work_dir` is the current session's `work/` directory for debug artifacts, `pr_stats` is the result already computed by `compute_pr_stats`, `head_sha` is the effective PR/review SHA that `_pr_flow_impl` passes explicitly for remote footer compatibility, and `gh_fetch` is a list-capable callable based on `gh_api_list` (not `gh_api_json`). The brief is produced by a single LLM scan with fixed sections and inline usage instructions; it is injected as `$PRIOR_CONTEXT` into the 5 built-in review templates. `PRIOR_CONTEXT` is always passed in `extra_vars` as `""` or content to avoid raw token leaks. Past-review deduplication uses char n-grams + Jaccard with no external dependencies; `past_reviews` is the retained side and duplicate events are removed from the returned/written/LLM-passed `discussion`. The LLM is received as a `Callable` injected from `cure.py`. Any error aborts the review. No cache, no new CLI flags, no changes to `cure_flows.py`.
 
 ## Discovery Notes
 
-- El viejo `github_history.py` en `cure-subsequent-pr-review/story-01-intake` tiene ~300 líneas. `collect_pr_discussion()` usa `gh_api_list` (no `gh_api_json`) para los 3 endpoints porque GitHub retorna arrays. El manejo de paginación está en `PaginationMarker`.
-- El `gh_api_json` existente (`cure.py:7401-7418`) valida `isinstance(payload, dict)` y falla con arrays. Las 3 APIs de discusión retornan arrays. Se debe crear/portar `gh_api_list` usando el patrón del old branch (`cure.py:7613-7634` en `cure-subsequent-pr-review/story-01-intake`): `gh api --paginate [--slurp]`, fallback sin `--slurp`, flattening de páginas.
-- `render_prompt` en `cure_flows.py:1437-1491` soporta `extra_vars: dict[str, str]`, pero solo reemplaza keys presentes; si falta `PRIOR_CONTEXT`, `$PRIOR_CONTEXT` queda literal.
-- `_pr_flow_impl` en `cure.py:9334` resuelve `head_sha` desde la API de PR (`cure.py:9371-9375`), `review_head_sha` desde el checkout local (`cure.py:9730-9734`), y computa `pr_stats` en `compute_pr_stats` (`cure.py:4162`). El punto de inyección en `_pr_flow_impl` es después de `progress.flush()` en `detect_pr_size` (~`cure.py:9754-9767`), antes de la selección/routing final singlepass/multipass; debe pasar `review_head_sha or head_sha` como `head_sha` efectivo a `build_pr_context()`.
-- CURe escribe footers de review actuales como bloque `<!-- CURE_REVIEW_FOOTER_START -->` / `<!-- CURE_REVIEW_FOOTER_END -->` con línea que incluye `· sha <short>` (`cure_output.py:22`, `cure_output.py:1547-1549`). No usar el formato viejo hipotético `CURe-pr-footer reviewed_head=`.
-- `scan_completed_sessions_for_pr` recibe `sandbox_root` (`cure_sessions.py:954-980`) y los defaults viven en `paths.py` como `~/.local/state/cure/sandboxes` (`paths.py:37-38`, `paths.py:75-77`). No diseñar un `sessions_root` separado.
-- Los templates built-in de review están en `prompts/`: `mrereview_gh_local.md` (normal singlepass), `mrereview_gh_local_big.md` (big singlepass), `mrereview_gh_local_big_plan.md`, `_big_step.md`, `_big_synth.md`.
-- Live code puede usar big singlepass cuando el perfil resuelto es `big` y multipass está deshabilitado (`cure.py:9847-9867`); `prompt_template_name_for_profile` retorna `mrereview_gh_local_big.md` para el perfil `big` (`cure.py:4240`).
-- `pyproject.toml:16-18` usa listas explícitas de setuptools (`py-modules = [...]`, `packages = ["prompts"]`), por lo que `cure_pr_context` debe agregarse explícitamente a `packages`.
-- `write_pr_context_file` en `cure.py` ya escribe a `work/pr_context.json` — seguir ese patrón para los debug artifacts.
-- `PullRequestRef` (`cure.py:2953-2962`) no contiene SHA, y `compute_pr_stats` (`cure.py:4162-4197`) devuelve `head_ref` pero no SHA; por eso `head_sha` debe ser un parámetro explícito de `build_pr_context()` en vez de inferirse desde `pr` o `pr_stats`.
-- Live CLI no tiene un `--dry-run` genérico para `cure pr`; el flag relacionado es `--dry-run-chunkhound` (`cure.py:14882`). TAP-07 debe usar monkeypatch/helper seams si necesita un fallback sin ejecutar un review real.
+- The old `github_history.py` in `cure-subsequent-pr-review/story-01-intake` has ~300 lines. `collect_pr_discussion()` uses `gh_api_list` (not `gh_api_json`) for the 3 endpoints because GitHub returns arrays. Pagination handling is in `PaginationMarker`.
+- The existing `gh_api_json` (`cure.py:7401-7418`) validates `isinstance(payload, dict)` and fails with arrays. The 3 discussion APIs return arrays. Must create/port `gh_api_list` using the pattern from the old branch (`cure.py:7613-7634` in `cure-subsequent-pr-review/story-01-intake`): `gh api --paginate [--slurp]`, fallback without `--slurp`, page flattening.
+- `render_prompt` in `cure_flows.py:1437-1491` supports `extra_vars: dict[str, str]`, but only replaces present keys; if `PRIOR_CONTEXT` is missing, `$PRIOR_CONTEXT` remains literal.
+- `_pr_flow_impl` in `cure.py:9334` resolves `head_sha` from the PR API (`cure.py:9371-9375`), `review_head_sha` from the local checkout (`cure.py:9730-9734`), and computes `pr_stats` in `compute_pr_stats` (`cure.py:4162`). The injection point in `_pr_flow_impl` is after `progress.flush()` in `detect_pr_size` (~`cure.py:9754-9767`), before final singlepass/multipass selection/routing; it must pass `review_head_sha or head_sha` as effective `head_sha` to `build_pr_context()`.
+- CURe writes current review footers as a block `<!-- CURE_REVIEW_FOOTER_START -->` / `<!-- CURE_REVIEW_FOOTER_END -->` with a line that includes `· sha <short>` (`cure_output.py:22`, `cure_output.py:1547-1549`). Do not use the old hypothetical format `CURe-pr-footer reviewed_head=`.
+- `scan_completed_sessions_for_pr` receives `sandbox_root` (`cure_sessions.py:954-980`) and the defaults live in `paths.py` as `~/.local/state/cure/sandboxes` (`paths.py:37-38`, `paths.py:75-77`). Do not design a separate `sessions_root`.
+- The built-in review templates are in `prompts/`: `mrereview_gh_local.md` (normal singlepass), `mrereview_gh_local_big.md` (big singlepass), `mrereview_gh_local_big_plan.md`, `_big_step.md`, `_big_synth.md`.
+- Live code can use big singlepass when the resolved profile is `big` and multipass is disabled (`cure.py:9847-9867`); `prompt_template_name_for_profile` returns `mrereview_gh_local_big.md` for the `big` profile (`cure.py:4240`).
+- `pyproject.toml:16-18` uses explicit setuptools lists (`py-modules = [...]`, `packages = ["prompts"]`), so `cure_pr_context` must be added explicitly to `packages`.
+- `write_pr_context_file` in `cure.py` already writes to `work/pr_context.json` — follow that pattern for the debug artifacts.
+- `PullRequestRef` (`cure.py:2953-2962`) does not contain SHA, and `compute_pr_stats` (`cure.py:4162-4197`) returns `head_ref` but not SHA; therefore `head_sha` must be an explicit parameter of `build_pr_context()` instead of being inferred from `pr` or `pr_stats`.
+- Live CLI does not have a generic `--dry-run` for `cure pr`; the related flag is `--dry-run-chunkhound` (`cure.py:14882`). TAP-07 must use monkeypatch/helper seams if it needs a fallback without running a real review.
 
 ## Implementation Log
 

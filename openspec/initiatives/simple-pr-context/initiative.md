@@ -10,37 +10,37 @@ When `cure pr` runs, the review agent currently sees only the PR description and
 
 ### Risks / unknowns
 
-- **LLM scan quality**: si el modelo de orientación produce briefs de baja calidad (secciones vacías cuando sí hay señales, o al revés), la feature puede degradar la review en vez de mejorarla. Mitigación: las instrucciones de uso dentro de `$PRIOR_CONTEXT` le dicen al review agent que ignore secciones vacías o irrelevantes.
-- **Token budget**: si la discussion es muy larga, el scan de orientación puede ser costoso o exceder la ventana de contexto. Mitigación futura: truncar por cantidad de eventos o longitud total.
-- **Falsos positivos en dedup**: el Jaccard ≥ 0.85 puede marcar como duplicado contenido que es similar pero distinto. Mitigación: umbral configurable; `past_reviews` es el lado retenido y el peor caso es prunear un evento de discussion que queda contabilizado en `meta.n_deduped`.
+- **LLM scan quality**: if the orientation model produces low-quality briefs (empty sections when there are signals, or the reverse), the feature can degrade the review instead of improving it. Mitigation: the usage instructions inside `$PRIOR_CONTEXT` tell the review agent to ignore empty or irrelevant sections.
+- **Token budget**: if the discussion is very long, the orientation scan can be expensive or exceed the context window. Future mitigation: truncate by event count or total length.
+- **False positives in dedup**: Jaccard ≥ 0.85 can mark content as duplicate when it is similar but distinct. Mitigation: configurable threshold; `past_reviews` is the retained side and the worst case is pruning a discussion event that remains counted in `meta.n_deduped`.
 
 ## Story Candidates
 
-1. **`fetcher`** — `fetcher.py`: fetch de 3 endpoints GitHub (issue comments, PR reviews, review comments), normalizar a dicts planos. Simplificar desde el viejo `github_history.py`.
-2. **`corpus`** — `corpus.py`: scan de sesiones locales + detección de footers CURe remotos con compatibilidad `head_sha` + retained-side dedup por char n-grams/Jaccard. Basado en el viejo `prior_corpus.py`.
-3. **`orient`** — `orient.py`: LLM scan que produce el orientation brief con secciones fijas (Áreas resueltas, Problemáticas, Pendientes, Patrones, Decisiones) + instrucciones de uso inline.
-4. **`init + integration`** — `__init__.py` con `build_pr_context(..., head_sha, ...)`, inyección en `cure.py` después de `compute_pr_stats`, fail-hard en errores. Escribir debug artifacts deduplicados a `work/`.
-5. **`prompt templates`** — añadir `$PRIOR_CONTEXT` a los 5 templates built-in: normal singlepass, big singlepass, multipass plan, step, synth.
-6. **`tests`** — unitarios por módulo + integración del pipeline completo con fixtures deterministas.
+1. **`fetcher`** — `fetcher.py`: fetch from 3 GitHub endpoints (issue comments, PR reviews, review comments), normalize to flat dicts. Simplify from the old `github_history.py`.
+2. **`corpus`** — `corpus.py`: local session scan + remote CURe footer detection with `head_sha` compatibility + retained-side dedup by char n-grams/Jaccard. Based on the old `prior_corpus.py`.
+3. **`orient`** — `orient.py`: LLM scan that produces the orientation brief with fixed sections (Resolved areas, Problem areas, Pending issues, Repeated patterns, Decisions made) + inline usage instructions.
+4. **`init + integration`** — `__init__.py` with `build_pr_context(..., head_sha, ...)`, injection in `cure.py` after `compute_pr_stats`, fail-hard on errors. Write deduplicated debug artifacts to `work/`.
+5. **`prompt templates`** — add `$PRIOR_CONTEXT` to the 5 built-in templates: normal singlepass, big singlepass, multipass plan, step, synth.
+6. **`tests`** — unit tests per module + full pipeline integration with deterministic fixtures.
 
 ## Decisions & Constraints
 
 **Locked-in:**
-- Package de 4 archivos bajo `cure_pr_context/` (no 18 archivos como la iniciativa anterior)
-- API: `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `gh_fetch` es list-capable (`gh_api_list`), no `gh_api_json`
-- `head_sha` se pasa explícitamente desde `_pr_flow_impl` (`review_head_sha` si existe, si no PR API `head_sha`) para verificar footers remotos por prefijo
-- `$PRIOR_CONTEXT` en los 5 templates built-in de review (normal singlepass, big singlepass, multipass plan, step, synth)
-- Fail hard ante cualquier error (GitHub, LLM, archivos corruptos)
-- LLM inyectado como `Callable[[str], str]` — sin acoplamiento a configs de `cure.py`
-- Sin cache en esta iteración
-- Dedup: char n-grams + Jaccard ≥ 0.85, puro stdlib; `past_reviews` retenido, duplicate discussion pruned
+- 4-file package under `cure_pr_context/` (not 18 files like the previous initiative)
+- API: `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `gh_fetch` is list-capable (`gh_api_list`), not `gh_api_json`
+- `head_sha` is passed explicitly from `_pr_flow_impl` (`review_head_sha` if it exists, otherwise PR API `head_sha`) to verify remote footers by prefix
+- `$PRIOR_CONTEXT` in the 5 built-in review templates (normal singlepass, big singlepass, multipass plan, step, synth)
+- Fail hard on any error (GitHub, LLM, corrupt files)
+- LLM injected as `Callable[[str], str]` — no coupling to `cure.py` configs
+- No cache in this iteration
+- Dedup: char n-grams + Jaccard ≥ 0.85, pure stdlib; `past_reviews` retained, duplicate discussion pruned
 
-**Explícitamente NO parte de esta iniciativa:**
-- Multi-stage pipeline, semantic pipeline, disposition arbitration (del viejo subsequent-review)
-- Cache o almacenamiento persistente
-- Evidencia trusted/untrusted, clasificación de señales
-- Cambios de UX o flags nuevos de CLI
-- Cambios en `cure_flows.py` más allá de añadir `$PRIOR_CONTEXT` a los templates
+**Explicitly NOT part of this initiative:**
+- Multi-stage pipeline, semantic pipeline, disposition arbitration (from the old subsequent-review)
+- Cache or persistent storage
+- Trusted/untrusted evidence, signal classification
+- UX changes or new CLI flags
+- Changes in `cure_flows.py` beyond adding `$PRIOR_CONTEXT` to the templates
 
 ## External Resources
 

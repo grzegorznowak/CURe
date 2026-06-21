@@ -20,7 +20,7 @@ def test_build_orientation_brief_invokes_llm_and_ensures_sections() -> None:
 
     def run_llm(prompt: str) -> str:
         prompts.append(prompt)
-        return "## Problemáticas\n- Investigate API failures."
+        return "## Problem areas\n- Investigate API failures."
 
     brief = build_orientation_brief(
         discussion=[{"kind": "issue_comment", "body": "please check API failures"}],
@@ -30,6 +30,6 @@ def test_build_orientation_brief_invokes_llm_and_ensures_sections() -> None:
     )
 
     assert "Use this prior context as orientation only" in brief
-    for header in ["Áreas resueltas", "Problemáticas", "Pendientes", "Patrones", "Decisiones"]:
+    for header in ["Resolved areas", "Problem areas", "Pending issues", "Repeated patterns", "Decisions made"]:
         assert header in brief
     assert "please check API failures" in prompts[0]
