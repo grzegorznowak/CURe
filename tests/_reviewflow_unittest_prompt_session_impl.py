@@ -201,8 +201,6 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertNotIn("./rf-fetch-url", text)
         self.assertIn("$REVIEW_CITATION_CONTRACT", followup)
         self.assertIn("$REVIEW_CITATION_CONTRACT", big_followup)
-        zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
-        self.assertIn("$REVIEW_CITATION_CONTRACT", zip_template)
 
     def test_final_review_templates_expose_verbose_finding_placeholder(self) -> None:
         prompt_paths = [
@@ -217,10 +215,6 @@ class PromptTemplateTests(unittest.TestCase):
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("$VERBOSE_FINDING_MODE_GUIDANCE", text)
-        self.assertNotIn(
-            "$VERBOSE_FINDING_MODE_GUIDANCE",
-            (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8"),
-        )
 
     def test_review_templates_use_plain_code_under_review_wording(self) -> None:
         normal = (ROOT / "prompts" / "mrereview_gh_local.md").read_text(encoding="utf-8")
@@ -303,8 +297,6 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertEqual(contract.availability_proof, "successful_execution")
             self.assertEqual(contract.resource_discovery_rule, "neutral_expected_empty")
             self.assertEqual(cure_flows.chunkhound_prompt_contract_for_template(name), contract)
-
-        self.assertIsNone(cure_flows.chunkhound_prompt_contract_for_template("mrereview_zip.md"))
 
     def test_chunkhound_backed_prompts_use_helper_contract(self) -> None:
         prompt_paths = [
@@ -536,17 +528,6 @@ class PromptTemplateTests(unittest.TestCase):
             )
             self.assertNotIn("with JSON output", text)
 
-    def test_zip_template_discourages_file_writes_and_fenced_output(self) -> None:
-        zip_template = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
-        self.assertIn("Do not create, edit, or move any files.", zip_template)
-        self.assertIn("CURe will save your final response", zip_template)
-        self.assertIn("Do not wrap the response in a fenced code block.", zip_template)
-        self.assertNotIn("Write the final result to:", zip_template)
-        self.assertNotIn("```markdown", zip_template)
-        self.assertIn("## Business / Product Assessment", zip_template)
-        self.assertIn("## Technical Assessment", zip_template)
-        self.assertNotIn("**Decision**:", zip_template)
-
     def test_review_templates_keep_abort_gate_tool_neutral(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "mrereview_gh_local.md",
@@ -687,10 +668,6 @@ class PromptTemplateTests(unittest.TestCase):
             self.assertIn("Evidence / mitigation:", text)
             self.assertIn("without inventing production facts", text)
 
-        zip_text = (ROOT / "prompts" / "mrereview_zip.md").read_text(encoding="utf-8")
-        self.assertIn("### Input Boundary Shape Risk Assessment", zip_text)
-        self.assertIn("Status: [Triggered/Not triggered/Not assessed in inputs]", zip_text)
-
     def test_multipass_prompts_route_input_boundary_shape_risk_to_real_boundary(self) -> None:
         prompt_paths = [
             ROOT / "prompts" / "mrereview_gh_local_big_plan.md",
@@ -821,7 +798,6 @@ class PromptTemplateTests(unittest.TestCase):
             ROOT / "prompts" / "mrereview_gh_local_followup.md",
             ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
             ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
-            ROOT / "prompts" / "mrereview_zip.md",
         ]
         for path in prompt_paths:
             text = path.read_text(encoding="utf-8")
@@ -852,7 +828,6 @@ class PromptTemplateTests(unittest.TestCase):
             ROOT / "prompts" / "mrereview_gh_local_followup.md",
             ROOT / "prompts" / "mrereview_gh_local_big_followup.md",
             ROOT / "prompts" / "mrereview_gh_local_big_synth.md",
-            ROOT / "prompts" / "mrereview_zip.md",
         ]
         duplicate_suppression_prompt_paths = [
             ROOT / "prompts" / "default.md",
@@ -3073,449 +3048,6 @@ class InteractiveFlowTests(unittest.TestCase):
             cfg.unlink(missing_ok=True)
 
 
-class ZipSelectionTests(unittest.TestCase):
-    def test_build_zip_input_display_lines_formats_plain_and_markdown(self) -> None:
-        inputs = [
-            {
-                "session_id": "s1",
-                "kind": "review",
-                "path": "/tmp/s1/review.md",
-                "completed_at": "2026-03-04T01:00:00+00:00",
-                "verdicts": {"business": "APPROVE", "technical": "REQUEST CHANGES"},
-                "target_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            }
-        ]
-        plain = rf.build_zip_input_display_lines(inputs_meta=inputs)
-        markdown = rf.build_zip_input_display_lines(inputs_meta=inputs, markdown=True)
-        self.assertEqual(
-            plain,
-            [
-                "- s1 [review] biz=APPROVE tech=REQUEST CHANGES 2026-03-04T01:00:00+00:00 head bbbbbbbbbbbb /tmp/s1/review.md"
-            ],
-        )
-        self.assertEqual(
-            markdown,
-            [
-                "- `s1` • `review` • biz=APPROVE tech=REQUEST CHANGES • 2026-03-04T01:00:00+00:00 • head `bbbbbbbbbbbb` • `/tmp/s1/review.md`"
-            ],
-        )
-
-    def test_append_zip_inputs_provenance_appends_section(self) -> None:
-        md = ROOT / ".tmp_test_zip_append.md"
-        try:
-            md.write_text(
-                _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
-                encoding="utf-8",
-            )
-            rf.append_zip_inputs_provenance(
-                markdown_path=md,
-                inputs_meta=[
-                    {
-                        "session_id": "s1",
-                        "kind": "review",
-                        "path": "/tmp/s1/review.md",
-                        "completed_at": "2026-03-04T01:00:00+00:00",
-                        "verdicts": {"business": "APPROVE", "technical": "REQUEST CHANGES"},
-                        "target_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    }
-                ],
-            )
-            text = md.read_text(encoding="utf-8")
-            self.assertIn("## Inputs Processed", text)
-            self.assertIn("`s1`", text)
-            self.assertIn("biz=APPROVE tech=REQUEST CHANGES", text)
-            self.assertIn("head `bbbbbbbbbbbb`", text)
-        finally:
-            md.unlink(missing_ok=True)
-
-    def test_select_zip_sources_for_pr_head_filters_sha_and_picks_newest_per_session(self) -> None:
-        root = ROOT / ".tmp_test_zip_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-
-            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=9)
-            head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-            # Session s1: done but targets a different head SHA => excluded.
-            s1 = root / "s1"
-            s1.mkdir()
-            (s1 / "review.md").write_text("**Decision**: REJECT\n", encoding="utf-8")
-            (s1 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s1",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "created_at": "2026-03-03T00:00:00+00:00",
-                        "completed_at": "2026-03-03T01:00:00+00:00",
-                        "paths": {"review_md": str(s1 / "review.md")},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            # Session s2: done, review targets head_sha => included (older).
-            s2 = root / "s2"
-            s2.mkdir()
-            (s2 / "review.md").write_text("**Decision**: APPROVE\n", encoding="utf-8")
-            (s2 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s2",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": head_sha,
-                        "created_at": "2026-03-04T00:00:00+00:00",
-                        "completed_at": "2026-03-04T01:00:00+00:00",
-                        "paths": {"review_md": str(s2 / "review.md")},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            # Session s3: done, review targets head_sha but followup targets head_sha and is newer => followup selected.
-            s3 = root / "s3"
-            s3.mkdir()
-            (s3 / "review.md").write_text("**Decision**: REQUEST CHANGES\n", encoding="utf-8")
-            followups = s3 / "followups"
-            followups.mkdir(parents=True, exist_ok=True)
-            fu_path = followups / "followup-20260305-000000.md"
-            fu_path.write_text("**Decision**: APPROVE\n", encoding="utf-8")
-            (s3 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s3",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": head_sha,
-                        "created_at": "2026-03-04T02:00:00+00:00",
-                        "completed_at": "2026-03-04T02:30:00+00:00",
-                        "paths": {"review_md": str(s3 / "review.md")},
-                        "followups": [
-                            {
-                                "completed_at": "2026-03-05T00:00:00+00:00",
-                                "output_path": str(fu_path),
-                                "head_sha_after": head_sha,
-                                "decision": "APPROVE",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            # Session s4: done, review targets head_sha but newer followup is REJECT => review should still be selected.
-            s4 = root / "s4"
-            s4.mkdir()
-            (s4 / "review.md").write_text("**Decision**: APPROVE\n", encoding="utf-8")
-            followups4 = s4 / "followups"
-            followups4.mkdir(parents=True, exist_ok=True)
-            fu4_path = followups4 / "followup-20260306-000000.md"
-            fu4_path.write_text("**Decision**: REJECT\n", encoding="utf-8")
-            (s4 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s4",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": head_sha,
-                        "created_at": "2026-03-06T00:00:00+00:00",
-                        "completed_at": "2026-03-06T00:10:00+00:00",
-                        "paths": {"review_md": str(s4 / "review.md")},
-                        "followups": [
-                            {
-                                "completed_at": "2026-03-06T01:00:00+00:00",
-                                "output_path": str(fu4_path),
-                                "head_sha_after": head_sha,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            # Session s5: done, only matching artifact is REJECT => excluded entirely.
-            s5 = root / "s5"
-            s5.mkdir()
-            (s5 / "review.md").write_text("**Decision**: REJECT\n", encoding="utf-8")
-            (s5 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s5",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": head_sha,
-                        "created_at": "2026-03-07T00:00:00+00:00",
-                        "completed_at": "2026-03-07T00:10:00+00:00",
-                        "paths": {"review_md": str(s5 / "review.md")},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            sources = rf.select_zip_sources_for_pr_head(sandbox_root=root, pr=pr, head_sha=head_sha)
-            self.assertEqual([s.session_id for s in sources], ["s4", "s3", "s2"])
-            self.assertEqual(sources[0].kind, "review")
-            self.assertEqual(sources[1].kind, "followup")
-            self.assertEqual(sources[1].verdicts, _verdicts("APPROVE"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_select_zip_sources_for_pr_head_skips_dual_axis_reject_artifacts(self) -> None:
-        root = ROOT / ".tmp_test_zip_reject_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-
-            pr = rf.PullRequestRef(host="github.com", owner="acme", repo="repo", number=9)
-            head_sha = "cccccccccccccccccccccccccccccccccccccccc"
-
-            s1 = root / "s1"
-            s1.mkdir()
-            review_md = s1 / "review.md"
-            review_md.write_text(
-                _sectioned_review_markdown(business="APPROVE", technical="REJECT"),
-                encoding="utf-8",
-            )
-            (s1 / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "s1",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "head_sha": head_sha,
-                        "created_at": "2026-03-08T00:00:00+00:00",
-                        "completed_at": "2026-03-08T00:10:00+00:00",
-                        "paths": {"review_md": str(review_md)},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            sources = rf.select_zip_sources_for_pr_head(sandbox_root=root, pr=pr, head_sha=head_sha)
-            self.assertEqual(sources, [])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-
-class ZipFlowTests(unittest.TestCase):
-    def test_zip_flow_logs_selected_inputs_and_appends_provenance(self) -> None:
-        root = ROOT / ".tmp_test_zip_flow_root"
-        cfg = ROOT / ".tmp_test_zip_flow_cfg.json"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            cfg.write_text("{}", encoding="utf-8")
-
-            host_session = root / "host-session"
-            host_session.mkdir(parents=True, exist_ok=True)
-            host_repo = host_session / "repo"
-            host_repo.mkdir()
-            host_work = host_session / "work"
-            host_work.mkdir()
-            host_review = host_session / "review.md"
-            host_review.write_text("**Decision**: APPROVE\n", encoding="utf-8")
-            (host_session / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "host-session",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 9,
-                        "base_ref": "main",
-                        "base_ref_for_review": "cure_base__main",
-                        "paths": {
-                            "repo_dir": str(host_repo),
-                            "work_dir": str(host_work),
-                            "review_md": str(host_review),
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            other_session = root / "other-session"
-            other_session.mkdir(parents=True, exist_ok=True)
-            other_artifact = other_session / "followup.md"
-            other_artifact.write_text("**Decision**: REQUEST CHANGES\n", encoding="utf-8")
-
-            sources = [
-                rf.ZipSourceArtifact(
-                    session_id="host-session",
-                    session_dir=host_session,
-                    kind="review",
-                    artifact_path=host_review,
-                    completed_at="2026-03-04T01:00:00+00:00",
-                    verdicts=_verdicts("APPROVE", "REQUEST CHANGES"),
-                    target_head_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                ),
-                rf.ZipSourceArtifact(
-                    session_id="other-session",
-                    session_dir=other_session,
-                    kind="followup",
-                    artifact_path=other_artifact,
-                    completed_at="2026-03-05T01:00:00+00:00",
-                    verdicts=_verdicts("REQUEST CHANGES", "REJECT"),
-                    target_head_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                ),
-            ]
-
-            args = argparse.Namespace(
-                pr_url="https://github.com/acme/repo/pull/9",
-                codex_model=None,
-                codex_effort=None,
-                codex_plan_effort=None,
-                ui="off",
-                verbosity="normal",
-                no_stream=False,
-            )
-            paths = rf.ReviewflowPaths(
-                sandbox_root=root,
-                cache_root=ROOT / ".tmp_test_zip_flow_cache",
-                review_chunkhound_config=cfg,
-                main_chunkhound_config=cfg,
-            )
-            stdout = StringIO()
-            stderr = StringIO()
-            prompts: list[str] = []
-
-            def fake_run_codex_exec(**kwargs: object) -> rf.CodexRunResult:
-                prompt = kwargs["prompt"]
-                assert isinstance(prompt, str)
-                prompts.append(prompt)
-                output_path = kwargs["output_path"]
-                assert isinstance(output_path, Path)
-                output_path.write_text(
-                    "```markdown\n" + _sectioned_review_markdown(
-                        business="APPROVE",
-                        technical="REQUEST CHANGES",
-                    ) + "```\n",
-                    encoding="utf-8",
-                )
-                return rf.CodexRunResult(resume=None)
-
-            with (
-                mock.patch.object(
-                    rf,
-                    "gh_api_json",
-                    return_value={
-                        "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-                        "title": "Zip PR",
-                    },
-                ) as gh_api_json,
-                mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("zip should use shared metadata helper")),
-                mock.patch.object(rf, "select_zip_sources_for_pr_head", return_value=sources),
-                mock.patch.object(rf, "resolve_codex_flags", return_value=([], {"resolved": {}})),
-                mock.patch.object(rf, "codex_mcp_overrides_for_reviewflow", return_value=[]),
-                mock.patch.object(
-                    rf,
-                    "prepare_review_agent_runtime",
-                    return_value={
-                        "env": {},
-                        "metadata": {"provider": "codex"},
-                        "codex_flags": [],
-                        "dangerously_bypass_approvals_and_sandbox": False,
-                        "add_dirs": [],
-                    },
-                ),
-                mock.patch.object(rf, "run_codex_exec", side_effect=fake_run_codex_exec),
-                mock.patch("sys.stdout", stdout),
-                mock.patch("sys.stderr", stderr),
-            ):
-                rc = rf.zip_flow(args, paths=paths)
-
-            self.assertEqual(rc, 0)
-            gh_api_json.assert_called_once_with(
-                host="github.com",
-                path="repos/acme/repo/pulls/9",
-                allow_public_fallback=True,
-            )
-            self.assertIn("zip selected 2 input artifact(s) for HEAD bbbbbbbbbbbb", stderr.getvalue())
-            self.assertIn(
-                "zip input host-session [review] biz=APPROVE tech=REQUEST CHANGES 2026-03-04T01:00:00+00:00 head bbbbbbbbbbbb",
-                stderr.getvalue(),
-            )
-            self.assertIn(
-                "zip input other-session [followup] biz=REQUEST CHANGES tech=REJECT 2026-03-05T01:00:00+00:00 head bbbbbbbbbbbb",
-                stderr.getvalue(),
-            )
-            self.assertEqual(len(prompts), 1)
-            self.assertIn("Do not create, edit, or move any files.", prompts[0])
-            self.assertIn("Do not wrap the response in a fenced code block.", prompts[0])
-            self.assertNotIn("Write the final result to:", prompts[0])
-            self.assertNotIn("```markdown", prompts[0])
-            self.assertIn("## Business / Product Assessment", prompts[0])
-            self.assertIn("## Technical Assessment", prompts[0])
-
-            output_md = Path(stdout.getvalue().strip())
-            text = output_md.read_text(encoding="utf-8")
-            self.assertFalse(text.startswith("```markdown"))
-            self.assertIn("## Inputs Processed", text)
-            self.assertIn("`host-session`", text)
-            self.assertIn("`other-session`", text)
-            self.assertIn("biz=APPROVE tech=REQUEST CHANGES", text)
-            self.assertIn("head `bbbbbbbbbbbb`", text)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
-
-    def test_zip_flow_non_github_host_still_fails_via_shared_metadata_contract(self) -> None:
-        args = argparse.Namespace(
-            pr_url="https://ghe.example.com/acme/repo/pull/9",
-            codex_model=None,
-            codex_effort=None,
-            codex_plan_effort=None,
-            ui="off",
-            verbosity="normal",
-            no_stream=False,
-        )
-        paths = rf.ReviewflowPaths(
-            sandbox_root=ROOT,
-            cache_root=ROOT,
-            review_chunkhound_config=ROOT / ".tmp_cfg",
-            main_chunkhound_config=ROOT / ".tmp_cfg2",
-        )
-        with (
-            mock.patch.object(
-                rf,
-                "gh_api_json",
-                side_effect=rf.ReviewflowError("`gh` is not authenticated for ghe.example.com."),
-            ) as gh_api_json,
-            mock.patch.object(rf, "require_gh_auth", side_effect=AssertionError("zip should not preflight gh auth")),
-        ):
-            with self.assertRaises(rf.ReviewflowError) as ctx:
-                rf.zip_flow(args, paths=paths)
-
-        gh_api_json.assert_called_once_with(
-            host="ghe.example.com",
-            path="repos/acme/repo/pulls/9",
-            allow_public_fallback=True,
-        )
-        self.assertIn("ghe.example.com", str(ctx.exception))
-
-
 class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
     def _write_session_meta(
         self,
@@ -5004,7 +4536,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
-        self.assertEqual(names, ["pr", "resume", "zip", "clean", "status", "watch"])
+        self.assertEqual(names, ["pr", "resume", "clean", "status", "watch"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
@@ -5035,7 +4567,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIs(rf.pr_flow, cure_commands.pr_flow)
         self.assertIs(rf.resume_flow, cure_commands.resume_flow)
         self.assertIs(rf.followup_flow, cure_commands.followup_flow)
-        self.assertIs(rf.zip_flow, cure_commands.zip_flow)
         self.assertIs(rf.interactive_flow, cure_commands.interactive_flow)
         self.assertIs(rf.clean_flow, cure_commands.clean_flow)
         self.assertFalse(hasattr(rf, "jira_smoke_flow"))
@@ -5116,15 +4647,6 @@ class WorkflowContractTests(unittest.TestCase):
             (
                 "followup",
                 "followup_flow",
-                {
-                    "paths": mock.sentinel.paths,
-                    "config_path": Path("/tmp/reviewflow.toml"),
-                    "codex_base_config_path": Path("/tmp/codex.toml"),
-                },
-            ),
-            (
-                "zip",
-                "zip_flow",
                 {
                     "paths": mock.sentinel.paths,
                     "config_path": Path("/tmp/reviewflow.toml"),

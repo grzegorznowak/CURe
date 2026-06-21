@@ -5397,49 +5397,6 @@ class RefactorRegressionTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_select_zip_sources_for_pr_head_matches_case_insensitive_identity(self) -> None:
-        root = ROOT / ".tmp_test_case_insensitive_zip"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-
-            session_dir = root / "zip-session"
-            session_dir.mkdir()
-            review_md = session_dir / "review.md"
-            review_md.write_text(
-                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
-                encoding="utf-8",
-            )
-            (session_dir / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "zip-session",
-                        "status": "done",
-                        "host": "github.com",
-                        "owner": "acme",
-                        "repo": "repo",
-                        "number": 12,
-                        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "review_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "created_at": "2026-03-03T00:00:00+00:00",
-                        "completed_at": "2026-03-03T01:00:00+00:00",
-                        "paths": {"review_md": str(review_md)},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            pr = rf.PullRequestRef(host="GitHub.COM", owner="AcMe", repo="Repo", number=12)
-            sources = rf.select_zip_sources_for_pr_head(
-                sandbox_root=root,
-                pr=pr,
-                head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-
-            self.assertEqual([source.session_id for source in sources], ["zip-session"])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
     def test_status_flow_matches_mixed_case_pr_url(self) -> None:
         root = ROOT / ".tmp_test_case_insensitive_status"
         try:

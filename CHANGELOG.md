@@ -10,6 +10,12 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 - Removed Claude CLI support; Codex remains the supported CLI/local agent path, alongside configured HTTP providers.
 
+## [0.8.1] - 2026-06-19
+
+### Removed
+
+- Removed the `zip` command (Zip Arbiter workflow phase) that synthesized multiple review/followup artifacts into a consolidated final review. It was never used in practice and added unnecessary complexity.
+
 ## [0.8.0] - 2026-06-02
 
 ### Changed

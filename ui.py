@@ -307,8 +307,6 @@ _PHASE_LABEL_OVERRIDES = {
     "followup_update": "Update follow-up",
     "followup_index": "Refresh index",
     "followup_review": "Generate follow-up",
-    "zip_resolve_pr_head": "Resolve PR head",
-    "codex_zip": "Generate zip review",
 }
 
 
@@ -1049,31 +1047,6 @@ def build_dashboard_lines(
                 codex_bits.append(f"plan={peff}")
             dials.append(("Codex", " ".join(codex_bits)))
 
-    kind = str(meta.get("kind") or "").strip()
-    zip_meta = meta.get("zip")
-    zip_meta = zip_meta if isinstance(zip_meta, dict) else {}
-    zip_display_inputs: list[str] = []
-    raw_zip_display = zip_meta.get("display_inputs")
-    if isinstance(raw_zip_display, list):
-        zip_display_inputs = [str(item) for item in raw_zip_display if isinstance(item, str) and str(item).strip()]
-    if not zip_display_inputs:
-        raw_inputs = zip_meta.get("inputs")
-        raw_inputs = raw_inputs if isinstance(raw_inputs, list) else []
-        for item in raw_inputs:
-            if not isinstance(item, dict):
-                continue
-            session_id = str(item.get("session_id") or "?").strip() or "?"
-            item_kind = str(item.get("kind") or "?").strip() or "?"
-            item_verdicts = _format_verdicts(item)
-            completed = str(item.get("completed_at") or "?").strip() or "?"
-            target = str(item.get("target_head_sha") or "").strip()
-            target = target[:12] if target else "?"
-            path = str(item.get("path") or "?").strip() or "?"
-            zip_display_inputs.append(
-                f"- {session_id} [{item_kind}] {item_verdicts or 'biz=? tech=?'} {completed} head {target} {path}"
-            )
-    if kind == "zip" and zip_display_inputs:
-        dials.append(("Zip", f"{len(zip_display_inputs)} inputs"))
 
     if snapshot.verbosity is Verbosity.debug:
         last_cmd = meta.get("last_cmd")
@@ -1114,11 +1087,6 @@ def build_dashboard_lines(
             if out:
                 out.append("")
             out.extend(dial_lines)
-        if kind == "zip" and snapshot.verbosity is not Verbosity.quiet and zip_display_inputs:
-            if out:
-                out.append("")
-            out.append("Inputs:")
-            out.extend(_truncate(line, width) for line in zip_display_inputs)
         if len(out) > max_lines:
             if max_lines == 1:
                 return ["…"]

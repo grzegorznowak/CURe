@@ -39,7 +39,7 @@ This document describes the internal architecture: how modules connect, what hap
 
 ### `cure_commands.py` — CLI Dispatch & Top-Level Flows
 
-The primary entry point for all user-facing commands. Receives parsed `argparse.Namespace` arguments and delegates to the appropriate flow function. Owns the command catalog (`commands --json`), `setup`, `doctor`, `status`, `watch`, `clean`, `set-agent`, and `cache` subcommands. For review-producing commands (`pr`, `resume`, `followup`, `zip`, `interactive`), it delegates to `cure.py` via thin wrappers.
+The primary entry point for all user-facing commands. Receives parsed `argparse.Namespace` arguments and delegates to the appropriate flow function. Owns the command catalog (`commands --json`), `setup`, `doctor`, `status`, `watch`, `clean`, `set-agent`, and `cache` subcommands. For review-producing commands (`pr`, `resume`, `followup`, `interactive`), it delegates to `cure.py` via thin wrappers.
 
 ### `cure.py` — Core Implementation (the "shell")
 
@@ -48,7 +48,6 @@ The largest module (~13k lines). Contains the canonical implementation of all re
 - **`_pr_flow_impl`** — Full new-review pipeline: resolve PR metadata, create sandbox, clone repo, build ChunkHound index, resolve LLM config, run multipass review, finalize artifacts.
 - **`_resume_flow_impl`** — Resume a failed or partially-completed multipass session from a specific phase (plan, steps, synth).
 - **`_followup_flow_impl`** — Run a follow-up review on a completed session after the PR HEAD has advanced.
-- **`_zip_flow_impl`** — Synthesize a final "arbiter" review from multiple completed review artifacts for a given PR HEAD.
 - **`_interactive_flow_impl`** — Interactive review mode with operator-in-the-loop.
 - **Multipass orchestration** — Plan decomposition, parallel step execution with worker pools, synthesis, grounding validation.
 - **LLM execution dispatch** — `run_llm_exec` routes to Codex CLI or HTTP providers.
@@ -84,7 +83,6 @@ Pure-logic module (no subprocess calls) for session state management:
 - **Session resolution** — Finds sessions by ID or PR URL, selects the best candidate for `resume`, `status`, `watch`, etc.
 - **Review verdicts** — Extracts and normalizes `APPROVE`/`REJECT`/`REQUEST CHANGES` verdicts from markdown review artifacts.
 - **LLM meta normalization** — Resolves legacy Codex-only metadata to the unified `llm` schema.
-- **Zip source selection** — Finds completed review/followup artifacts for a given PR HEAD SHA.
 - **`build_status_payload`** — Assembles the full JSON status payload for a session.
 
 ### `cure_runtime.py` — Runtime Configuration Resolution
@@ -166,7 +164,6 @@ Markdown templates with `{{VARIABLE}}` placeholders, selected by prompt profile 
 | `mrereview_gh_local_big_followup.md` | Follow-up after HEAD advance |
 | `mrereview_gh_local_followup.md` | Normal-size follow-up |
 | `mrereview_gh_local_big_resume_*.md` | Resume variants (plan/step/synth) |
-| `mrereview_zip.md` | Arbiter synthesis from multiple reviews |
 
 ## Flow of a `cure pr` Review
 

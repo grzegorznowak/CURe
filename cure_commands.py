@@ -179,17 +179,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 ],
             },
             {
-                "name": "zip",
-                "summary": "Synthesize a final arbiter review for the PR's current HEAD.",
-                "targets": ["PR_URL"],
-                "safety": "Reads existing review artifacts; does not create a new sandbox.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Prints the generated zip markdown path on success.",
-                "exit_codes": {"0": "zip completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("zip <PR_URL>"),
-                "variants": [],
-            },
-            {
                 "name": "clean",
                 "summary": "Delete an exact session, preview closed-session cleanup, or use the TTY cleaner.",
                 "targets": ["session_id", "closed"],
@@ -1255,22 +1244,6 @@ def followup_flow(
     )
 
 
-def zip_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    config_path: Path | None = None,
-    codex_base_config_path: Path | None = None,
-) -> int:
-    rf = _reviewflow()
-    return rf._zip_flow_impl(
-        args,
-        paths=paths,
-        config_path=config_path,
-        codex_base_config_path=codex_base_config_path,
-    )
-
-
 def interactive_flow(
     args: argparse.Namespace,
     *,
@@ -1363,5 +1336,4 @@ __all__ = [
     "setup_flow",
     "status_flow",
     "watch_flow",
-    "zip_flow",
 ]
