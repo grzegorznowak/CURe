@@ -42,7 +42,7 @@ def test_pr_context_end_to_end_with_deterministic_fixtures(tmp_path: Path) -> No
         sandbox_root=tmp_path / "sandboxes",
         work_dir=tmp_path / "work",
         pr_stats={"changed_files": 3, "changed_lines": 30},
-        head_sha="cafe123456789",
+        head_sha="cafe123456789",  # pragma: allowlist secret
         gh_fetch=lambda path: fixtures[path],
         run_llm=lambda prompt: "## Pendientes\n- Please revisit validation.",
     )

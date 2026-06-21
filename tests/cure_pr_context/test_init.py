@@ -35,7 +35,7 @@ def test_build_pr_context_orchestrates_and_writes_pruned_debug_artifacts(tmp_pat
         sandbox_root=tmp_path / "sandboxes",
         work_dir=tmp_path / "work",
         pr_stats={"changed_files": 1},
-        head_sha="abc123456789",
+        head_sha="abc123456789",  # pragma: allowlist secret
         gh_fetch=gh_fetch,
         run_llm=lambda prompt: "## Problemáticas\n- new user question",
     )
