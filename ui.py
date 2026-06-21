@@ -796,8 +796,6 @@ def _live_progress_lines(*, meta: dict, width: int, max_lines: int = 12) -> list
         text = str(item.get("text") or "").strip()
         if not text:
             continue
-        if str(item.get("type") or "").strip() == "assistant_text":
-            text = f"Claude: {text}"
         ts = _short_live_progress_ts(item.get("ts"))
         prefix = f"[{ts}] " if ts else ""
         line = prefix + text

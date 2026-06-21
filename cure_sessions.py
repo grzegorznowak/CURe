@@ -516,7 +516,7 @@ def _resolve_session_logs_dir(*, session_dir: Path, meta: dict[str, Any], work_d
         return ((session_dir / path).resolve() if not path.is_absolute() else path.resolve())
     raw_logs = meta.get("logs")
     logs: dict[str, Any] = raw_logs if isinstance(raw_logs, dict) else {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is not None:
             return candidate.parent
@@ -527,13 +527,11 @@ def _resolve_session_log_paths(*, session_dir: Path, meta: dict[str, Any], logs_
     raw_logs = meta.get("logs")
     logs: dict[str, Any] = raw_logs if isinstance(raw_logs, dict) else {}
     payload: dict[str, str] = {}
-    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events", "claude_events"):
+    for key in ("cure", "reviewflow", "chunkhound", "codex", "codex_events"):
         candidate = _resolve_log_path(session_dir=session_dir, raw=str(logs.get(key) or "").strip())
         if candidate is None:
             if key == "codex_events":
                 suffix = "codex.events.jsonl"
-            elif key == "claude_events":
-                suffix = "claude.events.jsonl"
             else:
                 suffix = f"{key}.log"
             fallback = logs_dir / suffix
@@ -722,8 +720,6 @@ def _default_llm_preset_for_provider(provider: object) -> str | None:
     value = str(provider or "").strip().lower()
     if value == "codex":
         return DEFAULT_IMPLICIT_CODEX_PRESET
-    if value == "claude":
-        return "claude-cli"
     if value == "gemini":
         return "gemini-cli"
     if value == "openai":
