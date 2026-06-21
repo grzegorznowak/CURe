@@ -246,7 +246,7 @@ base_config_path = \"/absolute/path/to/chunkhound-base.json\"
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
 include = [\"**/*.py\", \"**/*.ts\"]
-exclude = [\"**/.claude/**\", \"**/openspec/**\"]
+exclude = [\"**/openspec/**\"]
 per_file_timeout_seconds = 6
 per_file_timeout_min_size_kb = 128
 

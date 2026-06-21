@@ -100,7 +100,7 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
 include = ["**/*.py", "**/*.ts"]
-exclude = ["**/.claude/**", "**/openspec/**"]
+exclude = ["**/openspec/**"]
 per_file_timeout_seconds = 6
 per_file_timeout_min_size_kb = 128
 
@@ -1069,8 +1069,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if transport == "cli" and provider == "claude" and command in {"", "claude"}:
-        return "claude-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1317,18 +1315,15 @@ def _synthetic_legacy_codex_preset(
 
 def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
     current_env = os.environ if env is None else env
-    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
     codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
-    if claude_detected and not codex_detected:
-        return "claude-cli", "detected_env"
-    if codex_detected and not claude_detected:
+    if codex_detected:
         return "codex-cli", "detected_env"
     return None, None
 
 
 def detect_installed_local_agents() -> dict[str, str]:
     installed: dict[str, str] = {}
-    for agent in ("codex", "claude"):
+    for agent in ("codex",):
         path = shutil.which(agent)
         if path:
             installed[agent] = path
@@ -1374,7 +1369,7 @@ def resolve_local_agent_selection(
     if explicit_agent:
         preset = LOCAL_AGENT_PRESET_BY_NAME.get(explicit_agent)
         if preset is None:
-            raise ReviewflowError("Unsupported agent. Expected one of: codex, claude")
+            raise ReviewflowError("Unsupported agent. Expected one of: codex")
         if explicit_agent not in installed:
             result.update(
                 {
@@ -1434,7 +1429,7 @@ def resolve_local_agent_selection(
                     "effective_provider": provider or None,
                     "source": "cli_preset",
                     "status": "not_applicable",
-                    "detail": f"explicit preset `{cli_selected}` does not use a local codex/claude CLI provider",
+                    "detail": f"explicit preset `{cli_selected}` does not use a local codex CLI provider",
                     "ready": True,
                     "blocking": False,
                 }
@@ -1507,7 +1502,7 @@ def resolve_local_agent_selection(
                     "status": "invalid_saved_preference",
                     "detail": (
                         f"saved default preset `{raw_saved_preset}` does not resolve to the required local "
-                        "codex/claude CLI provider"
+                        "codex CLI provider"
                     ),
                     "ready": False,
                     "blocking": True,
@@ -2801,7 +2796,7 @@ def _doctor_executor_network_check(agent_runtime: dict[str, Any]) -> DoctorCheck
     if not bool(agent_runtime.get("supported")):
         return None
     provider = str(agent_runtime.get("provider") or "").strip().lower()
-    if provider not in {"codex", "claude"}:
+    if provider != "codex":
         return None
     return DoctorCheck(
         name="executor-network",
@@ -2917,13 +2912,6 @@ def _resolved_doctor_agent_runtime(
                 "dangerously_bypass_approvals_and_sandbox": True,
                 "sandbox_mode": None,
                 "approval_policy": None,
-            }
-        )
-    elif provider == "claude":
-        payload.update(
-            {
-                "dangerously_skip_permissions": True,
-                "permission_mode": None,
             }
         )
     return payload
