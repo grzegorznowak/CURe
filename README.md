@@ -102,7 +102,7 @@ If CURe is already partially configured, inspect the active local setup before c
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 ```
 
-On a TTY, `cure setup` acts as the setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects installed `codex` and `claude` executables, persists the sticky choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH`.
+On a TTY, `cure setup` acts as the setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects the installed `codex` executable, persists the local CLI-agent choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH`.
 
 ### Example 3: what a finished review produces
 
@@ -158,18 +158,16 @@ Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper ra
 
 Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
-Codex and Claude executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state. When `cure doctor` resolves Codex or Claude, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
+Codex executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state. When `cure doctor` resolves Codex, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
 
-Claude-first explicit override example:
+Codex explicit override example:
 
 ```bash
-cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json
-cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli
+cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json
+cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli
 ```
 
-If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
-
-To persist the choice for future runs, use `cure set-agent claude` or `cure set-agent codex`. `cure setup` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
+To persist the choice for future runs, use `cure set-agent codex`. `cure setup` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
 
 Need the full bootstrap contract for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 
@@ -285,7 +283,7 @@ If local CURe config already exists, inspect it before overwriting it:
 
 Prefer `cure doctor --pr-url <PR_URL> --json` as the readiness summary after that inspection. It now reports `repo_local_chunkhound` plus the `repo-local-chunkhound` and `executor-network` checks so the operator does not need to infer those details from raw files alone.
 
-When no explicit preset or config default is selected, CURe only autodetects between `claude-cli` and `codex-cli` from the high-confidence session markers it already understands. If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.
+When no explicit preset or config default is selected, CURe autodetects `codex-cli` from the high-confidence session markers it already understands. If autodetect needs to be overridden, pass `--llm-preset codex-cli` explicitly.
 
 Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
 
@@ -343,7 +341,7 @@ step_workers = 4
 reasoning_effort = "high"
 ```
 
-On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in defaults are now explicit: `claude-cli` uses `claude-sonnet-4-6` with effort `high`, and `codex-cli` defaults to effort `high`.
+On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in Codex defaults are explicit: `codex-cli` defaults to effort `high`.
 
 When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 

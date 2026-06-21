@@ -1797,22 +1797,22 @@ class HistoricalReviewsTests(unittest.TestCase):
         )
         self.assertEqual(summary, "llm=codex-cli/gpt-5.3-codex-spark/medium")
 
-    def test_resolve_codex_summary_prefers_runtime_adapter_model_for_claude(self) -> None:
+    def test_resolve_codex_summary_prefers_runtime_adapter_model_for_runtime_adapter(self) -> None:
         summary = rf.resolve_codex_summary(
             {
                 "llm": {
-                    "preset": "claude-cli",
-                    "provider": "claude",
+                    "preset": "codex-cli",
+                    "provider": "codex",
                     "model": None,
                     "reasoning_effort": "high",
                     "adapter": {
-                        "provider": "claude",
-                        "model": "claude-sonnet-4-6",
+                        "provider": "codex",
+                        "model": "gpt-5.3-codex",
                     },
                 }
             }
         )
-        self.assertEqual(summary, "llm=claude-cli/claude-sonnet-4-6/high")
+        self.assertEqual(summary, "llm=codex-cli/gpt-5.3-codex/high")
 
     def test_scan_completed_sessions_for_pr_filters_and_sorts(self) -> None:
         root = ROOT / ".tmp_test_review_sandboxes"
@@ -4852,14 +4852,14 @@ class WorkflowContractTests(unittest.TestCase):
                 resumed_at="2026-03-10T11:05:00+00:00",
                 number=26,
                 llm={
-                    "preset": "claude-cli",
+                    "preset": "codex-cli",
                     "transport": "cli",
-                    "provider": "claude",
-                    "model": "claude-sonnet-4-6",
+                    "provider": "codex",
+                    "model": "gpt-5.3-codex",
                     "reasoning_effort": "high",
                     "capabilities": {"supports_resume": True},
                 },
-                agent_runtime={"profile": "balanced", "provider": "claude", "permission_mode": "dontAsk"},
+                agent_runtime={"profile": "balanced", "provider": "codex", "permission_mode": "dontAsk"},
                 followup_name="followup-1.md",
             )
 
@@ -4886,7 +4886,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertTrue(payload["paths"]["logs_dir"].endswith("/work/logs"))
             self.assertTrue(payload["logs"]["codex"].endswith("/work/logs/codex.log"))
             self.assertEqual(payload["latest_artifact"]["path"].rsplit("/", 1)[-1], "followup-1.md")
-            self.assertEqual(payload["llm"]["summary"], "llm=claude-cli/claude-sonnet-4-6/high")
+            self.assertEqual(payload["llm"]["summary"], "llm=codex-cli/gpt-5.3-codex/high")
             self.assertEqual(payload["agent_runtime"]["profile"], "balanced")
         finally:
             shutil.rmtree(root, ignore_errors=True)

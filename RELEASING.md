@@ -17,7 +17,6 @@ This repo publishes the public CURe package as `cureview`, while the installed c
 Use the repo-owned command surface when running a release with an agent:
 
 - canonical command: [`operations/commands/cure_release.md`](operations/commands/cure_release.md)
-- Claude adapter: [`.claude/skills/cure_release/SKILL.md`](.claude/skills/cure_release/SKILL.md)
 - Codex adapter: [`.codex/prompts/cure_release.md`](.codex/prompts/cure_release.md)
 - curated release history: [`CHANGELOG.md`](CHANGELOG.md)
 

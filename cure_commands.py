@@ -702,9 +702,9 @@ def _ensure_bootstrap_files(
 
 def _agent_guidance_lines(*, command_name: str) -> list[str]:
     return [
-        "Supported local coding agents are `codex` and `claude`, detected from executables on PATH.",
-        f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` or `{PRIMARY_CLI_COMMAND} setup --agent claude` to persist a choice.",
-        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex|claude` to change the saved choice later.",
+        "Supported local coding agents are detected from executables on PATH.",
+        f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` to persist a choice.",
+        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex` to change the saved choice later.",
     ]
 
 
