@@ -14,13 +14,13 @@ This repo publishes the public CURe package as `cureview`, while the installed c
 
 ## Repo-Owned Release Command Surfaces
 
-Use the repo-owned command surface when running a release with an agent:
+For agent-assisted releases, use the repo-owned command surface as a checklist while a maintainer remains responsible for each publish decision and checkpoint:
 
 - canonical command: [`operations/commands/cure_release.md`](operations/commands/cure_release.md)
 - Codex adapter: [`.codex/prompts/cure_release.md`](.codex/prompts/cure_release.md)
 - curated release history: [`CHANGELOG.md`](CHANGELOG.md)
 
-These files are execution aids, not a second policy source. If they conflict with this runbook, `RELEASING.md` is normative.
+These files are execution aids, not a second policy source and not authorization to release unattended. If they conflict with this runbook, `RELEASING.md` is normative.
 
 ## Trusted Publishing Setup
 

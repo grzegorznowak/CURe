@@ -9,11 +9,9 @@
 
 CURe ("Code Under Review") is a CLI for running pull request reviews inside isolated sandboxes, with ChunkHound-backed code search/research and a configurable review agent on top.
 
-It is for two audiences:
-- human operators who want a repeatable way to hand PR review work to agents without letting them mutate the source checkout
-- agentic sessions that need a clear, reusable bootstrap contract for fresh or partially configured environments
+It is for human operators who want a repeatable way to run or delegate PR review work without letting the source checkout be mutated. LLM agents can assist by following documented commands, but installation, persistent configuration, secrets, network access, local agent selection, and sandbox permissions remain operator-controlled.
 
-If you are an agent, or you want to install CURe as a reusable skill, start with [SKILL.md](SKILL.md).
+If you are using CURe from an agent session, treat [SKILL.md](SKILL.md) as an assisted checklist: run only the steps your environment and operator allow, and stop when setup or permissions are ambiguous.
 
 ## Quick Links
 
@@ -32,8 +30,8 @@ If you are an agent, or you want to install CURe as a reusable skill, start with
 
 Use CURe when you want to:
 - review a GitHub PR from a disposable sandbox instead of the working repo
-- standardize how humans and agents start, observe, resume, and clean review runs
-- give an agent a single documented path from fresh install or existing local setup to "review in progress"
+- standardize how operators start, observe, resume, and clean review runs, including agent-assisted runs
+- document an assisted path from an operator-approved install or disposable setup to "review in progress" without promising unattended bootstrap
 
 CURe is different from an ad-hoc manual agent review because the project checkout stays untouched, the review state stays on disk, and the workflow is resumable instead of prompt-by-prompt improvisation.
 
@@ -52,9 +50,9 @@ cure doctor --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new
 ```
 
-`cure setup` reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` when you want CURe to install or replace that binary explicitly, or `--skip-install` when `chunkhound` is already available and should be left untouched.
+`cure setup` reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when the operator has approved CURe installing or replacing that binary explicitly, or `--skip-install` when `chunkhound` is already available and should be left untouched.
 
-Ephemeral agent run path:
+Disposable assisted run path:
 
 ```bash
 uvx --from cureview cure setup
@@ -62,7 +60,9 @@ uvx --from cureview cure doctor --pr-url <PR_URL> --json
 uvx --from cureview cure pr <PR_URL> --if-reviewed new
 ```
 
-Keep the README focused on the landing page and first success. For the full agent bootstrap contract, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
+This disposable path assumes package execution, network access, config writes under the selected XDG roots, and any ChunkHound install are permitted by the operator and sandbox. If one of those prerequisites is blocked or ambiguous, stop and ask the operator instead of improvising.
+
+Keep the README focused on the landing page and first success. For the full operator-controlled agent-assistance checklist, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
 
 ## Example Flows
 
@@ -77,11 +77,11 @@ cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json
 cure pr https://github.com/chunkhound/chunkhound/pull/220 --if-reviewed new
 ```
 
-The `v0.1.2` public release prove-out verified the package-first bootstrap flow in a clean temp-home install. `cure setup` is the single public bootstrap command.
+The `v0.1.2` public release prove-out verified the package-first setup flow in a clean temp-home install. `cure setup` is the primary public setup command.
 
-### Example 2: ephemeral agent bootstrap from the one-sentence kickoff
+### Example 2: disposable assisted run from the one-sentence kickoff
 
-Use the canonical agent run surface when the review happens inside a disposable sandbox or agent session:
+Use this assisted run surface when the review happens inside a disposable sandbox or agent session where the operator has approved package execution and temporary config/state/cache writes:
 
 ```bash
 tmp_root="$(mktemp -d)"
@@ -102,7 +102,7 @@ If CURe is already partially configured, inspect the active local setup before c
 - repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
 ```
 
-On a TTY, `cure setup` acts as the setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects the installed `codex` executable, persists the local CLI-agent choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH`.
+On a TTY, `cure setup` acts as an operator-facing setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects the installed `codex` executable, can persist an approved local CLI-agent choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH` and the operator has approved that install.
 
 ### Example 3: what a finished review produces
 
@@ -128,13 +128,13 @@ Review output uses two independent lenses:
 
 ## Agent And Setup Notes
 
-Ensure `git`, `curl`, and `ca-certificates` are present before bootstrap. Install `uv` if it is missing.
+Ensure `git`, `curl`, and `ca-certificates` are present before bootstrap. Install `uv` only in an environment where package installation is operator-approved; otherwise stop with the missing prerequisite and the exact command the operator can run.
 
 Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-first setup. Its `repo_local_chunkhound` payload plus the `repo-local-chunkhound` check and `executor-network` advisory check surface the same setup hints in machine-readable and text forms.
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
-Commands that actually require bootstrap now fail or repair earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor`.
+Commands that actually require bootstrap now fail or repair approved non-secret defaults earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before review side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor` so a human operator or approved automation can complete setup.
 
 On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
 
@@ -158,7 +158,7 @@ Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper ra
 
 Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
-Codex executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of pretending CURe can always self-bootstrap from zero state. When `cure doctor` resolves Codex, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
+Codex executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of claiming CURe can guarantee end-to-end setup or runtime access. When `cure doctor` resolves Codex, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
 
 Codex explicit override example:
 
@@ -167,9 +167,9 @@ cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli
 ```
 
-To persist the choice for future runs, use `cure set-agent codex`. `cure setup` also repairs missing bootstrap files plus the saved local-agent choice when it can do so deterministically.
+To persist the choice for future runs, use `cure set-agent codex` after the operator has approved Codex as the local CLI provider. `cure setup` can repair missing non-secret bootstrap files and the saved local-agent choice only when the selected config target is approved and the choice is unambiguous.
 
-Need the full bootstrap contract for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
+Need the full operator-controlled setup checklist for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 
 ## Core Commands
 
@@ -232,7 +232,7 @@ The public package remains the default and recommended path:
 uv tool install cureview
 ```
 
-Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient. The current secondary targets are:
+Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient, and only when the operator has approved running the installer in the current environment. The current secondary targets are:
 - Linux x86_64 with glibc 2.31 or newer
 - macOS x86_64
 - macOS arm64
@@ -249,7 +249,7 @@ Pin a specific standalone release:
 curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8
 ```
 
-The installer downloads the matching release asset into `~/.local/bin/cure`. After that, the bootstrap/readiness flow is unchanged:
+The installer downloads the matching release asset into `~/.local/bin/cure`. Agent sessions should not run this installer just because package installation failed; they should stop unless the operator approves this persistent install path. After that, the bootstrap/readiness flow is unchanged:
 
 ```bash
 cure setup
@@ -292,7 +292,7 @@ That sentence is the kickoff contract, not a promise that every sandbox can fini
 The operator should not need to provide a local checkout path.
 It should not do a manual review outside CURe.
 
-For the full bootstrap contract around fresh installs, existing local setup, and operator handoff, use [SKILL.md](SKILL.md).
+For the full operator-controlled checklist around approved installs, existing local setup, and operator handoff, use [SKILL.md](SKILL.md).
 
 ## Minimal Config
 
@@ -345,9 +345,9 @@ On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolve
 
 When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 
-If an embedding key is already present in the environment, `cure setup` adds the matching embedding block and continues. If `VOYAGE_API_KEY` already exists, `cure setup` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure setup` writes the OpenAI embedding model into the active ChunkHound base config and continues.
+If an embedding key is already present in the environment, `cure setup` adds the matching non-secret embedding provider/model block and continues. If `VOYAGE_API_KEY` already exists, `cure setup` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure setup` writes the OpenAI embedding model into the active ChunkHound base config and continues. CURe does not write the secret value into that config.
 
-If no supported key is present, the agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review.
+If no supported key is present, an assisting agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review. Agents must not ask the operator to paste secret values into chat, infer secret values, or persist secrets outside operator-approved local mechanisms.
 
 The structured `review_intelligence` source registry now feeds prompt guidance, session metadata, and `cure doctor --json` capability summaries. Only `mode = "required"` sources are preflighted before review generation; optional sources stay lazy and surface as `available`, `unavailable`, or `unknown` based on the runtime facts CURe already has.
 
