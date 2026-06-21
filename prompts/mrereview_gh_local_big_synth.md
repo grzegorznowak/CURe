@@ -17,23 +17,21 @@ Read the plan JSON and all step outputs, then produce the final review.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
-## Prior PR context — DO NOT READ until Phase 2
+## Prior PR context (discussion + past CURe reviews)
 $PRIOR_CONTEXT
 
-# Review phases — read fully before starting
+# Reconciliation
+You have independent step findings produced WITHOUT seeing the prior context above. Reconcile them now:
 
-### Phase 1 — Independent step findings
-You have already completed independent review steps that examined the code directly. Those step findings are your Phase 1 — formed without prior context influence. Treat them as your primary evidence.
+**Option B rules:**
+1. If a step finding and the context agree → keep the step finding as-is.
+2. If the context flags something no step found → inspect that specific file/path BEFORE adding the finding. Only add it if the code evidence supports it. Cite path:line.
+3. If the context says an area is "resolved" but a step found an issue there → inspect that file. Code evidence wins over context claims.
+4. If the context is blank or irrelevant → return step findings unchanged.
+5. Do NOT re-review code the steps already covered well. Only inspect disputed areas.
 
-### Phase 2 — Context reconciliation
-Read "## Prior PR context" above. Cross-check your step findings against it:
-- Did any step miss something the context flags? Add it only if the original code evidence from that step supports it.
-- Does the context overstate anything the steps found to be resolved or benign? Note the discrepancy explicitly.
-- Are there "Resolved areas" in the context that the diff actually touches? Flag them — they may need re-review regardless of context.
-- If the context is blank, skip to Phase 3.
-
-### Phase 3 — Final synthesis
-Produce the final review below. Integrate independent step findings with any validated context signals. Where they conflict, the step findings (direct code examination) win. Cite code evidence (path:line), not context claims.
+# Output
+Produce the final review. Integrate validated context signals. Where code evidence and context disagree, code evidence wins. Cite path:line, not context claims.
 
 # Claim Verification Rule
 Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.
