@@ -20,7 +20,7 @@ When `cure pr` runs, the review agent currently sees only the PR description and
 2. **`corpus`** — `corpus.py`: local session scan + remote CURe footer detection with `head_sha` compatibility + retained-side dedup by char n-grams/Jaccard. Based on the old `prior_corpus.py`.
 3. **`orient`** — `orient.py`: LLM scan that produces the orientation brief with fixed sections (Resolved areas, Problem areas, Pending issues, Repeated patterns, Decisions made) + inline usage instructions.
 4. **`init + integration`** — `__init__.py` with `build_pr_context(..., head_sha, ...)`, injection in `cure.py` after `compute_pr_stats`, fail-hard on errors. Write deduplicated debug artifacts to `work/`.
-5. **`prompt templates`** — add `$PRIOR_CONTEXT` to the 3 synthesis templates (normal singlepass, big singlepass, multipass synth) with 3-phase guardrails; plan/step templates intentionally exclude it.
+5. **`prompt templates`** — add `$PRIOR_CONTEXT` to multipass synth template only. Singlepass templates intentionally exclude it — context arrives via a separate second LLM call (two-pass architecture with Option B reconciliation rules). Plan/step templates are independent review passes without context.
 6. **`tests`** — unit tests per module + full pipeline integration with deterministic fixtures.
 
 ## Decisions & Constraints
@@ -29,8 +29,9 @@ When `cure pr` runs, the review agent currently sees only the PR description and
 - 4-file package under `cure_pr_context/` (not 18 files like the previous initiative)
 - API: `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `gh_fetch` is list-capable (`gh_api_list`), not `gh_api_json`
 - `head_sha` is passed explicitly from `_pr_flow_impl` (`review_head_sha` if it exists, otherwise PR API `head_sha`) to verify remote footers by prefix
-- `$PRIOR_CONTEXT` in the 3 synthesis templates (normal singlepass, big singlepass, multipass synth); plan and step are independent review passes without prior context
-- 3-phase review protocol embedded in all 5 templates: independent review → context reconciliation → final synthesis
+- `$PRIOR_CONTEXT` in multipass synth template only; singlepass uses two-pass architecture (draft call then reconcile call with context, following Option B reconciliation rules: only inspect disputed files, code evidence wins)
+- Plan and step are independent review passes without prior context
+- Two-pass singlepass reconciliation rules: (1) draft+context agree → keep draft, (2) context flags missed issue → read that specific file before adding, (3) context says resolved but draft found issue → read file, code wins, (4) context blank → return draft unchanged
 - Fail hard on any error (GitHub, LLM, corrupt files)
 - LLM injected as `Callable[[str], str]` — no coupling to `cure.py` configs
 - No cache in this iteration

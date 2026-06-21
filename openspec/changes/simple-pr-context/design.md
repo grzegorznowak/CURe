@@ -35,7 +35,11 @@ GitHub API arrays (3 endpoints)
         │                                    ├──→  JSON → work/pr_context_discussion.json (pruned discussion)
         │                                    └──→  JSON → work/pr_context_past_reviews.json (retained past reviews)
         ▼
-  build_orientation_brief()      ──→  str  (pruned discussion + retained past reviews → $PRIOR_CONTEXT)
+  build_orientation_brief()      ──→  str  (`orientation_brief`)
+        │
+        ├──→ singlepass with context: draft review → _reconcile_prior_context(draft, brief, run_llm) → final review
+        ├──→ singlepass without context: one review call, unchanged
+        └──→ multipass synth: render `$PRIOR_CONTEXT` in the synth prompt
 ```
 
 ## API contract
@@ -167,26 +171,26 @@ After `compute_pr_stats` completes (~`cure.py:9754-9767`), before the final mult
 1. Bind `gh_fetch` to `gh_api_list(host=pr.host, ...)`
 2. Compute `effective_head_sha = review_head_sha or head_sha or None` and call `build_pr_context(pr, sandbox_root=paths.sandbox_root, work_dir=work_dir, pr_stats=pr_stats, head_sha=effective_head_sha, gh_fetch=gh_fetch, run_llm=run_llm)` in a new phase
 3. Store result dict/meta under `progress.meta["pr_context"]`
-4. When building `extra_vars` for any built-in review prompt mode, always add `PRIOR_CONTEXT`: `context["orientation_brief"] or ""`
-5. Fail hard: if `build_pr_context()` raises, abort the review before prompt rendering
+4. For built-in singlepass (normal or big): render and run the singlepass template without `PRIOR_CONTEXT` to produce `draft_review`. If `context["orientation_brief"]` is non-empty, call `_reconcile_prior_context(draft_review, context["orientation_brief"], run_llm)` and use that result as the final review. If the brief is `""`, skip reconciliation and use `draft_review` unchanged.
+5. For multipass: leave plan and step calls unchanged and context-free. When rendering the synth prompt, pass `PRIOR_CONTEXT = context["orientation_brief"] or ""` in `extra_vars`.
+6. Fail hard: if `build_pr_context()` or `_reconcile_prior_context()` raises, abort the review instead of silently returning an unreconciled context-aware result.
 
 ### Template changes
 
-Add `$PRIOR_CONTEXT` to the 3 synthesis-level templates:
-- `prompts/mrereview_gh_local.md` (normal singlepass)
-- `prompts/mrereview_gh_local_big.md` (big singlepass when multipass is disabled)
-- `prompts/mrereview_gh_local_big_synth.md` (multipass synth)
+`$PRIOR_CONTEXT` appears only in the multipass synth template:
+- `prompts/mrereview_gh_local_big_synth.md` (multipass synth reconciliation)
 
-Intentionally exclude `$PRIOR_CONTEXT` from the 2 independent-pass templates:
+Remove `$PRIOR_CONTEXT` and the old in-template sequencing instructions from the singlepass templates:
+- `prompts/mrereview_gh_local.md` (normal singlepass draft prompt)
+- `prompts/mrereview_gh_local_big.md` (big singlepass draft prompt when multipass is disabled)
+
+Continue to exclude `$PRIOR_CONTEXT` from the independent multipass templates:
 - `prompts/mrereview_gh_local_big_plan.md` (multipass plan — independent planning)
 - `prompts/mrereview_gh_local_big_step.md` (multipass step — independent code review)
 
-Embed a 3-phase review protocol in all 5 templates:
-1. **Phase 1 — Independent review**: examine all code, form own findings. Do not read `$PRIOR_CONTEXT` yet.
-2. **Phase 2 — Context reconciliation**: read `$PRIOR_CONTEXT`, cross-check against Phase 1 findings. Did you miss anything? Does the context overstate?
-3. **Phase 3 — Final synthesis**: integrate independent findings with validated context signals. Where they conflict, direct code examination wins.
+Singlepass context reconciliation is not a template instruction. It is a separate prompt, preferably inline in `cure.py::_reconcile_prior_context()`, that receives `draft_review` and `orientation_brief` after the first LLM call. The reconcile prompt should instruct the model to treat the draft review as the independent code-evidence baseline, use the orientation brief to check for missed unresolved issues and confirmed decisions, and return the final review. Current code evidence wins over unsupported context claims.
 
-In multipass, plan and steps execute Phase 1 only (no context available). The synth template executes all 3 phases — reconciling independent step findings against the context.
+Multipass is unchanged architecturally: plan and step calls are independent, and the synth call reconciles their findings with `$PRIOR_CONTEXT`.
 
 ### Packaging
 

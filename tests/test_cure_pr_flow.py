@@ -196,6 +196,16 @@ def test_build_multipass_step_entries_no_prior_context(monkeypatch) -> None:
     assert entries[0].prompt == "prior=$PRIOR_CONTEXT step=api"
 
 
+def test_two_pass_singlepass_reconcile_prompt_has_option_b_rules() -> None:
+    """The reconcile prompt must contain Option B reconciliation rules."""
+    flow_source = inspect.getsource(cure._pr_flow_impl)
+    assert "reconcile_prior_context" in flow_source
+    assert 'inspect that specific file/path BEFORE adding' in flow_source
+    assert 'Code evidence wins over context claims' in flow_source
+    assert 'Do NOT re-review files the draft already covered well' in flow_source
+    assert 'if review_md_path.is_file() and prior_context and isinstance(profile_template_name, str)' in flow_source
+
+
 def test_gh_api_list_decodes_slurped_and_unslurped_pages() -> None:
     assert cure._decode_gh_api_list_stdout(stdout='[[{"id": 1}], [{"id": 2}]]', path="p") == [
         {"id": 1},

@@ -4,15 +4,18 @@ from importlib import resources
 
 from cure_flows import render_prompt
 
+# Only multipass synth template contains $PRIOR_CONTEXT.
+# Singlepass templates (normal + big) intentionally exclude it —
+# context arrives via a separate two-pass LLM call.
 TEMPLATES = [
-    "mrereview_gh_local.md",
-    "mrereview_gh_local_big.md",
     "mrereview_gh_local_big_synth.md",
 ]
 
 # Plan and step templates intentionally exclude $PRIOR_CONTEXT —
-# they are independent review passes. Context is reconciled in synth.
+# they are independent review passes.
 NO_PRIOR_TEMPLATES = [
+    "mrereview_gh_local.md",
+    "mrereview_gh_local_big.md",
     "mrereview_gh_local_big_plan.md",
     "mrereview_gh_local_big_step.md",
 ]
@@ -66,3 +69,7 @@ def test_prior_context_renders_with_brief_and_empty_string_without_raw_token() -
         assert "$PRIOR_CONTEXT" not in rendered, name
         empty_rendered = _render(text, "")
         assert "$PRIOR_CONTEXT" not in empty_rendered, name
+
+    for name in NO_PRIOR_TEMPLATES:
+        text = resources.files("prompts").joinpath(name).read_text(encoding="utf-8")
+        assert "$PRIOR_CONTEXT" not in text, f"{name} should not contain $PRIOR_CONTEXT"

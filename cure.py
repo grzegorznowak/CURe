@@ -10612,6 +10612,44 @@ def _pr_flow_impl(
                     )
                     progress.flush()
 
+        # Two-pass singlepass: reconcile draft with prior context (Option B rules)
+        # Only for built-in profile templates; custom prompts are user-controlled.
+        if review_md_path.is_file() and prior_context and isinstance(profile_template_name, str):
+            with phase("reconcile_prior_context", progress=progress, quiet=quiet):
+                draft = review_md_path.read_text(encoding="utf-8")
+                reconcile_prompt = f"""You are reconciling a completed draft code review with prior PR context.
+
+## Prior PR context (discussion + past CURe reviews)
+{prior_context}
+
+## Draft review (produced independently, without seeing the context above)
+{draft}
+
+## Reconciliation rules (Option B)
+1. If the draft and context agree on a finding -> keep the draft as-is.
+2. If the context flags something the draft missed -> inspect that specific file/path BEFORE adding the finding. Only add it if the code evidence supports it. Cite path:line.
+3. If the context says an area is "resolved" but the draft found an issue there -> inspect that file. Code evidence wins over context claims.
+4. If the context is blank or irrelevant -> return the draft unchanged.
+5. Do NOT re-review files the draft already covered well. Only inspect disputed areas.
+
+## Output
+Return the final review in the same format as the draft. Integrate validated context signals. Where code evidence and context disagree, code evidence wins. Cite path:line."""
+                reconcile_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+                reconcile_result = run_llm_exec(
+                    repo_dir=repo_dir,
+                    resolved=llm_resolved,
+                    resolution_meta=llm_resolution_meta,
+                    output_path=review_md_path,
+                    prompt=reconcile_prompt,
+                    env=reconcile_env,
+                    stream=False,
+                    progress=progress,
+                    add_dirs=add_dirs,
+                    runtime_policy=None,
+                )
+                record_llm_usage(progress.meta.setdefault("llm", {}), reconcile_result.adapter_meta)
+                progress.flush()
+
         if review_md_path.is_file() and (
             persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
         ):
