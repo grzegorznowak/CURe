@@ -51,7 +51,7 @@ The largest module (~13k lines). Contains the canonical implementation of all re
 - **`_zip_flow_impl`** — Synthesize a final "arbiter" review from multiple completed review artifacts for a given PR HEAD.
 - **`_interactive_flow_impl`** — Interactive review mode with operator-in-the-loop.
 - **Multipass orchestration** — Plan decomposition, parallel step execution with worker pools, synthesis, grounding validation.
-- **LLM execution dispatch** — `run_llm_exec` routes to Codex CLI, Claude CLI, or HTTP providers.
+- **LLM execution dispatch** — `run_llm_exec` routes to Codex CLI or HTTP providers.
 - **ChunkHound helper** — Generates a standalone Python script (`cure-chunkhound`) that wraps ChunkHound daemon access for CLI-provider review sessions.
 - **Session lifecycle** — `SessionProgress` class manages `meta.json` state throughout a review.
 
@@ -72,7 +72,6 @@ Abstracts the differences between LLM providers:
 
 - **`run_llm_exec`** — Provider-agnostic dispatch (mirrors the version in `cure.py` but delegates back to it).
 - **Codex CLI adapter** — Builds command-line flags, manages sandbox permissions, captures events from JSONL logs.
-- **Claude CLI adapter** — Runs `claude` with prompt piped via stdin, captures streaming events, extracts tool usage and review artifacts.
 - **HTTP adapter** — For OpenAI/OpenRouter Responses API calls.
 - **ChunkHound helper generation** — Writes a self-contained helper script that manages daemon lifecycle, preflight checks, and tool call timeouts.
 - **Auth staging** — Copies `gh`, Jira, and `.netrc` credentials into the sandbox work directory.
@@ -95,8 +94,8 @@ Resolves the full runtime environment from CLI args, env vars, and TOML config:
 - **`ReviewflowRuntime`** — Frozen dataclass holding resolved config path, paths, and codex config path with their provenance sources.
 - **Config path cascade** — CLI flag → env var → `cure.toml` → XDG defaults.
 - **ChunkHound config loading** — Reads `[chunkhound]` from `cure.toml`, resolves `base_config_path`, overlay indexing/research settings.
-- **LLM preset resolution** — Resolves which provider (codex-cli, claude-cli, openai-responses, openrouter-responses) to use from saved preferences, env, or autodetection.
-- **Local agent selection** — Detects installed `codex`/`claude` executables, applies saved preferences, surfaces readiness status.
+- **LLM preset resolution** — Resolves which provider (codex-cli, openai-responses, openrouter-responses) to use from saved preferences, env, or autodetection.
+- **Local agent selection** — Detects the installed `codex` executable, applies saved preferences, surfaces readiness status.
 - **Doctor checks** — Runs a structured health-check suite (`_doctor_runtime_checks`) and produces a machine-readable payload.
 - **Review intelligence config** — Parses the `[review_intelligence]` source registry (GitHub, Jira) and builds prompt guidance.
 - **Multipass defaults** — Reads `[multipass]` from config (grounding_mode, step_workers, max_steps).
@@ -117,7 +116,7 @@ Handles all user-facing output:
 - **Dashboard rendering** — Reads `meta.json` to produce a live terminal dashboard with phase status, multipass step progress, ChunkHound index stats.
 - **Structured logging** — `log()` writes to both stderr and the session log file.
 - **Review artifact footer** — Appends provenance watermarks to completed review markdown.
-- **Claude/Codex event parsing** — Extracts tool call progress, assistant messages, and usage stats from provider event streams.
+- **Codex event parsing** — Extracts tool call progress, assistant messages, and usage stats from provider event streams.
 
 ### `ui.py` — Terminal UI Primitives
 
@@ -208,7 +207,7 @@ CLI args → cure_commands.pr_flow() → cure._pr_flow_impl()
       logs/
         cure.log
         chunkhound.log
-        codex.log       # or claude.events.jsonl
+        codex.log
       review_plan.json  # Multipass plan
       review.step-01.md # Step artifacts
       review.step-02.md
@@ -219,7 +218,7 @@ CLI args → cure_commands.pr_flow() → cure._pr_flow_impl()
 
 ### 4. LLM Config Resolution
 
-- Resolve which provider to use (codex-cli, claude-cli, openai-responses, openrouter-responses)
+- Resolve which provider to use (codex-cli, openai-responses, openrouter-responses)
 - Cascade: CLI flag → env var → `cure.toml` `[llm].default_preset` → autodetect from PATH
 - On TTY with unset model/effort, show an interactive picker
 - Resolve per-stage LLM configs for multipass (plan, step, synth can have different effort levels)
@@ -255,7 +254,7 @@ For "big" PRs (auto-detected by file/line thresholds), the review runs in three 
 #### 8a. Plan Stage
 
 - Render the plan prompt template with PR context, diff stats, review intelligence guidance
-- Run through the LLM (Codex/Claude/HTTP)
+- Run through the LLM (Codex CLI or HTTP)
 - Parse the returned JSON plan: an ordered list of review steps, each with a focus area and title
 - Persist plan to `work/review_plan.json`
 
@@ -306,8 +305,8 @@ For "big" PRs (auto-detected by file/line thresholds), the review runs in three 
         ┌──────────┐ ┌─────────┐ ┌──────────┐
         │ChunkHound│ │  LLM    │ │  Review  │
         │ index &  │ │Provider │ │ Intelli- │
-        │ search   │ │(Codex/  │ │ gence    │
-        │ research │ │ Claude/ │ │(GitHub/  │
+        │ search   │ │(Codex   │ │ gence    │
+        │ research │ │ CLI/    │ │(GitHub/  │
         └──────────┘ │ HTTP)   │ │ Jira)    │
                      └─────────┘ └──────────┘
 ```
@@ -373,7 +372,7 @@ CURe checks for the `jira` binary on PATH and the config file during `cure docto
 
 ### Credential Staging into the Sandbox
 
-Because LLM sandbox environments (Codex/Claude) restrict filesystem access, CURe stages credentials into the session work directory:
+Because Codex CLI sandbox environments restrict filesystem access, CURe stages credentials into the session work directory:
 
 1. **`prepare_jira_config_for_codex()`** — Copies the entire Jira config directory (`~/.config/.jira/`) into `<session>/work/jira_config/` and sets `JIRA_CONFIG_FILE` in the subprocess environment.
 
@@ -473,7 +472,7 @@ CURe validates and normalizes these keys. They flow into the step prompts so eac
 
 4. **Grounding validation** — In strict mode, every `file:line` citation in a step artifact is verified against the actual repo. This catches LLM hallucinations about code locations.
 
-5. **Provider abstraction** — The LLM execution layer supports multiple providers (Codex CLI, Claude CLI, OpenAI/OpenRouter HTTP). The review pipeline is provider-agnostic; only the execution adapter changes.
+5. **Provider abstraction** — The LLM execution layer supports multiple providers (Codex CLI and OpenAI/OpenRouter HTTP). The review pipeline is provider-agnostic; only the execution adapter changes.
 
 6. **ChunkHound helper** — Instead of native MCP wiring, CLI-provider reviews use a generated helper script (`cure-chunkhound`) that manages the ChunkHound daemon lifecycle, preflight checks, and tool call timeouts. This gives CURe control over the search/research contract.
 

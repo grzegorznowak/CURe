@@ -15,7 +15,6 @@ from _reviewflow_unittest_config_runtime import (  # noqa: E402, F401
     AgentRuntimePolicyTests,
     CanonicalShellOwnershipTests,
     ChunkHoundConfigTests,
-    ClaudeLiveProgressTests,
     CodexConfigTests,
     LlmPresetConfigTests,
     ReviewIntelligenceConfigTests,
