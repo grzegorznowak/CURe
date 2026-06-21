@@ -12,6 +12,12 @@ Use the configured review-intelligence guidance below to gather the required pro
 $REVIEW_INTELLIGENCE_GUIDANCE
 CURe may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
 - If that file exists, read it first and use it as the primary PR-context source for this session.
+
+# Prior PR context (discussion + past CURe reviews)
+$PRIOR_CONTEXT
+
+- Treat the prior context above as orientation: use it to avoid re-requesting resolved work and to prioritize unresolved risks; verify every finding against the current checkout.
+- If this section is blank, proceed with the normal review flow.
 - Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.
 - Do not ABORT solely because GitHub MCP or `gh` is unavailable if the staged PR context plus the local git history/diff provide enough context for this review.
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).

@@ -9,6 +9,12 @@ Ensure code quality, prevent technical debt, and maintain architectural consiste
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review.
 $REVIEW_INTELLIGENCE_GUIDANCE
+
+# Prior PR context (discussion + past CURe reviews)
+$PRIOR_CONTEXT
+
+Use this prior context as orientation: avoid re-requesting resolved work, prioritize unresolved risks, and verify every finding against the current checkout. If this section is blank, proceed with the normal review flow.
+
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:

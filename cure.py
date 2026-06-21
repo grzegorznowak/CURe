@@ -6412,6 +6412,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    prior_context: str = "",
     cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
@@ -6437,6 +6438,7 @@ def _build_multipass_step_entries(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
+                "PRIOR_CONTEXT": prior_context,
                 "PLAN_JSON_PATH": str(plan_json_path),
                 "STEP_ID": step_id,
                 "STEP_TITLE": step_title,
@@ -7416,6 +7418,111 @@ def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) ->
     if not isinstance(payload, dict):
         raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
     return payload
+
+
+_GH_API_SLURP_SUPPORTED: bool | None = None
+
+
+def _decode_gh_api_list_stdout(*, stdout: str, path: str) -> list[Any]:
+    text = stdout.strip()
+    if not text:
+        return []
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    idx = 0
+    while idx < len(text):
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        if idx >= len(text):
+            break
+        try:
+            value, end = decoder.raw_decode(text, idx)
+        except Exception as e:
+            raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
+        values.append(value)
+        idx = end
+    payload: Any = values[0] if len(values) == 1 else values
+    if all(isinstance(page, list) for page in payload) if isinstance(payload, list) else False:
+        flattened: list[Any] = []
+        for page in payload:
+            flattened.extend(page)
+        return flattened
+    if not isinstance(payload, list):
+        raise ReviewflowError(f"`gh api` returned unexpected list payload for {path}")
+    return payload
+
+
+def _run_gh_api_list(*, host: str, path: str, use_slurp: bool) -> list[Any]:
+    cmd = ["gh", "api", "--hostname", host, path, "--paginate"]
+    if use_slurp:
+        cmd.append("--slurp")
+    result = run_cmd(cmd)
+    return _decode_gh_api_list_stdout(stdout=result.stdout, path=path)
+
+
+def _classify_gh_api_list_error(error: ReviewflowSubprocessError) -> str:
+    text = f"{error.stderr}\n{error.stdout}\n{error}".lower()
+    if "unknown flag" in text or "unknown option" in text or "invalid option" in text:
+        return "cli_unsupported_flag"
+    return "subprocess"
+
+
+def _github_public_api_list(*, path: str) -> list[Any]:
+    normalized = path.lstrip("/")
+    url = f"https://api.github.com/{normalized}"
+    items: list[Any] = []
+    while url:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"}, method="GET")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                link_header = resp.headers.get("Link", "")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise ReviewflowError(
+                f"Public GitHub API request failed ({getattr(e, 'code', '?')}): {normalized}\n{body}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
+        try:
+            payload = json.loads(body)
+        except Exception as e:
+            raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
+        if not isinstance(payload, list):
+            raise ReviewflowError(f"Public GitHub API returned unexpected list payload for {normalized}")
+        items.extend(payload)
+        next_url = ""
+        for part in link_header.split(","):
+            if 'rel="next"' in part:
+                start = part.find("<")
+                end = part.find(">", start + 1)
+                if start >= 0 and end > start:
+                    next_url = part[start + 1 : end]
+        url = next_url
+    return items
+
+
+def gh_api_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any]:
+    global _GH_API_SLURP_SUPPORTED
+
+    use_slurp = _GH_API_SLURP_SUPPORTED is not False
+    try:
+        payload = _run_gh_api_list(host=host, path=path, use_slurp=use_slurp)
+    except ReviewflowSubprocessError as e:
+        if use_slurp and _classify_gh_api_list_error(e) == "cli_unsupported_flag":
+            _GH_API_SLURP_SUPPORTED = False
+            try:
+                return _run_gh_api_list(host=host, path=path, use_slurp=False)
+            except ReviewflowSubprocessError as retry_error:
+                e = retry_error
+        if allow_public_fallback and _looks_like_gh_auth_error(e) and _supports_public_github_fallback(host):
+            _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
+            return _github_public_api_list(path=path)
+        raise
+    else:
+        if use_slurp:
+            _GH_API_SLURP_SUPPORTED = True
+        return payload
 
 
 def write_pr_context_file(
@@ -9544,6 +9651,7 @@ def _pr_flow_impl(
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
+    prior_context: str = ""
     profile_resolved: str | None = None
     profile_reason: str | None = None
     profile_template_name: str | None = None
@@ -9765,6 +9873,44 @@ def _pr_flow_impl(
                 }
             progress.meta["pr_stats"] = pr_stats
             progress.flush()
+
+        if not bool(args.no_review):
+            if llm_resolved is None or llm_resolution_meta is None:
+                raise ReviewflowError("LLM configuration was not resolved before PR context orientation.")
+
+            def _run_pr_context_orientation(prompt: str) -> str:
+                orientation_path = work_dir / "pr_context_orientation.md"
+                orientation_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+                run_llm_exec(
+                    repo_dir=repo_dir,
+                    resolved=llm_resolved,
+                    resolution_meta=llm_resolution_meta,
+                    output_path=orientation_path,
+                    prompt=prompt,
+                    env=orientation_env,
+                    stream=False,
+                    progress=progress,
+                    add_dirs=[],
+                    runtime_policy=None,
+                )
+                return orientation_path.read_text(encoding="utf-8") if orientation_path.is_file() else ""
+
+            with phase("build_pr_context", progress=progress, quiet=quiet):
+                pr_context_result = build_pr_context(
+                    pr=pr,
+                    sandbox_root=paths.sandbox_root,
+                    work_dir=work_dir,
+                    pr_stats=pr_stats,
+                    head_sha=review_head_sha or head_sha,
+                    gh_fetch=lambda path: gh_api_list(
+                        host=pr.host, path=path, allow_public_fallback=True
+                    ),
+                    run_llm=_run_pr_context_orientation,
+                )
+                prior_context = str(pr_context_result.get("orientation_brief") or "")
+                progress.meta["pr_context"] = pr_context_result.get("meta") or {}
+                progress.meta["pr_context"]["orientation_brief_chars"] = len(prior_context)
+                progress.flush()
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -10106,6 +10252,7 @@ def _pr_flow_impl(
                             **cod_hypothesis_ledger_prompt_vars(
                                 enabled=bool(getattr(args, "cod_ledger", False))
                             ),
+                            "PRIOR_CONTEXT": prior_context,
                             "MAX_STEPS": str(multipass_max_steps),
                         },
                     )
@@ -10236,6 +10383,7 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
+                        prior_context=prior_context,
                         cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
                     )
                     for entry in step_entries:
@@ -10325,6 +10473,7 @@ def _pr_flow_impl(
                                 **cod_hypothesis_ledger_prompt_vars(
                                     enabled=bool(getattr(args, "cod_ledger", False))
                                 ),
+                                "PRIOR_CONTEXT": prior_context,
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
@@ -10401,6 +10550,7 @@ def _pr_flow_impl(
                             )
                         )
                         prompt_extra_vars["PR_CONTEXT_PATH"] = str(pr_context_path)
+                        prompt_extra_vars["PRIOR_CONTEXT"] = prior_context
                         rendered = render_prompt(
                             prompt,
                             base_ref_for_review=base_ref_for_review,
@@ -14709,6 +14859,7 @@ from cure_runtime import (
     resolve_verbosity,
     toml_string,
 )
+from cure_pr_context import build_pr_context
 from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,

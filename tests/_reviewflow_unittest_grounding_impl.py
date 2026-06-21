@@ -2676,6 +2676,8 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -3968,6 +3970,8 @@ class BaselineSelectionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5155,6 +5159,8 @@ class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5505,6 +5511,8 @@ class RefactorRegressionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5706,6 +5714,8 @@ class RefactorRegressionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5910,6 +5920,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                 return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
             if cmd[:3] == ["gh", "pr", "checkout"]:
                 return _Result()
+            if cmd[:2] == ["gh", "api"]:
+                return _Result("[]")
             if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                 return _Result()
             raise AssertionError(f"unexpected command: {cmd}")
@@ -8975,6 +8987,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
             if cmd[:3] == ["gh", "pr", "checkout"]:
                 return _Result()
+            if cmd[:2] == ["gh", "api"]:
+                return _Result("[]")
             if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                 return _Result()
             raise AssertionError(f"unexpected command: {cmd}")
