@@ -29,13 +29,10 @@ from ui import Verbosity
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
-CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
-CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
-CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude")
-LLM_RESUME_PROVIDERS = ("codex", "claude")
+CLI_LLM_PROVIDERS = ("codex",)
+LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
@@ -43,12 +40,10 @@ AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
 DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "claude-cli",
     "openai-responses",
     "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
-    "ANTHROPIC_API_KEY",
     "CHUNKHOUND_EMBEDDING__API_KEY",
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
@@ -73,11 +68,9 @@ CURATED_ENV_INHERIT_KEYS = (
 )
 CLI_PROVIDER_SESSION_ENV_PREFIXES = {
     "codex": ("CODEX_",),
-    "claude": ("CLAUDE_",),
 }
 LOCAL_AGENT_PRESET_BY_NAME = {
     "codex": "codex-cli",
-    "claude": "claude-cli",
 }
 LOCAL_AGENT_NAME_BY_PRESET = {preset: agent for agent, preset in LOCAL_AGENT_PRESET_BY_NAME.items()}
 DEFAULT_MULTIPASS_ENABLED = True
@@ -582,9 +575,6 @@ def build_utility_llm_meta(
 
 
 def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
-    name = str(provider or "").strip().lower()
-    if name == "claude":
-        return CLAUDE_REASONING_EFFORT_CHOICES
     return CODEX_REASONING_EFFORT_CHOICES
 
 
@@ -1038,24 +1028,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "request": {},
             "env": {},
             "reasoning_effort": "high",
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
-        "claude-cli": {
-            "transport": "cli",
-            "provider": "claude",
-            "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "model": CLAUDE_CLI_DEFAULT_MODEL,
-            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
             "text_verbosity": None,
             "max_output_tokens": None,
         },
