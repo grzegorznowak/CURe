@@ -1,8 +1,8 @@
 # `cure_release`
 
-This is the canonical repo-owned release command for CURe. It is the agent-consumable execution wrapper for the release policy in [RELEASING.md](../../RELEASING.md).
+This is the canonical repo-owned release command for CURe. It is an agent-assisted checklist for the release policy in [RELEASING.md](../../RELEASING.md); a maintainer remains responsible for every publish decision and explicit checkpoint.
 
-If this file and [RELEASING.md](../../RELEASING.md) disagree, `RELEASING.md` wins.
+If this file and [RELEASING.md](../../RELEASING.md) disagree, `RELEASING.md` wins. This file is not authorization to release unattended.
 
 ## Command Name
 

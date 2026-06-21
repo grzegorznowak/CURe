@@ -2210,6 +2210,23 @@ def build_codex_flags_from_llm_config(
 
 
 
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    candidates.extend(line.strip() for line in raw.splitlines() if line.strip())
+    for candidate in reversed(candidates):
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+
 def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
     direct = payload.get("output_text")
     if isinstance(direct, str) and direct.strip():
@@ -2586,7 +2603,6 @@ def prepare_review_agent_runtime(
             chunkhound_config_path=chunkhound_config_path,
             paths=paths,
         )
-        runtime["provider_args"] = provider_args
     else:
         raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
 
@@ -14542,7 +14558,7 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="agent_runtime_profile",
         choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
         default=None,
-        help="CURe-owned CLI coding-agent runtime posture (permissive only)",
+        help="Operator-approved CLI coding-agent runtime profile (permissive only)",
     )
 
 
@@ -14755,7 +14771,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     setupp = sub.add_parser(
         "setup",
-        help="Bootstrap CURe: write config files, install ChunkHound, and persist the local coding agent choice",
+        help="Assist CURe setup: write non-secret config, optionally install ChunkHound, and optionally persist an approved local coding agent choice",
         parents=[runtime_parent],
     )
     setupp.add_argument(
@@ -14767,7 +14783,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--agent",
         choices=["codex"],
         default=None,
-        help="Persist this local coding agent choice during setup",
+        help="Persist this operator-approved local coding agent choice during setup",
     )
     setupp.add_argument(
         "--chunkhound-source",
@@ -14783,10 +14799,10 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     sap = sub.add_parser(
         "set-agent",
-        help="Persist the local coding agent choice used by CURe",
+        help="Persist an operator-approved local coding agent choice used by CURe",
         parents=[runtime_parent],
     )
-    sap.add_argument("agent", choices=["codex"], help="Local coding agent to persist")
+    sap.add_argument("agent", choices=["codex"], help="Operator-approved local coding agent to persist")
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
