@@ -14,9 +14,10 @@ CURe may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
 - If that file exists, read it first and use it as the primary PR-context source for this session.
 
 # Prior PR context (discussion + past CURe reviews)
+This context is supplementary only — it highlights what others have discussed but does not replace your own independent review. You MUST still examine every changed file, every diff hunk, and form your own judgment. Do not skip files or sections just because they are not mentioned below.
 $PRIOR_CONTEXT
 
-- Treat the prior context above as orientation: use it to avoid re-requesting resolved work and to prioritize unresolved risks; verify every finding against the current checkout.
+- Treat the prior context above as a guide, not a checklist: use it to avoid re-requesting already-resolved work and to pay extra attention to known problem areas, but perform a full independent review of all code. The context may miss new issues or overstate old ones.
 - If this section is blank, proceed with the normal review flow.
 - Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.
 - Do not ABORT solely because GitHub MCP or `gh` is unavailable if the staged PR context plus the local git history/diff provide enough context for this review.

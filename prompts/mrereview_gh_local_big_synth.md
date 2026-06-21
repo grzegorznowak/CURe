@@ -20,7 +20,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 # Prior PR context (discussion + past CURe reviews)
 $PRIOR_CONTEXT
 
-Use this prior context as orientation during synthesis: avoid re-requesting resolved work, prioritize unresolved risks, and verify every final claim against primary evidence in the current checkout. If this section is blank, synthesize normally.
+Use this prior context as a guide during synthesis: avoid re-requesting already-resolved work and pay extra attention to known problem areas, but synthesize based on your own independent review of all step findings. The context may miss new issues or overstate old ones. If this section is blank, synthesize normally.
 
 # Claim Verification Rule
 Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.

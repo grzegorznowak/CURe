@@ -19,7 +19,8 @@ _USAGE_NOTE = (
     "prioritize unresolved risks, and verify every finding against the current checkout."
 )
 
-_USAGE_INSTRUCTIONS = """INSTRUCTIONS FOR USING PRIOR_CONTEXT:
+_USAGE_INSTRUCTIONS = """This brief summarizes prior discussion — it is orientation only. You must still perform a complete, independent review of every changed file. The sections below highlight patterns; they are not a substitute for thoroughness.
+
 - "Resolved areas": do not spend time re-evaluating them unless the diff touches them
 - "Problem areas": prioritize them in your review plan
 - "Pending issues": verify whether the diff resolved them or not

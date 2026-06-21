@@ -19,7 +19,7 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 # Prior PR context (discussion + past CURe reviews)
 $PRIOR_CONTEXT
 
-Use this prior context as orientation for this step: avoid re-requesting resolved work, prioritize unresolved risks that intersect the step focus, and verify every finding against the current checkout. If this section is blank, execute the step normally.
+Use this prior context as a guide for this step: avoid re-requesting already-resolved work and pay extra attention to known problem areas that intersect the step focus, but examine all code assigned to this step independently. The context may miss new issues or overstate old ones. If this section is blank, execute the step normally.
 
 Safety guardrail:
 - Do not read or write outside the sandbox checkout, except CURe scratch space under `$CURE_WORK_DIR`.
