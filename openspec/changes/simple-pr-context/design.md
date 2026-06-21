@@ -3,6 +3,8 @@
 ## Package structure
 
 ```
+cure_github.py      # GitHub CLI/public API adapter: gh_api_json, gh_api_list, auth/fallback helpers
+
 cure_pr_context/
   __init__.py   # build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm)
                 # → { orientation_brief, discussion, past_reviews, meta }
@@ -12,7 +14,7 @@ cure_pr_context/
   orient.py     # build_orientation_brief(discussion, past_reviews, pr_stats, run_llm) → str
 ```
 
-`cure_pr_context` must also be listed in `pyproject.toml` because CURe uses explicit setuptools package metadata.
+`cure_pr_context` must be listed in `pyproject.toml` packages and `cure_github` must be listed in `py-modules` because CURe uses explicit setuptools metadata.
 
 ## Data flow
 
@@ -44,12 +46,14 @@ GitHub API arrays (3 endpoints)
 
 ## API contract
 
-### gh_api_list helper (new in cure.py)
+### GitHub API helper module (`cure_github.py`)
 
-All 3 GitHub discussion endpoints return JSON **arrays**, but the existing `gh_api_json` at `cure.py:7416-7418` validates `isinstance(payload, dict)` and raises `ReviewflowError` on non-dict payloads. A new `gh_api_list` helper must be added to `cure.py` that:
-- Calls `gh api --paginate [--slurp]` (retrying without `--slurp` on CLI incompatibility)
-- Decodes and flattens multi-page JSON arrays into a single `list[dict]`
-- Raises `ReviewflowError` on subprocess, auth, invalid JSON, or unexpected non-list payload failures
+All 3 GitHub discussion endpoints return JSON **arrays**, while `gh_api_json` intentionally validates `isinstance(payload, dict)` and raises `ReviewflowError` on non-dict payloads. GitHub API subprocess/public-fallback concerns live in `cure_github.py`, which exports `gh_api_json`, `gh_api_list`, auth/fallback helpers, and decode helpers. `cure.py` imports/re-exports those names for existing call sites and tests, but new GitHub API behavior belongs in `cure_github.py`, not in the already-large CLI orchestration module.
+
+`gh_api_list` must:
+- Call `gh api --paginate [--slurp]` (retrying without `--slurp` on CLI incompatibility)
+- Decode and flatten multi-page JSON arrays into a single `list[dict]`
+- Raise `ReviewflowError` on subprocess, auth, invalid JSON, or unexpected non-list payload failures
 
 The old branch `cure-subsequent-pr-review/story-01-intake` has a list-capable implementation (`cure.py:7613-7634`) that can be ported directly, then tightened to return list payloads for this use case.
 
@@ -90,13 +94,13 @@ def gh_fetch(path: str) -> list[dict[str, Any]]:
 effective_head_sha = review_head_sha or head_sha or None
 ```
 
-`gh_api_json` remains correct for PR metadata/object endpoints and must not be reused for discussion arrays. `head_sha` is passed explicitly because `PullRequestRef` and `compute_pr_stats` do not contain a SHA.
+`cure_github.gh_api_json` remains correct for PR metadata/object endpoints and must not be reused for discussion arrays. `head_sha` is passed explicitly because `PullRequestRef` and `compute_pr_stats` do not contain a SHA.
 
 ## Module design
 
 ### fetcher.py
 
-Calls 3 GitHub endpoints via `gh_fetch` (which must be list-capable — `gh_api_list` from `cure.py` or a bound wrapper):
+Calls 3 GitHub endpoints via `gh_fetch` (which must be list-capable — `cure_github.gh_api_list` or a bound wrapper imported by `cure.py`):
 - `repos/{owner}/{repo}/issues/{number}/comments`
 - `repos/{owner}/{repo}/pulls/{number}/reviews`
 - `repos/{owner}/{repo}/pulls/{number}/comments`
@@ -168,7 +172,7 @@ INSTRUCTIONS FOR USING PRIOR_CONTEXT:
 ### cure.py integration
 
 After `compute_pr_stats` completes (~`cure.py:9754-9767`), before the final multipass/singlepass prompt routing:
-1. Bind `gh_fetch` to `gh_api_list(host=pr.host, ...)`
+1. Bind `gh_fetch` to `gh_api_list(host=pr.host, ...)` imported from `cure_github`
 2. Compute `effective_head_sha = review_head_sha or head_sha or None` and call `build_pr_context(pr, sandbox_root=paths.sandbox_root, work_dir=work_dir, pr_stats=pr_stats, head_sha=effective_head_sha, gh_fetch=gh_fetch, run_llm=run_llm)` in a new phase
 3. Store result dict/meta under `progress.meta["pr_context"]`
 4. For built-in singlepass (normal or big): render and run the singlepass template without `PRIOR_CONTEXT` to produce `draft_review`. If `context["orientation_brief"]` is non-empty, call `_reconcile_prior_context(draft_review, context["orientation_brief"], run_llm)` and use that result as the final review. If the brief is `""`, skip reconciliation and use `draft_review` unchanged.
@@ -188,10 +192,10 @@ Continue to exclude `$PRIOR_CONTEXT` from the independent multipass templates:
 - `prompts/mrereview_gh_local_big_plan.md` (multipass plan — independent planning)
 - `prompts/mrereview_gh_local_big_step.md` (multipass step — independent code review)
 
-Singlepass context reconciliation is not a template instruction. It is a separate prompt, preferably inline in `cure.py::_reconcile_prior_context()`, that receives `draft_review` and `orientation_brief` after the first LLM call. The reconcile prompt should instruct the model to treat the draft review as the independent code-evidence baseline, use the orientation brief to check for missed unresolved issues and confirmed decisions, and return the final review. Current code evidence wins over unsupported context claims.
+Singlepass context reconciliation is not a template instruction. It is a separate prompt in `cure.py::_reconcile_prior_context()` that receives `draft_review` and `orientation_brief` after the first LLM call. The reconcile prompt should instruct the model to treat the draft review as the independent code-evidence baseline, use the orientation brief to check for missed unresolved issues and confirmed decisions, and return the final review. Current code evidence wins over unsupported context claims.
 
-Multipass is unchanged architecturally: plan and step calls are independent, and the synth call reconciles their findings with `$PRIOR_CONTEXT`.
+Multipass is unchanged architecturally: plan and step calls are independent, and the synth call reconciles their findings with `$PRIOR_CONTEXT` using the same Option B rules: inspect only disputed paths and let current code evidence win.
 
 ### Packaging
 
-`pyproject.toml` currently uses explicit setuptools metadata (`packages = ["prompts"]`). Add `"cure_pr_context"` to the package list and prove importability with a wheel/install smoke so installed `cure` environments can import the new package.
+`pyproject.toml` uses explicit setuptools metadata. Add `"cure_pr_context"` to the package list and `"cure_github"` to `py-modules`; prove importability with a wheel/install smoke so installed `cure` environments can import the new package/module.

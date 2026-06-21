@@ -5773,6 +5773,7 @@ class RefactorRegressionTests(unittest.TestCase):
                         },
                     )
                 )
+                stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
                 stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
                 stack.enter_context(
                     mock.patch.object(
@@ -6121,6 +6122,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(
@@ -6332,6 +6334,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(
@@ -9220,6 +9223,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(
