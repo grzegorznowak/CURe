@@ -17,10 +17,23 @@ Read the plan JSON and all step outputs, then produce the final review.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
-# Prior PR context (discussion + past CURe reviews)
+## Prior PR context — DO NOT READ until Phase 2
 $PRIOR_CONTEXT
 
-Use this prior context as a guide during synthesis: avoid re-requesting already-resolved work and pay extra attention to known problem areas, but synthesize based on your own independent review of all step findings. The context may miss new issues or overstate old ones. If this section is blank, synthesize normally.
+# Review phases — read fully before starting
+
+### Phase 1 — Independent step findings
+You have already completed independent review steps that examined the code directly. Those step findings are your Phase 1 — formed without prior context influence. Treat them as your primary evidence.
+
+### Phase 2 — Context reconciliation
+Read "## Prior PR context" above. Cross-check your step findings against it:
+- Did any step miss something the context flags? Add it only if the original code evidence from that step supports it.
+- Does the context overstate anything the steps found to be resolved or benign? Note the discrepancy explicitly.
+- Are there "Resolved areas" in the context that the diff actually touches? Flag them — they may need re-review regardless of context.
+- If the context is blank, skip to Phase 3.
+
+### Phase 3 — Final synthesis
+Produce the final review below. Integrate independent step findings with any validated context signals. Where they conflict, the step findings (direct code examination) win. Cite code evidence (path:line), not context claims.
 
 # Claim Verification Rule
 Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.

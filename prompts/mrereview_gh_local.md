@@ -13,12 +13,8 @@ $REVIEW_INTELLIGENCE_GUIDANCE
 CURe may have staged pre-fetched PR context at `$PR_CONTEXT_PATH`.
 - If that file exists, read it first and use it as the primary PR-context source for this session.
 
-# Prior PR context (discussion + past CURe reviews)
-This context is supplementary only — it highlights what others have discussed but does not replace your own independent review. You MUST still examine every changed file, every diff hunk, and form your own judgment. Do not skip files or sections just because they are not mentioned below.
+# Prior PR context — DO NOT READ until Phase 2
 $PRIOR_CONTEXT
-
-- Treat the prior context above as a guide, not a checklist: use it to avoid re-requesting already-resolved work and to pay extra attention to known problem areas, but perform a full independent review of all code. The context may miss new issues or overstate old ones.
-- If this section is blank, proceed with the normal review flow.
 - Use GitHub MCP or `gh` only when you need more context than the staged PR context provides.
 - Do not ABORT solely because GitHub MCP or `gh` is unavailable if the staged PR context plus the local git history/diff provide enough context for this review.
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
@@ -36,6 +32,21 @@ If you must ABORT:
 - Use `**Summary**` starting with `ABORT:` and include the failure reason.
 - Set both `**Verdict**` lines to `REJECT`.
 - Keep both `**In Scope Issues**` and `**Out of Scope Issues**` blocks present in both sections.
+
+## Review phases — read fully before starting
+
+### Phase 1 — Independent review
+Perform a complete code review using only your own judgment. Examine every changed file, run all mandatory gates and checks below, and form your own independent findings. **Do not read the prior context section above yet.** Your direct code examination is the authority.
+
+### Phase 2 — Context reconciliation
+After completing your independent review, scroll up and read "# Prior PR context" above. Cross-check your Phase 1 findings against it:
+- Did you miss anything the context flags? Add it to your review only if the code evidence supports it.
+- Does the context overstate anything you found to be resolved or benign? Note the discrepancy explicitly.
+- Are there "Resolved areas" in the context that the diff actually touches? Flag them — they may need re-review regardless of what the context says.
+- If the context is blank, skip to Phase 3.
+
+### Phase 3 — Final synthesis
+Produce your output below. Integrate your independent Phase 1 findings with any validated Phase 2 signals. Where they conflict, your direct code examination wins. Cite code evidence (path:line), not context claims.
 
 # Review Process
 1. Use the gate above to understand the business value and acceptance criteria; do not proceed without it.

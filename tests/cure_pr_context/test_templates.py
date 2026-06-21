@@ -7,9 +7,14 @@ from cure_flows import render_prompt
 TEMPLATES = [
     "mrereview_gh_local.md",
     "mrereview_gh_local_big.md",
+    "mrereview_gh_local_big_synth.md",
+]
+
+# Plan and step templates intentionally exclude $PRIOR_CONTEXT —
+# they are independent review passes. Context is reconciled in synth.
+NO_PRIOR_TEMPLATES = [
     "mrereview_gh_local_big_plan.md",
     "mrereview_gh_local_big_step.md",
-    "mrereview_gh_local_big_synth.md",
 ]
 
 

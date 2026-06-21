@@ -10,11 +10,6 @@ Your job in this call is to produce a **multipass review plan** for this PR that
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review plan.
 $REVIEW_INTELLIGENCE_GUIDANCE
 
-# Prior PR context (discussion + past CURe reviews)
-$PRIOR_CONTEXT
-
-Use this prior context as a guide for the multipass plan: avoid re-planning already-resolved work and pay extra attention to known problem areas, but plan a full independent review of all code. The context may miss new issues or overstate old ones. If this section is blank, plan normally.
-
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:

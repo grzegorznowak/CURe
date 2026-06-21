@@ -168,14 +168,13 @@ def test_pr_flow_builds_simple_pr_context_after_pr_stats_with_effective_head() -
 
 def test_pr_flow_always_supplies_prior_context_to_prompt_render_paths() -> None:
     flow_source = inspect.getsource(cure._pr_flow_impl)
-    step_source = inspect.getsource(cure._build_multipass_step_entries)
 
-    assert 'prompt_extra_vars["PRIOR_CONTEXT"] = prior_context' in flow_source
+    assert 'prompt_extra_vars["PRIOR_CONTEXT"] = prior_context' in flow_source  # singlepass
     assert flow_source.count('"PRIOR_CONTEXT": prior_context') >= 2  # multipass plan + synth
-    assert '"PRIOR_CONTEXT": prior_context' in step_source
 
 
-def test_build_multipass_step_entries_renders_prior_context(monkeypatch) -> None:
+def test_build_multipass_step_entries_no_prior_context(monkeypatch) -> None:
+    """Step entries should NOT receive prior context — steps are independent review passes."""
     monkeypatch.setattr(cure, "load_builtin_prompt_text", lambda name: "prior=$PRIOR_CONTEXT step=$STEP_ID")
     monkeypatch.setattr(cure, "review_intelligence_prompt_vars", lambda *args, **kwargs: {})
     monkeypatch.setattr(cure, "cod_hypothesis_ledger_prompt_vars", lambda *args, **kwargs: {})
@@ -192,10 +191,9 @@ def test_build_multipass_step_entries_renders_prior_context(monkeypatch) -> None
         agent_desc="",
         review_intelligence_cfg=None,  # type: ignore[arg-type]
         review_intelligence_capabilities=None,
-        prior_context="brief body",
     )
 
-    assert entries[0].prompt == "prior=brief body step=api"
+    assert entries[0].prompt == "prior=$PRIOR_CONTEXT step=api"
 
 
 def test_gh_api_list_decodes_slurped_and_unslurped_pages() -> None:

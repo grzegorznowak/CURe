@@ -6438,7 +6438,6 @@ def _build_multipass_step_entries(
                     capability_summary=review_intelligence_capabilities,
                 ),
                 **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
-                "PRIOR_CONTEXT": prior_context,
                 "PLAN_JSON_PATH": str(plan_json_path),
                 "STEP_ID": step_id,
                 "STEP_TITLE": step_title,
@@ -10383,7 +10382,6 @@ def _pr_flow_impl(
                         agent_desc=agent_desc,
                         review_intelligence_cfg=review_intelligence_cfg,
                         review_intelligence_capabilities=review_intelligence_capabilities,
-                        prior_context=prior_context,
                         cod_ledger_enabled=bool(getattr(args, "cod_ledger", False)),
                     )
                     for entry in step_entries:

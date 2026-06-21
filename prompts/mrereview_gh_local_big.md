@@ -10,10 +10,8 @@ Ensure code quality, prevent technical debt, and maintain architectural consiste
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review.
 $REVIEW_INTELLIGENCE_GUIDANCE
 
-# Prior PR context (discussion + past CURe reviews)
+## Prior PR context — DO NOT READ until Phase 2
 $PRIOR_CONTEXT
-
-Use this prior context as a guide, not a checklist: avoid re-requesting already-resolved work and pay extra attention to known problem areas, but perform a full independent review of all code. The context may miss new issues or overstate old ones. If this section is blank, proceed with the normal review flow.
 
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
@@ -28,6 +26,21 @@ If you must ABORT:
 - Use `**Summary**` starting with `ABORT:` and include the failure reason.
 - Set both `**Verdict**` lines to `REJECT`.
 - Keep both `**In Scope Issues**` and `**Out of Scope Issues**` blocks present in both sections.
+
+## Review phases — read fully before starting
+
+### Phase 1 — Independent review
+Perform a complete code review using only your own judgment. Examine every changed file, run all mandatory gates and checks below, and form your own independent findings. **Do not read the prior context section above yet.** Your direct code examination is the authority.
+
+### Phase 2 — Context reconciliation
+After completing your independent review, scroll up and read "## Prior PR context" above. Cross-check your Phase 1 findings against it:
+- Did you miss anything the context flags? Add it to your review only if the code evidence supports it.
+- Does the context overstate anything you found to be resolved or benign? Note the discrepancy explicitly.
+- Are there "Resolved areas" in the context that the diff actually touches? Flag them — they may need re-review regardless of what the context says.
+- If the context is blank, skip to Phase 3.
+
+### Phase 3 — Final synthesis
+Produce your output below. Integrate your independent Phase 1 findings with any validated Phase 2 signals. Where they conflict, your direct code examination wins. Cite code evidence (path:line), not context claims.
 
 # Review Process
 1. Use the gate above to understand the business value and acceptance criteria; do not proceed without it.
