@@ -331,14 +331,14 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
         resumed_at="2026-03-10T11:05:00+00:00",
         number=26,
         llm={
-            "preset": "claude-cli",
+            "preset": "codex-cli",
             "transport": "cli",
-            "provider": "claude",
-            "model": "claude-sonnet-4-6",
+            "provider": "codex",
+            "model": "gpt-5.3-codex",
             "reasoning_effort": "high",
             "capabilities": {"supports_resume": True},
         },
-        agent_runtime={"profile": "balanced", "provider": "claude", "permission_mode": "dontAsk"},
+        agent_runtime={"profile": "balanced", "provider": "codex", "permission_mode": "dontAsk"},
         followup_name="followup-1.md",
     )
     write_session(
@@ -365,7 +365,7 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     exact = run_cmd(cli_cmd(binary, sandbox_root, "status", "running-newer", "--json"), env=env)
     exact_payload = json.loads(exact.stdout)
     ensure(exact_payload["resolved_target"]["session_id"] == "running-newer", "exact status mismatch")
-    ensure(exact_payload["llm"]["summary"] == "llm=claude-cli/claude-sonnet-4-6/high", "llm summary mismatch")
+    ensure(exact_payload["llm"]["summary"] == "llm=codex-cli/gpt-5.3-codex/high", "llm summary mismatch")
     ensure(exact_payload["agent_runtime"]["profile"] == "balanced", "agent runtime mismatch")
     ensure(exact_payload["latest_artifact"]["path"].endswith("followup-1.md"), "latest artifact mismatch")
 

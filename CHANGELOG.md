@@ -6,7 +6,9 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
-No entries yet.
+### Removed
+
+- Removed Claude CLI support; Codex remains the supported CLI/local agent path, alongside configured HTTP providers.
 
 ## [0.8.1] - 2026-06-19
 

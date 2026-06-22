@@ -37,13 +37,10 @@ from ui import Verbosity
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
-CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
-CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
-CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude")
-LLM_RESUME_PROVIDERS = ("codex", "claude")
+CLI_LLM_PROVIDERS = ("codex",)
+LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
@@ -51,12 +48,10 @@ AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
 DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "claude-cli",
     "openai-responses",
     "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
-    "ANTHROPIC_API_KEY",
     "CHUNKHOUND_EMBEDDING__API_KEY",
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
@@ -81,11 +76,9 @@ CURATED_ENV_INHERIT_KEYS = (
 )
 CLI_PROVIDER_SESSION_ENV_PREFIXES = {
     "codex": ("CODEX_",),
-    "claude": ("CLAUDE_",),
 }
 LOCAL_AGENT_PRESET_BY_NAME = {
     "codex": "codex-cli",
-    "claude": "claude-cli",
 }
 LOCAL_AGENT_NAME_BY_PRESET = {preset: agent for agent, preset in LOCAL_AGENT_PRESET_BY_NAME.items()}
 DEFAULT_MULTIPASS_ENABLED = True
@@ -115,7 +108,7 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
 include = ["**/*.py", "**/*.ts"]
-exclude = ["**/.claude/**", "**/openspec/**"]
+exclude = ["**/openspec/**"]
 per_file_timeout_seconds = 6
 per_file_timeout_min_size_kb = 128
 
@@ -590,9 +583,6 @@ def build_utility_llm_meta(
 
 
 def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
-    name = str(provider or "").strip().lower()
-    if name == "claude":
-        return CLAUDE_REASONING_EFFORT_CHOICES
     return CODEX_REASONING_EFFORT_CHOICES
 
 
@@ -1049,24 +1039,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "claude-cli": {
-            "transport": "cli",
-            "provider": "claude",
-            "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "model": CLAUDE_CLI_DEFAULT_MODEL,
-            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
         "openai-responses": {
             "transport": "http",
             "provider": "openai",
@@ -1105,8 +1077,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if transport == "cli" and provider == "claude" and command in {"", "claude"}:
-        return "claude-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1353,18 +1323,15 @@ def _synthetic_legacy_codex_preset(
 
 def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
     current_env = os.environ if env is None else env
-    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
     codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
-    if claude_detected and not codex_detected:
-        return "claude-cli", "detected_env"
-    if codex_detected and not claude_detected:
+    if codex_detected:
         return "codex-cli", "detected_env"
     return None, None
 
 
 def detect_installed_local_agents() -> dict[str, str]:
     installed: dict[str, str] = {}
-    for agent in ("codex", "claude"):
+    for agent in ("codex",):
         path = shutil.which(agent)
         if path:
             installed[agent] = path
@@ -1410,7 +1377,7 @@ def resolve_local_agent_selection(
     if explicit_agent:
         preset = LOCAL_AGENT_PRESET_BY_NAME.get(explicit_agent)
         if preset is None:
-            raise ReviewflowError("Unsupported agent. Expected one of: codex, claude")
+            raise ReviewflowError("Unsupported agent. Expected one of: codex")
         if explicit_agent not in installed:
             result.update(
                 {
@@ -1470,7 +1437,7 @@ def resolve_local_agent_selection(
                     "effective_provider": provider or None,
                     "source": "cli_preset",
                     "status": "not_applicable",
-                    "detail": f"explicit preset `{cli_selected}` does not use a local codex/claude CLI provider",
+                    "detail": f"explicit preset `{cli_selected}` does not use a local codex CLI provider",
                     "ready": True,
                     "blocking": False,
                 }
@@ -1543,7 +1510,7 @@ def resolve_local_agent_selection(
                     "status": "invalid_saved_preference",
                     "detail": (
                         f"saved default preset `{raw_saved_preset}` does not resolve to the required local "
-                        "codex/claude CLI provider"
+                        "codex CLI provider"
                     ),
                     "ready": False,
                     "blocking": True,
@@ -3005,7 +2972,7 @@ def _doctor_executor_network_check(agent_runtime: dict[str, Any]) -> DoctorCheck
     if not bool(agent_runtime.get("supported")):
         return None
     provider = str(agent_runtime.get("provider") or "").strip().lower()
-    if provider not in {"codex", "claude"}:
+    if provider != "codex":
         return None
     return DoctorCheck(
         name="executor-network",
@@ -3121,13 +3088,6 @@ def _resolved_doctor_agent_runtime(
                 "dangerously_bypass_approvals_and_sandbox": True,
                 "sandbox_mode": None,
                 "approval_policy": None,
-            }
-        )
-    elif provider == "claude":
-        payload.update(
-            {
-                "dangerously_skip_permissions": True,
-                "permission_mode": None,
             }
         )
     return payload

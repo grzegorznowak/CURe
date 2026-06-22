@@ -173,13 +173,10 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
-CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
-CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
-CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude")
-LLM_RESUME_PROVIDERS = ("codex", "claude")
+CLI_LLM_PROVIDERS = ("codex",)
+LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
@@ -188,12 +185,10 @@ AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
 DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "claude-cli",
     "openai-responses",
     "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
-    "ANTHROPIC_API_KEY",
     "CHUNKHOUND_EMBEDDING__API_KEY",
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
@@ -251,7 +246,7 @@ base_config_path = \"/absolute/path/to/chunkhound-base.json\"
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
 include = [\"**/*.py\", \"**/*.ts\"]
-exclude = [\"**/.claude/**\", \"**/openspec/**\"]
+exclude = [\"**/openspec/**\"]
 per_file_timeout_seconds = 6
 per_file_timeout_min_size_kb = 128
 
@@ -610,8 +605,6 @@ def build_llm_meta(
 
 
 def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
-    if str(provider or "").strip().lower() == "claude":
-        return CLAUDE_REASONING_EFFORT_CHOICES
     return CODEX_REASONING_EFFORT_CHOICES
 
 
@@ -1111,24 +1104,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "claude-cli": {
-            "transport": "cli",
-            "provider": "claude",
-            "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "model": CLAUDE_CLI_DEFAULT_MODEL,
-            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
         "openai-responses": {
             "transport": "http",
             "provider": "openai",
@@ -1167,8 +1142,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if transport == "cli" and provider == "claude" and command in {"", "claude"}:
-        return "claude-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1477,11 +1450,8 @@ def _normalize_llm_config_meta(value: object) -> dict[str, Any] | None:
 
 def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
     current_env = os.environ if env is None else env
-    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
     codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
-    if claude_detected and not codex_detected:
-        return "claude-cli", "detected_env"
-    if codex_detected and not claude_detected:
+    if codex_detected:
         return "codex-cli", "detected_env"
     return None, None
 
@@ -2238,15 +2208,6 @@ def build_codex_flags_from_llm_config(
     return flags, meta
 
 
-def _build_env_prefix_assignments(env: dict[str, str], keys: tuple[str, ...]) -> str:
-    assignments: list[str] = []
-    for key in keys:
-        value = str(env.get(key) or "").strip()
-        if value:
-            assignments.append(f"{key}={shlex.quote(value)}")
-    if not assignments:
-        return ""
-    return "env " + " ".join(assignments) + " "
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -2263,6 +2224,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         if isinstance(data, dict):
             return data
     return None
+
 
 
 def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
@@ -2292,136 +2254,6 @@ def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
-def _run_logged_text_command(
-    *,
-    cmd: list[str],
-    cwd: Path,
-    env: dict[str, str],
-) -> CommandResult:
-    out = active_output()
-    if out is not None:
-        return out.run_logged_cmd(
-            cmd,
-            kind="codex",
-            cwd=cwd,
-            env=env,
-            check=True,
-            stream_requested=False,
-        )
-    return run_cmd(cmd, cwd=cwd, env=env, check=True, stream=False, stream_label="codex")
-
-
-def build_claude_exec_cmd(
-    *,
-    command: str,
-    model: str | None,
-    effort: str | None = None,
-    prompt: str,
-    runtime_policy: dict[str, Any] | None = None,
-) -> list[str]:
-    cmd = [command, "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
-    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
-    provider_args = policy.get("provider_args")
-    if isinstance(provider_args, list):
-        cmd.extend([str(item) for item in provider_args])
-    elif not policy:
-        cmd.append("--dangerously-skip-permissions")
-    if bool(policy.get("dangerously_skip_permissions")):
-        cmd.append("--dangerously-skip-permissions")
-    if model:
-        cmd.extend(["--model", model])
-    if effort:
-        cmd.extend(["--effort", effort])
-    cmd.extend(["--", prompt])
-    return cmd
-
-
-def build_claude_resume_command(
-    *,
-    repo_dir: Path,
-    session_id: str,
-    env: dict[str, str],
-    command: str,
-    runtime_policy: dict[str, Any] | None = None,
-) -> str:
-    env_prefix = _build_env_prefix_assignments(
-        env,
-        (
-            "ANTHROPIC_API_KEY",
-            "GH_CONFIG_DIR",
-            "JIRA_CONFIG_FILE",
-            "NETRC",
-            "CURE_WORK_DIR",
-            "CURE_CHUNKHOUND_HELPER",
-            "CURE_CHUNKHOUND_DRY_RUN",
-            "PYTHONSAFEPATH",
-        ),
-    )
-    policy = runtime_policy if isinstance(runtime_policy, dict) else {}
-    resume_cmd = [command]
-    provider_args = policy.get("provider_args")
-    if isinstance(provider_args, list):
-        resume_cmd.extend([str(item) for item in provider_args])
-    elif not policy:
-        resume_cmd.append("--dangerously-skip-permissions")
-    if bool(policy.get("dangerously_skip_permissions")):
-        resume_cmd.append("--dangerously-skip-permissions")
-    resume_cmd.extend(["--resume", session_id])
-    return f"cd {shlex.quote(str(repo_dir))} && {env_prefix}{_shell_join(resume_cmd)}"
-
-
-def run_claude_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    env: dict[str, str],
-    progress: "SessionProgress",
-    runtime_policy: dict[str, Any] | None = None,
-) -> LlmRunResult:
-    cmd = build_claude_exec_cmd(
-        command=str(resolved.get("command") or "claude"),
-        model=str(resolved.get("model") or "").strip() or None,
-        effort=str(resolved.get("reasoning_effort") or "").strip() or None,
-        prompt=prompt,
-        runtime_policy=runtime_policy,
-    )
-    progress.record_cmd(cmd)
-    result = _run_logged_text_command(cmd=cmd, cwd=repo_dir, env=env)
-    payload = _parse_claude_stream_payload(result.stdout)
-    text = str(payload.get("result") or "").strip()
-    if not text:
-        assistant_text = _extract_claude_text_from_message(payload.get("message"))
-        text = str(assistant_text or result.stdout or "").strip()
-    if not text:
-        raise ReviewflowError("Claude did not return any printable review output.")
-    output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    usage = _extract_usage_from_payload(payload)
-    session_id = str(payload.get("session_id") or "").strip()
-    resume = None
-    if session_id:
-        resume = LlmResumeInfo(
-            provider="claude",
-            session_id=session_id,
-            cwd=repo_dir.resolve(),
-            command=build_claude_resume_command(
-                repo_dir=repo_dir.resolve(),
-                session_id=session_id,
-                env=env,
-                command=str(resolved.get("command") or "claude"),
-                runtime_policy=runtime_policy,
-            ),
-        )
-    return LlmRunResult(
-        resume=resume,
-        adapter_meta={
-            "transport": "cli-claude",
-            "command": safe_cmd_for_meta(cmd),
-            "usage": usage,
-        },
-    )
 
 
 def run_http_response_exec(
@@ -2541,16 +2373,6 @@ def run_llm_exec(
         return LlmRunResult(
             resume=resume,
             adapter_meta={"transport": "cli-codex", "flags": codex_flags},
-        )
-    if provider == "claude":
-        return run_claude_exec(
-            repo_dir=repo_dir,
-            resolved=resolved,
-            output_path=output_path,
-            prompt=prompt,
-            env=env,
-            progress=progress,
-            runtime_policy=runtime_policy,
         )
     if provider == "gemini":
         _raise_removed_gemini_support(context="Gemini CLI execution is no longer available.")
@@ -2781,41 +2603,6 @@ def prepare_review_agent_runtime(
             chunkhound_config_path=chunkhound_config_path,
             paths=paths,
         )
-    elif provider == "claude":
-        claude_dir = work_dir / "claude"
-        settings_path = _write_json_file(claude_dir / "settings.json", {})
-        runtime["staged_paths"]["claude_settings"] = str(settings_path)
-        provider_args: list[str] = [
-            "--setting-sources",
-            "user",
-            "--settings",
-            str(settings_path),
-        ]
-        for add_dir in add_dirs:
-            provider_args.extend(["--add-dir", str(add_dir)])
-        if enable_mcp:
-            mcp_path = _write_json_file(
-                claude_dir / "mcp.json",
-                {
-                    "mcpServers": {
-                        "cure-chunkhound": _reviewflow_chunkhound_mcp_entry(
-                            sandbox_repo_dir=repo_dir,
-                            chunkhound_config_path=chunkhound_config_path,
-                            chunkhound_db_path=chunkhound_db_path,
-                            chunkhound_cwd=chunkhound_cwd,
-                        )
-                    }
-                },
-            )
-            runtime["staged_paths"]["claude_mcp_config"] = str(mcp_path)
-            provider_args.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
-        if profile == "permissive":
-            runtime["dangerously_skip_permissions"] = True
-        else:
-            raise ReviewflowError(f"Unsupported claude agent runtime profile: {profile!r}")
-        if runtime["permission_mode"]:
-            provider_args.extend(["--permission-mode", str(runtime["permission_mode"])])
-        runtime["provider_args"] = provider_args
     else:
         raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
 
@@ -4428,8 +4215,6 @@ def _default_llm_preset_for_provider(provider: object) -> str | None:
     value = str(provider or "").strip().lower()
     if value == "codex":
         return DEFAULT_IMPLICIT_CODEX_PRESET
-    if value == "claude":
-        return "claude-cli"
     if value == "gemini":
         return "gemini-cli"
     if value == "openai":
@@ -6588,18 +6373,10 @@ def _prepare_multipass_stage_llm_configs(
 
 
 def _provider_effort_choices(provider: str) -> tuple[str, ...]:
-    if str(provider or "").strip().lower() == "claude":
-        return ("low", "medium", "high", "max")
     return CODEX_REASONING_EFFORT_CHOICES
 
 
 def _provider_model_options(provider: str) -> list[tuple[str, str]]:
-    if str(provider or "").strip().lower() == "claude":
-        return [
-            ("Opus 4.6", "claude-opus-4-6"),
-            ("Sonnet 4.6", "claude-sonnet-4-6"),
-            ("Haiku 4.5-20251001", "claude-haiku-4-5-20251001"),
-        ]
     if str(provider or "").strip().lower() == "codex":
         return [
             ("GPT-5.4", "gpt-5.4"),
@@ -13307,28 +13084,6 @@ def build_interactive_resume_command(
         write_redacted_json(meta_path, meta)
         return (command, env)
 
-    if provider == "claude":
-        if not resume_session_id:
-            fallback_command = str((llm_resume or {}).get("command") or "").strip()
-            if not fallback_command:
-                raise ReviewflowError(f"Session {session.session_id} is missing llm.resume metadata.")
-            write_redacted_json(meta_path, meta)
-            return (fallback_command, env)
-        command = build_claude_resume_command(
-            repo_dir=repo_dir,
-            session_id=resume_session_id,
-            env=env,
-            command="claude",
-            runtime_policy=runtime_policy,
-        )
-        record_llm_resume(
-            llm_meta,
-            LlmResumeInfo(provider="claude", session_id=resume_session_id, cwd=repo_dir, command=command),
-        )
-        meta["llm"] = llm_meta
-        write_redacted_json(meta_path, meta)
-        return (command, env)
-
     raise ReviewflowError(
         f"interactive is not supported for provider {provider} in v1. This session is execution-only."
     )
@@ -14383,13 +14138,6 @@ def _resolved_doctor_agent_runtime(
                 "approval_policy": None,
             }
         )
-    elif provider == "claude":
-        payload.update(
-            {
-                "dangerously_skip_permissions": True,
-                "permission_mode": None,
-            }
-        )
     return payload
 
 
@@ -14736,11 +14484,7 @@ from cure_llm import (
     CodexRunResult,
     LlmResumeInfo,
     LlmRunResult,
-    _extract_claude_text_from_message,
     _extract_usage_from_payload,
-    _parse_claude_stream_payload,
-    build_claude_exec_cmd,
-    build_claude_resume_command,
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
@@ -14752,7 +14496,6 @@ from cure_llm import (
     prepare_review_agent_runtime,
     record_codex_resume,
     record_llm_resume,
-    run_claude_exec,
     run_codex_exec,
     run_http_response_exec,
     run_llm_exec,
@@ -14815,7 +14558,7 @@ def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="agent_runtime_profile",
         choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
         default=None,
-        help="CURe-owned CLI coding-agent runtime posture (permissive only)",
+        help="Operator-approved CLI coding-agent runtime profile (permissive only)",
     )
 
 
@@ -15028,7 +14771,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     setupp = sub.add_parser(
         "setup",
-        help="Bootstrap CURe: write config files, install ChunkHound, and persist the local coding agent choice",
+        help="Assist CURe setup: write non-secret config, optionally install ChunkHound, and optionally persist an approved local coding agent choice",
         parents=[runtime_parent],
     )
     setupp.add_argument(
@@ -15038,9 +14781,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     )
     setupp.add_argument(
         "--agent",
-        choices=["codex", "claude"],
+        choices=["codex"],
         default=None,
-        help="Persist this local coding agent choice during setup",
+        help="Persist this operator-approved local coding agent choice during setup",
     )
     setupp.add_argument(
         "--chunkhound-source",
@@ -15056,10 +14799,10 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     sap = sub.add_parser(
         "set-agent",
-        help="Persist the local coding agent choice used by CURe",
+        help="Persist an operator-approved local coding agent choice used by CURe",
         parents=[runtime_parent],
     )
-    sap.add_argument("agent", choices=["codex", "claude"], help="Local coding agent to persist")
+    sap.add_argument("agent", choices=["codex"], help="Operator-approved local coding agent to persist")
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)

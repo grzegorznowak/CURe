@@ -582,37 +582,6 @@ def _command_uses_staged_chunkhound_helper(*, command: object, helper_path: obje
     return any(pattern.search(text) is not None for pattern in helper_patterns)
 
 
-def _command_invokes_staged_chunkhound_helper_tool(
-    *,
-    command: object,
-    helper_path: object,
-    tool_name: str,
-) -> bool:
-    text = " ".join(str(command or "").split())
-    if not text:
-        return False
-    normalized_tool = _normalize_chunkhound_tool_name(tool_name)
-    if normalized_tool == "search":
-        helper_subcommand = "search"
-    elif normalized_tool == "code_research":
-        helper_subcommand = "research"
-    else:
-        return False
-
-    env_helper = r'(?:"\$\{?CURE_CHUNKHOUND_HELPER\}?"|\'\$\{?CURE_CHUNKHOUND_HELPER\}?\'|\$\{?CURE_CHUNKHOUND_HELPER\}?)'
-    patterns = [
-        re.compile(rf"(?<![\w./-]){env_helper}\s+{re.escape(helper_subcommand)}(?![\w./-])"),
-    ]
-
-    helper = str(helper_path or "").strip()
-    if helper:
-        path_token = re.escape(helper)
-        patterns.append(
-            re.compile(rf"(?<![\w./-])(?:{path_token}|\"{path_token}\"|'{path_token}')\s+{re.escape(helper_subcommand)}(?![\w./-])")
-        )
-
-    return any(pattern.search(text) is not None for pattern in patterns)
-
 
 def _chunkhound_helper_command_excerpt(command: object) -> str | None:
     text = " ".join(str(command or "").split())
@@ -820,23 +789,6 @@ def _read_codex_events_slice(*, path: Path, start_offset: int | None, end_offset
     return payload.decode("utf-8", errors="replace")
 
 
-def _chunkhound_helper_detail_for_report(
-    *,
-    payload: dict[str, Any],
-    item_id: str | None,
-    command_excerpt: str | None,
-    detail_override: str | None = None,
-) -> dict[str, Any]:
-    detail = _chunkhound_helper_failure_detail(
-        payload=payload,
-        item_id=item_id,
-        command=command_excerpt,
-    )
-    detail["command_excerpt"] = command_excerpt
-    if detail_override:
-        detail["detail"] = detail_override
-    return detail
-
 
 def validate_chunkhound_tool_proof(
     *,
@@ -982,82 +934,6 @@ def validate_chunkhound_tool_proof(
                 "item_id": _first_nonempty_string(item.get("id")) or None,
                 "server": None,
                 "command_excerpt": _chunkhound_helper_command_excerpt(command),
-            }
-            if detail not in observed_successful_call_details:
-                observed_successful_call_details.append(detail)
-            observed_evidence_sources.add("cli_helper_command_execution")
-    elif normalized_provider == "claude":
-        helper_path = str(meta.get("chunkhound_helper_path") or "").strip()
-        if not helper_path:
-            report["failure_reason"] = "missing staged helper path for Claude ChunkHound tool proof"
-            return report
-        entries = meta.get("chunkhound_tool_proof_entries")
-        if not isinstance(entries, list):
-            entries = []
-        command_excerpt = f"claude tool_use_result via {helper_path}"
-        for idx, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            payload = entry.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            item_id = _first_nonempty_string(entry.get("item_id")) or f"claude-tool-use-{idx}"
-            command = _first_nonempty_string(entry.get("command"))
-            declared_tool = _chunkhound_helper_declared_tool_name(payload)
-            expected_tool = declared_tool or _normalize_chunkhound_tool_name(payload.get("tool_name"))
-            payload_helper_path = str(payload.get("helper_path") or "").strip()
-            if not _command_invokes_staged_chunkhound_helper_tool(
-                command=command,
-                helper_path=helper_path,
-                tool_name=expected_tool,
-            ):
-                failure_detail = _chunkhound_helper_detail_for_report(
-                    payload=payload,
-                    item_id=item_id,
-                    command_excerpt=command_excerpt,
-                    detail_override="Claude Bash command did not invoke staged helper for the claimed tool",
-                )
-                if failure_detail not in observed_failed_call_details:
-                    observed_failed_call_details.append(failure_detail)
-                if declared_tool:
-                    latest_failed_helper_calls[declared_tool] = failure_detail
-                continue
-            if payload_helper_path != helper_path:
-                failure_detail = _chunkhound_helper_detail_for_report(
-                    payload=payload,
-                    item_id=item_id,
-                    command_excerpt=command_excerpt,
-                    detail_override=(
-                        f"staged helper path mismatch: expected {helper_path}, observed {payload_helper_path or '<missing>'}"
-                    ),
-                )
-                if failure_detail not in observed_failed_call_details:
-                    observed_failed_call_details.append(failure_detail)
-                if declared_tool:
-                    latest_failed_helper_calls[declared_tool] = failure_detail
-                continue
-            tool_name = _chunkhound_helper_tool_name(payload)
-            if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
-                declared_tool = _chunkhound_helper_declared_tool_name(payload)
-                if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
-                    continue
-                failure_detail = _chunkhound_helper_detail_for_report(
-                    payload=payload,
-                    item_id=item_id,
-                    command_excerpt=command_excerpt,
-                )
-                if failure_detail not in observed_failed_call_details:
-                    observed_failed_call_details.append(failure_detail)
-                latest_failed_helper_calls[declared_tool] = failure_detail
-                continue
-            if tool_name not in observed_successful_calls:
-                observed_successful_calls.append(tool_name)
-            detail = {
-                "tool_name": tool_name,
-                "evidence_source": "cli_helper_command_execution",
-                "item_id": item_id,
-                "server": None,
-                "command_excerpt": command_excerpt,
             }
             if detail not in observed_successful_call_details:
                 observed_successful_call_details.append(detail)
