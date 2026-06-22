@@ -1288,11 +1288,13 @@ def clean_flow(
 
 def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
     pr_url = str(getattr(args, "pr_url", "") or "").strip() or None
+    artifacts: dict[str, object] = {}
     checks = _doctor_runtime_checks(
         runtime,
         cli_profile=getattr(args, "agent_runtime_profile", None),
         pr_url=pr_url,
         args=args,
+        artifacts=artifacts,
     )
     if bool(getattr(args, "json_output", False)):
         ok_count = sum(1 for item in checks if item.status == "ok")
@@ -1303,6 +1305,7 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
             cli_profile=getattr(args, "agent_runtime_profile", None),
             pr_url=pr_url,
             args=args,
+            artifacts=artifacts,
         )
         payload["checks"] = [
             {"name": item.name, "status": item.status, "detail": item.detail} for item in checks

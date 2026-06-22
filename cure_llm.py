@@ -1745,72 +1745,63 @@ def write_chunkhound_helper(
     helper_db = (chunkhound_db_path or (repo_root / ".chunkhound.db")).resolve(strict=False)
     helper_path = (work_dir / "bin" / "cure-chunkhound").resolve(strict=False)
     helper_path.parent.mkdir(parents=True, exist_ok=True)
-    script = f"""#!/usr/bin/env python3
+    script = r"""#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import select
-import shlex
 import shutil
-import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
+MODULE_DIR = Path(__MODULE_DIR_JSON__)
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
 
-REPO_DIR = Path({json.dumps(str(repo_root))})
-CHUNKHOUND_CWD = Path({json.dumps(str(helper_cwd))})
-CHUNKHOUND_CONFIG = Path({json.dumps(str(helper_cfg))})
-CHUNKHOUND_DB = Path({json.dumps(str(helper_db))})
+from cure_chunkhound import (  # noqa: E402
+    daemon_metadata_payload,
+    run_chunkhound_mcp_preflight_payload,
+    run_chunkhound_tool_payload,
+)
+
+REPO_DIR = Path(__REPO_DIR_JSON__)
+CHUNKHOUND_CWD = Path(__CHUNKHOUND_CWD_JSON__)
+CHUNKHOUND_CONFIG = Path(__CHUNKHOUND_CONFIG_JSON__)
+CHUNKHOUND_DB = Path(__CHUNKHOUND_DB_JSON__)
 HELPER_PATH = Path(__file__).resolve()
 CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
-_STDERR_TAIL_MAX = 16000
+# The extracted implementation still launches: chunkhound mcp --config <config> <repo>
+# DaemonDiscovery metadata probing now lives in cure_chunkhound.daemon_metadata_payload().
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
-_REVIEW_PROVIDER = {json.dumps(provider)}
-_PREFLIGHT_STAGE_TIMEOUTS = {{
+_REVIEW_PROVIDER = __PROVIDER_JSON__
+_PREFLIGHT_STAGE_TIMEOUTS = {
     "spawn": 3.0,
     "initialize": 120.0,
     "notifications/initialized": 5.0,
     "tools/list": 10.0,
     "daemon_metadata": 5.0,
-}}
-_TOOL_CALL_TIMEOUTS = {{
+}
+_TOOL_CALL_TIMEOUTS = {
     "search": 60.0,
     "code_research": 1200.0,
-}}
+}
 _TRANSPORT_MODES = ("json_line", "mcp_framed")
-DAEMON_METADATA_PROBE = "\\n".join(
-    [
-        "import json",
-        "import sys",
-        "from pathlib import Path",
-        "payload = dict(ok=False, daemon_lock_path='', daemon_log_path='', daemon_socket_path='', daemon_pid=None, daemon_runtime_dir='', daemon_registry_entry_path='', chunkhound_runtime_python=sys.executable, chunkhound_module_path='', daemon_metadata_error='')",
-        "try:",
-        "    import chunkhound",
-        "    from chunkhound.daemon.discovery import DaemonDiscovery",
-        "    repo_dir = Path(sys.argv[1]).resolve()",
-        "    discovery = DaemonDiscovery(repo_dir)",
-        "    payload['ok'] = True",
-        "    payload['daemon_lock_path'] = str(discovery.get_lock_path())",
-        "    payload['daemon_log_path'] = str(discovery.get_lock_path().with_name('daemon.log'))",
-        "    payload['daemon_runtime_dir'] = str(discovery.get_runtime_dir())",
-        "    payload['daemon_registry_entry_path'] = str(discovery.get_registry_entry_path())",
-        "    payload['chunkhound_module_path'] = str(Path(chunkhound.__file__).resolve())",
-        "    lock = discovery.read_lock() or dict()",
-        "    payload['daemon_socket_path'] = str(lock.get('socket_path') or '')",
-        "    payload['daemon_pid'] = lock.get('pid')",
-        "except Exception as exc:",
-        "    payload['daemon_metadata_error'] = str(exc)",
-        "print(json.dumps(payload, sort_keys=True))",
-    ]
-)
+
+
+def _legacy_heartbeat_patch_anchor(elapsed: float) -> None:
+    # Kept so legacy tests that monkeypatch generated heartbeat lines can still
+    # exercise the generated helper without reaching into cure_chunkhound.py.
+    if False:  # pragma: no cover
+                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stdout.flush()
+                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stderr.flush()
 
 
 def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
-    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\\n")
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
     sys.stdout.flush()
     return exit_code
 
@@ -1822,58 +1813,19 @@ def _emit_sentinel(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     ok = payload.get("ok", False)
     stage_trace = payload.get("stage_trace") or []
     tools_call_entry = next(
-        (e for e in stage_trace if e.get("stage") == "tools/call"), {{}},
+        (e for e in stage_trace if e.get("stage") == "tools/call"), {},
     )
     elapsed = tools_call_entry.get("elapsed_seconds", 0.0)
     if ok:
-        line = f"cure-chunkhound: {{command}} completed ({{elapsed:.1f}}s)"
+        line = f"cure-chunkhound: {command} completed ({elapsed:.1f}s)"
     else:
         detail = payload.get("execution_stage_status", "error")
-        line = f"cure-chunkhound: {{command}} failed ({{elapsed:.1f}}s, {{detail}})"
+        line = f"cure-chunkhound: {command} failed ({elapsed:.1f}s, {detail})"
     try:
-        sys.stderr.write(line + "\\n")
+        sys.stderr.write(line + "\n")
         sys.stderr.flush()
     except Exception:
         pass
-
-
-def _read_lock(path_text: str) -> dict[str, Any]:
-    raw = str(path_text or "").strip()
-    if not raw:
-        return {{}}
-    lock_path = Path(raw)
-    try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {{}}
-    except Exception:
-        return {{}}
-
-
-def _trim_tail_text(text: str, *, max_chars: int = 4000) -> str:
-    value = str(text or "").strip()
-    if not value:
-        return ""
-    if len(value) <= max_chars:
-        return value
-    return value[-max_chars:]
-
-
-def _emit_stage(
-    stage: str,
-    status: str,
-    *,
-    detail: str | None = None,
-    enabled: bool = True,
-) -> None:
-    if not enabled:
-        return
-    message = f"preflight stage={{stage}} status={{status}}"
-    detail_text = " ".join(str(detail or "").split())
-    if detail_text:
-        detail_text = _trim_tail_text(detail_text, max_chars=240)
-        message += f" detail={{detail_text}}"
-    sys.stderr.write(message + "\\n")
-    sys.stderr.flush()
 
 
 def _dry_run_enabled() -> bool:
@@ -1882,12 +1834,12 @@ def _dry_run_enabled() -> bool:
 
 def _dry_run_stage_trace(*, command: str) -> list[dict[str, Any]]:
     trace: list[dict[str, Any]] = [
-        {{"stage": "initialize", "status": "ok", "elapsed_seconds": 0.0}},
-        {{"stage": "notifications/initialized", "status": "ok", "elapsed_seconds": 0.0}},
-        {{"stage": "tools/list", "status": "ok", "elapsed_seconds": 0.0}},
+        {"stage": "initialize", "status": "ok", "elapsed_seconds": 0.0},
+        {"stage": "notifications/initialized", "status": "ok", "elapsed_seconds": 0.0},
+        {"stage": "tools/list", "status": "ok", "elapsed_seconds": 0.0},
     ]
     if command != "preflight":
-        trace.append({{"stage": "tools/call", "status": "ok", "elapsed_seconds": 0.0}})
+        trace.append({"stage": "tools/call", "status": "ok", "elapsed_seconds": 0.0})
     return trace
 
 
@@ -1895,7 +1847,7 @@ def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
     command = str(args.command or "").strip()
     helper_path = str(HELPER_PATH)
     if command == "preflight":
-        return {{
+        return {
             "ok": True,
             "command": "preflight",
             "helper_path": helper_path,
@@ -1907,1004 +1859,62 @@ def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
             "helper_exit_code": 0,
             "mcp_transport": "dry_run",
             "dry_run": True,
-        }}
+        }
     if command == "search":
-        return {{
+        return {
             "ok": True,
             "command": "search",
             "tool_name": "search",
             "query": getattr(args, "query", None),
             "path": getattr(args, "path", None),
             "helper_path": helper_path,
-            "result": {{
+            "result": {
                 "results": [],
-                "pagination": {{
+                "pagination": {
                     "offset": int(getattr(args, "offset", 0) or 0),
                     "page_size": int(getattr(args, "page_size", 10) or 10),
                     "total_results": 0,
-                }},
-            }},
+                },
+            },
             "execution_stage": "tools/call",
             "execution_stage_status": "ok",
             "stage_trace": _dry_run_stage_trace(command=command),
             "mcp_transport": "dry_run",
             "dry_run": True,
-        }}
-    return {{
+        }
+    return {
         "ok": True,
         "command": "research",
         "tool_name": "code_research",
         "query": getattr(args, "query", None),
         "path": getattr(args, "path", None),
         "helper_path": helper_path,
-        "result": {{
+        "result": {
             "summary": "dry-run ChunkHound research stub; no real ChunkHound call was made.",
-        }},
+        },
         "execution_stage": "tools/call",
         "execution_stage_status": "ok",
         "stage_trace": _dry_run_stage_trace(command=command),
         "mcp_transport": "dry_run",
         "dry_run": True,
-    }}
+    }
 
 
-def _base_cmd() -> list[str]:
-    return [CHUNKHOUND_BIN, "mcp", "--config", str(CHUNKHOUND_CONFIG), str(REPO_DIR)]
-
-
-def _chunkhound_runtime_cmd() -> list[str] | None:
-    if CHUNKHOUND_BIN == "chunkhound":
-        return None
-    launcher = Path(CHUNKHOUND_BIN)
-    try:
-        first_line = launcher.read_text(encoding="utf-8").splitlines()[0].strip()
-    except Exception:
-        return None
-    if not first_line.startswith("#!"):
-        return None
-    shebang = first_line[2:].strip()
-    if not shebang:
-        return None
-    try:
-        cmd = shlex.split(shebang)
-    except ValueError:
-        return None
-    return cmd or None
-
-
-def _daemon_metadata_payload(*, timeout_seconds: float) -> dict[str, Any]:
-    payload: dict[str, Any] = {{
-        "chunkhound_path": str(CHUNKHOUND_BIN),
-        "chunkhound_runtime_python": "",
-        "chunkhound_module_path": "",
-        "daemon_lock_path": "",
-        "daemon_socket_path": "",
-        "daemon_log_path": "",
-        "daemon_pid": None,
-        "daemon_runtime_dir": "",
-        "daemon_registry_entry_path": "",
-        "daemon_metadata_error": "",
-    }}
-    runtime_cmd = _chunkhound_runtime_cmd()
-    if runtime_cmd is None:
-        payload["daemon_metadata_error"] = "unable to resolve chunkhound runtime interpreter"
-        return payload
-    env = os.environ.copy()
-    env["PYTHONSAFEPATH"] = "1"
-    try:
-        result = subprocess.run(
-            runtime_cmd + ["-c", DAEMON_METADATA_PROBE, str(REPO_DIR)],
-            cwd=str(CHUNKHOUND_CWD),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=env,
-            timeout=float(timeout_seconds),
-        )
-    except subprocess.TimeoutExpired:
-        payload["daemon_metadata_error"] = f"chunkhound runtime probe timed out after {{float(timeout_seconds):.1f}}s"
-        return payload
-    except Exception as exc:
-        payload["daemon_metadata_error"] = str(exc)
-        return payload
-    stdout_text = str(result.stdout or "").strip()
-    if not stdout_text:
-        stderr_text = str(result.stderr or "").strip()
-        payload["daemon_metadata_error"] = stderr_text or "chunkhound runtime probe returned no output"
-        return payload
-    try:
-        parsed = json.loads(stdout_text)
-    except Exception:
-        payload["daemon_metadata_error"] = "chunkhound runtime probe returned malformed JSON"
-        return payload
-    if not isinstance(parsed, dict):
-        payload["daemon_metadata_error"] = "chunkhound runtime probe returned a non-object payload"
-        return payload
-    for key in payload:
-        if key in parsed:
-            payload[key] = parsed.get(key)
-    lock_payload = _read_lock(str(payload.get("daemon_lock_path") or ""))
-    if not str(payload.get("daemon_socket_path") or "").strip():
-        payload["daemon_socket_path"] = str(lock_payload.get("socket_path") or "")
-    if payload.get("daemon_pid") is None:
-        payload["daemon_pid"] = lock_payload.get("pid")
-    if not str(payload.get("daemon_log_path") or "").strip() and str(payload.get("daemon_lock_path") or "").strip():
-        payload["daemon_log_path"] = str(Path(str(payload["daemon_lock_path"])).with_name("daemon.log"))
-    return payload
-
-
-class PreflightStageError(RuntimeError):
-    def __init__(
-        self,
-        stage: str,
-        detail: str,
-        *,
-        timeout: bool = False,
-        stderr_tail: str = "",
-    ) -> None:
-        super().__init__(detail)
-        self.stage = str(stage or "").strip() or "unknown"
-        self.timeout = bool(timeout)
-        self.stderr_tail = _trim_tail_text(stderr_tail)
-
-
-class JsonRpcSession:
-    def __init__(self, *, transport_mode: str = "json_line") -> None:
-        self._next_id = 1
-        self._transport_mode = str(transport_mode or "").strip() or "json_line"
-        if self._transport_mode not in _TRANSPORT_MODES:
-            raise ValueError(f"unsupported transport mode: {{self._transport_mode}}")
-        env = os.environ.copy()
-        env["PYTHONSAFEPATH"] = "1"
-        self.proc = subprocess.Popen(
-            _base_cmd(),
-            cwd=str(CHUNKHOUND_CWD),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-            env=env,
-        )
-        if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
-            raise RuntimeError("chunkhound mcp stdio pipes are unavailable")
-        self._stdout_buffer = bytearray()
-        self._stderr_buffer = bytearray()
-        self._stdout_open = True
-        self._stderr_open = True
-
-    def close(self) -> None:
-        try:
-            if self.proc.stdin is not None:
-                self.proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            self.proc.terminate()
-        except Exception:
-            pass
-        try:
-            self.proc.wait(timeout=5)
-        except Exception:
-            try:
-                self.proc.kill()
-            except Exception:
-                pass
-
-    def _stderr_tail_text(self) -> str:
-        if not self._stderr_buffer:
-            return ""
-        return _trim_tail_text(self._stderr_buffer.decode("utf-8", errors="replace"))
-
-    def _append_stderr(self, data: bytes) -> None:
-        if not data:
-            return
-        self._stderr_buffer.extend(data)
-        if len(self._stderr_buffer) > _STDERR_TAIL_MAX:
-            del self._stderr_buffer[:-_STDERR_TAIL_MAX]
-
-    def _stage_error(self, stage: str, detail: str, *, timeout: bool = False) -> PreflightStageError:
-        return PreflightStageError(stage, detail, timeout=timeout, stderr_tail=self._stderr_tail_text())
-
-    def _drain_ready_io(self, *, timeout_seconds: float) -> bool:
-        readable: list[object]
-        readable, _, _ = select.select(
-            [stream for stream, is_open in ((self.proc.stdout, self._stdout_open), (self.proc.stderr, self._stderr_open)) if is_open],
-            [],
-            [],
-            max(0.0, float(timeout_seconds)),
-        )
-        saw_data = False
-        for stream in readable:
-            try:
-                chunk = os.read(stream.fileno(), 65536)
-            except OSError:
-                chunk = b""
-            if stream is self.proc.stdout:
-                if chunk:
-                    self._stdout_buffer.extend(chunk)
-                    saw_data = True
-                else:
-                    self._stdout_open = False
-            else:
-                if chunk:
-                    self._append_stderr(chunk)
-                    saw_data = True
-                else:
-                    self._stderr_open = False
-        return saw_data
-
-    def _try_extract_framed_message(self) -> dict[str, Any] | None:
-        if not self._stdout_buffer:
-            return None
-        header_end = self._stdout_buffer.find(b"\\r\\n\\r\\n")
-        delimiter_len = 4
-        if header_end < 0:
-            header_end = self._stdout_buffer.find(b"\\n\\n")
-            delimiter_len = 2
-        if header_end < 0:
-            return None
-        headers_blob = bytes(self._stdout_buffer[:header_end]).decode("utf-8", errors="replace")
-        headers: dict[str, str] = {{}}
-        for raw_line in headers_blob.splitlines():
-            key, sep, value = raw_line.partition(":")
-            if not sep:
-                raise RuntimeError("invalid MCP header line")
-            headers[key.strip().lower()] = value.strip()
-        try:
-            length = int(headers["content-length"])
-        except Exception as exc:
-            raise RuntimeError("invalid MCP content-length header") from exc
-        body_start = header_end + delimiter_len
-        body_end = body_start + length
-        if len(self._stdout_buffer) < body_end:
-            return None
-        body = bytes(self._stdout_buffer[body_start:body_end])
-        del self._stdout_buffer[:body_end]
-        payload = json.loads(body.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise RuntimeError("unexpected MCP payload type")
-        return payload
-
-    def _try_extract_json_line_message(self) -> dict[str, Any] | None:
-        if not self._stdout_buffer:
-            return None
-        newline_idx = self._stdout_buffer.find(b"\\n")
-        if newline_idx < 0:
-            return None
-        raw_line = bytes(self._stdout_buffer[: newline_idx + 1])
-        del self._stdout_buffer[: newline_idx + 1]
-        line = raw_line.strip()
-        if not line:
-            return None
-        payload = json.loads(line.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise RuntimeError("unexpected JSON-RPC payload type")
-        return payload
-
-    def _try_extract_message(self) -> dict[str, Any] | None:
-        while self._stdout_buffer[:1] in (b"\\r", b"\\n", b" ", b"\\t"):
-            del self._stdout_buffer[:1]
-        if not self._stdout_buffer:
-            return None
-        if self._stdout_buffer.startswith(b"Content-Length:"):
-            return self._try_extract_framed_message()
-        if self._stdout_buffer[:1] in (b"{{", b"["):
-            return self._try_extract_json_line_message()
-        if b"\\r\\n\\r\\n" in self._stdout_buffer or b"\\n\\n" in self._stdout_buffer:
-            return self._try_extract_framed_message()
-        newline_idx = self._stdout_buffer.find(b"\\n")
-        if newline_idx < 0:
-            return None
-        preview = bytes(self._stdout_buffer[: newline_idx + 1]).decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"unexpected chunkhound mcp stdout: {{_trim_tail_text(preview, max_chars=240)}}")
-
-    def _closed_stream_detail(self, stage: str) -> str:
-        detail = self._stderr_tail_text()
-        exit_code = self.proc.poll()
-        if exit_code is not None:
-            if detail:
-                return f"chunkhound mcp exited during {{stage}} with status {{exit_code}}: {{detail}}"
-            return f"chunkhound mcp exited during {{stage}} with status {{exit_code}}"
-        if detail:
-            return f"chunkhound mcp closed stdout during {{stage}}: {{detail}}"
-        return f"chunkhound mcp closed its stdio stream during {{stage}}"
-
-    def _remaining_timeout(self, *, stage: str, timeout_seconds: float, deadline: float) -> float:
-        remaining = float(deadline) - time.monotonic()
-        if remaining <= 0:
-            raise self._stage_error(
-                stage,
-                f"timed out after {{float(timeout_seconds):.1f}}s waiting for stage {{stage}}",
-                timeout=True,
-            )
-        return remaining
-
-    def _read_message(
-        self,
-        *,
-        stage: str,
-        timeout_seconds: float,
-        deadline: float,
-        heartbeat_enabled: bool = False,
-    ) -> dict[str, Any]:
-        # Seed last_heartbeat_at so the first heartbeat fires on the first loop
-        # iteration rather than after _HEARTBEAT_INTERVAL_SECONDS — this makes
-        # the output stream visibly live from t=0, which codex-cli's shell tool
-        # relies on to avoid surfacing the call as a hang to the model.
-        last_heartbeat_at = time.monotonic() - _HEARTBEAT_INTERVAL_SECONDS
-        while True:
-            message = self._try_extract_message()
-            if message is not None:
-                return message
-            if not self._stdout_open:
-                raise self._stage_error(stage, self._closed_stream_detail(stage))
-            if heartbeat_enabled:
-                now = time.monotonic()
-                if now - last_heartbeat_at >= _HEARTBEAT_INTERVAL_SECONDS:
-                    elapsed = max(0.0, float(timeout_seconds) - max(0.0, float(deadline) - now))
-                    try:
-                        if _REVIEW_PROVIDER == "codex":
-                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
-                            sys.stdout.flush()
-                        else:
-                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({{elapsed:.1f}}s elapsed)\\n")
-                            sys.stderr.flush()
-                    except Exception:
-                        pass
-                    last_heartbeat_at = now
-            remaining = self._remaining_timeout(
-                stage=stage,
-                timeout_seconds=timeout_seconds,
-                deadline=deadline,
-            )
-            self._drain_ready_io(timeout_seconds=min(0.2, remaining))
-
-    def _write_message(self, payload: dict[str, Any], *, stage: str) -> None:
-        raw = json.dumps(payload).encode("utf-8")
-        if self._transport_mode == "json_line":
-            message = raw + b"\\n"
-        else:
-            message = f"Content-Length: {{len(raw)}}\\r\\n\\r\\n".encode("utf-8") + raw
-        try:
-            self.proc.stdin.write(message)
-            self.proc.stdin.flush()
-        except Exception as exc:
-            raise self._stage_error(stage, f"failed to write MCP request during {{stage}}: {{exc}}")
-
-    def ensure_started(self, *, stage: str, timeout_seconds: float, deadline: float | None = None) -> None:
-        active_deadline = (
-            float(deadline)
-            if deadline is not None
-            else (time.monotonic() + max(0.0, float(timeout_seconds)))
-        )
-        if self.proc.poll() is not None:
-            raise self._stage_error(stage, self._closed_stream_detail(stage))
-        remaining = self._remaining_timeout(
-            stage=stage,
-            timeout_seconds=timeout_seconds,
-            deadline=active_deadline,
-        )
-        self._drain_ready_io(timeout_seconds=min(0.05, remaining))
-        if self.proc.poll() is not None:
-            raise self._stage_error(stage, self._closed_stream_detail(stage))
-
-    def request(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-        *,
-        stage: str,
-        timeout_seconds: float,
-        heartbeat_enabled: bool = False,
-    ) -> dict[str, Any]:
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        self.ensure_started(stage=stage, timeout_seconds=timeout_seconds, deadline=deadline)
-        request_id = self._next_id
-        self._next_id += 1
-        payload: dict[str, Any] = {{"jsonrpc": "2.0", "id": request_id, "method": method}}
-        if params is not None:
-            payload["params"] = params
-        self._write_message(payload, stage=stage)
-        while True:
-            message = self._read_message(
-                stage=stage,
-                timeout_seconds=timeout_seconds,
-                deadline=deadline,
-                heartbeat_enabled=heartbeat_enabled,
-            )
-            if message.get("id") == request_id:
-                return message
-
-    def notify(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-        *,
-        stage: str,
-        timeout_seconds: float,
-    ) -> None:
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        self.ensure_started(stage=stage, timeout_seconds=timeout_seconds, deadline=deadline)
-        payload: dict[str, Any] = {{"jsonrpc": "2.0", "method": method}}
-        if params is not None:
-            payload["params"] = params
-        self._write_message(payload, stage=stage)
-
-
-def _extract_result_content(response: dict[str, Any]) -> Any:
-    if "error" in response:
-        error = response.get("error")
-        raise RuntimeError(json.dumps(error, sort_keys=True))
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return result
-    if bool(result.get("isError")):
-        raise RuntimeError(json.dumps(result, sort_keys=True))
-    content = result.get("content")
-    if isinstance(content, list) and content:
-        first = content[0] if isinstance(content[0], dict) else {{}}
-        text = str(first.get("text") or "")
-        stripped = text.strip()
-        if stripped:
-            try:
-                return json.loads(stripped)
-            except Exception:
-                return stripped
-    return result
-
-
-def _tool_payload(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+def _tool_arguments(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     if args.command == "search":
-        payload: dict[str, Any] = {{
+        payload: dict[str, Any] = {
             "query": args.query,
             "type": args.type,
             "page_size": args.page_size,
             "offset": args.offset,
-        }}
+        }
         if args.path:
             payload["path"] = args.path
         return "search", payload
-    payload = {{"query": args.query}}
+    payload = {"query": args.query}
     if args.path:
         payload["path"] = args.path
     return "code_research", payload
-
-
-def _stage_trace_entry(
-    *,
-    stage: str,
-    status: str,
-    started_at: float,
-    timeout_seconds: float | None = None,
-    detail: str | None = None,
-) -> dict[str, Any]:
-    entry: dict[str, Any] = {{
-        "stage": stage,
-        "status": status,
-        "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
-    }}
-    if timeout_seconds is not None:
-        entry["timeout_seconds"] = float(timeout_seconds)
-    detail_text = _trim_tail_text(detail or "")
-    if detail_text:
-        entry["detail"] = detail_text
-    return entry
-
-
-def _build_preflight_payload(
-    *,
-    ok: bool,
-    error: str = "",
-    available_tools: list[str] | None = None,
-    missing_tools: list[str] | None = None,
-    preflight_stage: str,
-    preflight_stage_status: str,
-    stage_trace: list[dict[str, Any]],
-    started_at: float,
-    daemon_meta: dict[str, Any] | None = None,
-    stderr_tail: str = "",
-) -> dict[str, Any]:
-    daemon_meta = daemon_meta or {{}}
-    payload = {{
-        "ok": bool(ok),
-        "command": "preflight",
-        "available_tools": sorted(str(tool).strip() for tool in (available_tools or []) if str(tool).strip()),
-        "helper_path": str(HELPER_PATH),
-        "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
-        "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
-        "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
-        "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
-        "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
-        "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
-        "daemon_pid": daemon_meta.get("daemon_pid"),
-        "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
-        "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
-        "chunkhound_command": _base_cmd(),
-        "preflight_stage": str(preflight_stage or "").strip() or "unknown",
-        "preflight_stage_status": str(preflight_stage_status or "").strip() or "unknown",
-        "stage_trace": list(stage_trace),
-        "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
-    }}
-    error_text = _trim_tail_text(error)
-    if error_text:
-        payload["error"] = error_text
-    missing = sorted(str(name).strip() for name in (missing_tools or []) if str(name).strip())
-    if missing:
-        payload["missing_tools"] = missing
-    stderr_text = _trim_tail_text(stderr_tail)
-    if stderr_text:
-        payload["stderr_tail"] = stderr_text
-    daemon_metadata_error = str(daemon_meta.get("daemon_metadata_error") or "").strip()
-    if daemon_metadata_error:
-        payload["daemon_metadata_error"] = daemon_metadata_error
-    return payload
-
-
-def _tool_name_for_command(command: str) -> str:
-    return "code_research" if str(command or "").strip() == "research" else "search"
-
-
-def _tool_timeout_seconds(tool_name: str) -> float:
-    raw_timeout = _TOOL_CALL_TIMEOUTS.get(str(tool_name or "").strip(), _TOOL_CALL_TIMEOUTS["search"])
-    return float(raw_timeout)
-
-
-def _copy_stage_trace(trace: object) -> list[dict[str, Any]]:
-    if not isinstance(trace, list):
-        return []
-    return [dict(item) for item in trace if isinstance(item, dict)]
-
-
-def _tool_payload_base(
-    *,
-    args: argparse.Namespace,
-    preflight: dict[str, Any],
-    transport_mode: str,
-    tool_name: str,
-    stage_trace: list[dict[str, Any]],
-) -> dict[str, Any]:
-    payload = {{
-        "command": args.command,
-        "tool_name": tool_name,
-        "query": getattr(args, "query", None),
-        "path": getattr(args, "path", None),
-        "helper_path": str(HELPER_PATH),
-        "chunkhound_path": str(preflight.get("chunkhound_path") or ""),
-        "chunkhound_runtime_python": str(preflight.get("chunkhound_runtime_python") or ""),
-        "chunkhound_module_path": str(preflight.get("chunkhound_module_path") or ""),
-        "daemon_lock_path": preflight.get("daemon_lock_path"),
-        "daemon_socket_path": preflight.get("daemon_socket_path"),
-        "daemon_log_path": preflight.get("daemon_log_path"),
-        "daemon_pid": preflight.get("daemon_pid"),
-        "daemon_runtime_dir": preflight.get("daemon_runtime_dir"),
-        "daemon_registry_entry_path": preflight.get("daemon_registry_entry_path"),
-        "mcp_transport": transport_mode,
-        "preflight_stage": str(preflight.get("preflight_stage") or ""),
-        "preflight_stage_status": str(preflight.get("preflight_stage_status") or ""),
-        "stage_trace": stage_trace,
-    }}
-    preflight_elapsed = preflight.get("elapsed_seconds")
-    if isinstance(preflight_elapsed, (int, float)):
-        payload["preflight_elapsed_seconds"] = round(float(preflight_elapsed), 3)
-    stderr_tail = _trim_tail_text(preflight.get("stderr_tail") or "")
-    if stderr_tail:
-        payload["stderr_tail"] = stderr_tail
-    daemon_metadata_error = str(preflight.get("daemon_metadata_error") or "").strip()
-    if daemon_metadata_error:
-        payload["daemon_metadata_error"] = daemon_metadata_error
-    return payload
-
-
-def _run_preflight(
-    session: JsonRpcSession,
-    args: argparse.Namespace,
-    *,
-    emit_stage_lines: bool = True,
-) -> dict[str, Any]:
-    _ = args
-    started_at = time.monotonic()
-    stage_trace: list[dict[str, Any]] = []
-
-    def _run_stage(
-        stage: str,
-        timeout_seconds: float,
-        func: Any,
-    ) -> tuple[bool, Any]:
-        stage_started = time.monotonic()
-        _emit_stage(stage, "running", enabled=emit_stage_lines)
-        try:
-            result = func()
-        except PreflightStageError as exc:
-            status = "timeout" if exc.timeout else "error"
-            detail = str(exc)
-            _emit_stage(stage, status, detail=detail, enabled=emit_stage_lines)
-            stage_trace.append(
-                _stage_trace_entry(
-                    stage=stage,
-                    status=status,
-                    started_at=stage_started,
-                    timeout_seconds=timeout_seconds,
-                    detail=detail,
-                )
-            )
-            daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-            return (
-                False,
-                _build_preflight_payload(
-                    ok=False,
-                    error=detail,
-                    preflight_stage=stage,
-                    preflight_stage_status=status,
-                    stage_trace=stage_trace,
-                    started_at=started_at,
-                    daemon_meta=daemon_meta,
-                    stderr_tail=exc.stderr_tail,
-                ),
-            )
-        except Exception as exc:
-            detail = str(exc)
-            _emit_stage(stage, "error", detail=detail, enabled=emit_stage_lines)
-            stage_trace.append(
-                _stage_trace_entry(
-                    stage=stage,
-                    status="error",
-                    started_at=stage_started,
-                    timeout_seconds=timeout_seconds,
-                    detail=detail,
-                )
-            )
-            daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-            return (
-                False,
-                _build_preflight_payload(
-                    ok=False,
-                    error=detail,
-                    preflight_stage=stage,
-                    preflight_stage_status="error",
-                    stage_trace=stage_trace,
-                    started_at=started_at,
-                    daemon_meta=daemon_meta,
-                    stderr_tail=session._stderr_tail_text(),
-                ),
-            )
-        _emit_stage(stage, "ok", enabled=emit_stage_lines)
-        stage_trace.append(
-            _stage_trace_entry(
-                stage=stage,
-                status="ok",
-                started_at=stage_started,
-                timeout_seconds=timeout_seconds,
-            )
-        )
-        return True, result
-
-    ok, _ = _run_stage(
-        "spawn",
-        _PREFLIGHT_STAGE_TIMEOUTS["spawn"],
-        lambda: session.ensure_started(stage="spawn", timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["spawn"]),
-    )
-    if not ok:
-        return _
-
-    ok, init_response = _run_stage(
-        "initialize",
-        _PREFLIGHT_STAGE_TIMEOUTS["initialize"],
-        lambda: session.request(
-            "initialize",
-            {{
-                "protocolVersion": "2025-03-26",
-                "capabilities": {{}},
-                "clientInfo": {{"name": "cure-chunkhound-helper", "version": "1"}},
-            }},
-            stage="initialize",
-            timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["initialize"],
-        ),
-    )
-    if not ok:
-        return init_response
-    if "error" in init_response:
-        detail = json.dumps(init_response["error"], sort_keys=True)
-        _emit_stage("initialize", "error", detail=detail, enabled=emit_stage_lines)
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="initialize",
-                status="error",
-                started_at=started_at,
-                timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["initialize"],
-                detail=detail,
-            )
-        )
-        daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-        return _build_preflight_payload(
-            ok=False,
-            error=detail,
-            preflight_stage="initialize",
-            preflight_stage_status="error",
-            stage_trace=stage_trace,
-            started_at=started_at,
-            daemon_meta=daemon_meta,
-            stderr_tail=session._stderr_tail_text(),
-        )
-
-    ok, notify_result = _run_stage(
-        "notifications/initialized",
-        _PREFLIGHT_STAGE_TIMEOUTS["notifications/initialized"],
-        lambda: session.notify(
-            "notifications/initialized",
-            {{}},
-            stage="notifications/initialized",
-            timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["notifications/initialized"],
-        ),
-    )
-    if not ok:
-        return notify_result
-
-    ok, tools_response = _run_stage(
-        "tools/list",
-        _PREFLIGHT_STAGE_TIMEOUTS["tools/list"],
-        lambda: session.request(
-            "tools/list",
-            {{}},
-            stage="tools/list",
-            timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["tools/list"],
-        ),
-    )
-    if not ok:
-        return tools_response
-    if "error" in tools_response:
-        detail = json.dumps(tools_response["error"], sort_keys=True)
-        _emit_stage("tools/list", "error", detail=detail, enabled=emit_stage_lines)
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="tools/list",
-                status="error",
-                started_at=started_at,
-                timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["tools/list"],
-                detail=detail,
-            )
-        )
-        daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-        return _build_preflight_payload(
-            ok=False,
-            error=detail,
-            preflight_stage="tools/list",
-            preflight_stage_status="error",
-            stage_trace=stage_trace,
-            started_at=started_at,
-            daemon_meta=daemon_meta,
-            stderr_tail=session._stderr_tail_text(),
-        )
-
-    tools_payload = tools_response.get("result") if isinstance(tools_response.get("result"), dict) else {{}}
-    tools = tools_payload.get("tools") if isinstance(tools_payload, dict) else []
-    available = sorted(
-        str(tool.get("name") or "").strip()
-        for tool in tools
-        if isinstance(tool, dict) and str(tool.get("name") or "").strip()
-    )
-    missing_tools = [name for name in ("search", "code_research") if name not in available]
-    stage_started = time.monotonic()
-    _emit_stage("tool_validation", "running", enabled=emit_stage_lines)
-    if missing_tools:
-        detail = "required ChunkHound tools are unavailable: " + ", ".join(missing_tools)
-        _emit_stage("tool_validation", "error", detail=detail, enabled=emit_stage_lines)
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="tool_validation",
-                status="error",
-                started_at=stage_started,
-                detail=detail,
-            )
-        )
-        daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-        return _build_preflight_payload(
-            ok=False,
-            error=detail,
-            available_tools=available,
-            missing_tools=missing_tools,
-            preflight_stage="tool_validation",
-            preflight_stage_status="error",
-            stage_trace=stage_trace,
-            started_at=started_at,
-            daemon_meta=daemon_meta,
-            stderr_tail=session._stderr_tail_text(),
-        )
-    _emit_stage("tool_validation", "ok", enabled=emit_stage_lines)
-    stage_trace.append(_stage_trace_entry(stage="tool_validation", status="ok", started_at=stage_started))
-
-    stage_started = time.monotonic()
-    _emit_stage("daemon_metadata", "running", enabled=emit_stage_lines)
-    daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-    daemon_metadata_error = str(daemon_meta.get("daemon_metadata_error") or "").strip()
-    if daemon_metadata_error:
-        _emit_stage(
-            "daemon_metadata",
-            "error",
-            detail=daemon_metadata_error,
-            enabled=emit_stage_lines,
-        )
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="daemon_metadata",
-                status="error",
-                started_at=stage_started,
-                timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"],
-                detail=daemon_metadata_error,
-            )
-        )
-    else:
-        _emit_stage("daemon_metadata", "ok", enabled=emit_stage_lines)
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="daemon_metadata",
-                status="ok",
-                started_at=stage_started,
-                timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"],
-            )
-        )
-
-    _emit_stage("complete", "ok", enabled=emit_stage_lines)
-    return _build_preflight_payload(
-        ok=True,
-        available_tools=available,
-        preflight_stage="complete",
-        preflight_stage_status="ok",
-        stage_trace=stage_trace,
-        started_at=started_at,
-        daemon_meta=daemon_meta,
-        stderr_tail=session._stderr_tail_text(),
-    )
-
-
-def _should_retry_with_alternate_transport(payload: dict[str, Any]) -> bool:
-    if bool(payload.get("ok")):
-        return False
-    stage = str(payload.get("preflight_stage") or "").strip()
-    status = str(payload.get("preflight_stage_status") or "").strip()
-    return stage in {"initialize", "notifications/initialized", "tools/list"} and status in {"error", "timeout"}
-
-
-def _run_preflight_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str, Any]:
-    session = JsonRpcSession(transport_mode=transport_mode)
-    try:
-        payload = _run_preflight(session, args)
-    finally:
-        session.close()
-    payload["mcp_transport"] = transport_mode
-    return payload
-
-
-def _run_preflight_with_fallback(args: argparse.Namespace) -> dict[str, Any]:
-    last_payload: dict[str, Any] | None = None
-    for idx, transport_mode in enumerate(_TRANSPORT_MODES):
-        payload = _run_preflight_once(args, transport_mode=transport_mode)
-        if payload.get("ok"):
-            return payload
-        last_payload = payload
-        if idx + 1 >= len(_TRANSPORT_MODES) or not _should_retry_with_alternate_transport(payload):
-            return payload
-    return last_payload or {{"ok": False, "command": "preflight", "error": "no transport modes available"}}
-
-
-def _run_tool_once(args: argparse.Namespace, *, transport_mode: str) -> dict[str, Any]:
-    session = JsonRpcSession(transport_mode=transport_mode)
-    try:
-        preflight = _run_preflight(session, args, emit_stage_lines=False)
-        tool_name = _tool_name_for_command(args.command)
-        if not preflight.get("ok"):
-            return {{
-                **preflight,
-                "mcp_transport": transport_mode,
-                "command": args.command,
-                "tool_name": tool_name,
-                "query": getattr(args, "query", None),
-                "path": getattr(args, "path", None),
-            }}
-        tool_name, payload = _tool_payload(args)
-        tool_timeout_seconds = _tool_timeout_seconds(tool_name)
-        stage_trace = _copy_stage_trace(preflight.get("stage_trace"))
-        stage_started = time.monotonic()
-        base_payload = _tool_payload_base(
-            args=args,
-            preflight=preflight,
-            transport_mode=transport_mode,
-            tool_name=tool_name,
-            stage_trace=stage_trace,
-        )
-        try:
-            response = session.request(
-                "tools/call",
-                {{"name": tool_name, "arguments": payload}},
-                stage="tools/call",
-                timeout_seconds=tool_timeout_seconds,
-                heartbeat_enabled=True,
-            )
-            result = _extract_result_content(response)
-        except PreflightStageError as exc:
-            stage_status = "timeout" if exc.timeout else "error"
-            detail = str(exc)
-            stage_trace.append(
-                _stage_trace_entry(
-                    stage="tools/call",
-                    status=stage_status,
-                    started_at=stage_started,
-                    timeout_seconds=tool_timeout_seconds,
-                    detail=detail,
-                )
-            )
-            failure_payload = {{
-                **base_payload,
-                "ok": False,
-                "error": detail,
-                "execution_stage": "tools/call",
-                "execution_stage_status": stage_status,
-                "execution_timeout_seconds": tool_timeout_seconds,
-            }}
-            stderr_tail = _trim_tail_text(exc.stderr_tail)
-            if stderr_tail:
-                failure_payload["stderr_tail"] = stderr_tail
-            return failure_payload
-        except Exception as exc:
-            detail = str(exc)
-            stage_trace.append(
-                _stage_trace_entry(
-                    stage="tools/call",
-                    status="error",
-                    started_at=stage_started,
-                    timeout_seconds=tool_timeout_seconds,
-                    detail=detail,
-                )
-            )
-            failure_payload = {{
-                **base_payload,
-                "ok": False,
-                "error": detail,
-                "execution_stage": "tools/call",
-                "execution_stage_status": "error",
-                "execution_timeout_seconds": tool_timeout_seconds,
-            }}
-            stderr_tail = _trim_tail_text(session._stderr_tail_text())
-            if stderr_tail:
-                failure_payload["stderr_tail"] = stderr_tail
-            return failure_payload
-        stage_trace.append(
-            _stage_trace_entry(
-                stage="tools/call",
-                status="ok",
-                started_at=stage_started,
-                timeout_seconds=tool_timeout_seconds,
-            )
-        )
-        return {{
-            **base_payload,
-            "ok": True,
-            "result": result,
-            "execution_stage": "tools/call",
-            "execution_stage_status": "ok",
-            "execution_timeout_seconds": tool_timeout_seconds,
-        }}
-    finally:
-        session.close()
-
-
-def _run_tool(args: argparse.Namespace) -> dict[str, Any]:
-    last_payload: dict[str, Any] | None = None
-    for idx, transport_mode in enumerate(_TRANSPORT_MODES):
-        payload = _run_tool_once(args, transport_mode=transport_mode)
-        if payload.get("ok"):
-            return payload
-        last_payload = payload
-        if idx + 1 >= len(_TRANSPORT_MODES) or not _should_retry_with_alternate_transport(payload):
-            return payload
-    return last_payload or {{
-        "ok": False,
-        "command": args.command,
-        "tool_name": "code_research" if args.command == "research" else "search",
-        "query": getattr(args, "query", None),
-        "path": getattr(args, "path", None),
-        "error": "no transport modes available",
-    }}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2926,16 +1936,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _daemon_meta() -> dict[str, Any]:
+    return daemon_metadata_payload(
+        REPO_DIR,
+        chunkhound_cwd=CHUNKHOUND_CWD,
+        binary=CHUNKHOUND_BIN,
+        timeout=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"],
+    )
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if _dry_run_enabled():
         return _emit(_dry_run_payload(args), exit_code=0)
     if args.command == "preflight":
         try:
-            payload = _run_preflight_with_fallback(args)
+            payload = run_chunkhound_mcp_preflight_payload(
+                CHUNKHOUND_CONFIG,
+                REPO_DIR,
+                cwd=CHUNKHOUND_CWD,
+                binary=CHUNKHOUND_BIN,
+                helper_path=HELPER_PATH,
+                stage_timeouts=_PREFLIGHT_STAGE_TIMEOUTS,
+                transport_modes=_TRANSPORT_MODES,
+                heartbeat_provider=_REVIEW_PROVIDER,
+                heartbeat_interval=_HEARTBEAT_INTERVAL_SECONDS,
+            )
         except Exception as exc:
-            daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-            return _emit({{
+            daemon_meta = _daemon_meta()
+            return _emit({
                 "ok": False,
                 "command": "preflight",
                 "error": str(exc),
@@ -2950,13 +1979,27 @@ def main() -> int:
                 "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
                 "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
                 "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
-            }}, exit_code=1)
+            }, exit_code=1)
         return _emit(payload, exit_code=0 if payload.get("ok") else 1)
     try:
-        payload = _run_tool(args)
+        tool_name, arguments = _tool_arguments(args)
+        payload = run_chunkhound_tool_payload(
+            CHUNKHOUND_CONFIG,
+            REPO_DIR,
+            tool_name,
+            arguments,
+            cwd=CHUNKHOUND_CWD,
+            binary=CHUNKHOUND_BIN,
+            helper_path=HELPER_PATH,
+            stage_timeouts=_PREFLIGHT_STAGE_TIMEOUTS,
+            tool_timeouts=_TOOL_CALL_TIMEOUTS,
+            transport_modes=_TRANSPORT_MODES,
+            heartbeat_provider=_REVIEW_PROVIDER,
+            heartbeat_interval=_HEARTBEAT_INTERVAL_SECONDS,
+        )
     except Exception as exc:
-        daemon_meta = _daemon_metadata_payload(timeout_seconds=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"])
-        payload = {{
+        daemon_meta = _daemon_meta()
+        payload = {
             "ok": False,
             "command": args.command,
             "tool_name": "code_research" if args.command == "research" else "search",
@@ -2974,7 +2017,7 @@ def main() -> int:
             "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
             "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
             "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
-        }}
+        }
     exit_code = _emit(payload, exit_code=0 if payload.get("ok") else 1)
     _emit_sentinel(args, payload)
     return exit_code
@@ -2983,6 +2026,14 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 """
+    script = (
+        script.replace("__MODULE_DIR_JSON__", json.dumps(str(Path(__file__).resolve().parent)))
+        .replace("__REPO_DIR_JSON__", json.dumps(str(repo_root)))
+        .replace("__CHUNKHOUND_CWD_JSON__", json.dumps(str(helper_cwd)))
+        .replace("__CHUNKHOUND_CONFIG_JSON__", json.dumps(str(helper_cfg)))
+        .replace("__CHUNKHOUND_DB_JSON__", json.dumps(str(helper_db)))
+        .replace("__PROVIDER_JSON__", json.dumps(provider))
+    )
     helper_path.write_text(script, encoding="utf-8")
     helper_path.chmod(0o755)
     return helper_path

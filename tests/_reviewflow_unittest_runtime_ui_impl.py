@@ -3786,6 +3786,43 @@ class InstallAndDoctorTests(unittest.TestCase):
         payload.update(overrides)
         return argparse.Namespace(**payload)
 
+    def _recommended_chunkhound_config_json(self) -> str:
+        return json.dumps(
+            {
+                "embedding": {
+                    "provider": "voyageai",
+                    "model": "voyage-3.5-lite",
+                    "rerank_model": "rerank-2.5",
+                    "api_key": "voyage-test-key",
+                },
+                "llm": {
+                    "provider": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "synthesis_model": "deepseek-v4-flash",
+                    "utility_model": "deepseek-v4-flash",
+                    "api_key": "sk-test-key",
+                    "codex_reasoning_effort_synthesis": "high",
+                    "codex_reasoning_effort_utility": "high",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+
+    def _mock_chunkhound_health_warn(self):
+        return mock.patch.object(
+            cure_runtime,
+            "_doctor_chunkhound_health_check",
+            return_value=(
+                cure_runtime.DoctorCheck(
+                    name="chunkhound-health",
+                    status="warn",
+                    detail="mocked chunkhound health check",
+                ),
+                None,
+            ),
+        )
+
     def test_build_chunkhound_install_command_uses_expected_specs(self) -> None:
         with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=False), mock.patch.object(
             rf.importlib.util, "find_spec", return_value=object()
@@ -4888,7 +4925,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             codex_cfg.write_text("", encoding="utf-8")
             jira_cfg.write_text("endpoint: https://example.atlassian.net\n", encoding="utf-8")
             cfg.write_text(
@@ -4909,15 +4946,21 @@ class InstallAndDoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
-            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=False), mock.patch.object(
+            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=True), mock.patch.object(
                 shutil,
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}",
-            ), mock.patch.object(cure_runtime, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
+            ), mock.patch.object(
+                cure_runtime,
+                "run_cmd",
+                return_value=mock.Mock(stdout="", stderr="", exit_code=0),
+            ), self._mock_chunkhound_health_warn():
                 checks = rf._doctor_runtime_checks(runtime)
             by_name = {item.name: item for item in checks}
             self.assertEqual(by_name["cure-config"].status, "ok")
             self.assertEqual(by_name["chunkhound-config"].status, "ok")
+            self.assertEqual(by_name["chunkhound-config-validate"].status, "ok")
+            self.assertEqual(by_name["chunkhound-health"].status, "warn")
             self.assertEqual(by_name["jira-config"].status, "ok")
             self.assertEqual(by_name["codex-config"].status, "ok")
             self.assertEqual(by_name["gh-auth"].status, "ok")
@@ -5194,7 +5237,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             jira_cfg.write_text("jira", encoding="utf-8")
             cfg.write_text(
                 "\n".join(
@@ -5252,7 +5295,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rf.urllib.request,
                 "urlopen",
                 return_value=response,
-            ), mock.patch("sys.stdout", stdout):
+            ), self._mock_chunkhound_health_warn(), mock.patch("sys.stdout", stdout):
                 rc = rf.doctor_flow(
                     argparse.Namespace(
                         json_output=True,
@@ -5290,6 +5333,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             base_cfg.write_text(
                 json.dumps(
                     {
+                        **json.loads(self._recommended_chunkhound_config_json()),
                         "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
                         "research": {"algorithm": "hybrid"},
                     },
@@ -5303,6 +5347,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             repo_local_cfg.write_text(
                 json.dumps(
                     {
+                        **json.loads(self._recommended_chunkhound_config_json()),
                         "database": {"provider": "duckdb", "path": ".chunkhound"},
                         "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
                         "research": {"algorithm": "hybrid"},
@@ -5360,7 +5405,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 cure_runtime.Path,
                 "cwd",
                 return_value=invocation_cwd,
-            ), mock.patch("sys.stdout", stdout):
+            ), self._mock_chunkhound_health_warn(), mock.patch("sys.stdout", stdout):
                 rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
 
             self.assertEqual(rc, 0)
@@ -5387,7 +5432,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             cfg.write_text(
                 "\n".join(
                     [
@@ -5437,7 +5482,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 cure_runtime.Path,
                 "cwd",
                 return_value=root,
-            ), mock.patch("sys.stdout", stdout):
+            ), self._mock_chunkhound_health_warn(), mock.patch("sys.stdout", stdout):
                 rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
 
             self.assertEqual(rc, 0)
@@ -5513,7 +5558,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             cfg.write_text(
                 "\n".join(
                     [
@@ -5545,7 +5590,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rf,
                 "_default_jira_config_path",
                 return_value=root / ".tmp_missing_jira.yml",
-            ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response), mock.patch(
+            ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response), self._mock_chunkhound_health_warn(), mock.patch(
                 "sys.stdout",
                 stdout,
             ):

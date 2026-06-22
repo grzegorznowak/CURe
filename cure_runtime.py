@@ -7,12 +7,20 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tomllib
 from typing import Any, Mapping
 import urllib.error
 import urllib.request
 
+from cure_chunkhound import (
+    ChunkHoundPreflightError,
+    ChunkHoundPreflightResult,
+    run_chunkhound_mcp_preflight,
+    run_chunkhound_tool,
+)
+from _doctor_chunkhound_fixture import index_fixture_for_health_check
 from cure_errors import ReviewflowError
 from cure_sessions import PullRequestRef, parse_pr_url
 from meta import json_fingerprint
@@ -2663,6 +2671,174 @@ def load_chunkhound_runtime_config(
     return cfg, meta, resolved
 
 
+_CHUNKHOUND_RECOMMENDED_CONFIG: dict[str, dict[str, str]] = {
+    "embedding": {
+        "provider": "voyageai",
+        "model": "voyage-3.5-lite",
+        "rerank_model": "rerank-2.5",
+    },
+    "llm": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "synthesis_model": "deepseek-v4-flash",
+        "utility_model": "deepseek-v4-flash",
+        "codex_reasoning_effort_synthesis": "high",
+        "codex_reasoning_effort_utility": "high",
+    },
+}
+
+
+_CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
+
+
+def _validate_chunkhound_config(config: dict[str, Any]) -> tuple[str, str]:
+    if not isinstance(config.get("embedding"), dict):
+        return "fail", "missing required section: embedding"
+    if not isinstance(config.get("llm"), dict):
+        return "fail", "missing required section: llm"
+
+    warnings: list[str] = []
+    for section_name, recommended in _CHUNKHOUND_RECOMMENDED_CONFIG.items():
+        section = config.get(section_name)
+        section = section if isinstance(section, dict) else {}
+        for field, expected in recommended.items():
+            value = section.get(field)
+            if value != expected:
+                warnings.append(f"recommended {section_name}.{field} is {expected!r}, got {value!r}")
+
+    embedding = config.get("embedding") if isinstance(config.get("embedding"), dict) else {}
+    if not str(embedding.get("api_key") or "").strip():
+        warnings.append("embedding.api_key is empty")
+
+    llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
+    llm_key = str(llm.get("api_key") or "").strip()
+    if not llm_key:
+        warnings.append("llm.api_key is empty")
+    elif not llm_key.startswith("sk-"):
+        warnings.append("llm.api_key does not start with sk-")
+
+    if warnings:
+        return "warn", "; ".join(warnings)
+    return "ok", "configuration matches CURe recommendation"
+
+
+def _chunkhound_config_credentials_available(config: Mapping[str, Any]) -> bool:
+    embedding = config.get("embedding") if isinstance(config.get("embedding"), Mapping) else {}
+    llm = config.get("llm") if isinstance(config.get("llm"), Mapping) else {}
+    embedding_key = str(embedding.get("api_key") or "").strip()
+    llm_key = str(llm.get("api_key") or "").strip()
+    return bool(embedding_key and llm_key)
+
+
+def _payload_references_fixture(payload: object) -> bool:
+    text = json.dumps(payload, sort_keys=True, default=str) if not isinstance(payload, str) else payload
+    return any(marker in text for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS)
+
+
+def _doctor_chunkhound_health_check(
+    runtime: ReviewflowRuntime,
+) -> tuple[DoctorCheck, ChunkHoundPreflightResult | ChunkHoundPreflightError | None]:
+    try:
+        _, _, resolved_config = load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+    except ReviewflowError as exc:
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=str(exc).splitlines()[0]), None
+
+    if not _chunkhound_config_credentials_available(resolved_config):
+        return (
+            DoctorCheck(
+                name="chunkhound-health",
+                status="warn",
+                detail="skipping runtime check: chunkhound config missing embedding/LLM api_key",
+            ),
+            None,
+        )
+
+    binary = shutil.which("chunkhound") or "chunkhound"
+    try:
+        with index_fixture_for_health_check(binary, resolved_config, timeout=120.0) as (merged_config_path, repo_path, _temp_dir):
+            try:
+                preflight = run_chunkhound_mcp_preflight(merged_config_path, repo_path, timeout=30.0)
+            except ChunkHoundPreflightError as exc:
+                return (
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=f"preflight failed at {exc.stage}: {exc.detail}"),
+                    exc,
+                )
+
+            try:
+                search_payload = run_chunkhound_tool(
+                    merged_config_path,
+                    repo_path,
+                    "search",
+                    {"type": "regex", "query": "def saludar"},
+                    timeout=60.0,
+                )
+            except Exception as exc:
+                return DoctorCheck(name="chunkhound-health", status="fail", detail=f"search failed: {exc}"), preflight
+            if not bool(search_payload.get("ok")):
+                return (
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=f"search failed: {search_payload.get('error') or 'unknown error'}"),
+                    preflight,
+                )
+            if not _payload_references_fixture(search_payload.get("result", search_payload)):
+                return DoctorCheck(name="chunkhound-health", status="fail", detail="search returned no results for fixture"), preflight
+
+            try:
+                research_payload = run_chunkhound_tool(
+                    merged_config_path,
+                    repo_path,
+                    "code_research",
+                    {"query": "como funciona la funcion saludar"},
+                    timeout=300.0,
+                )
+            except subprocess.TimeoutExpired:
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail="code_research timed out after 300s; preflight and search passed",
+                    ),
+                    preflight,
+                )
+            except Exception as exc:
+                return DoctorCheck(name="chunkhound-health", status="warn", detail=f"code_research failed: {exc}; preflight and search passed"), preflight
+            if not bool(research_payload.get("ok")):
+                status = str(research_payload.get("execution_stage_status") or "").strip()
+                if status == "timeout":
+                    return (
+                        DoctorCheck(
+                            name="chunkhound-health",
+                            status="warn",
+                            detail="code_research timed out after 300s; preflight and search passed",
+                        ),
+                        preflight,
+                    )
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail=f"code_research failed: {research_payload.get('error') or 'unknown error'}; preflight and search passed",
+                    ),
+                    preflight,
+                )
+            if not _payload_references_fixture(research_payload.get("result", research_payload)):
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail="code_research returned no fixture citation; preflight and search passed",
+                    ),
+                    preflight,
+                )
+            return DoctorCheck(name="chunkhound-health", status="ok", detail="preflight, search, and code_research passed"), preflight
+    except subprocess.TimeoutExpired as exc:
+        return DoctorCheck(name="chunkhound-health", status="warn", detail=f"fixture indexing timed out after {exc.timeout}s"), None
+    except subprocess.CalledProcessError as exc:
+        detail = str(exc.stderr or exc.stdout or exc).strip() or str(exc)
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=f"fixture indexing failed: {detail}"), None
+    except Exception as exc:
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=f"fixture health check failed: {exc}"), None
+
+
 def _doctor_executable_check(name: str) -> DoctorCheck:
     path = shutil.which(name)
     if path:
@@ -2963,6 +3139,7 @@ def _doctor_runtime_payload(
     cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
+    artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = _resolve_doctor_target_context(pr_url)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
@@ -3046,6 +3223,20 @@ def _doctor_runtime_payload(
             "public_pr_metadata_detail": target.public_pr_metadata_detail,
         }
 
+    chunkhound_health = (artifacts or {}).get("chunkhound_health")
+    if isinstance(chunkhound_health, ChunkHoundPreflightResult):
+        payload["chunkhound_health"] = {
+            "preflight_stage": chunkhound_health.stage,
+            "available_tools": list(chunkhound_health.available_tools),
+            "missing_tools": list(chunkhound_health.missing_tools),
+            "mcp_transport": chunkhound_health.mcp_transport,
+            "daemon_pid": chunkhound_health.daemon_pid,
+            "daemon_socket": chunkhound_health.daemon_socket,
+            "daemon_log": chunkhound_health.daemon_log,
+            "daemon_runtime_dir": chunkhound_health.daemon_runtime_dir,
+            "time_ms": chunkhound_health.time_ms,
+        }
+
     if not runtime.config_enabled:
         payload["chunkhound_base_config"] = {
             "path": None,
@@ -3081,6 +3272,7 @@ def _doctor_runtime_checks(
     cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
+    artifacts: dict[str, Any] | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
@@ -3119,6 +3311,8 @@ def _doctor_runtime_checks(
     else:
         checks.append(DoctorCheck(name="cache-root", status="warn", detail=f"{cache_detail} (will be created on demand)"))
 
+    chunkhound_config_status = "warn" if not runtime.config_enabled else "fail"
+    chunkhound_config_validate_status: str | None = None
     if not runtime.config_enabled:
         checks.append(DoctorCheck(name="chunkhound-config", status="warn", detail="disabled by --no-config"))
     else:
@@ -3130,7 +3324,22 @@ def _doctor_runtime_checks(
             assert chunkhound_cfg is not None
             chunkhound_detail = f"{chunkhound_cfg.base_config_path} (source=config)"
             if chunkhound_cfg.base_config_path.is_file():
+                chunkhound_config_status = "ok"
                 checks.append(DoctorCheck(name="chunkhound-config", status="ok", detail=chunkhound_detail))
+                try:
+                    resolved_chunkhound = resolve_chunkhound_reviewflow_config(chunkhound_cfg)
+                except ReviewflowError as e:
+                    chunkhound_config_validate_status = "fail"
+                    checks.append(DoctorCheck(name="chunkhound-config-validate", status="fail", detail=str(e).splitlines()[0]))
+                else:
+                    chunkhound_config_validate_status, validate_detail = _validate_chunkhound_config(resolved_chunkhound)
+                    checks.append(
+                        DoctorCheck(
+                            name="chunkhound-config-validate",
+                            status=chunkhound_config_validate_status,
+                            detail=validate_detail,
+                        )
+                    )
             else:
                 checks.append(DoctorCheck(name="chunkhound-config", status="fail", detail=f"missing base_config_path: {chunkhound_detail}"))
 
@@ -3195,7 +3404,17 @@ def _doctor_runtime_checks(
         )
     )
 
-    checks.append(_doctor_executable_check("chunkhound"))
+    chunkhound_binary_check = _doctor_executable_check("chunkhound")
+    checks.append(chunkhound_binary_check)
+    if (
+        chunkhound_config_status == "ok"
+        and chunkhound_binary_check.status == "ok"
+        and chunkhound_config_validate_status != "fail"
+    ):
+        health_check, health_artifact = _doctor_chunkhound_health_check(runtime)
+        checks.append(health_check)
+        if artifacts is not None and health_artifact is not None:
+            artifacts["chunkhound_health"] = health_artifact
     gh_check = _doctor_executable_check("gh")
     jira_check = _doctor_executable_check("jira")
     codex_check = _doctor_executable_check("codex")
