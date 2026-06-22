@@ -2676,6 +2676,8 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -3968,6 +3970,8 @@ class BaselineSelectionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5155,6 +5159,8 @@ class ExactRepoLocalDuckdbReuseTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5505,6 +5511,8 @@ class RefactorRegressionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5706,6 +5714,8 @@ class RefactorRegressionTests(unittest.TestCase):
                     return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
                 if cmd[:3] == ["gh", "pr", "checkout"]:
                     return _Result()
+                if cmd[:2] == ["gh", "api"]:
+                    return _Result("[]")
                 if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                     return _Result()
                 raise AssertionError(f"unexpected command: {cmd}")
@@ -5763,6 +5773,7 @@ class RefactorRegressionTests(unittest.TestCase):
                         },
                     )
                 )
+                stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
                 stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
                 stack.enter_context(
                     mock.patch.object(
@@ -5910,6 +5921,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                 return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
             if cmd[:3] == ["gh", "pr", "checkout"]:
                 return _Result()
+            if cmd[:2] == ["gh", "api"]:
+                return _Result("[]")
             if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                 return _Result()
             raise AssertionError(f"unexpected command: {cmd}")
@@ -6109,6 +6122,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(
@@ -6320,6 +6334,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(
@@ -8338,6 +8353,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 return _Result("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
             if cmd[:3] == ["gh", "pr", "checkout"]:
                 return _Result()
+            if cmd[:2] == ["gh", "api"]:
+                return _Result("[]")
             if cmd and cmd[0] in {"git", "rsync", "chunkhound"}:
                 return _Result()
             raise AssertionError(f"unexpected command: {cmd}")
@@ -8569,6 +8586,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
             stack.enter_context(
                 mock.patch.object(

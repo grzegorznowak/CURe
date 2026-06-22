@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Callable, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -83,6 +83,16 @@ from paths import (
     seed_dir,
 )
 from run import CommandResult, ReviewflowSubprocessError, merged_env, run_cmd
+from cure_github import (
+    _decode_gh_api_list_stdout,
+    _looks_like_gh_auth_error,
+    _public_github_repo_clone_url,
+    _raise_gh_auth_error,
+    _supports_public_github_fallback,
+    gh_api_json,
+    gh_api_list,
+    require_gh_auth,
+)
 from cure_runtime import _normalize_optional_reasoning_effort
 
 from ui import UiSnapshot, Verbosity, build_dashboard_lines
@@ -6197,6 +6207,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    prior_context: str = "",
     cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
@@ -7098,101 +7109,6 @@ def _execute_multipass_step_stage(
             _eprint(f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}")
         raise first_error
     return success_resume_command, skipped_records
-
-
-def require_gh_auth(host: str) -> None:
-    try:
-        run_cmd(["gh", "auth", "status", "--hostname", host], check=True)
-    except ReviewflowSubprocessError as e:
-        _raise_gh_auth_error(host=host, error=e)
-
-
-def _gh_error_text(error: ReviewflowSubprocessError) -> str:
-    return (error.stderr or error.stdout or str(error)).strip()
-
-
-def _looks_like_gh_auth_error(error: ReviewflowSubprocessError) -> bool:
-    text = _gh_error_text(error).lower()
-    needles = (
-        "gh auth login",
-        "not logged into any github hosts",
-        "not authenticated",
-        "populate the gh_token",
-        "please run:  gh auth login",
-        "please run gh auth login",
-    )
-    return any(needle in text for needle in needles)
-
-
-def _raise_gh_auth_error(*, host: str, error: ReviewflowSubprocessError) -> None:
-    msg = _gh_error_text(error) or str(error)
-    raise ReviewflowError(
-        f"`gh` is not authenticated for {host}.\n"
-        f"- Try: gh auth login -h {host}\n"
-        f"- Details: {msg}"
-    ) from error
-
-
-def _supports_public_github_fallback(host: str) -> bool:
-    return host == "github.com"
-
-
-def _public_github_repo_clone_url(*, host: str, owner: str, repo: str) -> str:
-    if not _supports_public_github_fallback(host):
-        raise ReviewflowError(
-            f"Unauthenticated public clone fallback is only supported for github.com, got: {host}"
-        )
-    return f"https://github.com/{owner}/{repo}.git"
-
-
-def _github_public_api_json(*, path: str) -> dict[str, Any]:
-    normalized = path if path.startswith("/") else f"/{path}"
-    req = urllib.request.Request(
-        f"https://api.github.com{normalized}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "cure/0.1.0",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise ReviewflowError(
-            f"Public GitHub API request failed ({getattr(e, 'code', '?')}): {normalized}\n{body}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
-    try:
-        payload = json.loads(body)
-    except Exception as e:
-        raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
-    if not isinstance(payload, dict):
-        raise ReviewflowError(f"Public GitHub API returned unexpected payload for {normalized}")
-    return payload
-
-
-def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) -> dict[str, Any]:
-    cmd = ["gh", "api", "--hostname", host, path]
-    try:
-        result = run_cmd(cmd)
-    except ReviewflowSubprocessError as e:
-        if _looks_like_gh_auth_error(e):
-            if allow_public_fallback and _supports_public_github_fallback(host):
-                _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
-                return _github_public_api_json(path=path)
-            _raise_gh_auth_error(host=host, error=e)
-        raise
-    try:
-        payload = json.loads(result.stdout)
-    except Exception as e:
-        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
-    if not isinstance(payload, dict):
-        raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
-    return payload
 
 
 def write_pr_context_file(
@@ -9108,6 +9024,35 @@ def _raise_on_multipass_plan_abort_contradiction(
     )
 
 
+def _reconcile_prior_context(
+    *,
+    draft_review: str,
+    orientation_brief: str,
+    run_llm: Callable[[str], str],
+) -> str:
+    """Reconcile an independent draft review with prior PR context."""
+    if not orientation_brief:
+        return draft_review
+    reconcile_prompt = f"""You are reconciling a completed draft code review with prior PR context.
+
+## Prior PR context (discussion + past CURe reviews)
+{orientation_brief}
+
+## Draft review (produced independently, without seeing the context above)
+{draft_review}
+
+## Reconciliation rules (Option B)
+1. If the draft and context agree on a finding -> keep the draft as-is.
+2. If the context flags something the draft missed -> inspect that specific file/path BEFORE adding the finding. Only add it if the code evidence supports it. Cite path:line.
+3. If the context says an area is "resolved" but the draft found an issue there -> inspect that file. Code evidence wins over context claims.
+4. If the context is blank or irrelevant -> return the draft unchanged.
+5. Do NOT re-review files the draft already covered well. Only inspect disputed areas.
+
+## Output
+Return the final review in the same format as the draft. Integrate validated context signals. Where code evidence and context disagree, code evidence wins. Cite path:line."""
+    return run_llm(reconcile_prompt)
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -9321,6 +9266,7 @@ def _pr_flow_impl(
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
+    prior_context: str = ""
     profile_resolved: str | None = None
     profile_reason: str | None = None
     profile_template_name: str | None = None
@@ -9542,6 +9488,44 @@ def _pr_flow_impl(
                 }
             progress.meta["pr_stats"] = pr_stats
             progress.flush()
+
+        if not bool(args.no_review):
+            if llm_resolved is None or llm_resolution_meta is None:
+                raise ReviewflowError("LLM configuration was not resolved before PR context orientation.")
+
+            def _run_pr_context_orientation(prompt: str) -> str:
+                orientation_path = work_dir / "pr_context_orientation.md"
+                orientation_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+                run_llm_exec(
+                    repo_dir=repo_dir,
+                    resolved=llm_resolved,
+                    resolution_meta=llm_resolution_meta,
+                    output_path=orientation_path,
+                    prompt=prompt,
+                    env=orientation_env,
+                    stream=False,
+                    progress=progress,
+                    add_dirs=[],
+                    runtime_policy=None,
+                )
+                return orientation_path.read_text(encoding="utf-8") if orientation_path.is_file() else ""
+
+            with phase("build_pr_context", progress=progress, quiet=quiet):
+                pr_context_result = build_pr_context(
+                    pr=pr,
+                    sandbox_root=paths.sandbox_root,
+                    work_dir=work_dir,
+                    pr_stats=pr_stats,
+                    head_sha=review_head_sha or head_sha,
+                    gh_fetch=lambda path: gh_api_list(
+                        host=pr.host, path=path, allow_public_fallback=True
+                    ),
+                    run_llm=_run_pr_context_orientation,
+                )
+                prior_context = str(pr_context_result.get("orientation_brief") or "")
+                progress.meta["pr_context"] = pr_context_result.get("meta") or {}
+                progress.meta["pr_context"]["orientation_brief_chars"] = len(prior_context)
+                progress.flush()
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -10102,6 +10086,7 @@ def _pr_flow_impl(
                                 **cod_hypothesis_ledger_prompt_vars(
                                     enabled=bool(getattr(args, "cod_ledger", False))
                                 ),
+                                "PRIOR_CONTEXT": prior_context,
                                 "PLAN_JSON_PATH": str(plan_json_path),
                                 "STEP_OUTPUT_PATHS": step_paths_text,
                                 "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
@@ -10240,6 +10225,37 @@ def _pr_flow_impl(
                         adapter_meta=review_result.adapter_meta,
                     )
                     progress.flush()
+
+        # Two-pass singlepass: reconcile draft with prior context (Option B rules)
+        # Only for built-in profile templates; custom prompts are user-controlled.
+        if (not use_multipass) and review_md_path.is_file() and prior_context and isinstance(profile_template_name, str):
+            with phase("reconcile_prior_context", progress=progress, quiet=quiet):
+                draft = review_md_path.read_text(encoding="utf-8")
+                reconcile_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+
+                def _run_prior_context_reconcile(prompt: str) -> str:
+                    reconcile_result = run_llm_exec(
+                        repo_dir=repo_dir,
+                        resolved=llm_resolved,
+                        resolution_meta=llm_resolution_meta,
+                        output_path=review_md_path,
+                        prompt=prompt,
+                        env=reconcile_env,
+                        stream=False,
+                        progress=progress,
+                        add_dirs=add_dirs,
+                        runtime_policy=None,
+                    )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), reconcile_result.adapter_meta)
+                    return review_md_path.read_text(encoding="utf-8") if review_md_path.is_file() else ""
+
+                reconciled_review = _reconcile_prior_context(
+                    draft_review=draft,
+                    orientation_brief=prior_context,
+                    run_llm=_run_prior_context_reconcile,
+                )
+                review_md_path.write_text(reconciled_review, encoding="utf-8")
+                progress.flush()
 
         if review_md_path.is_file() and (
             persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
@@ -14457,6 +14473,7 @@ from cure_runtime import (
     resolve_verbosity,
     toml_string,
 )
+from cure_pr_context import build_pr_context
 from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
