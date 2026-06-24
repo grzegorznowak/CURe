@@ -1025,21 +1025,6 @@ def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 
 
-    if args.command == "search":
-        payload: dict[str, Any] = {
-            "query": args.query,
-            "type": args.type,
-            "page_size": args.page_size,
-            "offset": args.offset,
-        }
-        if args.path:
-            payload["path"] = args.path
-        return "search", payload
-    payload = {"query": args.query}
-    if args.path:
-        payload["path"] = args.path
-    return "code_research", payload
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=str(HELPER_PATH), description="CURe-managed ChunkHound helper")

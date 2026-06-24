@@ -474,6 +474,48 @@ def test_redact_secrets_preserves_non_secret_text() -> None:
     assert '42' in result
 
 
+def test_redact_secrets_key_equals_value() -> None:
+    """Redact api_key=sk-... format."""
+    result = cure_runtime._redact_secrets("api_key=sk-secret-456")  # pragma: allowlist secret
+    assert "sk-secret-456" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_colon_value() -> None:
+    """Redact api_key: sk-... YAML/colon format."""
+    result = cure_runtime._redact_secrets("api_key: sk-secret-789")  # pragma: allowlist secret
+    assert "sk-secret-789" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_bearer_token() -> None:
+    """Redact Authorization: Bearer token."""
+    result = cure_runtime._redact_secrets("Authorization: Bearer sk-token-abc")  # pragma: allowlist secret
+    assert "sk-token-abc" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_basic_auth() -> None:
+    """Redact Authorization: Basic base64."""
+    result = cure_runtime._redact_secrets("Authorization: Basic dXNlcjpwYXNz")
+    assert "dXNlcjpwYXNz" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_x_api_key() -> None:
+    """Redact X-Api-Key header."""
+    result = cure_runtime._redact_secrets("X-Api-Key: sk-header-key")  # pragma: allowlist secret
+    assert "sk-header-key" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_lowercase_x_api_key() -> None:
+    """Redact x-api-key header (lowercase)."""
+    result = cure_runtime._redact_secrets("x-api-key: sk-lower-key")  # pragma: allowlist secret
+    assert "sk-lower-key" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
 def test_search_result_references_fixture_matches_file_path() -> None:
     assert cure_runtime._search_result_references_fixture(
         {"results": [{"file_path": "/tmp/fixture/main.py"}]}
@@ -489,6 +531,19 @@ def test_search_result_references_fixture_rejects_non_matching() -> None:
     )
     assert not cure_runtime._search_result_references_fixture({"results": []})
     assert not cure_runtime._search_result_references_fixture({})
+
+
+def test_search_result_references_fixture_string_results() -> None:
+    """Markdown/text search results (not JSON dicts) should still match fixture markers."""
+    assert cure_runtime._search_result_references_fixture("Found [main.py](main.py) in results.")
+    assert cure_runtime._search_result_references_fixture("See `utils.py` for the implementation.")
+    assert not cure_runtime._search_result_references_fixture("No fixture files matched.")
+
+
+def test_search_result_references_fixture_non_dict_non_string() -> None:
+    assert not cure_runtime._search_result_references_fixture(None)
+    assert not cure_runtime._search_result_references_fixture(42)
+    assert not cure_runtime._search_result_references_fixture([])
 
 
 def test_research_result_references_fixture_matches_bracketed() -> None:

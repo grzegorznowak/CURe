@@ -2659,8 +2659,21 @@ _CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
 
 # Patterns that could expose credentials in subprocess output.
 _REDACT_PATTERNS = (
+    # JSON: "api_key": "sk-..."
     (r'"api_key"\s*:\s*"[^"]+"', '"api_key": "[REDACTED]"'),
+    # Python: 'api_key': 'sk-...'
     (r"'api_key'\s*:\s*'[^']+'", "'api_key': '[REDACTED]'"),
+    # key=value: api_key=sk-...
+    (r'\bapi_key\s*=\s*\S+', 'api_key=[REDACTED]'),
+    # YAML/colon: api_key: sk-...
+    (r'\bapi_key\s*:\s*\S+', 'api_key: [REDACTED]'),
+    # Authorization: Bearer token
+    (r'\bAuthorization\s*:\s*Bearer\s+\S+', 'Authorization: Bearer [REDACTED]'),
+    # Authorization: Basic base64
+    (r'\bAuthorization\s*:\s*Basic\s+\S+', 'Authorization: Basic [REDACTED]'),
+    # X-Api-Key / x-api-key headers
+    (r'\bX-Api-Key\s*:\s*\S+', 'X-Api-Key: [REDACTED]'),
+    (r'\bx-api-key\s*:\s*\S+', 'x-api-key: [REDACTED]'),
 )
 
 
@@ -2676,15 +2689,20 @@ def _redact_secrets(text: str) -> str:
 
 def _search_result_references_fixture(search_payload: dict[str, Any]) -> bool:
     """Return True when at least one search result `file_path` ends with a known fixture filename."""
-    results = search_payload.get("results") if isinstance(search_payload, dict) else None
-    if not isinstance(results, list):
-        return False
-    for entry in results:
-        if not isinstance(entry, dict):
-            continue
-        file_path = str(entry.get("file_path") or "")
-        if any(file_path.endswith(marker) for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS):
-            return True
+    if isinstance(search_payload, dict):
+        results = search_payload.get("results")
+        if isinstance(results, list):
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                file_path = str(entry.get("file_path") or "")
+                if any(file_path.endswith(marker) for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS):
+                    return True
+    elif isinstance(search_payload, str):
+        text = search_payload
+        for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS:
+            if f'[{marker}]' in text or f'`{marker}`' in text:
+                return True
     return False
 
 
