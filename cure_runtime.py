@@ -2769,7 +2769,7 @@ def _doctor_chunkhound_health_check(
                 preflight = run_chunkhound_mcp_preflight(merged_config_path, repo_path, timeout=30.0)
             except ChunkHoundPreflightError as exc:
                 return (
-                    DoctorCheck(name="chunkhound-health", status="fail", detail=f"preflight failed at {exc.stage}: {exc.detail}"),
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"preflight failed at {exc.stage}: {exc.detail}")),
                     exc,
                 )
 
@@ -2780,12 +2780,13 @@ def _doctor_chunkhound_health_check(
                     "search",
                     {"type": "regex", "query": "def saludar"},
                     timeout=60.0,
+                    skip_preflight=True,
                 )
             except Exception as exc:
                 return DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"search failed: {exc}")), preflight
             if not bool(search_payload.get("ok")):
                 return (
-                    DoctorCheck(name="chunkhound-health", status="fail", detail=f"search failed: {search_payload.get('error') or 'unknown error'}"),
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"search failed: {search_payload.get('error') or 'unknown error'}")),
                     preflight,
                 )
             if not _search_result_references_fixture(search_payload.get("result", search_payload)):
@@ -2798,6 +2799,7 @@ def _doctor_chunkhound_health_check(
                     "code_research",
                     {"query": "como funciona la funcion saludar"},
                     timeout=300.0,
+                    skip_preflight=True,
                 )
             except subprocess.TimeoutExpired:
                 return (
@@ -2825,7 +2827,7 @@ def _doctor_chunkhound_health_check(
                     DoctorCheck(
                         name="chunkhound-health",
                         status="warn",
-                        detail=f"code_research failed: {research_payload.get('error') or 'unknown error'}; preflight and search passed",
+                        detail=_redact_secrets(f"code_research failed: {research_payload.get('error') or 'unknown error'}; preflight and search passed"),
                     ),
                     preflight,
                 )

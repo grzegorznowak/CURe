@@ -1060,6 +1060,7 @@ def run_chunkhound_tool_payload(
     transport_modes: tuple[str, ...] | None = None,
     heartbeat_provider: str = "claude",
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    skip_preflight: bool = False,
 ) -> dict[str, Any]:
     active_stage_timeouts = _normalized_stage_timeouts(stage_timeouts, None)
     active_tool_timeouts = _normalized_tool_timeouts(tool_timeouts, timeout)
@@ -1080,16 +1081,19 @@ def run_chunkhound_tool_payload(
             heartbeat_interval=heartbeat_interval,
         )
         try:
-            preflight = _run_preflight(
-                session,
-                config_path=config_path,
-                repo_path=repo_path,
-                cwd=cwd,
-                binary=binary,
-                helper_path=helper_path,
-                stage_timeouts=active_stage_timeouts,
-                emit_stage_lines=False,
-            )
+            if skip_preflight:
+                preflight = {"ok": True, "session": session, "stage_trace": [], "available_tools": ["search", "code_research"]}
+            else:
+                preflight = _run_preflight(
+                    session,
+                    config_path=config_path,
+                    repo_path=repo_path,
+                    cwd=cwd,
+                    binary=binary,
+                    helper_path=helper_path,
+                    stage_timeouts=active_stage_timeouts,
+                    emit_stage_lines=False,
+                )
             if not preflight.get("ok"):
                 payload = {
                     **preflight,
@@ -1208,5 +1212,6 @@ def run_chunkhound_tool(
     tool_name: str,
     arguments: dict[str, Any],
     timeout: float = 60.0,
+    skip_preflight: bool = False,
 ) -> dict[str, Any]:
-    return run_chunkhound_tool_payload(config_path, repo_path, tool_name, arguments, timeout=timeout)
+    return run_chunkhound_tool_payload(config_path, repo_path, tool_name, arguments, timeout=timeout, skip_preflight=skip_preflight)
