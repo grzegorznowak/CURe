@@ -2659,7 +2659,7 @@ _CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
 
 # Patterns that could expose credentials in subprocess output.
 _REDACT_PATTERNS = (
-    # JSON: "api_key": "sk-..."
+    # JSON: "api_key": "<redacted>"
     (r'"api_key"\s*:\s*"[^"]+"', '"api_key": "[REDACTED]"'),
     # Python: 'api_key': 'sk-...'
     (r"'api_key'\s*:\s*'[^']+'", "'api_key': '[REDACTED]'"),
@@ -2667,13 +2667,12 @@ _REDACT_PATTERNS = (
     (r'\bapi_key\s*=\s*\S+', 'api_key=[REDACTED]'),
     # YAML/colon: api_key: sk-...
     (r'\bapi_key\s*:\s*\S+', 'api_key: [REDACTED]'),
-    # Authorization: Bearer token
-    (r'\bAuthorization\s*:\s*Bearer\s+\S+', 'Authorization: Bearer [REDACTED]'),
-    # Authorization: Basic base64
-    (r'\bAuthorization\s*:\s*Basic\s+\S+', 'Authorization: Basic [REDACTED]'),
-    # X-Api-Key / x-api-key headers
-    (r'\bX-Api-Key\s*:\s*\S+', 'X-Api-Key: [REDACTED]'),
-    (r'\bx-api-key\s*:\s*\S+', 'x-api-key: [REDACTED]'),
+    # Authorization: Bearer token (case-insensitive)
+    (r'(?i)\bAuthorization\s*:\s*Bearer\s+\S+', 'Authorization: Bearer [REDACTED]'),
+    # Authorization: Basic base64 (case-insensitive)
+    (r'(?i)\bAuthorization\s*:\s*Basic\s+\S+', 'Authorization: Basic [REDACTED]'),
+    # X-Api-Key / x-api-key headers (case-insensitive)
+    (r'(?i)\bX-Api-Key\s*:\s*\S+', 'X-Api-Key: [REDACTED]'),
 )
 
 
@@ -2730,7 +2729,8 @@ def _validate_chunkhound_config(config: dict[str, Any]) -> tuple[str, str]:
         for field, expected in recommended.items():
             value = section.get(field)
             if value != expected:
-                warnings.append(f"recommended {section_name}.{field} is {expected!r}, got {value!r}")
+                display_value = _redact_secrets(repr(value)) if isinstance(value, str) else repr(value)
+                warnings.append(f"recommended {section_name}.{field} is {expected!r}, got {display_value}")
 
     embedding = config.get("embedding") if isinstance(config.get("embedding"), dict) else {}
     if not str(embedding.get("api_key") or "").strip():
@@ -3257,6 +3257,12 @@ def _doctor_runtime_payload(
             "daemon_log": chunkhound_health.daemon_log,
             "daemon_runtime_dir": chunkhound_health.daemon_runtime_dir,
             "time_ms": chunkhound_health.time_ms,
+        }
+    elif isinstance(chunkhound_health, ChunkHoundPreflightError):
+        payload["chunkhound_health"] = {
+            "preflight_stage": chunkhound_health.stage,
+            "error": _redact_secrets(chunkhound_health.detail),
+            "ok": False,
         }
 
     if not runtime.config_enabled:

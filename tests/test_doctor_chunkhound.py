@@ -516,6 +516,27 @@ def test_redact_secrets_lowercase_x_api_key() -> None:
     assert "[REDACTED]" in result
 
 
+def test_redact_secrets_case_insensitive_bearer() -> None:
+    """Redact authorization: bearer with mixed case."""
+    result = cure_runtime._redact_secrets("authorization: bearer sk-mixed-case")  # pragma: allowlist secret
+    assert "sk-mixed-case" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_case_insensitive_basic() -> None:
+    """Redact authorization: basic with mixed case."""
+    result = cure_runtime._redact_secrets("authorization: basic dXNlcjpwYXNz")
+    assert "dXNlcjpwYXNz" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_case_insensitive_x_api_key() -> None:
+    """Redact x-api-key with mixed case via case-insensitive pattern."""
+    result = cure_runtime._redact_secrets("X-API-KEY: sk-mixed-header")  # pragma: allowlist secret
+    assert "sk-mixed-header" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+
+
 def test_search_result_references_fixture_matches_file_path() -> None:
     assert cure_runtime._search_result_references_fixture(
         {"results": [{"file_path": "/tmp/fixture/main.py"}]}

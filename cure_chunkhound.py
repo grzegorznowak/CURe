@@ -1082,24 +1082,46 @@ def run_chunkhound_tool_payload(
         )
         try:
             if skip_preflight:
-                session.ensure_started(stage="spawn", timeout_seconds=active_stage_timeouts["spawn"])
-                session.request(
-                    "initialize",
-                    {
-                        "protocolVersion": "2025-03-26",
-                        "capabilities": {},
-                        "clientInfo": {"name": "cure-chunkhound-helper", "version": "1"},
-                    },
-                    stage="initialize",
-                    timeout_seconds=active_stage_timeouts["initialize"],
-                )
-                session.notify(
-                    "notifications/initialized",
-                    {},
-                    stage="notifications/initialized",
-                    timeout_seconds=active_stage_timeouts["notifications/initialized"],
-                )
-                preflight = {"ok": True, "session": session, "stage_trace": [], "available_tools": ["search", "code_research"]}
+                try:
+                    session.ensure_started(stage="spawn", timeout_seconds=active_stage_timeouts["spawn"])
+                    session.request(
+                        "initialize",
+                        {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "cure-chunkhound-helper", "version": "1"},
+                        },
+                        stage="initialize",
+                        timeout_seconds=active_stage_timeouts["initialize"],
+                    )
+                    session.notify(
+                        "notifications/initialized",
+                        {},
+                        stage="notifications/initialized",
+                        timeout_seconds=active_stage_timeouts["notifications/initialized"],
+                    )
+                except PreflightStageError as exc:
+                    preflight = {
+                        "ok": False,
+                        "preflight_stage": exc.stage,
+                        "preflight_stage_status": "timeout" if exc.timeout else "error",
+                        "error": str(exc),
+                        "session": session,
+                        "stage_trace": [],
+                        "available_tools": [],
+                    }
+                except Exception as exc:
+                    preflight = {
+                        "ok": False,
+                        "preflight_stage": "initialize",
+                        "preflight_stage_status": "error",
+                        "error": str(exc),
+                        "session": session,
+                        "stage_trace": [],
+                        "available_tools": [],
+                    }
+                else:
+                    preflight = {"ok": True, "session": session, "stage_trace": [], "available_tools": ["search", "code_research"]}
             else:
                 preflight = _run_preflight(
                     session,
