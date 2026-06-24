@@ -25,14 +25,14 @@ def _recommended_chunkhound_config() -> dict[str, object]:
             "provider": "voyageai",
             "model": "voyage-3.5-lite",
             "rerank_model": "rerank-2.5",
-            "api_key": "voyage-test-key",
+            "api_key": "voyage-test-key",  # pragma: allowlist secret
         },
         "llm": {
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com",
             "synthesis_model": "deepseek-v4-flash",
             "utility_model": "deepseek-v4-flash",
-            "api_key": "sk-test-key",
+            "api_key": "sk-test-key",  # pragma: allowlist secret
             "codex_reasoning_effort_synthesis": "high",
             "codex_reasoning_effort_utility": "high",
         },
@@ -150,7 +150,7 @@ def test_chunkhound_preflight_error_exposes_stage_and_detail() -> None:
         (lambda cfg: {**cfg, "llm": {**cfg["llm"], "base_url": "https://api.openai.com/v1"}}, "warn", "llm.base_url"),
         (lambda cfg: {**cfg, "llm": {**cfg["llm"], "synthesis_model": "other"}}, "warn", "llm.synthesis_model"),
         (lambda cfg: {**cfg, "llm": {**cfg["llm"], "utility_model": "other"}}, "warn", "llm.utility_model"),
-        (lambda cfg: {**cfg, "llm": {**cfg["llm"], "api_key": "not-sk"}}, "warn", "llm.api_key does not start with sk-"),
+        (lambda cfg: {**cfg, "llm": {**cfg["llm"], "api_key": "not-sk"}}, "warn", "llm.api_key does not start with sk-"),  # pragma: allowlist secret
         (
             lambda cfg: {**cfg, "llm": {**cfg["llm"], "codex_reasoning_effort_synthesis": "medium"}},
             "warn",

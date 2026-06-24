@@ -3456,14 +3456,14 @@ class InstallAndDoctorTests(unittest.TestCase):
                     "provider": "voyageai",
                     "model": "voyage-3.5-lite",
                     "rerank_model": "rerank-2.5",
-                    "api_key": "voyage-test-key",
+                    "api_key": "voyage-test-key",  # pragma: allowlist secret
                 },
                 "llm": {
                     "provider": "deepseek",
                     "base_url": "https://api.deepseek.com",
                     "synthesis_model": "deepseek-v4-flash",
                     "utility_model": "deepseek-v4-flash",
-                    "api_key": "sk-test-key",
+                    "api_key": "sk-test-key",  # pragma: allowlist secret
                     "codex_reasoning_effort_synthesis": "high",
                     "codex_reasoning_effort_utility": "high",
                 },
