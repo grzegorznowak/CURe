@@ -464,8 +464,8 @@ def test_redact_secrets_strips_json_api_key() -> None:
 
 
 def test_redact_secrets_strips_python_api_key() -> None:
-    assert "[REDACTED]" in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")
-    assert "sk-secret-123" not in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")
+    assert "[REDACTED]" in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")  # pragma: allowlist secret
+    assert "sk-secret-123" not in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")  # pragma: allowlist secret
 
 
 def test_redact_secrets_preserves_non_secret_text() -> None:
