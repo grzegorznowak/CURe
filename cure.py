@@ -8515,8 +8515,26 @@ def _apply_review_intelligence_runtime_meta(
 
 _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS = 45.0
 _CHUNKHOUND_HELPER_STAGE_LINE_RE = re.compile(
-    r"^preflight stage=(?P<stage>\S+) status=(?P<status>\S+)(?: detail=(?P<detail>.*))?$"
+    r"^\s+(?P<status>ok|fail|warn)\s+(?P<label>.+?)"
+    r"(?:\s+\((?P<timing>\d+\.\d+)s(?:(?:\s*/\s*(?P<timeout>\d+\.\d+)s)|"
+    r"(?:,\s*non-blocking))?\))?"
+    r"(?::\s+(?P<detail>.*))?$"
 )
+_CHUNKHOUND_HELPER_RUNNING_LINE_RE = re.compile(
+    r"^\s+(?P<label>.+?)\.{3}$"
+)
+
+
+def _reverse_preflight_stage_label(label: str) -> str:
+    return {
+        "start MCP server": "spawn",
+        "initialize": "initialize",
+        "initialized": "notifications/initialized",
+        "list tools": "tools/list",
+        "validate tools": "tool_validation",
+        "daemon metadata": "daemon_metadata",
+        "preflight": "complete",
+    }.get(label, label)
 
 
 def _trim_chunkhound_diag_text(text: object, *, max_chars: int = 4000) -> str:
@@ -8529,12 +8547,21 @@ def _trim_chunkhound_diag_text(text: object, *, max_chars: int = 4000) -> str:
 
 
 def _parse_chunkhound_helper_stage_line(line: str) -> dict[str, str] | None:
-    match = _CHUNKHOUND_HELPER_STAGE_LINE_RE.match(str(line or "").strip())
+    value = str(line or "").rstrip("\n\r")
+    running_match = _CHUNKHOUND_HELPER_RUNNING_LINE_RE.match(value)
+    if running_match:
+        return {
+            "stage": _reverse_preflight_stage_label(running_match.group("label")),
+            "status": "running",
+        }
+    match = _CHUNKHOUND_HELPER_STAGE_LINE_RE.match(value)
     if match is None:
         return None
-    detail = _trim_chunkhound_diag_text(match.group("detail") or "", max_chars=240)
+    label = str(match.group("label") or "").strip()
+    detail_group = match.group("detail")
+    detail = _trim_chunkhound_diag_text(detail_group, max_chars=240) if detail_group else ""
     payload = {
-        "stage": str(match.group("stage") or "").strip(),
+        "stage": _reverse_preflight_stage_label(label),
         "status": str(match.group("status") or "").strip(),
     }
     if detail:

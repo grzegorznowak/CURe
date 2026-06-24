@@ -141,21 +141,51 @@ def _read_lock(path_text: str) -> dict[str, Any]:
 
 
 def _emit_stage(
-    stage: str,
     status: str,
+    label: str,
     *,
+    elapsed_seconds: float | None = None,
+    timeout_seconds: float | None = None,
     detail: str | None = None,
     enabled: bool = True,
 ) -> None:
     if not enabled:
         return
-    message = f"preflight stage={stage} status={status}"
     detail_text = " ".join(str(detail or "").split())
     if detail_text:
         detail_text = _trim_tail_text(detail_text, max_chars=240)
-        message += f" detail={detail_text}"
-    sys.stderr.write(message + "\n")
+    if status == "running":
+        line = f"  {label}..."
+    elif status == "ok":
+        timing = f" ({elapsed_seconds:.1f}s)" if elapsed_seconds is not None else ""
+        line = f"  ok {label}{timing}"
+    elif status == "timeout":
+        timing = f" ({elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
+        timeout_part = f" / {timeout_seconds:.1f}s)" if timeout_seconds is not None else ")"
+        line = f"  fail {label}{timing}{timeout_part}: {detail_text}" if detail_text else f"  fail {label}{timing}{timeout_part}"
+    elif status == "error":
+        timing = f" ({elapsed_seconds:.1f}s)" if elapsed_seconds is not None else ""
+        line = f"  fail {label}{timing}: {detail_text}" if detail_text else f"  fail {label}{timing}"
+    elif status == "warn":
+        timing = f" ({elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
+        timeout_part = f" / {timeout_seconds:.1f}s, non-blocking)" if timeout_seconds is not None else ", non-blocking)"
+        line = f"  warn {label}{timing}{timeout_part}: {detail_text}" if detail_text else f"  warn {label}{timing}{timeout_part}"
+    else:
+        line = f"  {status} {label}" + (f" ({elapsed_seconds:.1f}s)" if elapsed_seconds is not None else "") + (f": {detail_text}" if detail_text else "")
+    sys.stderr.write(line + "\n")
     sys.stderr.flush()
+
+
+def _preflight_stage_label(stage: str) -> str:
+    return {
+        "spawn": "start MCP server",
+        "initialize": "initialize",
+        "notifications/initialized": "initialized",
+        "tools/list": "list tools",
+        "tool_validation": "validate tools",
+        "daemon_metadata": "daemon metadata",
+        "complete": "preflight",
+    }.get(stage, stage)
 
 
 def _base_cmd(config_path: str | Path, repo_path: str | Path, *, binary: str = "chunkhound") -> list[str]:
@@ -450,6 +480,7 @@ class JsonRpcSession:
         timeout_seconds: float,
         deadline: float,
         heartbeat_enabled: bool = False,
+        heartbeat_label: str | None = None,
     ) -> dict[str, Any]:
         last_heartbeat_at = time.monotonic() - self._heartbeat_interval
         while True:
@@ -462,12 +493,13 @@ class JsonRpcSession:
                 now = time.monotonic()
                 if now - last_heartbeat_at >= self._heartbeat_interval:
                     elapsed = max(0.0, float(timeout_seconds) - max(0.0, float(deadline) - now))
+                    label_part = f"tools/call {heartbeat_label} " if heartbeat_label else "tools/call "
                     try:
                         if self._heartbeat_provider == "codex":
-                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stdout.write(f"cure-chunkhound: {label_part}waiting ({elapsed:.1f}s / {timeout_seconds:.0f}s)\n")
                             sys.stdout.flush()
                         else:
-                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stderr.write(f"cure-chunkhound: {label_part}waiting ({elapsed:.1f}s / {timeout_seconds:.0f}s)\n")
                             sys.stderr.flush()
                     except Exception:
                         pass
@@ -504,6 +536,7 @@ class JsonRpcSession:
         stage: str,
         timeout_seconds: float,
         heartbeat_enabled: bool = False,
+        heartbeat_label: str | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         self.ensure_started(stage=stage, timeout_seconds=timeout_seconds, deadline=deadline)
@@ -519,6 +552,7 @@ class JsonRpcSession:
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
                 heartbeat_enabled=heartbeat_enabled,
+                heartbeat_label=heartbeat_label,
             )
             if message.get("id") == request_id:
                 return message
@@ -708,13 +742,16 @@ def _run_preflight(
 
     def _run_stage(stage: str, timeout_seconds: float, func: Any) -> tuple[bool, Any]:
         stage_started = time.monotonic()
-        _emit_stage(stage, "running", enabled=emit_stage_lines)
+        _emit_stage("running", _preflight_stage_label(stage), enabled=emit_stage_lines)
         try:
             result = func()
         except PreflightStageError as exc:
             status = "timeout" if exc.timeout else "error"
             detail = str(exc)
-            _emit_stage(stage, status, detail=detail, enabled=emit_stage_lines)
+            if status == "timeout":
+                _emit_stage("timeout", _preflight_stage_label(stage), elapsed_seconds=time.monotonic() - stage_started, timeout_seconds=timeout_seconds, detail=detail, enabled=emit_stage_lines)
+            else:
+                _emit_stage("error", _preflight_stage_label(stage), elapsed_seconds=time.monotonic() - stage_started, detail=detail, enabled=emit_stage_lines)
             stage_trace.append(
                 _stage_trace_entry(
                     stage=stage,
@@ -743,7 +780,7 @@ def _run_preflight(
             )
         except Exception as exc:
             detail = str(exc)
-            _emit_stage(stage, "error", detail=detail, enabled=emit_stage_lines)
+            _emit_stage("error", _preflight_stage_label(stage), elapsed_seconds=time.monotonic() - stage_started, detail=detail, enabled=emit_stage_lines)
             stage_trace.append(
                 _stage_trace_entry(
                     stage=stage,
@@ -770,7 +807,7 @@ def _run_preflight(
                     stderr_tail=session._stderr_tail_text(),
                 ),
             )
-        _emit_stage(stage, "ok", enabled=emit_stage_lines)
+        _emit_stage("ok", _preflight_stage_label(stage), elapsed_seconds=time.monotonic() - stage_started, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage=stage,
@@ -807,7 +844,7 @@ def _run_preflight(
         return init_response
     if "error" in init_response:
         detail = json.dumps(init_response["error"], sort_keys=True)
-        _emit_stage("initialize", "error", detail=detail, enabled=emit_stage_lines)
+        _emit_stage("error", "initialize", elapsed_seconds=time.monotonic() - started_at, detail=detail, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="initialize",
@@ -854,7 +891,7 @@ def _run_preflight(
         return tools_response
     if "error" in tools_response:
         detail = json.dumps(tools_response["error"], sort_keys=True)
-        _emit_stage("tools/list", "error", detail=detail, enabled=emit_stage_lines)
+        _emit_stage("error", "list tools", elapsed_seconds=time.monotonic() - started_at, detail=detail, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="tools/list",
@@ -889,10 +926,10 @@ def _run_preflight(
     )
     missing_tools = [name for name in ("search", "code_research") if name not in available]
     stage_started = time.monotonic()
-    _emit_stage("tool_validation", "running", enabled=emit_stage_lines)
+    _emit_stage("running", "validate tools", enabled=emit_stage_lines)
     if missing_tools:
         detail = "required ChunkHound tools are unavailable: " + ", ".join(missing_tools)
-        _emit_stage("tool_validation", "error", detail=detail, enabled=emit_stage_lines)
+        _emit_stage("error", "validate tools", elapsed_seconds=time.monotonic() - stage_started, detail=detail, enabled=emit_stage_lines)
         stage_trace.append(_stage_trace_entry(stage="tool_validation", status="error", started_at=stage_started, detail=detail))
         return _build_preflight_payload(
             ok=False,
@@ -910,15 +947,15 @@ def _run_preflight(
             daemon_meta=_metadata(),
             stderr_tail=session._stderr_tail_text(),
         )
-    _emit_stage("tool_validation", "ok", enabled=emit_stage_lines)
+    _emit_stage("ok", "validate tools", elapsed_seconds=time.monotonic() - stage_started, enabled=emit_stage_lines)
     stage_trace.append(_stage_trace_entry(stage="tool_validation", status="ok", started_at=stage_started))
 
     stage_started = time.monotonic()
-    _emit_stage("daemon_metadata", "running", enabled=emit_stage_lines)
+    _emit_stage("running", "daemon metadata", enabled=emit_stage_lines)
     daemon_meta = _metadata()
     daemon_metadata_error = str(daemon_meta.get("daemon_metadata_error") or "").strip()
     if daemon_metadata_error:
-        _emit_stage("daemon_metadata", "error", detail=daemon_metadata_error, enabled=emit_stage_lines)
+        _emit_stage("warn", "daemon metadata", elapsed_seconds=time.monotonic() - stage_started, timeout_seconds=stage_timeouts["daemon_metadata"], detail=daemon_metadata_error, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="daemon_metadata",
@@ -929,7 +966,7 @@ def _run_preflight(
             )
         )
     else:
-        _emit_stage("daemon_metadata", "ok", enabled=emit_stage_lines)
+        _emit_stage("ok", "daemon metadata", elapsed_seconds=time.monotonic() - stage_started, enabled=emit_stage_lines)
         stage_trace.append(
             _stage_trace_entry(
                 stage="daemon_metadata",
@@ -939,7 +976,7 @@ def _run_preflight(
             )
         )
 
-    _emit_stage("complete", "ok", enabled=emit_stage_lines)
+    _emit_stage("ok", "preflight", elapsed_seconds=time.monotonic() - started_at, detail=f"{len(available)} tools", enabled=emit_stage_lines)
     return _build_preflight_payload(
         ok=True,
         config_path=config_path,
@@ -1164,6 +1201,7 @@ def run_chunkhound_tool_payload(
                         stage="tools/call",
                         timeout_seconds=tool_timeout_seconds,
                         heartbeat_enabled=True,
+                        heartbeat_label=requested_tool_name,
                     )
                     result = _extract_result_content(response)
                 except PreflightStageError as exc:

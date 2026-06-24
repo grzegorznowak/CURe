@@ -901,9 +901,9 @@ def _legacy_heartbeat_patch_anchor(elapsed: float) -> None:
     # Kept so legacy tests that monkeypatch generated heartbeat lines can still
     # exercise the generated helper without reaching into cure_chunkhound.py.
     if False:  # pragma: no cover
-                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stdout.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\n")
                             sys.stdout.flush()
-                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\n")
+                            sys.stderr.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\n")
                             sys.stderr.flush()
 
 

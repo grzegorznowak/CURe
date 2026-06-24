@@ -2784,7 +2784,10 @@ def _doctor_chunkhound_health_check(
 
     binary = shutil.which("chunkhound") or "chunkhound"
     try:
+        print("chunkhound-health: indexing fixture repository (timeout=120s)...", file=sys.stderr, flush=True)
         with index_fixture_for_health_check(binary, resolved_config, timeout=120.0) as (merged_config_path, repo_path, _temp_dir):
+            print("  ok indexing", file=sys.stderr, flush=True)
+            print("chunkhound-health: MCP preflight (initialize timeout=30s)...", file=sys.stderr, flush=True)
             try:
                 preflight = run_chunkhound_mcp_preflight(merged_config_path, repo_path, timeout=30.0)
             except ChunkHoundPreflightError as exc:
@@ -2793,6 +2796,7 @@ def _doctor_chunkhound_health_check(
                     exc,
                 )
 
+            print('chunkhound-health: search "def saludar" (tool timeout=60s)...', file=sys.stderr, flush=True)
             try:
                 search_payload = run_chunkhound_tool(
                     merged_config_path,
@@ -2812,6 +2816,7 @@ def _doctor_chunkhound_health_check(
             if not _search_result_references_fixture(search_payload.get("result", search_payload)):
                 return DoctorCheck(name="chunkhound-health", status="fail", detail="search returned no results for fixture"), preflight
 
+            print('chunkhound-health: code_research "como funciona la funcion saludar" (tool timeout=300s)...', file=sys.stderr, flush=True)
             try:
                 research_payload = run_chunkhound_tool(
                     merged_config_path,

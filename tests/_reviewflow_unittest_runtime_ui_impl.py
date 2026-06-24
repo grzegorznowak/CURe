@@ -581,17 +581,17 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                     stderr_lines = [line for line in result.stderr.splitlines() if line.strip()]
                     if provider == "codex":
                         self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stdout_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
                             result.stdout,
                         )
                     else:
                         self.assertEqual(len(stdout_lines), 1, result.stdout)
                         self.assertFalse(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stdout_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
                             result.stdout,
                         )
                         self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stderr_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stderr_lines),
                             result.stderr,
                         )
                         # Part D: completion sentinel must be the last stderr line
@@ -730,7 +730,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-            self.assertTrue(any(line.startswith("cure-chunkhound: tools/call waiting") for line in stdout_lines), result.stdout)
+            self.assertTrue(any(line.startswith("cure-chunkhound: tools/call search ") for line in stdout_lines), result.stdout)
             payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["tool_name"], "search")
@@ -831,7 +831,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
             self.assertEqual(len(stdout_lines), 1, result.stdout)
-            self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call waiting"))
+            self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call "))
             payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["command"], "preflight")
@@ -1002,7 +1002,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05"
                     )
                     helper_text = helper_text.replace(
-                        'sys.stdout.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\\n")',
+                        'sys.stdout.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\\n")',
                         '(_ for _ in ()).throw(BrokenPipeError("heartbeat pipe closed"))',
                     )
                     self.assertIn("BrokenPipeError", helper_text)
@@ -1770,9 +1770,9 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "#!/usr/bin/env python3",
                         "import sys",
                         "import time",
-                        "sys.stderr.write('preflight stage=spawn status=ok\\n')",
-                        "sys.stderr.write('preflight stage=initialize status=ok\\n')",
-                        "sys.stderr.write('preflight stage=tools/list status=running\\n')",
+                        "sys.stderr.write('  ok start MCP server (0.0s)\\n')",
+                        "sys.stderr.write('  ok initialize (0.0s)\\n')",
+                        "sys.stderr.write('  list tools...\\n')",
                         "sys.stderr.flush()",
                         "time.sleep(5)",
                     ]
@@ -1804,7 +1804,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(access["stage_trace"][-1]["stage"], "tools/list")
             self.assertEqual(access["stage_trace"][-1]["status"], "running")
             self.assertAlmostEqual(access["outer_timeout_seconds"], 0.2)
-            self.assertIn("tools/list", access["helper_stderr_tail"])
+            self.assertIn("list tools", access["helper_stderr_tail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
