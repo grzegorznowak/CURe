@@ -537,6 +537,26 @@ def test_redact_secrets_case_insensitive_x_api_key() -> None:
     assert "[REDACTED]" in result
 
 
+def test_redact_secrets_uppercase_env_api_key() -> None:
+    """Redact OPENAI_API_KEY=value env-var assignments."""
+    result = cure_runtime._redact_secrets("OPENAI_API_KEY=sk-env-secret")  # pragma: allowlist secret
+    assert "sk-env-secret" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+    assert "OPENAI_API_KEY=" in result
+
+
+def test_redact_secrets_other_uppercase_env_keys() -> None:
+    """Redact VOYAGE_API_KEY= and CHUNKHOUND_LLM_API_KEY= env-var assignments."""
+    result = cure_runtime._redact_secrets("VOYAGE_API_KEY=sk-voyage")  # pragma: allowlist secret
+    assert "sk-voyage" not in result  # pragma: allowlist secret
+    assert "[REDACTED]" in result
+    assert "VOYAGE_API_KEY=" in result
+    result2 = cure_runtime._redact_secrets("CHUNKHOUND_LLM_API_KEY=sk-ch-secret")  # pragma: allowlist secret
+    assert "sk-ch-secret" not in result2  # pragma: allowlist secret
+    assert "[REDACTED]" in result2
+    assert "CHUNKHOUND_LLM_API_KEY=" in result2
+
+
 def test_search_result_references_fixture_matches_file_path() -> None:
     assert cure_runtime._search_result_references_fixture(
         {"results": [{"file_path": "/tmp/fixture/main.py"}]}

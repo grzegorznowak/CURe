@@ -2661,11 +2661,11 @@ _CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
 _REDACT_PATTERNS = (
     # JSON: "api_key": "<redacted>"
     (r'"api_key"\s*:\s*"[^"]+"', '"api_key": "[REDACTED]"'),
-    # Python: 'api_key': 'sk-...'
+    # Python: 'api_key': '<redacted>'
     (r"'api_key'\s*:\s*'[^']+'", "'api_key': '[REDACTED]'"),
-    # key=value: api_key=sk-...
+    # key=value: api_key=<redacted>
     (r'\bapi_key\s*=\s*\S+', 'api_key=[REDACTED]'),
-    # YAML/colon: api_key: sk-...
+    # YAML/colon: api_key: <redacted>
     (r'\bapi_key\s*:\s*\S+', 'api_key: [REDACTED]'),
     # Authorization: Bearer token (case-insensitive)
     (r'(?i)\bAuthorization\s*:\s*Bearer\s+\S+', 'Authorization: Bearer [REDACTED]'),
@@ -2673,6 +2673,8 @@ _REDACT_PATTERNS = (
     (r'(?i)\bAuthorization\s*:\s*Basic\s+\S+', 'Authorization: Basic [REDACTED]'),
     # X-Api-Key / x-api-key headers (case-insensitive)
     (r'(?i)\bX-Api-Key\s*:\s*\S+', 'X-Api-Key: [REDACTED]'),
+    # Uppercase env-var API key assignments: OPENAI_API_KEY=..., etc.
+    (r'(\b\w*API_KEY\w*\s*=\s*)\S+', r'\1[REDACTED]'),
 )
 
 
