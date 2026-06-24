@@ -312,7 +312,7 @@ def test_doctor_chunkhound_health_warns_when_research_times_out(tmp_path: Path) 
             cure_runtime,
             "run_chunkhound_tool",
             side_effect=[
-                {"ok": True, "result": {"results": [{"path": str(fixture_repo / "main.py")}] }},
+                {"ok": True, "result": {"results": [{"file_path": str(fixture_repo / "main.py")}] }},
                 {"ok": False, "execution_stage_status": "timeout", "error": "timed out"},
             ],
         ):
@@ -332,7 +332,7 @@ def test_doctor_chunkhound_health_warns_when_research_lacks_fixture_citation(tmp
             cure_runtime,
             "run_chunkhound_tool",
             side_effect=[
-                {"ok": True, "result": {"results": [{"path": str(fixture_repo / "main.py")}] }},
+                {"ok": True, "result": {"results": [{"file_path": str(fixture_repo / "main.py")}] }},
                 {"ok": True, "result": "No citations here."},
             ],
         ):
@@ -455,3 +455,51 @@ def test_doctor_flow_passes_shared_artifacts_to_checks_and_payload(tmp_path: Pat
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["chunkhound_health"] == {"preflight_stage": "complete"}
+
+
+def test_redact_secrets_strips_json_api_key() -> None:
+    result = cure_runtime._redact_secrets('{"api_key": "sk-secret-123"}')
+    assert "sk-secret-123" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_strips_python_api_key() -> None:
+    assert "[REDACTED]" in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")
+    assert "sk-secret-123" not in cure_runtime._redact_secrets("'api_key': 'sk-secret-123'")
+
+
+def test_redact_secrets_preserves_non_secret_text() -> None:
+    result = cure_runtime._redact_secrets('{"name": "test", "value": 42}')
+    assert '"name"' in result
+    assert '42' in result
+
+
+def test_search_result_references_fixture_matches_file_path() -> None:
+    assert cure_runtime._search_result_references_fixture(
+        {"results": [{"file_path": "/tmp/fixture/main.py"}]}
+    )
+    assert cure_runtime._search_result_references_fixture(
+        {"results": [{"file_path": "/tmp/fixture/utils.py"}]}
+    )
+
+
+def test_search_result_references_fixture_rejects_non_matching() -> None:
+    assert not cure_runtime._search_result_references_fixture(
+        {"results": [{"file_path": "/tmp/other/demo.py"}]}
+    )
+    assert not cure_runtime._search_result_references_fixture({"results": []})
+    assert not cure_runtime._search_result_references_fixture({})
+
+
+def test_research_result_references_fixture_matches_bracketed() -> None:
+    assert cure_runtime._research_result_references_fixture("See [main.py](main.py) for details.")
+    assert cure_runtime._research_result_references_fixture("Reference [utils.py].")
+
+
+def test_research_result_references_fixture_matches_backtick() -> None:
+    assert cure_runtime._research_result_references_fixture("Use `README.md` for context.")
+
+
+def test_research_result_references_fixture_rejects_bare_filename() -> None:
+    assert not cure_runtime._research_result_references_fixture("Just main.py without brackets.")
+    assert not cure_runtime._research_result_references_fixture("No references here.")

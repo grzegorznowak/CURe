@@ -31,12 +31,9 @@ def index_fixture_for_health_check(
                 shutil.copy2(source, repo_path / name)
 
         config_path = temp_root / "chunkhound.json"
-        merged_config = {
-            "database": {"provider": "duckdb", "path": str(temp_root / ".chunkhound.db")},
-            "indexing": {"include": ["*.py", "*.md"]},
-            "embedding": dict(user_config.get("embedding") or {}),
-            "llm": dict(user_config.get("llm") or {}),
-        }
+        merged_config = dict(user_config)
+        merged_config["database"] = {"provider": "duckdb", "path": str(temp_root / ".chunkhound.db")}
+        merged_config["indexing"] = {"include": ["*.py", "*.md"]}
         config_path.write_text(json.dumps(merged_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
         subprocess.run(

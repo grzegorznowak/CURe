@@ -2657,6 +2657,47 @@ _CHUNKHOUND_RECOMMENDED_CONFIG: dict[str, dict[str, str]] = {
 
 _CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
 
+# Patterns that could expose credentials in subprocess output.
+_REDACT_PATTERNS = (
+    (r'"api_key"\s*:\s*"[^"]+"', '"api_key": "[REDACTED]"'),
+    (r"'api_key'\s*:\s*'[^']+'", "'api_key': '[REDACTED]'"),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip credential-like values from subprocess output before it reaches doctor detail."""
+    import re as _re
+
+    value = text
+    for pattern, replacement in _REDACT_PATTERNS:
+        value = _re.sub(pattern, replacement, value)
+    return value
+
+
+def _search_result_references_fixture(search_payload: dict[str, Any]) -> bool:
+    """Return True when at least one search result `file_path` ends with a known fixture filename."""
+    results = search_payload.get("results") if isinstance(search_payload, dict) else None
+    if not isinstance(results, list):
+        return False
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        file_path = str(entry.get("file_path") or "")
+        if any(file_path.endswith(marker) for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS):
+            return True
+    return False
+
+
+def _research_result_references_fixture(research_payload: dict[str, Any]) -> bool:
+    """Return True when research response text contains a citation-style reference to a fixture file."""
+    text = json.dumps(research_payload, sort_keys=True, default=str) if not isinstance(research_payload, str) else research_payload
+    # Look for markdown links or bracketed references: [main.py](...), [main.py], `main.py`
+    for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS:
+        if f'[{marker}]' in text or f'`{marker}`' in text:
+            return True
+    return False
+
+
 
 def _validate_chunkhound_config(config: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(config.get("embedding"), dict):
@@ -2698,6 +2739,7 @@ def _chunkhound_config_credentials_available(config: Mapping[str, Any]) -> bool:
 
 
 def _payload_references_fixture(payload: object) -> bool:
+    """Deprecated thin wrapper kept for internal use — prefer _search_result_references_fixture / _research_result_references_fixture."""
     text = json.dumps(payload, sort_keys=True, default=str) if not isinstance(payload, str) else payload
     return any(marker in text for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS)
 
@@ -2740,13 +2782,13 @@ def _doctor_chunkhound_health_check(
                     timeout=60.0,
                 )
             except Exception as exc:
-                return DoctorCheck(name="chunkhound-health", status="fail", detail=f"search failed: {exc}"), preflight
+                return DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"search failed: {exc}")), preflight
             if not bool(search_payload.get("ok")):
                 return (
                     DoctorCheck(name="chunkhound-health", status="fail", detail=f"search failed: {search_payload.get('error') or 'unknown error'}"),
                     preflight,
                 )
-            if not _payload_references_fixture(search_payload.get("result", search_payload)):
+            if not _search_result_references_fixture(search_payload.get("result", search_payload)):
                 return DoctorCheck(name="chunkhound-health", status="fail", detail="search returned no results for fixture"), preflight
 
             try:
@@ -2767,7 +2809,7 @@ def _doctor_chunkhound_health_check(
                     preflight,
                 )
             except Exception as exc:
-                return DoctorCheck(name="chunkhound-health", status="warn", detail=f"code_research failed: {exc}; preflight and search passed"), preflight
+                return DoctorCheck(name="chunkhound-health", status="warn", detail=_redact_secrets(f"code_research failed: {exc}; preflight and search passed")), preflight
             if not bool(research_payload.get("ok")):
                 status = str(research_payload.get("execution_stage_status") or "").strip()
                 if status == "timeout":
@@ -2787,7 +2829,7 @@ def _doctor_chunkhound_health_check(
                     ),
                     preflight,
                 )
-            if not _payload_references_fixture(research_payload.get("result", research_payload)):
+            if not _research_result_references_fixture(research_payload.get("result", research_payload)):
                 return (
                     DoctorCheck(
                         name="chunkhound-health",
@@ -2800,10 +2842,10 @@ def _doctor_chunkhound_health_check(
     except subprocess.TimeoutExpired as exc:
         return DoctorCheck(name="chunkhound-health", status="warn", detail=f"fixture indexing timed out after {exc.timeout}s"), None
     except subprocess.CalledProcessError as exc:
-        detail = str(exc.stderr or exc.stdout or exc).strip() or str(exc)
+        detail = _redact_secrets(str(exc.stderr or exc.stdout or exc).strip() or str(exc))
         return DoctorCheck(name="chunkhound-health", status="fail", detail=f"fixture indexing failed: {detail}"), None
     except Exception as exc:
-        return DoctorCheck(name="chunkhound-health", status="fail", detail=f"fixture health check failed: {exc}"), None
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"fixture health check failed: {exc}")), None
 
 
 def _doctor_executable_check(name: str) -> DoctorCheck:
