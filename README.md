@@ -18,6 +18,7 @@ If you are using CURe from an agent session, treat [SKILL.md](SKILL.md) as an as
 - [Why CURe](#why-cure)
 - [Install And First Review](#install-and-first-review)
 - [Example Flows](#example-flows)
+- [Synthetic Design Examples](docs/README.md)
 - [Agent And Setup Notes](#agent-and-setup-notes)
 - [Core Commands](#core-commands)
 - [Secondary Standalone Install](#secondary-standalone-install)
@@ -65,6 +66,8 @@ This disposable path assumes package execution, network access, config writes un
 Keep the README focused on the landing page and first success. For the full operator-controlled agent-assistance checklist, including local setup inspection rules and operator handoff wording, use [SKILL.md](SKILL.md).
 
 ## Example Flows
+
+For non-executable design fixtures, see [Synthetic Design Examples](docs/README.md), including the [subsequent review simulation](docs/examples/subsequent-review-simulation.md).
 
 ### Example 1: clean public package install to first review
 
