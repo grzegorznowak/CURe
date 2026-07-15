@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 RunLlm = Callable[[str], str]
@@ -50,7 +51,8 @@ def _ensure_sections(text: str) -> str:
     if body:
         parts.append(body)
     for header in _SECTION_HEADERS:
-        if header.lower() not in body.lower():
+        heading_pattern = rf"^##[ \t]+{re.escape(header)}[ \t]*$"
+        if re.search(heading_pattern, body, flags=re.MULTILINE) is None:
             parts.append(f"## {header}\n- None identified.")
     return "\n\n".join(parts).strip()
 
@@ -71,7 +73,10 @@ You are preparing concise prior PR context for a code review agent.
 
 {_USAGE_NOTE}
 
-Summarize only information useful for reviewing the current diff. Return Markdown
+Summarize only information useful for reviewing the current diff. Populate
+Resolved areas only when supplied discussion or past-review text describes an
+area as addressed or resolved. This is not authoritative GitHub review-thread resolution state;
+do not infer resolution merely from an event's presence or review state. Return Markdown
 with these exact section headings:
 - Resolved areas
 - Problem areas

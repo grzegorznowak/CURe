@@ -29,6 +29,14 @@ def _head_matches(*, candidate: object, head_sha: object) -> bool:
     return candidate_sha.startswith(current_sha) or current_sha.startswith(candidate_sha)
 
 
+def _head_match_status(*, reviewed_head: object, current_head: object) -> str:
+    reviewed_sha = _normalize_sha(reviewed_head)
+    current_sha = _normalize_sha(current_head)
+    if not reviewed_sha or not current_sha:
+        return "unknown"
+    return "matches" if _head_matches(candidate=reviewed_sha, head_sha=current_sha) else "differs"
+
+
 def extract_official_cure_review_footer(body: str) -> str | None:
     start = body.find(CURE_REVIEW_FOOTER_START)
     end = body.find(CURE_REVIEW_FOOTER_END)
@@ -71,7 +79,7 @@ def _event_text(event: dict[str, Any]) -> str:
     return str(event.get("body") or "")
 
 
-def _ngrams(text: str, *, n: int = 5) -> set[str]:
+def _ngrams(text: str, *, n: int = 3) -> set[str]:
     normalized = " ".join(text.lower().split())
     if not normalized:
         return set()
@@ -115,8 +123,7 @@ def _local_session_reviews(*, sandbox_root: Path, pr: Any, head_sha: str) -> lis
         if path is None:
             continue
         reviewed_head = _normalize_sha(getattr(session, "review_head_sha", ""))
-        if reviewed_head and not _head_matches(candidate=reviewed_head, head_sha=head_sha):
-            continue
+        current_head = _normalize_sha(head_sha)
         body = Path(path).read_text(encoding="utf-8")
         session_id = str(getattr(session, "session_id", "") or Path(path).parent.name)
         entries.append(
@@ -125,6 +132,8 @@ def _local_session_reviews(*, sandbox_root: Path, pr: Any, head_sha: str) -> lis
                 "entry_id": f"session:{session_id}",
                 "body": body,
                 "reviewed_head": reviewed_head,
+                "current_head": current_head,
+                "head_match_status": _head_match_status(reviewed_head=reviewed_head, current_head=current_head),
                 "provenance": {
                     "session_id": session_id,
                     "session_dir": str(getattr(session, "session_dir", "")),
@@ -149,16 +158,17 @@ def _remote_review_from_event(*, pr: Any, event: dict[str, Any], head_sha: str) 
         return None
     footer_head = _normalize_sha(footer_meta.get("reviewed_head"))
     event_head = _normalize_sha(event.get("reviewed_head"))
-    for candidate in (footer_head, event_head):
-        if candidate and not _head_matches(candidate=candidate, head_sha=head_sha):
-            return None
+    reviewed_head = event_head or footer_head
+    current_head = _normalize_sha(head_sha)
     source_type = "pr_review" if event.get("kind") == "review" else "pr_comment"
     entry_id = f"{source_type}:{event.get('event_id') or event.get('url') or len(body)}"
     return {
         "source_type": source_type,
         "entry_id": entry_id,
         "body": body,
-        "reviewed_head": event_head or footer_head,
+        "reviewed_head": reviewed_head,
+        "current_head": current_head,
+        "head_match_status": _head_match_status(reviewed_head=reviewed_head, current_head=current_head),
         "provenance": {
             "event_id": event.get("event_id"),
             "url": event.get("url"),
@@ -170,6 +180,41 @@ def _remote_review_from_event(*, pr: Any, event: dict[str, Any], head_sha: str) 
     }
 
 
+def _body_without_footer(body: str) -> str:
+    start = body.find(CURE_REVIEW_FOOTER_START)
+    end = body.find(CURE_REVIEW_FOOTER_END, start + len(CURE_REVIEW_FOOTER_START))
+    if start < 0 or end < 0:
+        return body
+    return f"{body[:start]}{body[end + len(CURE_REVIEW_FOOTER_END) :]}".strip()
+
+
+def _canonical_review_body(item: dict[str, Any]) -> str:
+    return " ".join(_body_without_footer(str(item.get("body") or "")).lower().split())
+
+
+def _review_session_id(item: dict[str, Any]) -> str:
+    provenance = item.get("provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    value = provenance.get("session_id") or provenance.get("footer_session_id")
+    return str(value or "").strip()
+
+
+def _deduplicate_past_reviews(past_reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    retained: list[dict[str, Any]] = []
+    for candidate in past_reviews:
+        session_id = _review_session_id(candidate)
+        body = _canonical_review_body(candidate)
+        if any(
+            (session_id and session_id == _review_session_id(existing))
+            or (body and body == _canonical_review_body(existing))
+            for existing in retained
+        ):
+            continue
+        retained.append(candidate)
+    return retained
+
+
 def deduplicate(
     *, discussion: list[dict[str, Any]], past_reviews: list[dict[str, Any]], threshold: float = 0.85
 ) -> tuple[list[dict[str, Any]], int]:
@@ -177,9 +222,9 @@ def deduplicate(
 
     retained_discussion: list[dict[str, Any]] = []
     deduped = 0
-    past_bodies = [str(item.get("body") or "") for item in past_reviews if str(item.get("body") or "")]
+    past_bodies = [_canonical_review_body(item) for item in past_reviews if _canonical_review_body(item)]
     for event in discussion:
-        body = _event_text(event)
+        body = _body_without_footer(_event_text(event))
         if body and any(_jaccard(body, past_body) >= threshold for past_body in past_bodies):
             deduped += 1
             continue
@@ -195,6 +240,7 @@ def find_past_reviews(
         remote = _remote_review_from_event(pr=pr, event=event, head_sha=head_sha)
         if remote is not None:
             past_reviews.append(remote)
+    past_reviews = _deduplicate_past_reviews(past_reviews)
     pruned_discussion, n_deduped = deduplicate(discussion=discussion, past_reviews=past_reviews)
     return {
         "past_reviews": past_reviews,

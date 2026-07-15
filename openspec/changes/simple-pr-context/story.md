@@ -1,5 +1,5 @@
 Plan: 🟢 PLAN APPROVED
-Status: 🔄 IN PROGRESS
+Status: 🟣 IN REVIEW
 
 ## Purpose
 
@@ -232,6 +232,8 @@ python -m pytest tests/ -x --timeout=120
 | TAP-08 | Lint/Type | Ruff formatting + mypy type checking | `cure_github.py`, `cure_pr_context/` | Style and types | Ruff clean, mypy clean | N/A | `ruff check cure_github.py cure_pr_context/ && mypy cure_github.py cure_pr_context/` | N/A | Quality |
 | TAP-09 | Packaging | Installed package/module contains/imports `cure_pr_context` and `cure_github` | `pyproject.toml` + packaging smoke command | setuptools explicit package/module lists / wheel install | `pyproject.toml` includes `cure_pr_context` and `cure_github`; `python -c "import cure_pr_context, cure_github"` succeeds from wheel target | Local wheel built into `.tmp_package_smoke/` | packaging smoke commands above | If wheel tooling unavailable, `pip install -e .` smoke in disposable env | Covers A11 |
 
+**Current source-fit status:** TAP-02 and TAP-05 exercise the amended A4 contract. TAP-03 captures the scanner's normalized payload and bounded resolved-area semantics. TAP-07 proves persisted-or-empty resume substitution and reconcile fail-hard observability. The deterministic focused and full suites pass.
+
 ### Acceptance Proof Matrix
 
 | Acceptance ID | Proof Maturity | Proof Method | Reviewer Action | Expected Evidence | Relevant Surfaces | Open Detail |
@@ -240,14 +242,14 @@ python -m pytest tests/ -x --timeout=120
 | A2 | final | TAP-04 + TAP-05 | Run unit/package-integration tests and review signature | TAP-05 proves the successful public result/meta shape with explicit `head_sha` and list-capable `gh_fetch`; TAP-04 proves exceptions propagate instead of returning partial context | `__init__.py`, `tests/cure_pr_context/test_init.py`, `tests/cure_pr_context/test_integration.py` | — |
 | A3 | final | TAP-01 | Run tests + review code | Fetch tests pass, 3 mock calls verified | `fetcher.py` | — |
 | A4 | final | TAP-02 + TAP-05 | Run tests + review code | Corpus and integration tests pass with `sandbox_root` and official footer verified, same-PR different-head reviews retained, different-PR footer metadata ignored, head metadata annotated, local/posted copies collapsed to one retained review, character 3-gram Jaccard proven at the inclusive 0.85 boundary, and duplicate discussion pruned | `corpus.py`, `cure_sessions.py`, `cure_output.py`, `cure.py`, `tests/cure_pr_context/test_corpus.py`, `tests/cure_pr_context/test_integration.py` | — |
-| A5 | provisional | TAP-03 | Run tests and inspect captured scanner prompt | Scanner receives normalized payload; prompt bounds `Resolved areas` to supplied text rather than authoritative thread state; partial and usage-only outputs normalize to all five actual Markdown `##` headings plus instructions | `orient.py`, `tests/cure_pr_context/test_orient.py` | Prompt boundary and captured-payload regression assertion remain pending |
+| A5 | final | TAP-03 | Run tests and inspect captured scanner prompt | Scanner receives normalized payload; prompt bounds `Resolved areas` to supplied text rather than authoritative thread state; partial and usage-only outputs normalize to all five actual Markdown `##` headings plus instructions | `orient.py`, `tests/cure_pr_context/test_orient.py` | — |
 | A6 | final | TAP-04 + TAP-06 + TAP-07 | Run tests | `orientation_brief=""` → singlepass skips reconcile and remains one call; multipass synth renders `PRIOR_CONTEXT=""`; no raw `$PRIOR_CONTEXT` remains | `__init__.py`, templates, `cure.py`, `cure_flows.py` | — |
 | A7 | final | TAP-07 | Run flow tests + code review | Runtime mocked `_pr_flow_impl` proof shows `build_pr_context` called after `compute_pr_stats`, before prompt routing, with effective `review_head_sha`; flow branches choose reconcile only when context exists | `cure.py`, `tests/test_cure_pr_flow.py` | — |
-| A8 | provisional | TAP-06 + TAP-07 + Surface / Branch Proof Matrix | Run tests + review templates and both synth-render callsites | Only the shared multipass synth template contains `$PRIOR_CONTEXT`; normal/big singlepass and plan/step templates exclude it; `_reconcile_prior_context()` handles singlepass context in a second LLM call; fresh and resumed synth renders supply context or `""` with no raw token; custom/distinct follow-up exclusions documented | templates, `cure.py`, `tests/test_cure_pr_flow.py` | `_resume_flow_impl` currently renders the shared synth template without `PRIOR_CONTEXT`; implementation and present/absent-artifact regression proof remain pending |
+| A8 | final | TAP-06 + TAP-07 + Surface / Branch Proof Matrix | Run tests + review templates and both synth-render callsites | Only the shared multipass synth template contains `$PRIOR_CONTEXT`; normal/big singlepass and plan/step templates exclude it; `_reconcile_prior_context()` handles singlepass context in a second LLM call; fresh and resumed synth renders supply context or `""` with no raw token; custom/distinct follow-up exclusions documented | templates, `cure.py`, `tests/test_cure_pr_flow.py` | — |
 | A9 | final | TAP-04 + TAP-05 | Run tests, verify written files | `work/pr_context_discussion.json` exists with pruned discussion and `work/pr_context_past_reviews.json` exists with retained past reviews | `__init__.py`, `work/` | — |
 | A10 | final | TAP-01..TAP-05 | Run `pytest tests/cure_pr_context/` | All deterministic module and end-to-end tests pass | `tests/cure_pr_context/` | — |
 | A11 | final | TAP-09 | Review `pyproject.toml`, run smoke | `cure_pr_context` package and `cure_github` module included in wheel/install and importable | `pyproject.toml`, wheel smoke | — |
-| A12 | provisional | TAP-07 | Run the deterministic reconcile-failure flow test and inspect failed-run observability | Reconcile LLM exception propagates from `_reconcile_prior_context()` through `_pr_flow_impl`; progress records failure; no successful final-review acceptance occurs | `cure.py`, `tests/test_cure_pr_flow.py` | Add the second-call exception fixture and branch-specific assertions for propagation, failed progress state, and absence of successful final-review acceptance |
+| A12 | final | TAP-07 | Run the deterministic reconcile-failure flow test and inspect failed-run observability | Reconcile LLM exception propagates from `_reconcile_prior_context()` through `_pr_flow_impl`; progress records failure; no successful final-review acceptance occurs | `cure.py`, `tests/test_cure_pr_flow.py` | — |
 
 ## Critical Files
 
@@ -352,6 +354,7 @@ A single `cure_pr_context/` package with 4 files plus a small top-level `cure_gi
   - Superseded approvals: 2026-06-20T07:09:45Z, 2026-06-22T07:31:02Z
   - Preserved decisions: discussion endpoints use list-capable `cure_github.gh_api_list`; `head_sha` annotates rather than filters same-PR past reviews; past-review dedup collapses local/posted copies and uses character 3-grams with inclusive Jaccard 0.85; only the shared multipass synth template owns `$PRIOR_CONTEXT`; singlepass uses independent draft then reconcile; `Resolved areas` is text-derived, not authoritative thread state; deterministic tests, not an unsupported coverage threshold, are the A10 gate.
   - Material evidence anchors: `cure_flows.py:1437-1491` only substitutes supplied keys; `cure.py::_pr_flow_impl`, `_resume_flow_impl`, and `_reconcile_prior_context`; `cure_output.py:22,1547-1549` official footer markers; `cure_sessions.py:954-980` plus `paths.py:37-38,75-77` sandbox root; `pyproject.toml:16-18` explicit setuptools metadata.
+  - Latest pre-compression implementation evidence: focused context/flow tests 24 passed, full suite 644 passed plus 13 subtests, Ruff/mypy/wheel smoke/`git diff --check` passed; no commit made.
   - Debt Friction: none identified.
 
 - 2026-07-15T09:40:34Z Plan feedback addressed by `/openspec-story-plan-resume`

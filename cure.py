@@ -9051,6 +9051,12 @@ def _raise_on_multipass_plan_abort_contradiction(
     )
 
 
+def _read_persisted_pr_context_orientation(work_dir: Path) -> str:
+    """Read the orientation brief saved by the original PR-context scan."""
+    orientation_path = work_dir / "pr_context_orientation.md"
+    return orientation_path.read_text(encoding="utf-8") if orientation_path.is_file() else ""
+
+
 def _reconcile_prior_context(
     *,
     draft_review: str,
@@ -11604,6 +11610,7 @@ def _resume_flow_impl(
             with phase("multipass_synth", progress=progress, quiet=quiet):
                 did_work = True
                 synth_template = load_builtin_prompt_text(templates["synth"])
+                prior_context = _read_persisted_pr_context_orientation(work_dir)
                 step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
                 synth_prompt = render_prompt(
                     synth_template,
@@ -11627,6 +11634,7 @@ def _resume_flow_impl(
                         **cod_hypothesis_ledger_prompt_vars(
                             enabled=bool(getattr(args, "cod_ledger", False))
                         ),
+                        "PRIOR_CONTEXT": prior_context,
                         "PLAN_JSON_PATH": str(plan_json_path),
                         "STEP_OUTPUT_PATHS": step_paths_text,
                         "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,

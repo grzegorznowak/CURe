@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ def _run_singlepass_pr_flow_with_orientation(
     tmp_path: Path,
     *,
     orientation_brief: str,
+    reconcile_error: Exception | None = None,
 ) -> tuple[list[str], list[str], dict[str, object]]:
     sandbox_root = tmp_path / "sandboxes"
     cache_root = tmp_path / "cache"
@@ -93,6 +95,8 @@ def _run_singlepass_pr_flow_with_orientation(
         if len(llm_prompts) == 1:
             output_path.write_text("draft review from pass 1\n", encoding="utf-8")
         elif len(llm_prompts) == 2:
+            if reconcile_error is not None:
+                raise reconcile_error
             output_path.write_text("final reconciled review\n", encoding="utf-8")
         else:  # pragma: no cover - defensive assertion for this focused harness
             raise AssertionError(f"unexpected LLM call count: {len(llm_prompts)}")
@@ -209,6 +213,32 @@ def test_pr_flow_singlepass_without_prior_context_runs_one_review_call(
     assert llm_prompts == ["draft prompt without prior context"]
 
 
+def test_pr_flow_reconcile_failure_propagates_and_does_not_accept_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reconcile_error = RuntimeError("reconcile LLM failed")
+
+    with pytest.raises(RuntimeError, match="reconcile LLM failed") as raised:
+        _run_singlepass_pr_flow_with_orientation(
+            monkeypatch,
+            tmp_path,
+            orientation_brief="runtime brief",
+            reconcile_error=reconcile_error,
+        )
+
+    assert raised.value is reconcile_error
+    session_dirs = list((tmp_path / "sandboxes").iterdir())
+    assert len(session_dirs) == 1
+    session_dir = session_dirs[0]
+    meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "error"
+    assert meta["phase"] == "reconcile_prior_context"
+    assert meta["phases"]["reconcile_prior_context"]["status"] == "error"
+    assert meta["error"]["message"] == "reconcile LLM failed"
+    assert "completed_at" not in meta
+    assert (session_dir / "review.md").read_text(encoding="utf-8") == "draft review from pass 1\n"
+
+
 def test_pr_flow_builds_simple_pr_context_after_pr_stats_with_effective_head() -> None:
     source = inspect.getsource(cure._pr_flow_impl)
     stats_idx = source.index('with phase("detect_pr_size"')
@@ -226,6 +256,43 @@ def test_pr_flow_supplies_prior_context_only_to_multipass_synth_render() -> None
 
     assert 'prompt_extra_vars["PRIOR_CONTEXT"] = prior_context' not in flow_source
     assert flow_source.count('"PRIOR_CONTEXT": prior_context') == 1  # multipass synth only
+
+
+@pytest.mark.parametrize("persisted_context", [None, "persisted orientation brief\n"])
+def test_resume_flow_shared_synth_renders_persisted_or_empty_prior_context(
+    tmp_path: Path, persisted_context: str | None
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    if persisted_context is not None:
+        (work_dir / "pr_context_orientation.md").write_text(
+            persisted_context,
+            encoding="utf-8",
+        )
+
+    prior_context = cure._read_persisted_pr_context_orientation(work_dir)
+    template = cure.load_builtin_prompt_text("mrereview_gh_local_big_synth.md")
+    rendered = cure.render_prompt(
+        template,
+        base_ref_for_review="cure_base__main",
+        pr_url="https://github.com/acme/rocket/pull/7",
+        pr_number=7,
+        gh_host="github.com",
+        gh_owner="acme",
+        gh_repo_name="rocket",
+        gh_repo="acme/rocket",
+        agent_desc="",
+        extra_vars={"PRIOR_CONTEXT": prior_context},
+    )
+
+    assert prior_context == (persisted_context or "")
+    assert "$PRIOR_CONTEXT" not in rendered
+    if persisted_context is not None:
+        assert persisted_context.strip() in rendered
+
+    resume_source = inspect.getsource(cure._resume_flow_impl)
+    assert "_read_persisted_pr_context_orientation(work_dir)" in resume_source
+    assert '"PRIOR_CONTEXT": prior_context' in resume_source
 
 
 def test_build_multipass_step_entries_no_prior_context(monkeypatch) -> None:
