@@ -7,12 +7,20 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tomllib
 from typing import Any, Mapping
 import urllib.error
 import urllib.request
 
+from cure_chunkhound import (
+    ChunkHoundPreflightError,
+    ChunkHoundPreflightResult,
+    run_chunkhound_mcp_preflight,
+    run_chunkhound_tool,
+)
+from _doctor_chunkhound_fixture import index_fixture_for_health_check
 from cure_errors import ReviewflowError
 from cure_sessions import PullRequestRef, parse_pr_url
 from meta import json_fingerprint
@@ -29,13 +37,10 @@ from ui import Verbosity
 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
-CLAUDE_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "max")
-CLAUDE_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
-CLAUDE_CLI_DEFAULT_REASONING_EFFORT = "high"
 LLM_TRANSPORT_CHOICES = ("http", "cli")
 HTTP_LLM_PROVIDERS = ("openai", "openrouter")
-CLI_LLM_PROVIDERS = ("codex", "claude")
-LLM_RESUME_PROVIDERS = ("codex", "claude")
+CLI_LLM_PROVIDERS = ("codex",)
+LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
@@ -43,12 +48,10 @@ AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
 DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "claude-cli",
     "openai-responses",
     "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
-    "ANTHROPIC_API_KEY",
     "CHUNKHOUND_EMBEDDING__API_KEY",
     "CHUNKHOUND_LLM_API_KEY",
     "COLORTERM",
@@ -73,11 +76,9 @@ CURATED_ENV_INHERIT_KEYS = (
 )
 CLI_PROVIDER_SESSION_ENV_PREFIXES = {
     "codex": ("CODEX_",),
-    "claude": ("CLAUDE_",),
 }
 LOCAL_AGENT_PRESET_BY_NAME = {
     "codex": "codex-cli",
-    "claude": "claude-cli",
 }
 LOCAL_AGENT_NAME_BY_PRESET = {preset: agent for agent, preset in LOCAL_AGENT_PRESET_BY_NAME.items()}
 DEFAULT_MULTIPASS_ENABLED = True
@@ -107,7 +108,7 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 [chunkhound.indexing]
 # Optional: when set, these replace the corresponding lists in the base config.
 include = ["**/*.py", "**/*.ts"]
-exclude = ["**/.claude/**", "**/openspec/**"]
+exclude = ["**/openspec/**"]
 per_file_timeout_seconds = 6
 per_file_timeout_min_size_kb = 128
 
@@ -582,9 +583,6 @@ def build_utility_llm_meta(
 
 
 def _reasoning_effort_choices_for_provider(provider: object) -> tuple[str, ...]:
-    name = str(provider or "").strip().lower()
-    if name == "claude":
-        return CLAUDE_REASONING_EFFORT_CHOICES
     return CODEX_REASONING_EFFORT_CHOICES
 
 
@@ -1041,24 +1039,6 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "claude-cli": {
-            "transport": "cli",
-            "provider": "claude",
-            "command": "claude",
-            "endpoint": None,
-            "base_url": None,
-            "api_key": None,
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-            "model": CLAUDE_CLI_DEFAULT_MODEL,
-            "reasoning_effort": CLAUDE_CLI_DEFAULT_REASONING_EFFORT,
-            "text_verbosity": None,
-            "max_output_tokens": None,
-        },
         "openai-responses": {
             "transport": "http",
             "provider": "openai",
@@ -1097,8 +1077,6 @@ def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | N
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if transport == "cli" and provider == "claude" and command in {"", "claude"}:
-        return "claude-cli"
     if (
         transport == "http"
         and provider == "openai"
@@ -1345,18 +1323,15 @@ def _synthetic_legacy_codex_preset(
 
 def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
     current_env = os.environ if env is None else env
-    claude_detected = any(str(current_env.get(key) or "").strip() for key in ("CLAUDE_CODE_SESSION", "CLAUDE_HOME"))
     codex_detected = any(str(current_env.get(key) or "").strip() for key in ("CODEX_THREAD_ID", "CODEX_HOME"))
-    if claude_detected and not codex_detected:
-        return "claude-cli", "detected_env"
-    if codex_detected and not claude_detected:
+    if codex_detected:
         return "codex-cli", "detected_env"
     return None, None
 
 
 def detect_installed_local_agents() -> dict[str, str]:
     installed: dict[str, str] = {}
-    for agent in ("codex", "claude"):
+    for agent in ("codex",):
         path = shutil.which(agent)
         if path:
             installed[agent] = path
@@ -1402,7 +1377,7 @@ def resolve_local_agent_selection(
     if explicit_agent:
         preset = LOCAL_AGENT_PRESET_BY_NAME.get(explicit_agent)
         if preset is None:
-            raise ReviewflowError("Unsupported agent. Expected one of: codex, claude")
+            raise ReviewflowError("Unsupported agent. Expected one of: codex")
         if explicit_agent not in installed:
             result.update(
                 {
@@ -1462,7 +1437,7 @@ def resolve_local_agent_selection(
                     "effective_provider": provider or None,
                     "source": "cli_preset",
                     "status": "not_applicable",
-                    "detail": f"explicit preset `{cli_selected}` does not use a local codex/claude CLI provider",
+                    "detail": f"explicit preset `{cli_selected}` does not use a local codex CLI provider",
                     "ready": True,
                     "blocking": False,
                 }
@@ -1535,7 +1510,7 @@ def resolve_local_agent_selection(
                     "status": "invalid_saved_preference",
                     "detail": (
                         f"saved default preset `{raw_saved_preset}` does not resolve to the required local "
-                        "codex/claude CLI provider"
+                        "codex CLI provider"
                     ),
                     "ready": False,
                     "blocking": True,
@@ -2663,6 +2638,243 @@ def load_chunkhound_runtime_config(
     return cfg, meta, resolved
 
 
+_CHUNKHOUND_RECOMMENDED_CONFIG: dict[str, dict[str, str]] = {
+    "embedding": {
+        "provider": "voyageai",
+        "model": "voyage-3.5-lite",
+        "rerank_model": "rerank-2.5",
+    },
+    "llm": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "synthesis_model": "deepseek-v4-flash",
+        "utility_model": "deepseek-v4-flash",
+        "codex_reasoning_effort_synthesis": "high",
+        "codex_reasoning_effort_utility": "high",
+    },
+}
+
+
+_CHUNKHOUND_FIXTURE_PATH_MARKERS = ("main.py", "utils.py", "README.md")
+
+# Patterns that could expose credentials in subprocess output.
+_REDACT_PATTERNS = (
+    # JSON: "api_key": "<redacted>"
+    (r'"api_key"\s*:\s*"[^"]+"', '"api_key": "[REDACTED]"'),
+    # Python: 'api_key': '<redacted>'
+    (r"'api_key'\s*:\s*'[^']+'", "'api_key': '[REDACTED]'"),
+    # key=value: api_key=<redacted>
+    (r'\bapi_key\s*=\s*\S+', 'api_key=[REDACTED]'),
+    # YAML/colon: api_key: <redacted>
+    (r'\bapi_key\s*:\s*\S+', 'api_key: [REDACTED]'),
+    # Authorization: Bearer token (case-insensitive)
+    (r'(?i)\bAuthorization\s*:\s*Bearer\s+\S+', 'Authorization: Bearer [REDACTED]'),
+    # Authorization: Basic base64 (case-insensitive)
+    (r'(?i)\bAuthorization\s*:\s*Basic\s+\S+', 'Authorization: Basic [REDACTED]'),
+    # X-Api-Key / x-api-key headers (case-insensitive)
+    (r'(?i)\bX-Api-Key\s*:\s*\S+', 'X-Api-Key: [REDACTED]'),
+    # Uppercase env-var API key assignments: OPENAI_API_KEY=..., etc.
+    (r'(\b\w*API_KEY\w*\s*=\s*)\S+', r'\1[REDACTED]'),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip credential-like values from subprocess output before it reaches doctor detail."""
+    import re as _re
+
+    value = text
+    for pattern, replacement in _REDACT_PATTERNS:
+        value = _re.sub(pattern, replacement, value)
+    return value
+
+
+def _search_result_references_fixture(search_payload: dict[str, Any]) -> bool:
+    """Return True when at least one search result `file_path` ends with a known fixture filename."""
+    if isinstance(search_payload, dict):
+        results = search_payload.get("results")
+        if isinstance(results, list):
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                file_path = str(entry.get("file_path") or "")
+                if any(file_path.endswith(marker) for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS):
+                    return True
+    elif isinstance(search_payload, str):
+        text = search_payload
+        for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS:
+            if f'[{marker}]' in text or f'`{marker}`' in text:
+                return True
+    return False
+
+
+def _research_result_references_fixture(research_payload: dict[str, Any]) -> bool:
+    """Return True when research response text contains a citation-style reference to a fixture file."""
+    text = json.dumps(research_payload, sort_keys=True, default=str) if not isinstance(research_payload, str) else research_payload
+    # Look for markdown links or bracketed references: [main.py](...), [main.py], `main.py`
+    for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS:
+        if f'[{marker}]' in text or f'`{marker}`' in text:
+            return True
+    return False
+
+
+
+def _validate_chunkhound_config(config: dict[str, Any]) -> tuple[str, str]:
+    if not isinstance(config.get("embedding"), dict):
+        return "fail", "missing required section: embedding"
+    if not isinstance(config.get("llm"), dict):
+        return "fail", "missing required section: llm"
+
+    warnings: list[str] = []
+    for section_name, recommended in _CHUNKHOUND_RECOMMENDED_CONFIG.items():
+        section = config.get(section_name)
+        section = section if isinstance(section, dict) else {}
+        for field, expected in recommended.items():
+            value = section.get(field)
+            if value != expected:
+                display_value = _redact_secrets(repr(value)) if isinstance(value, str) else repr(value)
+                warnings.append(f"recommended {section_name}.{field} is {expected!r}, got {display_value}")
+
+    embedding = config.get("embedding") if isinstance(config.get("embedding"), dict) else {}
+    if not str(embedding.get("api_key") or "").strip():
+        warnings.append("embedding.api_key is empty")
+
+    llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
+    llm_key = str(llm.get("api_key") or "").strip()
+    if not llm_key:
+        warnings.append("llm.api_key is empty")
+    elif not llm_key.startswith("sk-"):
+        warnings.append("llm.api_key does not start with sk-")
+
+    if warnings:
+        return "warn", "; ".join(warnings)
+    return "ok", "configuration matches CURe recommendation"
+
+
+def _chunkhound_config_credentials_available(config: Mapping[str, Any]) -> bool:
+    embedding = config.get("embedding") if isinstance(config.get("embedding"), Mapping) else {}
+    llm = config.get("llm") if isinstance(config.get("llm"), Mapping) else {}
+    embedding_key = str(embedding.get("api_key") or "").strip()
+    llm_key = str(llm.get("api_key") or "").strip()
+    return bool(embedding_key and llm_key)
+
+
+def _payload_references_fixture(payload: object) -> bool:
+    """Deprecated thin wrapper kept for internal use — prefer _search_result_references_fixture / _research_result_references_fixture."""
+    text = json.dumps(payload, sort_keys=True, default=str) if not isinstance(payload, str) else payload
+    return any(marker in text for marker in _CHUNKHOUND_FIXTURE_PATH_MARKERS)
+
+
+def _doctor_chunkhound_health_check(
+    runtime: ReviewflowRuntime,
+) -> tuple[DoctorCheck, ChunkHoundPreflightResult | ChunkHoundPreflightError | None]:
+    try:
+        _, _, resolved_config = load_chunkhound_runtime_config(config_path=runtime.config_path, require=True)
+    except ReviewflowError as exc:
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=str(exc).splitlines()[0]), None
+
+    if not _chunkhound_config_credentials_available(resolved_config):
+        return (
+            DoctorCheck(
+                name="chunkhound-health",
+                status="warn",
+                detail="skipping runtime check: chunkhound config missing embedding/LLM api_key",
+            ),
+            None,
+        )
+
+    binary = shutil.which("chunkhound") or "chunkhound"
+    try:
+        print("chunkhound-health: indexing fixture repository (timeout=120s)...", file=sys.stderr, flush=True)
+        with index_fixture_for_health_check(binary, resolved_config, timeout=120.0) as (merged_config_path, repo_path, _temp_dir):
+            print("  ok indexing", file=sys.stderr, flush=True)
+            print("chunkhound-health: MCP preflight (initialize timeout=30s)...", file=sys.stderr, flush=True)
+            try:
+                preflight = run_chunkhound_mcp_preflight(merged_config_path, repo_path, timeout=30.0)
+            except ChunkHoundPreflightError as exc:
+                return (
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"preflight failed at {exc.stage}: {exc.detail}")),
+                    exc,
+                )
+
+            print('chunkhound-health: search "def saludar" (tool timeout=60s)...', file=sys.stderr, flush=True)
+            try:
+                search_payload = run_chunkhound_tool(
+                    merged_config_path,
+                    repo_path,
+                    "search",
+                    {"type": "regex", "query": "def saludar"},
+                    timeout=60.0,
+                    skip_preflight=True,
+                )
+            except Exception as exc:
+                return DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"search failed: {exc}")), preflight
+            if not bool(search_payload.get("ok")):
+                return (
+                    DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"search failed: {search_payload.get('error') or 'unknown error'}")),
+                    preflight,
+                )
+            if not _search_result_references_fixture(search_payload.get("result", search_payload)):
+                return DoctorCheck(name="chunkhound-health", status="fail", detail="search returned no results for fixture"), preflight
+
+            print('chunkhound-health: code_research "como funciona la funcion saludar" (tool timeout=300s)...', file=sys.stderr, flush=True)
+            try:
+                research_payload = run_chunkhound_tool(
+                    merged_config_path,
+                    repo_path,
+                    "code_research",
+                    {"query": "como funciona la funcion saludar"},
+                    timeout=300.0,
+                    skip_preflight=True,
+                )
+            except subprocess.TimeoutExpired:
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail="code_research timed out after 300s; preflight and search passed",
+                    ),
+                    preflight,
+                )
+            except Exception as exc:
+                return DoctorCheck(name="chunkhound-health", status="warn", detail=_redact_secrets(f"code_research failed: {exc}; preflight and search passed")), preflight
+            if not bool(research_payload.get("ok")):
+                status = str(research_payload.get("execution_stage_status") or "").strip()
+                if status == "timeout":
+                    return (
+                        DoctorCheck(
+                            name="chunkhound-health",
+                            status="warn",
+                            detail="code_research timed out after 300s; preflight and search passed",
+                        ),
+                        preflight,
+                    )
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail=_redact_secrets(f"code_research failed: {research_payload.get('error') or 'unknown error'}; preflight and search passed"),
+                    ),
+                    preflight,
+                )
+            if not _research_result_references_fixture(research_payload.get("result", research_payload)):
+                return (
+                    DoctorCheck(
+                        name="chunkhound-health",
+                        status="warn",
+                        detail="code_research returned no fixture citation; preflight and search passed",
+                    ),
+                    preflight,
+                )
+            return DoctorCheck(name="chunkhound-health", status="ok", detail="preflight, search, and code_research passed"), preflight
+    except subprocess.TimeoutExpired as exc:
+        return DoctorCheck(name="chunkhound-health", status="warn", detail=f"fixture indexing timed out after {exc.timeout}s"), None
+    except subprocess.CalledProcessError as exc:
+        detail = _redact_secrets(str(exc.stderr or exc.stdout or exc).strip() or str(exc))
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=f"fixture indexing failed: {detail}"), None
+    except Exception as exc:
+        return DoctorCheck(name="chunkhound-health", status="fail", detail=_redact_secrets(f"fixture health check failed: {exc}")), None
+
+
 def _doctor_executable_check(name: str) -> DoctorCheck:
     path = shutil.which(name)
     if path:
@@ -2829,7 +3041,7 @@ def _doctor_executor_network_check(agent_runtime: dict[str, Any]) -> DoctorCheck
     if not bool(agent_runtime.get("supported")):
         return None
     provider = str(agent_runtime.get("provider") or "").strip().lower()
-    if provider not in {"codex", "claude"}:
+    if provider != "codex":
         return None
     return DoctorCheck(
         name="executor-network",
@@ -2947,13 +3159,6 @@ def _resolved_doctor_agent_runtime(
                 "approval_policy": None,
             }
         )
-    elif provider == "claude":
-        payload.update(
-            {
-                "dangerously_skip_permissions": True,
-                "permission_mode": None,
-            }
-        )
     return payload
 
 
@@ -2963,6 +3168,7 @@ def _doctor_runtime_payload(
     cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
+    artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = _resolve_doctor_target_context(pr_url)
     repo_local_chunkhound = _doctor_repo_local_chunkhound_payload(runtime=runtime, target=target)
@@ -3046,6 +3252,26 @@ def _doctor_runtime_payload(
             "public_pr_metadata_detail": target.public_pr_metadata_detail,
         }
 
+    chunkhound_health = (artifacts or {}).get("chunkhound_health")
+    if isinstance(chunkhound_health, ChunkHoundPreflightResult):
+        payload["chunkhound_health"] = {
+            "preflight_stage": chunkhound_health.stage,
+            "available_tools": list(chunkhound_health.available_tools),
+            "missing_tools": list(chunkhound_health.missing_tools),
+            "mcp_transport": chunkhound_health.mcp_transport,
+            "daemon_pid": chunkhound_health.daemon_pid,
+            "daemon_socket": chunkhound_health.daemon_socket,
+            "daemon_log": chunkhound_health.daemon_log,
+            "daemon_runtime_dir": chunkhound_health.daemon_runtime_dir,
+            "time_ms": chunkhound_health.time_ms,
+        }
+    elif isinstance(chunkhound_health, ChunkHoundPreflightError):
+        payload["chunkhound_health"] = {
+            "preflight_stage": chunkhound_health.stage,
+            "error": _redact_secrets(chunkhound_health.detail),
+            "ok": False,
+        }
+
     if not runtime.config_enabled:
         payload["chunkhound_base_config"] = {
             "path": None,
@@ -3081,6 +3307,7 @@ def _doctor_runtime_checks(
     cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
+    artifacts: dict[str, Any] | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
@@ -3119,6 +3346,8 @@ def _doctor_runtime_checks(
     else:
         checks.append(DoctorCheck(name="cache-root", status="warn", detail=f"{cache_detail} (will be created on demand)"))
 
+    chunkhound_config_status = "warn" if not runtime.config_enabled else "fail"
+    chunkhound_config_validate_status: str | None = None
     if not runtime.config_enabled:
         checks.append(DoctorCheck(name="chunkhound-config", status="warn", detail="disabled by --no-config"))
     else:
@@ -3130,7 +3359,22 @@ def _doctor_runtime_checks(
             assert chunkhound_cfg is not None
             chunkhound_detail = f"{chunkhound_cfg.base_config_path} (source=config)"
             if chunkhound_cfg.base_config_path.is_file():
+                chunkhound_config_status = "ok"
                 checks.append(DoctorCheck(name="chunkhound-config", status="ok", detail=chunkhound_detail))
+                try:
+                    resolved_chunkhound = resolve_chunkhound_reviewflow_config(chunkhound_cfg)
+                except ReviewflowError as e:
+                    chunkhound_config_validate_status = "fail"
+                    checks.append(DoctorCheck(name="chunkhound-config-validate", status="fail", detail=str(e).splitlines()[0]))
+                else:
+                    chunkhound_config_validate_status, validate_detail = _validate_chunkhound_config(resolved_chunkhound)
+                    checks.append(
+                        DoctorCheck(
+                            name="chunkhound-config-validate",
+                            status=chunkhound_config_validate_status,
+                            detail=validate_detail,
+                        )
+                    )
             else:
                 checks.append(DoctorCheck(name="chunkhound-config", status="fail", detail=f"missing base_config_path: {chunkhound_detail}"))
 
@@ -3195,7 +3439,17 @@ def _doctor_runtime_checks(
         )
     )
 
-    checks.append(_doctor_executable_check("chunkhound"))
+    chunkhound_binary_check = _doctor_executable_check("chunkhound")
+    checks.append(chunkhound_binary_check)
+    if (
+        chunkhound_config_status == "ok"
+        and chunkhound_binary_check.status == "ok"
+        and chunkhound_config_validate_status != "fail"
+    ):
+        health_check, health_artifact = _doctor_chunkhound_health_check(runtime)
+        checks.append(health_check)
+        if artifacts is not None and health_artifact is not None:
+            artifacts["chunkhound_health"] = health_artifact
     gh_check = _doctor_executable_check("gh")
     jira_check = _doctor_executable_check("jira")
     codex_check = _doctor_executable_check("codex")

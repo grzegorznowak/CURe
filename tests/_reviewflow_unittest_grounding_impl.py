@@ -28,12 +28,12 @@ class UtilityModelProvenanceTests(unittest.TestCase):
         )
         utility_llm = rf.build_utility_llm_meta(
             resolved={
-                "preset": "claude-cli",
-                "selected_name": "utility_claude",
+                "preset": "codex-cli",
+                "selected_name": "utility_codex",
                 "transport": "cli",
-                "provider": "claude",
-                "command": "claude",
-                "model": "claude-sonnet-4-6",
+                "provider": "codex",
+                "command": "codex",
+                "model": "gpt-5.3-codex",
                 "reasoning_effort": "low",
                 "capabilities": {"supports_resume": True},
             },
@@ -51,8 +51,8 @@ class UtilityModelProvenanceTests(unittest.TestCase):
 
         self.assertEqual(payload["llm"]["provider"], "codex")
         self.assertEqual(payload["llm"]["model"], "gpt-5.4")
-        self.assertEqual(payload["utility_llm"]["provider"], "claude")
-        self.assertEqual(payload["utility_llm"]["model"], "claude-sonnet-4-6")
+        self.assertEqual(payload["utility_llm"]["provider"], "codex")
+        self.assertEqual(payload["utility_llm"]["model"], "gpt-5.3-codex")
         self.assertNotIn("utility_llm", payload["llm"])
         self.assertNotIn("llm", payload["utility_llm"])
 
@@ -440,18 +440,18 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
 
             rf._refresh_session_review_footer(
                 meta={
-                    "session_id": "session-claude",
+                    "session_id": "session-codex",
                     "created_at": "2026-03-12T22:00:00+00:00",
                     "completed_at": "2026-03-12T22:00:07+00:00",
                     "review_head_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                     "llm": {
-                        "preset": "claude-cli",
-                        "provider": "claude",
+                        "preset": "codex-cli",
+                        "provider": "codex",
                         "model": None,
                         "reasoning_effort": "high",
                         "adapter": {
-                            "provider": "claude",
-                            "model": "claude-sonnet-4-6",
+                            "provider": "codex",
+                            "model": "gpt-5.3-codex",
                         },
                         "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
                     },
@@ -460,7 +460,7 @@ class LocalMarkdownNormalizationTests(unittest.TestCase):
             )
 
             rendered = md.read_text(encoding="utf-8")
-            self.assertIn("model claude-sonnet-4-6/high", rendered)
+            self.assertIn("model gpt-5.3-codex/high", rendered)
             self.assertNotIn("model -/high", rendered)
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
@@ -3588,9 +3588,9 @@ class BaselineSelectionTests(unittest.TestCase):
                             events.append("resolve")
                             or (
                                 {
-                                    "provider": "claude",
-                                    "preset": "claude-cli",
-                                    "model": "claude-sonnet-4-6",
+                                    "provider": "codex",
+                                    "preset": "codex-cli",
+                                    "model": "gpt-5.3-codex",
                                     "reasoning_effort": "high",
                                 },
                                 {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
@@ -3661,9 +3661,9 @@ class BaselineSelectionTests(unittest.TestCase):
                         "resolve_llm_config_from_args",
                         return_value=(
                             {
-                                "provider": "claude",
-                                "preset": "claude-cli",
-                                "model": "claude-sonnet-4-6",
+                                "provider": "codex",
+                                "preset": "codex-cli",
+                                "model": "gpt-5.3-codex",
                                 "reasoning_effort": "high",
                             },
                             {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
@@ -3772,9 +3772,9 @@ class BaselineSelectionTests(unittest.TestCase):
                         "resolve_llm_config_from_args",
                         return_value=(
                             {
-                                "provider": "claude",
-                                "preset": "claude-cli",
-                                "model": "claude-sonnet-4-6",
+                                "provider": "codex",
+                                "preset": "codex-cli",
+                                "model": "gpt-5.3-codex",
                                 "reasoning_effort": "high",
                             },
                             {"resolved": {"model_source": "preset", "reasoning_effort_source": "preset"}},
@@ -7341,34 +7341,6 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             )
         return self._write_event_payloads(root=root, payloads=payloads)
 
-    def _claude_helper_adapter_meta(
-        self,
-        *,
-        payloads: list[dict[str, object]],
-        helper_path: str = "/tmp/cure/work/bin/cure-chunkhound",
-        command: str | None = None,
-    ) -> dict[str, object]:
-        entries = []
-        for payload in payloads:
-            payload_command = str((payload if isinstance(payload, dict) else {}).get("command") or "").strip().lower()
-            default_command = (
-                '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle"\''
-                if payload_command == "search"
-                else '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" research "cross-file question"\''
-            )
-            entries.append(
-                {
-                    "payload": payload,
-                    "stdout_excerpt": json.dumps(payload, sort_keys=True),
-                    "command": command or default_command,
-                }
-            )
-        return {
-            "provider": "claude",
-            "chunkhound_helper_path": helper_path,
-            "chunkhound_tool_proof_entries": entries,
-        }
-
     def test_validate_and_record_chunkhound_tool_proof_persists_report_and_meta(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_tool_proof_validation"
         try:
@@ -8360,615 +8332,6 @@ class ChunkHoundToolProofValidationTests(unittest.TestCase):
             self.assertEqual(report["observed_evidence_sources"], [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
-
-    def test_validate_chunkhound_tool_proof_accepts_claude_helper_entries(self) -> None:
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta=self._claude_helper_adapter_meta(
-                helper_path=helper_path,
-                payloads=[
-                    {
-                        "ok": True,
-                        "command": "search",
-                        "tool_name": "search",
-                        "query": "needle",
-                        "helper_path": helper_path,
-                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                    {
-                        "ok": True,
-                        "command": "research",
-                        "tool_name": "code_research",
-                        "query": "cross-file question",
-                        "helper_path": helper_path,
-                        "result": {"summary": "grounded answer"},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                ],
-            ),
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertTrue(report["valid"])
-        self.assertEqual(report["provider"], "claude")
-        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-        self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
-        self.assertEqual(
-            [detail["command_excerpt"] for detail in report["observed_successful_call_details"]],
-            [
-                f"claude tool_use_result via {helper_path}",
-                f"claude tool_use_result via {helper_path}",
-            ],
-        )
-
-    def test_validate_chunkhound_tool_proof_accepts_claude_helper_search_markdown_text(self) -> None:
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta=self._claude_helper_adapter_meta(
-                helper_path=helper_path,
-                payloads=[
-                    {
-                        "ok": True,
-                        "command": "search",
-                        "tool_name": "search",
-                        "query": "needle",
-                        "helper_path": helper_path,
-                        "result": "## `demo.py`\n\n```python\nneedle\n```",
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                    {
-                        "ok": True,
-                        "command": "research",
-                        "tool_name": "code_research",
-                        "query": "cross-file question",
-                        "helper_path": helper_path,
-                        "result": {"summary": "grounded answer"},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                ],
-            ),
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertTrue(report["valid"])
-        self.assertEqual(report["provider"], "claude")
-        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-        self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
-
-    def test_validate_and_record_chunkhound_tool_proof_accepts_real_claude_background_task_success_fixture(self) -> None:
-        root = ROOT / ".tmp_test_real_claude_background_task_success_report"
-
-        class _StubProgress:
-            def __init__(self) -> None:
-                self.meta: dict[str, object] = {}
-
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            work_dir = root / "work"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
-            progress = _StubProgress()
-            state: dict[str, Any] = {"content": ""}
-
-            search_fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
-            search_fixture_text = search_fixture_path.read_text(encoding="utf-8")
-            search_tool_use_id = ""
-            for raw in search_fixture_text.splitlines():
-                payload = json.loads(raw)
-                if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
-                    continue
-                message = payload.get("message")
-                if not isinstance(message, dict):
-                    continue
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
-                        continue
-                    search_tool_use_id = str(block.get("tool_use_id") or "").strip()
-                    if search_tool_use_id:
-                        break
-                if search_tool_use_id:
-                    break
-            self.assertTrue(search_tool_use_id)
-            state["bash_tool_commands_by_id"] = {search_tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'}
-            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
-            cure_llm._handle_claude_stream_chunk(progress=progress, state=state, chunk=search_fixture_text)
-
-            stream_fixture_path = (
-                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.ndjson"
-            )
-            output_fixture_path = (
-                ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_background_task_success.output.json"
-            )
-            output_path = root / "background_task_output.json"
-            output_path.write_text(output_fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
-            rewritten_lines: list[str] = []
-            research_tool_use_id = ""
-            research_command_text = ""
-            for raw in stream_fixture_path.read_text(encoding="utf-8").splitlines():
-                payload = json.loads(raw)
-                if isinstance(payload, dict) and str(payload.get("type") or "") == "assistant":
-                    message = payload.get("message")
-                    if isinstance(message, dict):
-                        for block in message.get("content") or []:
-                            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
-                                continue
-                            research_tool_use_id = str(block.get("id") or "").strip() or research_tool_use_id
-                            tool_input = block.get("input")
-                            if isinstance(tool_input, dict):
-                                research_command_text = str(tool_input.get("command") or "").strip() or research_command_text
-                if (
-                    isinstance(payload, dict)
-                    and str(payload.get("type") or "") == "system"
-                    and str(payload.get("subtype") or "") == "task_notification"
-                    and str(payload.get("status") or "") == "completed"
-                ):
-                    payload["output_file"] = str(output_path)
-                    research_tool_use_id = str(payload.get("tool_use_id") or "").strip() or research_tool_use_id
-                rewritten_lines.append(json.dumps(payload))
-            self.assertTrue(research_tool_use_id)
-            self.assertTrue(research_command_text)
-            state["bash_tool_commands_by_id"][research_tool_use_id] = research_command_text
-            cure_llm._handle_claude_stream_chunk(
-                progress=progress,
-                state=state,
-                chunk="\n".join(rewritten_lines),
-            )
-
-            report = rf.validate_and_record_chunkhound_tool_proof(
-                meta=meta,
-                work_dir=work_dir,
-                provider="claude",
-                review_stage="multipass_plan",
-                prompt_template_name="mrereview_gh_local.md",
-                adapter_meta={
-                    "provider": "claude",
-                    "chunkhound_helper_path": "<CURE_CHUNKHOUND_HELPER>",
-                    "chunkhound_tool_proof_entries": list(state["chunkhound_tool_proof_entries"]),
-                },
-            )
-
-            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
-            self.assertIsNotNone(report)
-            assert report is not None
-            self.assertTrue(report["valid"])
-            self.assertEqual(report["provider"], "claude")
-            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
-            self.assertEqual(persisted["provider"], "claude")
-            self.assertTrue(persisted["valid"])
-            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_plan")
-            self.assertEqual(persisted["runs"][0]["observed_successful_calls"], ["search", "code_research"])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_validate_and_record_chunkhound_tool_proof_accepts_persisted_output_recovery(self) -> None:
-        """End-to-end: proof recovered from a <persisted-output> wrapper file survives
-        validate_and_record and records observed_successful_calls == ["search", "code_research"]."""
-        import tempfile
-
-        root = ROOT / ".tmp_test_persisted_output_proof_recovery_report"
-
-        class _StubProgress:
-            def __init__(self) -> None:
-                self.meta: dict[str, object] = {}
-
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            work_dir = root / "work"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
-            progress = _StubProgress()
-            state: dict[str, Any] = {"content": ""}
-            helper_path = "<CURE_CHUNKHOUND_HELPER>"
-
-            # --- Phase 1: inline search proof (same as the background-task test) ---
-            search_fixture_path = ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
-            search_fixture_text = search_fixture_path.read_text(encoding="utf-8")
-            search_tool_use_id = ""
-            for raw in search_fixture_text.splitlines():
-                payload = json.loads(raw)
-                if not isinstance(payload, dict) or str(payload.get("type") or "") != "user":
-                    continue
-                message = payload.get("message")
-                if not isinstance(message, dict):
-                    continue
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
-                        continue
-                    search_tool_use_id = str(block.get("tool_use_id") or "").strip()
-                    if search_tool_use_id:
-                        break
-                if search_tool_use_id:
-                    break
-            self.assertTrue(search_tool_use_id)
-            state["bash_tool_commands_by_id"] = {search_tool_use_id: '"$CURE_CHUNKHOUND_HELPER" search "<QUERY>"'}
-            cure_llm._ensure_text_cli_live_progress(progress=progress, provider="claude", label="Claude CLI started.")
-            cure_llm._handle_claude_stream_chunk(progress=progress, state=state, chunk=search_fixture_text)
-
-            # --- Phase 2: research proof via <persisted-output> wrapper ---
-            research_proof_json = json.dumps(
-                {
-                    "ok": True,
-                    "command": "research",
-                    "tool_name": "code_research",
-                    "query": "how does X work",
-                    "helper_path": helper_path,
-                    "result": {"summary": "grounded answer"},
-                    "execution_stage": "tools/call",
-                    "execution_stage_status": "ok",
-                }
-            )
-            full_output = "\n".join(
-                [
-                    "cure-chunkhound: tools/call waiting (10.0s elapsed)",
-                    research_proof_json,
-                    "Some additional research text " * 50,
-                ]
-            )
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, encoding="utf-8", dir=str(root)
-            ) as f:
-                f.write(full_output)
-                persisted_path = f.name
-
-            wrapper_text = (
-                "<persisted-output>\n"
-                f"Output too large (33.2KB). Full output saved to: {persisted_path}\n"
-                "\n"
-                "Preview (first 2KB):\n"
-                "cure-chunkhound: tools/call waiting (10.0s elapsed)\n"
-                "</persisted-output>"
-            )
-            research_tool_use_id = "toolu_research_po"
-            state["bash_tool_commands_by_id"][research_tool_use_id] = (
-                '"$CURE_CHUNKHOUND_HELPER" research "how does X work"'
-            )
-            cure_llm._handle_claude_stream_chunk(
-                progress=progress,
-                state=state,
-                chunk="\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "type": "stream_event",
-                                "event": {
-                                    "type": "content_block_start",
-                                    "index": 1,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": research_tool_use_id,
-                                        "name": "Bash",
-                                        "input": {},
-                                    },
-                                },
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "type": "stream_event",
-                                "event": {
-                                    "type": "content_block_delta",
-                                    "index": 1,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": '{"command":"\\"$CURE_CHUNKHOUND_HELPER\\" research \\"how does X work\\"","description":"Run research"}',
-                                    },
-                                },
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "type": "user",
-                                "message": {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "tool_result",
-                                            "tool_use_id": research_tool_use_id,
-                                            "content": wrapper_text,
-                                            "is_error": False,
-                                        }
-                                    ],
-                                },
-                                "tool_use_result": {
-                                    "stdout": wrapper_text,
-                                    "stderr": "",
-                                },
-                            }
-                        ),
-                    ]
-                ),
-            )
-
-            # --- Phase 3: validate and record ---
-            entries = state.get("chunkhound_tool_proof_entries", [])
-            self.assertEqual(len(entries), 2)
-
-            report = rf.validate_and_record_chunkhound_tool_proof(
-                meta=meta,
-                work_dir=work_dir,
-                provider="claude",
-                review_stage="multipass_plan",
-                prompt_template_name="mrereview_gh_local.md",
-                adapter_meta={
-                    "provider": "claude",
-                    "chunkhound_helper_path": helper_path,
-                    "chunkhound_tool_proof_entries": list(entries),
-                },
-            )
-
-            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
-            self.assertIsNotNone(report)
-            assert report is not None
-            self.assertTrue(report["valid"])
-            self.assertEqual(report["provider"], "claude")
-            self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-            self.assertEqual(report["observed_evidence_sources"], ["cli_helper_command_execution"])
-            self.assertEqual(persisted["provider"], "claude")
-            self.assertTrue(persisted["valid"])
-            self.assertEqual(persisted["runs"][0]["review_stage"], "multipass_plan")
-            self.assertEqual(persisted["runs"][0]["observed_successful_calls"], ["search", "code_research"])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_validate_chunkhound_tool_proof_rejects_forged_claude_stdout_without_helper_command(self) -> None:
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta=self._claude_helper_adapter_meta(
-                helper_path=helper_path,
-                command='/bin/bash -lc \'printf "$CURE_CHUNKHOUND_HELPER"; printf "{\\"ok\\": true}"\'',
-                payloads=[
-                    {
-                        "ok": True,
-                        "command": "search",
-                        "tool_name": "search",
-                        "query": "needle",
-                        "helper_path": helper_path,
-                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                    {
-                        "ok": True,
-                        "command": "research",
-                        "tool_name": "code_research",
-                        "query": "cross-file question",
-                        "helper_path": helper_path,
-                        "result": {"summary": "grounded answer"},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                ],
-            ),
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertFalse(report["valid"])
-        self.assertIn("search", str(report["failure_reason"]))
-        self.assertTrue(
-            any("did not invoke staged helper for the claimed tool" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
-        )
-
-    def test_validate_chunkhound_tool_proof_accepts_batched_claude_helper_entries(self) -> None:
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta={
-                "provider": "claude",
-                "chunkhound_helper_path": helper_path,
-                "chunkhound_tool_proof_entries": [
-                    {
-                        "payload": {
-                            "ok": True,
-                            "command": "search",
-                            "tool_name": "search",
-                            "query": "needle",
-                            "helper_path": helper_path,
-                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                            "execution_stage": "tools/call",
-                            "execution_stage_status": "ok",
-                        },
-                        "stdout_excerpt": "batched helper stdout",
-                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
-                    },
-                    {
-                        "payload": {
-                            "ok": True,
-                            "command": "research",
-                            "tool_name": "code_research",
-                            "query": "cross-file question",
-                            "helper_path": helper_path,
-                            "result": {"summary": "grounded answer"},
-                            "execution_stage": "tools/call",
-                            "execution_stage_status": "ok",
-                        },
-                        "stdout_excerpt": "batched helper stdout",
-                        "command": '/bin/bash -lc \'"$CURE_CHUNKHOUND_HELPER" search "needle" && "$CURE_CHUNKHOUND_HELPER" research "cross-file question"\'',
-                    },
-                ],
-            },
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertTrue(report["valid"])
-        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-
-    def test_validate_chunkhound_tool_proof_claude_missing_helper_path_fails_closed(self) -> None:
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta={
-                "provider": "claude",
-                "chunkhound_tool_proof_entries": [
-                    {
-                        "payload": {
-                            "ok": True,
-                            "command": "search",
-                            "tool_name": "search",
-                            "query": "needle",
-                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
-                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                        },
-                        "stdout_excerpt": "helper payload",
-                    },
-                    {
-                        "payload": {
-                            "ok": True,
-                            "command": "research",
-                            "tool_name": "code_research",
-                            "query": "cross-file question",
-                            "helper_path": "/tmp/cure/work/bin/cure-chunkhound",
-                            "result": {"summary": "grounded answer"},
-                        },
-                        "stdout_excerpt": "helper payload",
-                    },
-                ],
-            },
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertFalse(report["valid"])
-        self.assertIn("missing staged helper path", str(report["failure_reason"]))
-
-    def test_validate_chunkhound_tool_proof_rejected_claude_entries_remain_visible_when_valid(self) -> None:
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        report = rf.validate_chunkhound_tool_proof(
-            provider="claude",
-            review_stage="singlepass_review",
-            prompt_template_name="mrereview_gh_local.md",
-            adapter_meta=self._claude_helper_adapter_meta(
-                helper_path=helper_path,
-                payloads=[
-                    {
-                        "ok": True,
-                        "command": "search",
-                        "tool_name": "search",
-                        "query": "needle",
-                        "helper_path": helper_path,
-                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                    {
-                        "ok": True,
-                        "command": "search",
-                        "tool_name": "search",
-                        "query": "needle",
-                        "helper_path": "/tmp/other/cure-chunkhound",
-                        "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                    {
-                        "ok": True,
-                        "command": "research",
-                        "tool_name": "code_research",
-                        "query": "cross-file question",
-                        "helper_path": helper_path,
-                        "result": {"summary": "grounded answer"},
-                        "execution_stage": "tools/call",
-                        "execution_stage_status": "ok",
-                    },
-                ],
-            ),
-        )
-
-        self.assertIsNotNone(report)
-        assert report is not None
-        self.assertTrue(report["valid"])
-        self.assertEqual(report["observed_successful_calls"], ["search", "code_research"])
-        self.assertTrue(
-            any(detail["tool_name"] == "search" for detail in report["observed_failed_call_details"])
-        )
-        self.assertTrue(
-            any("path mismatch" in str(detail.get("detail") or "") for detail in report["observed_failed_call_details"])
-        )
-
-    def test_validate_and_record_chunkhound_tool_proof_mixed_provider_report_uses_latest_provider(self) -> None:
-        root = ROOT / ".tmp_test_chunkhound_tool_proof_mixed_provider_report"
-        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            work_dir = root / "work"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
-
-            first = rf.validate_and_record_chunkhound_tool_proof(
-                meta=meta,
-                work_dir=work_dir,
-                provider="codex",
-                review_stage="singlepass_review",
-                prompt_template_name="mrereview_gh_local.md",
-                adapter_meta=self._write_codex_events(root=root, tool_names=["search", "code_research"]),
-            )
-            second = rf.validate_and_record_chunkhound_tool_proof(
-                meta=meta,
-                work_dir=work_dir,
-                provider="claude",
-                review_stage="singlepass_review",
-                prompt_template_name="mrereview_gh_local.md",
-                adapter_meta=self._claude_helper_adapter_meta(
-                    helper_path=helper_path,
-                    payloads=[
-                        {
-                            "ok": True,
-                            "command": "search",
-                            "tool_name": "search",
-                            "query": "needle",
-                            "helper_path": helper_path,
-                            "result": {"results": [], "pagination": {"offset": 0, "total_results": 0}},
-                            "execution_stage": "tools/call",
-                            "execution_stage_status": "ok",
-                        },
-                        {
-                            "ok": True,
-                            "command": "research",
-                            "tool_name": "code_research",
-                            "query": "cross-file question",
-                            "helper_path": helper_path,
-                            "result": {"summary": "grounded answer"},
-                            "execution_stage": "tools/call",
-                            "execution_stage_status": "ok",
-                        },
-                    ],
-                ),
-            )
-
-            persisted = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
-            self.assertIsNotNone(first)
-            self.assertIsNotNone(second)
-            self.assertEqual(persisted["schema_version"], 2)
-            self.assertEqual(persisted["provider"], "claude")
-            self.assertEqual([run["provider"] for run in persisted["runs"]], ["codex", "claude"])
-            self.assertEqual(meta["chunkhound"]["tool_validation"]["provider"], "claude")
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
 
 class CodexToolProofFlowTests(unittest.TestCase):
     def _fake_run_cmd(self, *, seed: Path) -> object:
@@ -14340,11 +13703,11 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 cure_output.prompt_pr_model_and_effort_picker(
-                    provider="claude",
-                    default_model="claude-sonnet-4-6",
+                    provider="codex",
+                    default_model="gpt-5.3-codex",
                     default_effort="high",
-                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
-                    effort_options=["low", "medium", "high", "max"],
+                    model_options=[("GPT-5.3 Codex", "gpt-5.3-codex")],
+                    effort_options=["minimal", "low", "medium", "high", "xhigh"],
                     prompt_for_model=True,
                     prompt_for_effort=False,
                 )
@@ -14360,11 +13723,11 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 cure_output.prompt_pr_model_and_effort_picker(
-                    provider="claude",
-                    default_model="claude-sonnet-4-6",
+                    provider="codex",
+                    default_model="gpt-5.3-codex",
                     default_effort="high",
-                    model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
-                    effort_options=["low", "medium", "high", "max"],
+                    model_options=[("GPT-5.3 Codex", "gpt-5.3-codex")],
+                    effort_options=["minimal", "low", "medium", "high", "xhigh"],
                     prompt_for_model=False,
                     prompt_for_effort=True,
                 )
@@ -14389,25 +13752,25 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             )
         self.assertEqual(result, {"model": "gpt-5.4", "reasoning_effort": "high"})
 
-    def test_pr_picker_accepts_named_effort_selection(self) -> None:
+    def test_pr_picker_accepts_named_codex_effort_selection(self) -> None:
         class _KeepOpenStringIO(StringIO):
             def close(self) -> None:
                 pass
 
-        reader = StringIO("max\n")
+        reader = StringIO("xhigh\n")
         writer = _KeepOpenStringIO()
         with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
             result = cure_output.prompt_pr_model_and_effort_picker(
-                provider="claude",
-                default_model="claude-sonnet-4-6",
+                provider="codex",
+                default_model="gpt-5.3-codex",
                 default_effort="high",
-                model_options=[("Sonnet 4.6", "claude-sonnet-4-6")],
-                effort_options=["low", "medium", "high", "max"],
+                model_options=[("GPT-5.3 Codex", "gpt-5.3-codex")],
+                effort_options=["minimal", "low", "medium", "high", "xhigh"],
                 prompt_for_model=False,
                 prompt_for_effort=True,
             )
 
-        self.assertEqual(result, {"reasoning_effort": "max"})
+        self.assertEqual(result, {"reasoning_effort": "xhigh"})
         self.assertIn("Select effort number or name:", writer.getvalue())
 
     def test_grounding_retry_effort_returns_none_when_effort_is_kept(self) -> None:
@@ -14419,9 +13782,9 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         writer = _KeepOpenStringIO()
         with mock.patch.object(cure_output, "_open_prompt_tty", return_value=(reader, writer)):
             result = cure_output.prompt_grounding_retry_effort(
-                provider="claude",
+                provider="codex",
                 default_effort="high",
-                effort_options=["low", "medium", "high", "max"],
+                effort_options=["minimal", "low", "medium", "high", "xhigh"],
                 stage_label="multipass step 08",
             )
 
@@ -14451,8 +13814,8 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
     def test_pr_picker_skips_explicit_preset_overrides(self) -> None:
         llm_resolved = {
-            "provider": "claude",
-            "model": "claude-opus-4-6",
+            "provider": "codex",
+            "model": "gpt-5.4",
             "reasoning_effort": "high",
         }
         llm_resolution_meta = {
@@ -14475,8 +13838,8 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
     def test_pr_picker_still_prompts_for_builtin_preset_defaults(self) -> None:
         llm_resolved = {
-            "provider": "claude",
-            "model": "claude-sonnet-4-6",
+            "provider": "codex",
+            "model": "gpt-5.3-codex",
             "reasoning_effort": "high",
         }
         llm_resolution_meta = {
@@ -14491,7 +13854,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         with mock.patch.object(
             rf,
             "prompt_pr_model_and_effort_picker",
-            return_value={"model": "claude-opus-4-6"},
+            return_value={"model": "gpt-5.4"},
         ) as picker:
             resolved, meta = rf._maybe_apply_pr_llm_picker(
                 llm_resolved=llm_resolved,
@@ -14499,7 +13862,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             )
 
         picker.assert_called_once()
-        self.assertEqual(resolved["model"], "claude-opus-4-6")
+        self.assertEqual(resolved["model"], "gpt-5.4")
         self.assertEqual(meta["resolved"]["model_source"], "tty_prompt")
 
     def test_persist_grounding_summary_keeps_full_catalog_and_filtered_synth_outputs(self) -> None:

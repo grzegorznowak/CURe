@@ -166,7 +166,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertFalse(payload["ok"])
             self.assertTrue(
                 (
@@ -268,7 +268,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["preflight_stage"], "initialize")
             self.assertEqual(payload["preflight_stage_status"], "timeout")
@@ -371,7 +371,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["tool_name"], "search")
             self.assertEqual(payload["mcp_transport"], "json_line")
@@ -469,7 +469,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["tool_name"], "search")
             self.assertEqual(payload["mcp_transport"], "json_line")
@@ -478,7 +478,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_generated_chunkhound_helper_emits_provider_appropriate_heartbeat_during_tools_call(self) -> None:
-        for provider, heartbeat_stream in (("codex", "stdout"), ("claude", "stderr")):
+        for provider, heartbeat_stream in (("codex", "stdout"),):
             with self.subTest(provider=provider, heartbeat_stream=heartbeat_stream):
                 root = ROOT / f".tmp_test_chunkhound_helper_tools_call_heartbeat_{provider}"
                 try:
@@ -581,17 +581,17 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                     stderr_lines = [line for line in result.stderr.splitlines() if line.strip()]
                     if provider == "codex":
                         self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stdout_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
                             result.stdout,
                         )
                     else:
                         self.assertEqual(len(stdout_lines), 1, result.stdout)
                         self.assertFalse(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stdout_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
                             result.stdout,
                         )
                         self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call waiting") for line in stderr_lines),
+                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stderr_lines),
                             result.stderr,
                         )
                         # Part D: completion sentinel must be the last stderr line
@@ -600,7 +600,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                             f"Expected sentinel as last stderr line, got: {stderr_lines[-1]!r}",
                         )
                         # Part D: verify combined output ordering (JSON before sentinel)
-                        # Re-run with merged stdout+stderr to simulate Claude's .output file
+                        # Re-run with merged stdout+stderr to verify combined output ordering
                         merged_result = subprocess.run(
                             [str(helper_path), "research", "cross-file question"],
                             cwd=repo_dir,
@@ -633,127 +633,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 finally:
                     shutil.rmtree(root, ignore_errors=True)
 
-    def test_generated_chunkhound_helper_emits_failure_sentinel_on_claude_tool_error(self) -> None:
-        """Part D: failure sentinel path — MCP server crashes during tools/call."""
-        root = ROOT / ".tmp_test_chunkhound_helper_failure_sentinel"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            repo_dir = root / "repo"
-            work_dir = root / "work"
-            helper_cwd = root / "chunkhound"
-            repo_dir.mkdir(parents=True, exist_ok=True)
-            work_dir.mkdir(parents=True, exist_ok=True)
-            helper_cwd.mkdir(parents=True, exist_ok=True)
-
-            fake_runtime = (root / "fake-python").resolve()
-            fake_chunkhound_dir = root / "fake-bin"
-            fake_chunkhound_dir.mkdir(parents=True, exist_ok=True)
-            fake_chunkhound = (fake_chunkhound_dir / "chunkhound").resolve()
-
-            # Fake MCP server that responds to init/list but crashes on tools/call
-            fake_runtime.write_text(
-                "\n".join(
-                    [
-                        "#!/usr/bin/env python3",
-                        "import json",
-                        "import sys",
-                        "from pathlib import Path",
-                        "",
-                        "def read_message():",
-                        "    raw = sys.stdin.buffer.readline()",
-                        "    if not raw:",
-                        "        raise SystemExit(0)",
-                        "    return json.loads(raw.decode('utf-8'))",
-                        "",
-                        "def write_message(payload):",
-                        "    sys.stdout.write(json.dumps(payload) + '\\n')",
-                        "    sys.stdout.flush()",
-                        "",
-                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
-                        "    payload = {",
-                        "        'daemon_lock_path': '/tmp/chunkhound-fail-sentinel/daemon.lock',",
-                        "        'daemon_log_path': '/tmp/chunkhound-fail-sentinel/daemon.log',",
-                        "        'daemon_socket_path': '/tmp/chunkhound-fail-sentinel.sock',",
-                        "        'daemon_pid': 999,",
-                        "        'daemon_runtime_dir': '/tmp/chunkhound-fail-sentinel',",
-                        "        'daemon_registry_entry_path': '/tmp/chunkhound-fail-sentinel/registry/repo.json',",
-                        f"        'chunkhound_runtime_python': {json.dumps(str(fake_runtime))},",
-                        f"        'chunkhound_module_path': {json.dumps('/opt/chunkhound/site-packages/chunkhound/__init__.py')},",
-                        "    }",
-                        "    print(json.dumps(payload, sort_keys=True))",
-                        "    raise SystemExit(0)",
-                        "",
-                        "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
-                        "    init_msg = read_message()",
-                        "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
-                        "    _ = read_message()",
-                        "    tools_msg = read_message()",
-                        "    write_message({'jsonrpc': '2.0', 'id': tools_msg.get('id'), 'result': {'tools': [{'name': 'search'}, {'name': 'code_research'}]}})",
-                        "    # Read the tools/call request, then crash without responding",
-                        "    _ = read_message()",
-                        "    raise SystemExit(1)",
-                        "raise SystemExit(2)",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
-
-            helper_path = cure_llm.write_chunkhound_helper(
-                work_dir=work_dir,
-                repo_dir=repo_dir,
-                chunkhound_config_path=helper_cwd / "chunkhound.json",
-                chunkhound_db_path=helper_cwd / ".chunkhound.db",
-                chunkhound_cwd=helper_cwd,
-                provider="claude",
-            )
-            helper_text = (
-                helper_path.read_text(encoding="utf-8")
-                .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
-                .replace('"code_research": 1200.0', '"code_research": 5.0')
-            )
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
-
-            result = subprocess.run(
-                [str(helper_path), "research", "failing query"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-
-            self.assertEqual(result.returncode, 1)
-            stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-            stderr_lines = [line for line in result.stderr.splitlines() if line.strip()]
-            # Stdout should have exactly one JSON line with ok=False
-            self.assertEqual(len(stdout_lines), 1, result.stdout)
-            payload = json.loads(stdout_lines[0])
-            self.assertFalse(payload["ok"])
-            self.assertIn("execution_stage_status", payload)
-            # Failure sentinel must be the last stderr line
-            self.assertTrue(
-                len(stderr_lines) > 0,
-                "Expected at least one stderr line (failure sentinel)",
-            )
-            last_stderr = stderr_lines[-1]
-            self.assertTrue(
-                last_stderr.startswith("cure-chunkhound: research failed ("),
-                f"Expected failure sentinel, got: {last_stderr!r}",
-            )
-            # Sentinel must include the execution_stage_status detail
-            self.assertIn(payload["execution_stage_status"], last_stderr)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_generated_chunkhound_helper_fast_search_emits_no_stdout_heartbeat(self) -> None:
+    def test_generated_chunkhound_helper_fast_search_emits_parseable_payload_after_stdout_heartbeat(self) -> None:
         root = ROOT / ".tmp_test_chunkhound_helper_fast_search_no_heartbeat"
         try:
             shutil.rmtree(root, ignore_errors=True)
@@ -850,9 +730,8 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-            self.assertEqual(len(stdout_lines), 1, result.stdout)
-            self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call waiting"))
-            payload = json.loads(stdout_lines[0])
+            self.assertTrue(any(line.startswith("cure-chunkhound: tools/call search ") for line in stdout_lines), result.stdout)
+            payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["tool_name"], "search")
         finally:
@@ -952,8 +831,8 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
             self.assertEqual(len(stdout_lines), 1, result.stdout)
-            self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call waiting"))
-            payload = json.loads(stdout_lines[0])
+            self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call "))
+            payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["command"], "preflight")
         finally:
@@ -1012,14 +891,14 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(search.returncode, 0)
             self.assertEqual(research.returncode, 0)
 
-            preflight_payload = json.loads(preflight.stdout)
+            preflight_payload = json.loads([line for line in preflight.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(preflight_payload["ok"])
             self.assertEqual(preflight_payload["available_tools"], ["search", "code_research"])
             self.assertEqual(preflight_payload["preflight_stage"], "tools/list")
             self.assertEqual(preflight_payload["mcp_transport"], "dry_run")
             self.assertTrue(preflight_payload["dry_run"])
 
-            search_payload = json.loads(search.stdout)
+            search_payload = json.loads([line for line in search.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(search_payload["ok"])
             self.assertEqual(search_payload["tool_name"], "search")
             self.assertEqual(search_payload["execution_stage"], "tools/call")
@@ -1029,7 +908,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(search_payload["mcp_transport"], "dry_run")
             self.assertTrue(search_payload["dry_run"])
 
-            research_payload = json.loads(research.stdout)
+            research_payload = json.loads([line for line in research.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(research_payload["ok"])
             self.assertEqual(research_payload["tool_name"], "code_research")
             self.assertEqual(research_payload["execution_stage"], "tools/call")
@@ -1040,7 +919,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_generated_chunkhound_helper_ignores_broken_heartbeat_pipe_during_heartbeat(self) -> None:
-        for provider, stream_name in (("codex", "stdout"), ("claude", "stderr")):
+        for provider, stream_name in (("codex", "stdout"),):
             with self.subTest(provider=provider, stream_name=stream_name):
                 root = ROOT / f".tmp_test_chunkhound_helper_heartbeat_broken_{stream_name}"
                 try:
@@ -1119,23 +998,12 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         chunkhound_cwd=helper_cwd,
                         provider=provider,
                     )
-                    if provider == "codex":
-                        heartbeat_fragment = (
-                            '                            sys.stdout.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\\n")\n'
-                            "                            sys.stdout.flush()"
-                        )
-                    else:
-                        heartbeat_fragment = (
-                            '                            sys.stderr.write(f"cure-chunkhound: tools/call waiting ({elapsed:.1f}s elapsed)\\n")\n'
-                            "                            sys.stderr.flush()"
-                        )
-                    helper_text = (
-                        helper_path.read_text(encoding="utf-8")
-                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
-                        .replace(
-                            heartbeat_fragment,
-                            '                            (_ for _ in ()).throw(BrokenPipeError("heartbeat pipe closed"))',
-                        )
+                    helper_text = helper_path.read_text(encoding="utf-8").replace(
+                        "_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05"
+                    )
+                    helper_text = helper_text.replace(
+                        'sys.stdout.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\\n")',
+                        '(_ for _ in ()).throw(BrokenPipeError("heartbeat pipe closed"))',
                     )
                     self.assertIn("BrokenPipeError", helper_text)
                     helper_path.write_text(helper_text, encoding="utf-8")
@@ -1270,7 +1138,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
             self.assertEqual(search_result.returncode, 0)
             self.assertNotIn("preflight stage=", search_result.stderr)
-            search_payload = json.loads(search_result.stdout)
+            search_payload = json.loads([line for line in search_result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(search_payload["ok"])
             self.assertEqual(search_payload["execution_stage"], "tools/call")
             self.assertEqual(search_payload["execution_stage_status"], "ok")
@@ -1280,7 +1148,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
             self.assertEqual(research_result.returncode, 1)
             self.assertNotIn("preflight stage=", research_result.stderr)
-            research_payload = json.loads(research_result.stdout)
+            research_payload = json.loads([line for line in research_result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertFalse(research_payload["ok"])
             self.assertEqual(research_payload["tool_name"], "code_research")
             self.assertEqual(research_payload["execution_stage"], "tools/call")
@@ -1388,7 +1256,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["mcp_transport"], "mcp_framed")
             self.assertEqual(payload["preflight_stage"], "complete")
@@ -1494,7 +1362,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["preflight_stage"], "tools/list")
             self.assertEqual(payload["preflight_stage_status"], "timeout")
@@ -1608,7 +1476,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["preflight_stage"], "tools/list")
             self.assertEqual(payload["preflight_stage_status"], "timeout")
@@ -1721,7 +1589,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            payload = json.loads(result.stdout)
+            payload = json.loads([line for line in result.stdout.splitlines() if line.strip().startswith("{")][-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["preflight_stage"], "complete")
             self.assertIn("search", payload["available_tools"])
@@ -1781,62 +1649,6 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(access["helper_path"], str(helper_path))
             self.assertEqual(access["daemon_socket_path"], "/tmp/chunkhound-test.sock")
             self.assertEqual(access["daemon_pid"], 4242)
-            self.assertTrue(meta["chunkhound"]["access"]["preflight_ok"])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_chunkhound_access_preflight_records_success_metadata_for_claude(self) -> None:
-        root = ROOT / ".tmp_test_chunkhound_access_preflight_success_claude"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            repo_dir = root / "repo"
-            repo_dir.mkdir(parents=True, exist_ok=True)
-            helper_path = root / "work" / "bin" / "cure-chunkhound"
-            helper_path.parent.mkdir(parents=True, exist_ok=True)
-            helper_path.write_text(
-                "\n".join(
-                    [
-                        "#!/usr/bin/env python3",
-                        "import json",
-                        "payload = {",
-                        '    "ok": True,',
-                        '    "command": "preflight",',
-                        '    "available_tools": ["search", "code_research"],',
-                        f'    "helper_path": {json.dumps(str(helper_path))},',
-                        f'    "daemon_lock_path": {json.dumps(str((repo_dir / ".chunkhound" / "daemon.lock").resolve()))},',
-                        f'    "daemon_socket_path": {json.dumps("/tmp/chunkhound-claude-test.sock")},',
-                        f'    "daemon_log_path": {json.dumps(str((repo_dir / ".chunkhound" / "daemon.log").resolve()))},',
-                        '    "daemon_pid": 4343,',
-                        "}",
-                        'print(json.dumps(payload, sort_keys=True))',
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            helper_path.chmod(0o755)
-            runtime_policy = {
-                "metadata": {"provider": "claude", "chunkhound_access_mode": "cli_helper_daemon"},
-                "staged_paths": {"chunkhound_helper": str(helper_path)},
-            }
-            meta: dict[str, object] = {"chunkhound": {"base_config_path": "/tmp/base.json"}}
-            env = {"CURE_CHUNKHOUND_HELPER": str(helper_path), "PYTHONSAFEPATH": "1"}
-
-            access = rf._run_chunkhound_access_preflight(
-                repo_dir=repo_dir,
-                env=env,
-                runtime_policy=runtime_policy,
-                stream=False,
-                meta=meta,
-            )
-
-            assert access is not None
-            self.assertEqual(access["mode"], "cli_helper_daemon")
-            self.assertEqual(access["provider"], "claude")
-            self.assertEqual(access["helper_env_var"], "CURE_CHUNKHOUND_HELPER")
-            self.assertEqual(access["helper_path"], str(helper_path))
-            self.assertEqual(access["daemon_socket_path"], "/tmp/chunkhound-claude-test.sock")
-            self.assertEqual(access["daemon_pid"], 4343)
             self.assertTrue(meta["chunkhound"]["access"]["preflight_ok"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -1958,9 +1770,9 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "#!/usr/bin/env python3",
                         "import sys",
                         "import time",
-                        "sys.stderr.write('preflight stage=spawn status=ok\\n')",
-                        "sys.stderr.write('preflight stage=initialize status=ok\\n')",
-                        "sys.stderr.write('preflight stage=tools/list status=running\\n')",
+                        "sys.stderr.write('  ok start MCP server (0.0s)\\n')",
+                        "sys.stderr.write('  ok initialize (0.0s)\\n')",
+                        "sys.stderr.write('  list tools...\\n')",
                         "sys.stderr.flush()",
                         "time.sleep(5)",
                     ]
@@ -1992,7 +1804,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(access["stage_trace"][-1]["stage"], "tools/list")
             self.assertEqual(access["stage_trace"][-1]["status"], "running")
             self.assertAlmostEqual(access["outer_timeout_seconds"], 0.2)
-            self.assertIn("tools/list", access["helper_stderr_tail"])
+            self.assertIn("list tools", access["helper_stderr_tail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -2053,114 +1865,6 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["text"], cure_output._compact_codex_text(long_message))
         self.assertEqual(tail.tail(2)[-1], cure_output._compact_codex_text(long_message))
 
-    def test_claude_stream_event_sink_preserves_raw_events_and_emits_readable_progress(self) -> None:
-        raw = StringIO()
-        display = StringIO()
-        stderr = StringIO()
-        tail = rui.TailBuffer(max_lines=10)
-        events: list[dict[str, object]] = []
-        sink = cure_output.ClaudeStreamEventSink(
-            raw_file=raw,
-            display_file=display,
-            tail=tail,
-            also_to=stderr,
-            on_event=events.append,
-        )
-
-        sink.write(json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}) + "\n")
-        sink.write(
-            json.dumps(
-                {
-                    "type": "stream_event",
-                    "event": {
-                        "type": "content_block_start",
-                        "index": 0,
-                        "content_block": {"type": "text"},
-                    },
-                }
-            )
-            + "\n"
-        )
-        sink.write(
-            json.dumps(
-                {
-                    "type": "stream_event",
-                    "event": {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": "Checking changed files and narrowing scope."},
-                    },
-                }
-            )
-            + "\n"
-        )
-        sink.write(
-            json.dumps(
-                {
-                    "type": "stream_event",
-                    "event": {"type": "content_block_stop", "index": 0},
-                }
-            )
-            + "\n"
-        )
-        sink.flush()
-
-        self.assertIn('"type": "system"', raw.getvalue())
-        self.assertIn("Claude session started.", display.getvalue())
-        self.assertIn("Claude: Checking changed files and narrowing scope.", display.getvalue())
-        self.assertIn("Claude: Checking changed files and narrowing scope.", stderr.getvalue())
-        self.assertEqual(events[-1]["type"], "assistant_text")
-        self.assertEqual(tail.tail(1)[0], "Claude: Checking changed files and narrowing scope.")
-
-    def test_claude_stream_event_sink_uses_real_search_fixture_without_partial_tool_noise(self) -> None:
-        raw = StringIO()
-        display = StringIO()
-        tail = rui.TailBuffer(max_lines=50)
-        sink = cure_output.ClaudeStreamEventSink(
-            raw_file=raw,
-            display_file=display,
-            tail=tail,
-        )
-        fixture = (
-            ROOT / "tests" / "fixtures" / "claude_stream" / "search_tool_result.ndjson"
-        ).read_text(encoding="utf-8")
-
-        sink.write(fixture)
-        sink.flush()
-
-        rendered_lines = [line.strip() for line in display.getvalue().splitlines() if line.strip()]
-        self.assertIn('Claude session started.', rendered_lines)
-        self.assertIn('[tool] Bash: "$CURE_CHUNKHOUND_HELPER" search "<QUERY>"', rendered_lines)
-        self.assertNotIn('[tool] Bash', rendered_lines)
-        result_lines = [
-            line
-            for line in rendered_lines
-            if line.startswith('[result] Bash: "$CURE_CHUNKHOUND_HELPER" search "<QUERY>"')
-        ]
-        self.assertEqual(len(result_lines), 1)
-        self.assertNotIn("chunkhound_module_path", result_lines[0])
-        self.assertNotIn('{"chunkhound_module_path"', result_lines[0])
-
-    def test_claude_stream_event_sink_hides_thinking_from_real_background_fixture(self) -> None:
-        raw = StringIO()
-        display = StringIO()
-        tail = rui.TailBuffer(max_lines=50)
-        sink = cure_output.ClaudeStreamEventSink(
-            raw_file=raw,
-            display_file=display,
-            tail=tail,
-        )
-        fixture = (
-            ROOT / "tests" / "fixtures" / "claude_stream" / "code_research_tool_result.ndjson"
-        ).read_text(encoding="utf-8")
-
-        sink.write(fixture)
-        sink.flush()
-
-        rendered = display.getvalue()
-        self.assertNotIn("Thinking", rendered)
-        self.assertIn("The background task completed successfully (exit code 0).", rendered)
-
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-123",
@@ -2176,7 +1880,7 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertIn("current=Checking changed files and narrowing scope", line)
 
     def test_phase_label_treats_provider_specific_review_phase_as_generate_review(self) -> None:
-        self.assertEqual(rui._phase_label("claude_review"), "Generate review")
+        self.assertEqual(rui._phase_label("codex_review"), "Generate review")
 
     def test_watch_line_for_payload_appends_chunkhound_cache_build_live_progress_summary(self) -> None:
         payload = {
@@ -2487,51 +2191,10 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertIn("live_progress", payload)
         self.assertIn("codex_events", payload["logs"])
 
-    def test_build_status_payload_includes_claude_events_log(self) -> None:
+    def test_build_status_payload_prefers_runtime_adapter_model_and_provider_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            session_dir = root / "session-claude-events"
-            repo_dir = session_dir / "repo"
-            logs_dir = session_dir / "work" / "logs"
-            review_md = session_dir / "review.md"
-            repo_dir.mkdir(parents=True, exist_ok=True)
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            review_md.write_text("# Review\n", encoding="utf-8")
-            for name in ("cure.log", "chunkhound.log", "codex.log", "claude.events.jsonl"):
-                (logs_dir / name).write_text(name + "\n", encoding="utf-8")
-            meta = {
-                "session_id": "session-claude-events",
-                "status": "running",
-                "phase": "claude_review",
-                "phases": {"claude_review": {"status": "running"}},
-                "host": "github.com",
-                "owner": "acme",
-                "repo": "repo",
-                "number": 12,
-                "created_at": "2026-03-17T12:00:00+00:00",
-                "paths": {
-                    "repo_dir": str(repo_dir),
-                    "work_dir": str(session_dir / "work"),
-                    "logs_dir": str(logs_dir),
-                    "review_md": str(review_md),
-                },
-                "logs": {
-                    "cure": str(logs_dir / "cure.log"),
-                    "chunkhound": str(logs_dir / "chunkhound.log"),
-                    "codex": str(logs_dir / "codex.log"),
-                    "claude_events": str(logs_dir / "claude.events.jsonl"),
-                },
-            }
-            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-
-            payload = rf.build_status_payload("session-claude-events", sandbox_root=root)
-
-        self.assertIn("claude_events", payload["logs"])
-
-    def test_build_status_payload_prefers_runtime_adapter_model_and_provider_phase_for_claude(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_dir = root / "session-claude"
+            session_dir = root / "session-codex"
             repo_dir = session_dir / "repo"
             logs_dir = session_dir / "work" / "logs"
             review_md = session_dir / "review.md"
@@ -2541,10 +2204,10 @@ class CodexJsonProgressTests(unittest.TestCase):
             for name in ("cure.log", "chunkhound.log", "codex.log"):
                 (logs_dir / name).write_text(name + "\n", encoding="utf-8")
             meta = {
-                "session_id": "session-claude",
+                "session_id": "session-codex",
                 "status": "running",
-                "phase": "claude_review",
-                "phases": {"claude_review": {"status": "running"}},
+                "phase": "codex_review",
+                "phases": {"codex_review": {"status": "running"}},
                 "host": "github.com",
                 "owner": "acme",
                 "repo": "repo",
@@ -2562,22 +2225,22 @@ class CodexJsonProgressTests(unittest.TestCase):
                     "codex": str(logs_dir / "codex.log"),
                 },
                 "llm": {
-                    "preset": "claude-cli",
-                    "provider": "claude",
+                    "preset": "codex-cli",
+                    "provider": "codex",
                     "model": None,
                     "reasoning_effort": "high",
                     "adapter": {
-                        "provider": "claude",
-                        "model": "claude-sonnet-4-6",
+                        "provider": "codex",
+                        "model": "gpt-5.3-codex",
                     },
                 },
             }
             (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
-            payload = rf.build_status_payload("session-claude", sandbox_root=root)
+            payload = rf.build_status_payload("session-codex", sandbox_root=root)
 
-        self.assertEqual(payload["phase"], "claude_review")
-        self.assertEqual(payload["llm"]["summary"], "llm=claude-cli/claude-sonnet-4-6/high")
+        self.assertEqual(payload["phase"], "codex_review")
+        self.assertEqual(payload["llm"]["summary"], "llm=codex-cli/gpt-5.3-codex/high")
 
     def test_build_status_payload_includes_chunkhound_access_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2913,9 +2576,9 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertTrue(args5.force)
         self.assertEqual(args5.chunkhound_source, "git-main")
         self.assertTrue(args5.skip_install)
-        args6 = p.parse_args(["setup", "--agent", "claude"])
+        args6 = p.parse_args(["setup", "--agent", "codex"])
         self.assertEqual(args6.cmd, "setup")
-        self.assertEqual(args6.agent, "claude")
+        self.assertEqual(args6.agent, "codex")
         args7 = p.parse_args(["set-agent", "codex"])
         self.assertEqual(args7.cmd, "set-agent")
         self.assertEqual(args7.agent, "codex")
@@ -2949,9 +2612,9 @@ class TuiDashboardTests(unittest.TestCase):
             [
                 "doctor",
                 "--llm-preset",
-                "claude-cli",
+                "codex-cli",
                 "--llm-model",
-                "claude-sonnet-4-6",
+                "gpt-5.3-codex",
                 "--llm-effort",
                 "high",
                 "--llm-plan-effort",
@@ -2967,8 +2630,8 @@ class TuiDashboardTests(unittest.TestCase):
                 "--json",
             ]
         )
-        self.assertEqual(args.llm_preset, "claude-cli")
-        self.assertEqual(args.llm_model, "claude-sonnet-4-6")
+        self.assertEqual(args.llm_preset, "codex-cli")
+        self.assertEqual(args.llm_model, "gpt-5.3-codex")
         self.assertEqual(args.llm_effort, "high")
         self.assertEqual(args.llm_plan_effort, "high")
         self.assertEqual(args.llm_verbosity, "low")
@@ -3786,6 +3449,43 @@ class InstallAndDoctorTests(unittest.TestCase):
         payload.update(overrides)
         return argparse.Namespace(**payload)
 
+    def _recommended_chunkhound_config_json(self) -> str:
+        return json.dumps(
+            {
+                "embedding": {
+                    "provider": "voyageai",
+                    "model": "voyage-3.5-lite",
+                    "rerank_model": "rerank-2.5",
+                    "api_key": "voyage-test-key",  # pragma: allowlist secret
+                },
+                "llm": {
+                    "provider": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "synthesis_model": "deepseek-v4-flash",
+                    "utility_model": "deepseek-v4-flash",
+                    "api_key": "sk-test-key",  # pragma: allowlist secret
+                    "codex_reasoning_effort_synthesis": "high",
+                    "codex_reasoning_effort_utility": "high",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+
+    def _mock_chunkhound_health_warn(self):
+        return mock.patch.object(
+            cure_runtime,
+            "_doctor_chunkhound_health_check",
+            return_value=(
+                cure_runtime.DoctorCheck(
+                    name="chunkhound-health",
+                    status="warn",
+                    detail="mocked chunkhound health check",
+                ),
+                None,
+            ),
+        )
+
     def test_build_chunkhound_install_command_uses_expected_specs(self) -> None:
         with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=False), mock.patch.object(
             rf.importlib.util, "find_spec", return_value=object()
@@ -3858,12 +3558,12 @@ class InstallAndDoctorTests(unittest.TestCase):
         jira_reference_url = "https://github.com/grzegorznowak/CURe/blob/main/JIRA.md"
         self.assertIn("use <CURE_REPO_URL> to review <PR_URL>", readme)
         self.assertIn("use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220", readme)
-        self.assertIn("start with [SKILL.md](SKILL.md)", readme)
+        self.assertIn("treat [SKILL.md](SKILL.md) as an assisted checklist", readme)
         self.assertIn(jira_reference_url, readme)
         self.assertIn("uv tool install cureview", readme)
         self.assertIn("uvx --from cureview cure setup", readme)
         self.assertIn("Secondary Standalone Install", readme)
-        self.assertIn("Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient.", readme)
+        self.assertIn("Use the standalone GitHub Release assets only when the package path is unavailable or inconvenient, and only when the operator has approved", readme)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh", readme)
         self.assertIn("curl -fsSL https://raw.githubusercontent.com/grzegorznowak/CURe/main/install-cure.sh | sh -s -- --version v0.1.8", readme)
         self.assertIn("cure setup", readme)
@@ -3893,19 +3593,19 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("Only `mode = \"required\"` sources are preflighted", readme)
         self.assertIn("the project checkout stays untouched", readme)
         self.assertIn("./selftest.sh", readme)
-        self.assertIn("fresh or partially configured environments", readme)
-        self.assertIn('fresh install or existing local setup to "review in progress"', readme)
+        self.assertIn("installation, persistent configuration, secrets, network access, local agent selection, and sandbox permissions remain operator-controlled", readme)
+        self.assertIn('operator-approved install or disposable setup to "review in progress"', readme)
         self.assertIn("inspect the active local setup before creating a fresh one", readme)
         self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", readme)
         self.assertIn("Do not silently adopt it in this public contract.", readme)
         self.assertIn("`repo_local_chunkhound` payload", readme)
         self.assertIn("`repo-local-chunkhound` check", readme)
         self.assertIn("`executor-network` advisory check", readme)
-        self.assertIn("Codex and Claude executor paths need internet / network access", readme)
-        self.assertIn("cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json", readme)
-        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli", readme)
+        self.assertIn("Codex executor paths need internet / network access", readme)
+        self.assertIn("cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json", readme)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli", readme)
         self.assertIn(
-            "If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            "If autodetect needs to be overridden, pass `--llm-preset codex-cli` explicitly.",
             readme,
         )
         self.assertIn("Hard Rule", skill)
@@ -3932,9 +3632,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("uv tool install --editable /path/to/cure", skill)
         self.assertIn("--config /tmp/cure-public/cure.toml", skill)
         self.assertIn("XDG_CONFIG_HOME", skill)
-        self.assertIn("`--skip-install`", skill)
-        self.assertIn("repairs missing non-secret bootstrap files", skill)
-        self.assertIn("cure set-agent codex|claude", skill)
+        self.assertIn("repair missing non-secret bootstrap files", skill)
+        self.assertIn("cure set-agent codex", skill)
         self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", skill)
         self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", skill)
         self.assertIn("Run `cure setup` before `cure doctor`.", skill)
@@ -3947,18 +3646,18 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("`available`, `unavailable`, or `unknown`", skill)
         self.assertIn("Only `required` sources are preflighted", skill)
         self.assertIn("If a required embedding secret is still missing", skill)
-        self.assertIn("fresh or partially configured environment with explicit readiness checks", skill)
+        self.assertIn("operator-approved setup checklist for a fresh or partially configured environment with explicit readiness checks", skill)
         self.assertIn("inspect the active local setup before creating fresh config files", skill)
         self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", skill)
         self.assertIn("Do not silently adopt it.", skill)
         self.assertIn("`repo_local_chunkhound` payload", skill)
         self.assertIn("`repo-local-chunkhound` check", skill)
         self.assertIn("`executor-network` checks", skill)
-        self.assertIn("Codex and Claude executor paths need internet / network access", skill)
-        self.assertIn("cure doctor --llm-preset claude-cli --pr-url <PR_URL> --json", skill)
-        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset claude-cli", skill)
+        self.assertIn("Codex executor paths need internet / network access", skill)
+        self.assertIn("cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json", skill)
+        self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli", skill)
         self.assertIn(
-            "If autodetect picks the wrong CLI provider, override it explicitly with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            "If autodetect needs to be overridden, rerun the readiness and review commands with `--llm-preset codex-cli`.",
             skill,
         )
         self.assertIn("Use `cure setup` as the primary bootstrap and repair entry point.", skill)
@@ -3968,16 +3667,16 @@ class InstallAndDoctorTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("cure.toml", skill)
         self.assertIn("chunkhound-base.json", skill)
-        self.assertIn("Bootstrap everything non-secret before you stop:", skill)
-        self.assertIn("run `cure setup`", skill)
-        self.assertIn("create `~/.config/cure/cure.toml` only when `cure setup` is unavailable", skill)
-        self.assertIn("create `~/.config/cure/chunkhound-base.json` only when `cure setup` is unavailable", skill)
-        self.assertIn("auto-wire embeddings if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists", skill)
+        self.assertIn("Complete only operator-approved non-secret setup before you stop:", skill)
+        self.assertIn("run `cure setup` in an approved or disposable config target", skill)
+        self.assertIn("create `~/.config/cure/cure.toml` only when `cure setup` is unavailable and the operator approved", skill)
+        self.assertIn("create `~/.config/cure/chunkhound-base.json` only when `cure setup` is unavailable and the operator approved", skill)
+        self.assertIn("auto-wire non-secret embedding metadata if `VOYAGE_API_KEY` or `OPENAI_API_KEY` already exists", skill)
         self.assertIn("prefer a current-shell export for the immediate retry", skill)
         self.assertIn("shell profile or existing local secret manager for persistence", skill)
         self.assertIn("VOYAGE_API_KEY", skill)
         self.assertIn("OPENAI_API_KEY", skill)
-        self.assertIn("never ask the operator to paste a secret into chat", skill)
+        self.assertIn("never ask the operator to paste a secret into chat, infer secret values", skill)
         self.assertIn("If `chunkhound index ...` or `cure doctor --pr-url <PR_URL> --json` fails because neither `VOYAGE_API_KEY` nor `OPENAI_API_KEY` is present", skill)
         self.assertIn("I checked ~/.config/cure/cure.toml", skill)
         self.assertIn("\"provider\": \"voyage\"", skill)
@@ -3990,10 +3689,10 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("if repo-root `chunkhound.json` or `.chunkhound.json` exists, summarize it as a setup hint", skill)
         self.assertIn("ask the operator whether it should be reused; do not silently adopt it", skill)
         self.assertIn("Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks", skill)
-        self.assertIn("the active executor path is Codex or Claude", skill)
+        self.assertIn("the active Codex executor path", skill)
         self.assertIn("the required internet / network access for code-under-review context", skill)
         self.assertIn(
-            "If autodetect picks the wrong CLI provider, rerun the readiness and review commands with `--llm-preset claude-cli` or `--llm-preset codex-cli`.",
+            "If autodetect needs to be overridden, rerun the readiness and review commands with `--llm-preset codex-cli`.",
             skill,
         )
 
@@ -4044,7 +3743,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertIn("chunkhound.json", text)
             self.assertIn(".chunkhound.json", text)
             self.assertIn("ask the operator whether it should be reused", text)
-            self.assertIn("Codex and Claude executor paths need internet / network access", text)
+            self.assertIn("Codex executor paths need internet / network access", text)
 
     def test_jira_docs_extracted_from_readme(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -4502,12 +4201,12 @@ class InstallAndDoctorTests(unittest.TestCase):
             with mock.patch.object(
                 shutil,
                 "which",
-                side_effect=lambda name: "/usr/bin/codex" if name == "codex" else None,
+                side_effect=lambda name: None if name == "codex" else f"/usr/bin/{name}",
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.set_agent_flow(argparse.Namespace(agent="claude"), runtime=runtime)
-            self.assertIn("`claude` is not installed on PATH", str(ctx.exception))
-            self.assertIn("Use `cure set-agent codex|claude`", str(ctx.exception))
+                    rf.set_agent_flow(argparse.Namespace(agent="codex"), runtime=runtime)
+            self.assertIn("`codex` is not installed on PATH", str(ctx.exception))
+            self.assertIn("Use `cure set-agent codex`", str(ctx.exception))
             self.assertFalse(config_path.exists())
             self.assertFalse((root / "config" / "chunkhound-base.json").exists())
         finally:
@@ -4888,7 +4587,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             codex_cfg.write_text("", encoding="utf-8")
             jira_cfg.write_text("endpoint: https://example.atlassian.net\n", encoding="utf-8")
             cfg.write_text(
@@ -4909,15 +4608,21 @@ class InstallAndDoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
-            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=False), mock.patch.object(
+            with mock.patch.dict(os.environ, {"JIRA_CONFIG_FILE": str(jira_cfg)}, clear=True), mock.patch.object(
                 shutil,
                 "which",
                 side_effect=lambda name: f"/usr/bin/{name}",
-            ), mock.patch.object(cure_runtime, "run_cmd", return_value=mock.Mock(stdout="", stderr="", exit_code=0)):
+            ), mock.patch.object(
+                cure_runtime,
+                "run_cmd",
+                return_value=mock.Mock(stdout="", stderr="", exit_code=0),
+            ), self._mock_chunkhound_health_warn():
                 checks = rf._doctor_runtime_checks(runtime)
             by_name = {item.name: item for item in checks}
             self.assertEqual(by_name["cure-config"].status, "ok")
             self.assertEqual(by_name["chunkhound-config"].status, "ok")
+            self.assertEqual(by_name["chunkhound-config-validate"].status, "ok")
+            self.assertEqual(by_name["chunkhound-health"].status, "warn")
             self.assertEqual(by_name["jira-config"].status, "ok")
             self.assertEqual(by_name["codex-config"].status, "ok")
             self.assertEqual(by_name["gh-auth"].status, "ok")
@@ -4976,10 +4681,10 @@ class InstallAndDoctorTests(unittest.TestCase):
                         'profile = "permissive"',
                         "",
                         "[llm]",
-                        'default_preset = "claude_default"',
+                        'default_preset = "codex_default"',
                         "",
-                        "[llm_presets.claude_default]",
-                        'preset = "claude-cli"',
+                        "[llm_presets.codex_default]",
+                        'preset = "codex-cli"',
                         "",
                     ]
                 ),
@@ -5000,11 +4705,11 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
             self.assertEqual(payload["agent_runtime"]["profile"], "permissive")
-            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset"], "codex-cli")
             self.assertEqual(payload["agent_runtime"]["preset_source"], "cure.toml")
-            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
-            self.assertEqual(payload["agent_selection"]["saved_preference"], "claude_default")
-            self.assertEqual(payload["agent_selection"]["effective_agent"], "claude")
+            self.assertEqual(payload["agent_runtime"]["provider"], "codex")
+            self.assertEqual(payload["agent_selection"]["saved_preference"], "codex_default")
+            self.assertEqual(payload["agent_selection"]["effective_agent"], "codex")
 
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -5037,7 +4742,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             stdout = StringIO()
             args = argparse.Namespace(
                 json_output=True,
-                llm_preset="claude-cli",
+                llm_preset="codex-cli",
                 llm_model=None,
                 llm_effort=None,
                 llm_plan_effort=None,
@@ -5056,12 +4761,12 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rc = rf.doctor_flow(args, runtime=runtime)
             self.assertEqual(rc, 1)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset"], "codex-cli")
             self.assertEqual(payload["agent_runtime"]["preset_source"], "cli")
-            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+            self.assertEqual(payload["agent_runtime"]["provider"], "codex")
             self.assertEqual(payload["agent_selection"]["source"], "cli_preset")
             self.assertEqual(payload["agent_selection"]["status"], "broken_cli_preset")
-            self.assertIn("explicit preset `claude-cli` resolved to `claude`", payload["agent_selection"]["detail"])
+            self.assertIn("explicit preset `codex-cli` resolved to `codex`", payload["agent_selection"]["detail"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5079,7 +4784,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         args = argparse.Namespace(
             cmd="pr",
             pr_url="https://github.com/acme/repo/pull/1",
-            llm_preset="claude-cli",
+            llm_preset="codex-cli",
             agent=None,
         )
         with mock.patch.object(
@@ -5094,12 +4799,12 @@ class InstallAndDoctorTests(unittest.TestCase):
             cure_commands,
             "resolve_local_agent_selection",
             return_value={
-                "installed_agents": ["codex", "claude"],
+                "installed_agents": ["codex"],
                 "saved_preference": None,
                 "effective_agent": None,
-                "status": "ambiguous",
-                "detail": "multiple supported local agents are installed and no saved choice exists",
-                "blocking": True,
+                "status": "selected",
+                "detail": "codex selected",
+                "blocking": False,
             },
         ), mock.patch.object(
             cure_commands,
@@ -5118,9 +4823,8 @@ class InstallAndDoctorTests(unittest.TestCase):
                     stderr=StringIO(),
                 )
         detail = str(ctx.exception)
-        self.assertIn("Local agent selection: installed=[codex, claude] saved=<none> effective=<none> status=ambiguous", detail)
-        self.assertIn("multiple supported local agents are installed and no saved choice exists", detail)
-        self.assertIn("cure doctor --pr-url https://github.com/acme/repo/pull/1 --llm-preset claude-cli --json", detail)
+        self.assertIn("Local agent selection: installed=[codex] saved=<none> effective=<none> status=selected", detail)
+        self.assertIn("cure doctor --pr-url https://github.com/acme/repo/pull/1 --llm-preset codex-cli --json", detail)
 
     def test_doctor_flow_json_reports_detected_provider_source(self) -> None:
         root = ROOT / ".tmp_test_doctor_json_detected_provider"
@@ -5164,10 +4868,8 @@ class InstallAndDoctorTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "CLAUDE_CODE_SESSION": "claude-session-123",
-                    "CLAUDE_HOME": "/tmp/claude-home",
-                    "CODEX_THREAD_ID": "",
-                    "CODEX_HOME": "",
+                    "CODEX_THREAD_ID": "thread-123",
+                    "CODEX_HOME": "/tmp/codex-home",
                 },
                 clear=False,
             ), mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
@@ -5178,9 +4880,9 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rc = rf.doctor_flow(args, runtime=runtime)
             self.assertEqual(rc, 1)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["agent_runtime"]["preset"], "claude-cli")
+            self.assertEqual(payload["agent_runtime"]["preset"], "codex-cli")
             self.assertEqual(payload["agent_runtime"]["preset_source"], "detected_env")
-            self.assertEqual(payload["agent_runtime"]["provider"], "claude")
+            self.assertEqual(payload["agent_runtime"]["provider"], "codex")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5194,7 +4896,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             jira_cfg.write_text("jira", encoding="utf-8")
             cfg.write_text(
                 "\n".join(
@@ -5252,7 +4954,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rf.urllib.request,
                 "urlopen",
                 return_value=response,
-            ), mock.patch("sys.stdout", stdout):
+            ), self._mock_chunkhound_health_warn(), mock.patch("sys.stdout", stdout):
                 rc = rf.doctor_flow(
                     argparse.Namespace(
                         json_output=True,
@@ -5290,6 +4992,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             base_cfg.write_text(
                 json.dumps(
                     {
+                        **json.loads(self._recommended_chunkhound_config_json()),
                         "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
                         "research": {"algorithm": "hybrid"},
                     },
@@ -5303,6 +5006,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             repo_local_cfg.write_text(
                 json.dumps(
                     {
+                        **json.loads(self._recommended_chunkhound_config_json()),
                         "database": {"provider": "duckdb", "path": ".chunkhound"},
                         "indexing": {"include": ["**/*.py"], "exclude": ["**/.git/**"]},
                         "research": {"algorithm": "hybrid"},
@@ -5360,7 +5064,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 cure_runtime.Path,
                 "cwd",
                 return_value=invocation_cwd,
-            ), mock.patch("sys.stdout", stdout):
+            ), self._mock_chunkhound_health_warn(), mock.patch("sys.stdout", stdout):
                 rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
 
             self.assertEqual(rc, 0)
@@ -5378,76 +5082,6 @@ class InstallAndDoctorTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_doctor_flow_adds_executor_network_advisory_for_claude(self) -> None:
-        root = ROOT / ".tmp_test_doctor_executor_network_claude"
-        cfg = root / "reviewflow.toml"
-        base_cfg = root / "chunkhound.json"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            (root / "sandboxes").mkdir()
-            (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
-            cfg.write_text(
-                "\n".join(
-                    [
-                        "[paths]",
-                        f'sandbox_root = "{root / "sandboxes"}"',
-                        f'cache_root = "{root / "cache"}"',
-                        "",
-                        "[chunkhound]",
-                        f'base_config_path = "{base_cfg}"',
-                        "",
-                        "[llm]",
-                        'default_preset = "claude_default"',
-                        "",
-                        "[llm_presets.claude_default]",
-                        'preset = "claude-cli"',
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            runtime = rf.resolve_runtime(self._runtime_args(config_path=str(cfg)))
-            stdout = StringIO()
-
-            def fake_which(name: str) -> str | None:
-                return {
-                    "chunkhound": f"/usr/bin/{name}",
-                    "gh": f"/usr/bin/{name}",
-                    "jira": f"/usr/bin/{name}",
-                    "codex": f"/usr/bin/{name}",
-                    "claude": f"/usr/bin/{name}",
-                }.get(name)
-
-            def fake_runtime_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
-                if cmd[:4] == ["gh", "auth", "status", "--hostname"]:
-                    return mock.Mock(stdout="", stderr="", exit_code=0)
-                raise AssertionError(f"unexpected runtime command: {cmd}")
-
-            with mock.patch.object(shutil, "which", side_effect=fake_which), mock.patch.object(
-                rf,
-                "_default_jira_config_path",
-                return_value=root / ".tmp_missing_jira.yml",
-            ), mock.patch.object(cure_runtime, "run_cmd", side_effect=fake_runtime_run_cmd), mock.patch.object(
-                rf,
-                "run_cmd",
-                side_effect=RuntimeError("not a git worktree"),
-            ), mock.patch.object(
-                cure_runtime.Path,
-                "cwd",
-                return_value=root,
-            ), mock.patch("sys.stdout", stdout):
-                rc = rf.doctor_flow(argparse.Namespace(json_output=True), runtime=runtime)
-
-            self.assertEqual(rc, 0)
-            payload = json.loads(stdout.getvalue())
-            by_name = {item["name"]: item for item in payload["checks"]}
-            self.assertEqual(by_name["executor-network"]["status"], "warn")
-            self.assertIn("claude executor needs internet / network access", by_name["executor-network"]["detail"])
-            self.assertIn("does not prove external sandbox access", by_name["executor-network"]["detail"])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
 
     def test_doctor_flow_raises_clear_error_for_removed_gemini_preset(self) -> None:
         root = ROOT / ".tmp_test_doctor_executor_network_gemini"
@@ -5513,7 +5147,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             root.mkdir(parents=True, exist_ok=True)
             (root / "sandboxes").mkdir()
             (root / "cache").mkdir()
-            base_cfg.write_text("{}", encoding="utf-8")
+            base_cfg.write_text(self._recommended_chunkhound_config_json(), encoding="utf-8")
             cfg.write_text(
                 "\n".join(
                     [
@@ -5545,7 +5179,7 @@ class InstallAndDoctorTests(unittest.TestCase):
                 rf,
                 "_default_jira_config_path",
                 return_value=root / ".tmp_missing_jira.yml",
-            ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response), mock.patch(
+            ), mock.patch.object(rf.urllib.request, "urlopen", return_value=response), self._mock_chunkhound_health_warn(), mock.patch(
                 "sys.stdout",
                 stdout,
             ):
@@ -5752,19 +5386,19 @@ class InstallAndDoctorTests(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("Verdict: biz=REQUEST CHANGES tech=REQUEST CHANGES", joined)
 
-    def test_dashboard_narrow_header_labels_claude_review_like_review_generation(self) -> None:
+    def test_dashboard_narrow_header_labels_review_phase_like_review_generation(self) -> None:
         meta = {
             "host": "github.com",
             "owner": "acme",
             "repo": "repo",
             "number": 1,
-            "title": "Claude Review",
+            "title": "Review",
             "session_id": "s",
             "created_at": "2026-03-04T00:00:00+00:00",
             "status": "done",
             "completed_at": "2026-03-04T00:05:00+00:00",
-            "phase": "claude_review",
-            "phases": {"claude_review": {"status": "done", "duration_seconds": 10.0}},
+            "phase": "codex_review",
+            "phases": {"codex_review": {"status": "done", "duration_seconds": 10.0}},
             "paths": {"session_dir": "/tmp/review", "review_md": "/tmp/review/review.md"},
         }
         lines = rui.build_dashboard_lines(
@@ -5781,7 +5415,7 @@ class InstallAndDoctorTests(unittest.TestCase):
     def test_live_progress_lines_prefixes_assistant_text_timeline_only(self) -> None:
         lines = rui._live_progress_lines(
             meta={
-                "phase": "claude_review",
+                "phase": "codex_review",
                 "live_progress": {
                     "current": {"type": "assistant_text", "text": "Checking scope"},
                     "timeline": [
@@ -5795,7 +5429,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         )
 
         self.assertIn("Now: Checking scope", lines)
-        self.assertIn("[05:00:00] Claude: Checking scope", lines)
+        self.assertIn("[05:00:00] Checking scope", lines)
         self.assertIn("[05:00:01] [result] Search completed", lines)
 
     def test_live_progress_lines_shows_twelve_history_lines(self) -> None:
@@ -5805,7 +5439,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         ]
         lines = rui._live_progress_lines(
             meta={
-                "phase": "claude_review",
+                "phase": "codex_review",
                 "live_progress": {
                     "current": {"type": "provider_output", "text": "Working"},
                     "timeline": timeline,
@@ -5818,9 +5452,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertEqual(len(lines), 14)
         self.assertEqual(lines[0], "Phase: Generate review")
         self.assertEqual(lines[1], "Now: Working")
-        self.assertIn("[05:00:00] Claude: item 0", lines)
-        self.assertIn("[05:00:01] Claude: item 1", lines)
-        self.assertIn("[05:00:11] Claude: item 11", lines)
+        self.assertIn("[05:00:00] item 0", lines)
+        self.assertIn("[05:00:01] item 1", lines)
+        self.assertIn("[05:00:11] item 11", lines)
 
     def test_dashboard_narrow_layout_uses_single_column_sections(self) -> None:
         meta = {

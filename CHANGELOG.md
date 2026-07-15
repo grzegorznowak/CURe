@@ -6,7 +6,27 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
-No entries yet.
+## [0.8.2] - 2026-06-24
+
+### Added
+
+- `chunkhound-health` doctor check: runtime verification of ChunkHound setup (MCP preflight, fixture search, code_research).
+- `chunkhound-config-validate` doctor check: validates required config sections and recommends optimal settings.
+- User-friendly doctor output with per-stage elapsed timing, human-readable labels, and phase announcements.
+
+### Fixed
+
+- Generated ChunkHound helper script no longer contains an orphaned code block that broke Python syntax.
+- `skip_preflight` tool calls now properly initialize the MCP session before sending `tools/call`.
+- Transport fallback (json_line → mcp_framed) works correctly when `skip_preflight=True`.
+- Doctor output now redacts credentials in env-var API key assignments, key=value, YAML colon, Bearer/Basic auth, and X-Api-Key headers.
+- Markdown-format search results are now correctly matched against fixture filenames.
+- Failed preflight errors are now serialized in `cure doctor --json` output.
+- Health-check fixture config no longer copies unrelated user config sections.
+
+### Removed
+
+- Removed Claude CLI support; Codex remains the supported CLI/local agent path, alongside configured HTTP providers.
 
 ## [0.8.1] - 2026-06-19
 

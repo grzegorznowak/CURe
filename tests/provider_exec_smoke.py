@@ -85,54 +85,6 @@ for event in events:
     _write_executable(bin_dir / "codex", body)
 
 
-def write_fake_claude(bin_dir: Path, review_text: str) -> None:
-    body = f"""#!/usr/bin/env python3
-from __future__ import annotations
-import json
-import sys
-
-print(json.dumps({{"type": "system", "subtype": "init", "session_id": "claude-smoke-session"}}), flush=True)
-print(
-    json.dumps(
-        {{
-            "type": "stream_event",
-            "event": {{
-                "type": "content_block_delta",
-                "delta": {{"type": "text_delta", "text": "Analyzing changed files"}},
-            }},
-            "session_id": "claude-smoke-session",
-        }}
-    ),
-    flush=True,
-)
-print(
-    json.dumps(
-        {{
-            "type": "stream_event",
-            "event": {{
-                "type": "content_block_delta",
-                "delta": {{"type": "text_delta", "text": "\\nDrafting review"}},
-            }},
-            "session_id": "claude-smoke-session",
-        }}
-    ),
-    flush=True,
-)
-print(
-    json.dumps(
-        {{
-            "type": "result",
-            "result": {review_text!r},
-            "session_id": "claude-smoke-session",
-            "usage": {{"input_tokens": 12, "output_tokens": 34, "total_tokens": 46}},
-        }}
-    ),
-    flush=True,
-)
-"""
-    _write_executable(bin_dir / "claude", body)
-
-
 class _ResponseHandler(BaseHTTPRequestHandler):
     review_text = _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES")
 
@@ -379,7 +331,7 @@ def run_provider_smoke(
             "dashboard_contains_live_progress": "─ Live Progress" in dashboard_joined,
             "dashboard_contains_current": bool(current_excerpt and current_excerpt in dashboard_joined),
         }
-        if provider in {"codex", "claude"}:
+        if provider == "codex":
             ensure(summary["transport"] == f"cli-{provider}", f"{provider}: unexpected transport {summary['transport']!r}")
             ensure(summary["live_progress_provider"] == provider, f"{provider}: live progress missing provider tag")
             ensure(summary["dashboard_contains_live_progress"], f"{provider}: dashboard did not render Live Progress")
@@ -397,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--providers",
         nargs="+",
-        default=["codex", "claude", "openai", "openrouter"],
+        default=["codex", "openai", "openrouter"],
         help="Providers to smoke test.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable output.")
@@ -413,7 +365,6 @@ def main() -> int:
         fake_bin = tmp_root / "bin"
         fake_bin.mkdir(parents=True, exist_ok=True)
         write_fake_codex(fake_bin, review_text)
-        write_fake_claude(fake_bin, review_text)
         base_env = build_env(tmp_root=tmp_root, fake_bin=fake_bin)
 
         server = LocalResponsesServer()

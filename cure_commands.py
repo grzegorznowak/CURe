@@ -702,9 +702,9 @@ def _ensure_bootstrap_files(
 
 def _agent_guidance_lines(*, command_name: str) -> list[str]:
     return [
-        "Supported local coding agents are `codex` and `claude`, detected from executables on PATH.",
-        f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` or `{PRIMARY_CLI_COMMAND} setup --agent claude` to persist a choice.",
-        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex|claude` to change the saved choice later.",
+        "Supported local coding agents are detected from executables on PATH; readiness is advisory and does not prove outer sandbox or network access.",
+        f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` only after the operator approves persisting that choice.",
+        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex` to change an approved saved choice later, or pass `--llm-preset codex-cli` for a one-off run.",
     ]
 
 
@@ -1288,11 +1288,13 @@ def clean_flow(
 
 def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
     pr_url = str(getattr(args, "pr_url", "") or "").strip() or None
+    artifacts: dict[str, object] = {}
     checks = _doctor_runtime_checks(
         runtime,
         cli_profile=getattr(args, "agent_runtime_profile", None),
         pr_url=pr_url,
         args=args,
+        artifacts=artifacts,
     )
     if bool(getattr(args, "json_output", False)):
         ok_count = sum(1 for item in checks if item.status == "ok")
@@ -1303,6 +1305,7 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
             cli_profile=getattr(args, "agent_runtime_profile", None),
             pr_url=pr_url,
             args=args,
+            artifacts=artifacts,
         )
         payload["checks"] = [
             {"name": item.name, "status": item.status, "detail": item.detail} for item in checks
