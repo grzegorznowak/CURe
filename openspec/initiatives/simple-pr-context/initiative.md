@@ -17,7 +17,7 @@ When `cure pr` runs, the review agent currently sees only the PR description and
 ## Story Candidates
 
 1. **`fetcher`** — `fetcher.py`: fetch from 3 GitHub endpoints (issue comments, PR reviews, review comments), normalize to flat dicts. Simplify from the old `github_history.py`.
-2. **`corpus`** — `corpus.py`: local session scan + remote CURe footer detection with `head_sha` compatibility + retained-side dedup by char n-grams/Jaccard. Based on the old `prior_corpus.py`.
+2. **`corpus`** — `corpus.py`: local session scan + remote CURe footer detection for the same PR across heads, with `head_sha` metadata annotation + combined-source collapse and retained-side dedup by character 3-grams/Jaccard. Based on the old `prior_corpus.py`.
 3. **`orient`** — `orient.py`: LLM scan that produces the orientation brief with fixed sections (Resolved areas, Problem areas, Pending issues, Repeated patterns, Decisions made) + inline usage instructions.
 4. **`cure_github` adapter** — top-level `cure_github.py`: host reusable GitHub CLI/API helpers (`gh_api_json`, `gh_api_list`, auth/public fallback helpers) so `cure.py` only imports/re-exports the seams it needs.
 5. **`init + integration`** — `__init__.py` with `build_pr_context(..., head_sha, ...)`, injection in `cure.py` after `compute_pr_stats`, fail-hard on errors. Write deduplicated debug artifacts to `work/`.
@@ -29,14 +29,14 @@ When `cure pr` runs, the review agent currently sees only the PR description and
 **Locked-in:**
 - 4-file package under `cure_pr_context/` (not 18 files like the previous initiative) plus a small top-level `cure_github.py` adapter registered in packaging
 - API: `build_pr_context(pr, sandbox_root, work_dir, pr_stats, head_sha, gh_fetch, run_llm) -> dict`; `gh_fetch` is list-capable and based on `cure_github.gh_api_list`, not `gh_api_json`
-- `head_sha` is passed explicitly from `_pr_flow_impl` (`review_head_sha` if it exists, otherwise PR API `head_sha`) to verify remote footers by prefix
+- `head_sha` is passed explicitly from `_pr_flow_impl` (`review_head_sha` if it exists, otherwise PR API `head_sha`) to annotate prior-review head metadata (`reviewed_head`, `current_head`, match status), never to exclude same-PR reviews from earlier heads
 - `$PRIOR_CONTEXT` in multipass synth template only; singlepass uses two-pass architecture (draft call then reconcile call with context, following Option B reconciliation rules: only inspect disputed files, code evidence wins)
 - Plan and step are independent review passes without prior context
 - Two-pass singlepass reconciliation rules: (1) draft+context agree → keep draft, (2) context flags missed issue → read that specific file before adding, (3) context says resolved but draft found issue → read file, code wins, (4) context blank → return draft unchanged
 - Fail hard on any error (GitHub, LLM, corrupt files)
 - LLM injected as `Callable[[str], str]` — no coupling to `cure.py` configs
 - No cache in this iteration
-- Dedup: char n-grams + Jaccard ≥ 0.85, pure stdlib; `past_reviews` retained, duplicate discussion pruned
+- Dedup: collapse identical local/posted representations, then use character 3-grams + Jaccard ≥ 0.85 (inclusive), pure stdlib; `past_reviews` retained, duplicate discussion pruned
 
 **Explicitly NOT part of this initiative:**
 - Multi-stage pipeline, semantic pipeline, disposition arbitration (from the old subsequent-review)
