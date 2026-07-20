@@ -125,7 +125,7 @@ _GH_API_SLURP_SUPPORTED: bool | None = None
 def _decode_gh_api_list_stdout(*, stdout: str, path: str) -> list[Any]:
     text = stdout.strip()
     if not text:
-        return []
+        raise ReviewflowError(f"`gh api` returned zero JSON documents for {path}")
     decoder = json.JSONDecoder()
     values: list[Any] = []
     idx = 0
@@ -140,14 +140,16 @@ def _decode_gh_api_list_stdout(*, stdout: str, path: str) -> list[Any]:
             raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
         values.append(value)
         idx = end
-    payload: Any = values[0] if len(values) == 1 else values
-    if all(isinstance(page, list) for page in payload) if isinstance(payload, list) else False:
-        flattened: list[Any] = []
-        for page in payload:
-            flattened.extend(page)
-        return flattened
-    if not isinstance(payload, list):
-        raise ReviewflowError(f"`gh api` returned unexpected list payload for {path}")
+    if any(not isinstance(document, list) for document in values):
+        raise ReviewflowError(f"`gh api` returned unexpected non-array document for {path}")
+    if len(values) > 1:
+        return [item for document in values for item in document]
+
+    payload = values[0]
+    if payload and any(isinstance(item, list) for item in payload):
+        if not all(isinstance(page, list) for page in payload):
+            raise ReviewflowError(f"`gh api` returned mixed page shapes for {path}")
+        return [item for page in payload for item in page]
     return payload
 
 

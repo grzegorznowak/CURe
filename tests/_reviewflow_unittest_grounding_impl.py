@@ -3699,6 +3699,7 @@ class BaselineSelectionTests(unittest.TestCase):
                     "https://github.com/acme/repo/pull/14",
                     "--if-reviewed",
                     "latest",
+                    "--pr-context",
                     "--prompt",
                     "review",
                     "--ui",
@@ -3724,10 +3725,95 @@ class BaselineSelectionTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
                 stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]))
                 stack.enter_context(mock.patch.object(rf, "_maybe_apply_pr_llm_picker", side_effect=AssertionError("picker should not run")))
+                stack.enter_context(mock.patch.object(rf, "build_pr_context", side_effect=AssertionError("PR context should not run")))
+                stack.enter_context(mock.patch.object(rf, "_reconcile_prior_context", side_effect=AssertionError("reconcile should not run")))
+                stack.enter_context(mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=AssertionError("synth should not run")))
                 stack.enter_context(mock.patch("sys.stdout", stdout))
                 rc = rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
             self.assertEqual(rc, 0)
             self.assertEqual(stdout.getvalue(), "prior review\n")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_prior_review_list_with_pr_context_is_pre_sandbox_non_invocation(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_prior_review_list_pr_context_"
+        )
+        try:
+            review_md = root / "prior-review.md"
+            review_md.write_text("immutable prior review\n", encoding="utf-8")
+            completed = mock.Mock(
+                review_md_path=review_md,
+                completed_at="2026-01-01T00:00:00Z",
+                created_at="2026-01-01T00:00:00Z",
+                verdicts=None,
+                codex_summary="summary",
+                session_id="prior-session",
+            )
+            args = rf.build_parser().parse_args([
+                "pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "list",
+                "--pr-context", "--ui", "off", "--quiet", "--no-stream",
+            ])
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            before = review_md.read_bytes()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "gh_api_json", return_value={
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "head": {"sha": "1" * 40}, "title": "Prior review PR",
+                }))
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]))
+                stack.enter_context(mock.patch.object(rf, "build_pr_context", side_effect=AssertionError("context should not run")))
+                stack.enter_context(mock.patch.object(rf, "_reconcile_prior_context", side_effect=AssertionError("reconcile should not run")))
+                stack.enter_context(mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=AssertionError("synth should not run")))
+                self.assertEqual(rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml"), 0)
+            self.assertEqual(review_md.read_bytes(), before)
+            self.assertEqual(list(sandbox_root.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_prior_review_prompt_selected_with_pr_context_is_pre_sandbox_non_invocation(self) -> None:
+        root, sandbox_root, cache_root, config_path = self._make_pr_flow_root(
+            ".tmp_test_pr_prior_review_prompt_pr_context_"
+        )
+        try:
+            review_md = root / "prior-review.md"
+            review_md.write_text("immutable selected review\n", encoding="utf-8")
+            completed = mock.Mock(
+                review_md_path=review_md,
+                completed_at="2026-01-01T00:00:00Z",
+                created_at="2026-01-01T00:00:00Z",
+                verdicts=None,
+                codex_summary="summary",
+                session_id="prior-session",
+                review_head_sha="1" * 40,
+            )
+            args = rf.build_parser().parse_args([
+                "pr", "https://github.com/acme/repo/pull/14", "--if-reviewed", "prompt",
+                "--pr-context", "--ui", "off", "--quiet", "--no-stream",
+            ])
+            paths = rf.ReviewflowPaths(sandbox_root=sandbox_root, cache_root=cache_root)
+            stdin = mock.Mock()
+            stdin.isatty.return_value = True
+            stdin.readline.return_value = "1\n"
+            stdout = StringIO()
+            before = review_md.read_bytes()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "gh_api_json", return_value={
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "head": {"sha": "1" * 40}, "title": "Prior review PR",
+                }))
+                stack.enter_context(mock.patch.object(rf, "resolve_pr_review_baseline_selection", return_value={"selected_baseline_ref": "main"}))
+                stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[completed]))
+                stack.enter_context(mock.patch.object(rf, "build_pr_context", side_effect=AssertionError("context should not run")))
+                stack.enter_context(mock.patch.object(rf, "_reconcile_prior_context", side_effect=AssertionError("reconcile should not run")))
+                stack.enter_context(mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=AssertionError("synth should not run")))
+                stack.enter_context(mock.patch("sys.stdin", stdin))
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                self.assertEqual(rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml"), 0)
+            self.assertEqual(stdout.getvalue(), "immutable selected review\n")
+            self.assertEqual(review_md.read_bytes(), before)
+            self.assertEqual(list(sandbox_root.iterdir()), [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5481,6 +5567,7 @@ class RefactorRegressionTests(unittest.TestCase):
                     "--if-reviewed",
                     "new",
                     "--no-review",
+                    "--pr-context",
                     "--ui",
                     "off",
                     "--quiet",
@@ -5648,6 +5735,8 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertTrue((session_dir / "work" / "chunkhound" / "chunkhound.json").is_file())
             self.assertTrue(meta["notes"]["no_review"])
             self.assertEqual(meta["status"], "done")
+            self.assertNotIn("pr_context", meta)
+            self.assertEqual(list((session_dir / "work").glob("pr_context_*")), [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -8495,12 +8584,18 @@ class CodexToolProofFlowTests(unittest.TestCase):
         step_workers: int = 4,
         llm_side_effect: Any,
         expect_error: str | None = None,
+        expect_error_type: type[BaseException] = rf.ReviewflowError,
         helper_preflight_side_effect: Any | None = None,
         multipass_defaults_override: dict[str, object] | None = None,
         llm_resolved_override: dict[str, object] | None = None,
         llm_resolution_meta_override: dict[str, object] | None = None,
         runtime_policy_override: dict[str, object] | None = None,
         extra_cli_args: list[str] | None = None,
+        pr_context_result_override: dict[str, object] | None = None,
+        synth_stage_side_effect: Any | None = None,
+        gh_api_list_side_effect: Any | None = None,
+        flow_patch: Any | None = None,
+        expected_exception: BaseException | None = None,
     ) -> tuple[Path, list[str]]:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
@@ -8588,6 +8683,14 @@ class CodexToolProofFlowTests(unittest.TestCase):
             )
             stack.enter_context(mock.patch.object(rf, "gh_api_list", return_value=[]))
             stack.enter_context(mock.patch.object(rf, "scan_completed_sessions_for_pr", return_value=[]))
+            if gh_api_list_side_effect is not None:
+                stack.enter_context(
+                    mock.patch.object(rf, "gh_api_list", side_effect=gh_api_list_side_effect)
+                )
+            if pr_context_result_override is not None:
+                stack.enter_context(
+                    mock.patch.object(rf, "build_pr_context", return_value=pr_context_result_override)
+                )
             stack.enter_context(
                 mock.patch.object(
                     rf,
@@ -8675,8 +8778,27 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 )
             stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
             stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
-            if expect_error is not None:
-                with self.assertRaisesRegex(rf.ReviewflowError, expect_error):
+            if synth_stage_side_effect is not None:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_execute_multipass_synth_stage",
+                        side_effect=synth_stage_side_effect,
+                    )
+                )
+            if flow_patch is not None:
+                flow_patch(stack)
+            if expected_exception is not None:
+                with self.assertRaises(type(expected_exception)) as raised:
+                    rf.pr_flow(
+                        args,
+                        paths=paths,
+                        config_path=config_path,
+                        codex_base_config_path=root / "codex.toml",
+                    )
+                self.assertIs(raised.exception, expected_exception)
+            elif expect_error is not None:
+                with self.assertRaisesRegex(expect_error_type, expect_error):
                     rf.pr_flow(
                         args,
                         paths=paths,
@@ -9147,6 +9269,1196 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 [run["review_stage"] for run in report["runs"]],
                 ["multipass_plan", "multipass_step", "multipass_synth"],
             )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap14_pr_context_eligibility_and_no_remote_genuine_pre_io_routes(self) -> None:
+        custom_prompt_file = ROOT / ".tmp_test_pr_context_custom_prompt.md"
+        custom_prompt_file.write_text("custom prompt", encoding="utf-8")
+        cases = [
+            ("omitted", [], "disabled_default"),
+            ("explicit_off", ["--no-pr-context"], "disabled_cli"),
+            ("custom", ["--pr-context", "--prompt", "custom prompt"], "custom_prompt"),
+            ("custom_file", ["--pr-context", "--prompt-file", str(custom_prompt_file)], "custom_prompt"),
+            ("unsupported", ["--pr-context", "--prompt-profile", "default"], "unsupported_profile"),
+        ]
+
+        def ordinary_review(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            self.assertEqual(output_path.name, "review.md")
+            output_path.write_text("ordinary review\n", encoding="utf-8")
+            return rf.LlmRunResult(
+                adapter_meta=self._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                )
+            )
+
+        for label, extra_args, reason in cases:
+            with self.subTest(label=label):
+                root = ROOT / f".tmp_test_pr_context_eligibility_{label}"
+                try:
+                    self._run_pr_flow_for_tool_proof(
+                        root=root,
+                        profile_resolved="default" if label == "unsupported" else "normal",
+                        multipass_enabled=False,
+                        llm_side_effect=ordinary_review,
+                        extra_cli_args=extra_args,
+                        gh_api_list_side_effect=AssertionError(
+                            "ineligible PR context must not perform enrichment I/O"
+                        ),
+                    )
+                    session_dir = next((root / "sandboxes").iterdir())
+                    meta = json.loads(
+                        (session_dir / "meta.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(meta["pr_context"]["reason"], reason)
+                    self.assertFalse(
+                        (session_dir / "work" / "pr_context_discussion.json").exists()
+                    )
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
+
+        root = ROOT / ".tmp_test_pr_context_no_remote_genuine_route"
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=ordinary_review,
+                extra_cli_args=["--pr-context"],
+            )
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["pr_context"]["reason"], "no_remote_context")
+            self.assertEqual(
+                json.loads(
+                    (session_dir / "work" / "pr_context_discussion.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                [],
+            )
+            self.assertFalse(
+                (session_dir / "work" / "pr_context_orientation.md").exists()
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            custom_prompt_file.unlink(missing_ok=True)
+
+    def test_tap18_pr_context_pr_flow_singlepass_fresh_success_has_exact_authority_usage_and_route_latency(self) -> None:
+        root = ROOT / ".tmp_test_singlepass_pr_context_reconcile_success"
+        observed_during_reconcile: list[object] = []
+
+        def llm_side_effect(
+            output_path: Path, work_dir: Path, kwargs: dict[str, object]
+        ) -> rf.LlmRunResult:
+            if output_path.name == "pr_context_draft.md":
+                output_path.write_text("blind draft\n", encoding="utf-8")
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                )
+            elif output_path.name == "pr_context_reconciled.md":
+                persisted = json.loads(
+                    (work_dir.parent / "meta.json").read_text(encoding="utf-8")
+                )
+                observed_during_reconcile.append(persisted.get("pr_context"))
+                output_path.write_text("reconciled review\n", encoding="utf-8")
+                adapter_meta = {"usage": {"input_tokens": 17, "output_tokens": 5}}
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        try:
+            with mock.patch.object(
+                rf, "_pr_context_monotonic", side_effect=[10.0, 10.1, 10.25, 10.4]
+            ):
+                self._run_pr_flow_for_tool_proof(
+                    root=root,
+                    profile_resolved="normal",
+                    multipass_enabled=False,
+                    llm_side_effect=llm_side_effect,
+                    extra_cli_args=["--pr-context"],
+                    pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
+                )
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(observed_during_reconcile, [None])
+            self.assertEqual(
+                (meta["pr_context"]["outcome"], meta["pr_context"]["reason"], meta["pr_context"]["context_mode"]),
+                ("used", "context_delivered", "on"),
+            )
+            self.assertEqual(meta["pr_context"]["latency_ms"]["delivery"], 150)
+            self.assertEqual(meta["pr_context"]["latency_ms"]["total_enrichment"], 400)
+            self.assertEqual(
+                json.loads(
+                    (session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8")
+                ),
+                meta["pr_context"],
+            )
+            self.assertEqual(meta["pr_context"]["provider_usage"]["delivery_input_tokens"], 17)
+            self.assertEqual(meta["pr_context"]["provider_usage"]["delivery_output_tokens"], 5)
+            self.assertEqual((session_dir / "review.md").read_text(encoding="utf-8").splitlines()[0], "reconciled review")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_singlepass_pr_context_fresh_injection_finalization_fail_open_real_route(self) -> None:
+        root = ROOT / ".tmp_test_singlepass_pr_context_injection_finalization_fail_open"
+        built_meta = {
+            "counts": {
+                "fetched": 3,
+                "normalized": 3,
+                "selected": 2,
+                "omitted": 1,
+                "truncated_events": 0,
+            },
+            "selection": {"selected": 2, "omitted": 1, "truncated_events": 0},
+            "orientation": {"estimated_tokens": 31, "truncated": False},
+            "provider_usage": {"input_tokens": 17},
+            "latency_ms": {
+                "fetch": 11,
+                "selection": 12,
+                "orientation": 13,
+                "total_enrichment": 36,
+            },
+        }
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            self.assertEqual(output_path.name, "review.md")
+            output_path.write_text("ordinary context-free review\n", encoding="utf-8")
+            return rf.LlmRunResult(
+                adapter_meta=self._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                )
+            )
+
+        try:
+            with (
+                mock.patch.object(
+                    rf,
+                    "finalize_injected_context",
+                    side_effect=rf.InjectedContextFinalizationFailure(
+                        ValueError("fresh injection finalizer failed")
+                    ),
+                ),
+                mock.patch.object(rf, "log") as log_mock,
+            ):
+                _, calls = self._run_pr_flow_for_tool_proof(
+                    root=root,
+                    profile_resolved="normal",
+                    multipass_enabled=False,
+                    llm_side_effect=llm_side_effect,
+                    extra_cli_args=["--pr-context"],
+                    pr_context_result_override={
+                        "orientation_brief": "singlepass context",
+                        "meta": built_meta,
+                    },
+                )
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            context_meta = meta["pr_context"]
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(
+                (
+                    context_meta["outcome"],
+                    context_meta["reason"],
+                    context_meta["context_mode"],
+                ),
+                ("degraded", "orientation_failed", "off"),
+            )
+            self.assertEqual(context_meta["counts"], built_meta["counts"])
+            self.assertEqual(
+                context_meta["provider_usage"]["orientation_input_tokens"], 17
+            )
+            self.assertEqual(context_meta["latency_ms"]["fetch"], 11)
+            self.assertEqual(context_meta["latency_ms"]["selection"], 12)
+            self.assertEqual(context_meta["latency_ms"]["orientation"], 13)
+            self.assertEqual(
+                context_meta["persistence"]["discussion_artifact"], "written"
+            )
+            self.assertEqual(
+                (session_dir / "review.md").read_text(encoding="utf-8").splitlines()[0],
+                "ordinary context-free review",
+            )
+            self.assertTrue(
+                any(
+                    "PR context degraded (orientation_failed)" in str(call.args[0])
+                    for call in log_mock.call_args_list
+                    if call.args
+                )
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap14_tap18_pr_context_pr_flow_stage_failures_fail_open_with_exact_authority_and_final_mirror(self) -> None:
+        import cure_pr_context as context_package
+        from cure_pr_context import orient as context_orient
+
+        self.maxDiff = None
+        cases = {
+            "fetch": (
+                "fetch_failed",
+                {"fetched": 0, "normalized": 0, "selected": 0, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "not_attempted", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+            ),
+            "selection": (
+                "selection_failed",
+                {"fetched": 1, "normalized": 1, "selected": 0, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "written", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+            ),
+            "orientation_provider": (
+                "orientation_failed",
+                {"fetched": 1, "normalized": 1, "selected": 1, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "written", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+            ),
+            "orientation_finalizer": (
+                "orientation_failed",
+                {"fetched": 1, "normalized": 1, "selected": 1, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "written", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+            ),
+            "discussion_write": (
+                "artifact_write_failed",
+                {"fetched": 1, "normalized": 1, "selected": 0, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "failed", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+            ),
+            "orientation_write": (
+                "artifact_write_failed",
+                {"fetched": 1, "normalized": 1, "selected": 1, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "written", "orientation_artifact": "failed", "meta_artifact": "written", "warning": None},
+            ),
+        }
+        event = {
+            "id": 1,
+            "body": "discussion",
+            "user": {"login": "dev"},
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        original_atomic_write_persisted_context = rf.atomic_write_persisted_context
+
+        for stage, (reason, counts, persistence) in cases.items():
+            with self.subTest(stage=stage):
+                root = ROOT / f".tmp_test_pr_context_route_stage_{stage}"
+
+                def fetch_side_effect(**kwargs: object) -> list[dict[str, object]]:
+                    if stage == "fetch":
+                        raise RuntimeError("fetch exploded")
+                    path = str(kwargs["path"])
+                    return [event] if path.endswith("issues/14/comments") else []
+
+                def llm_side_effect(
+                    output_path: Path, work_dir: Path, _kwargs: dict[str, object]
+                ) -> rf.LlmRunResult:
+                    if output_path.name == "pr_context_orientation.raw.md":
+                        if stage == "orientation_provider":
+                            raise rf.ReviewflowSubprocessError(
+                                cmd=["provider"], cwd=None, exit_code=1,
+                                stdout="", stderr="orientation provider exploded",
+                            )
+                        output_path.write_text("## Problem areas\n- inspect", encoding="utf-8")
+                        return rf.LlmRunResult(adapter_meta={"usage": {"input_tokens": 17, "output_tokens": 5}})
+                    self.assertEqual(output_path.name, "review.md")
+                    output_path.write_text("ordinary context-free review\n", encoding="utf-8")
+                    return rf.LlmRunResult(
+                        adapter_meta=self._write_helper_command_events(
+                            work_dir=work_dir, commands=["search", "research"]
+                        )
+                    )
+
+                def atomic_write_persisted_context(path: Path, text: str) -> None:
+                    if stage == "orientation_write" and path.name == "pr_context_orientation.md":
+                        raise OSError("orientation write exploded")
+                    original_atomic_write_persisted_context(path, text)
+
+                try:
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(context_package.time, "monotonic", return_value=1.0))
+                        stack.enter_context(mock.patch.object(rf, "_pr_context_monotonic", side_effect=[10.0, 10.5]))
+                        log_mock = stack.enter_context(mock.patch.object(rf, "log"))
+                        stack.enter_context(mock.patch.object(
+                            rf, "atomic_write_persisted_context",
+                            side_effect=atomic_write_persisted_context,
+                        ))
+                        if stage == "selection":
+                            stack.enter_context(mock.patch.object(
+                                context_package, "select_orientation_events",
+                                side_effect=ValueError("selection exploded"),
+                            ))
+                        elif stage == "discussion_write":
+                            stack.enter_context(mock.patch.object(
+                                context_package, "_write_json",
+                                side_effect=OSError("discussion write exploded"),
+                            ))
+                        elif stage == "orientation_finalizer":
+                            stack.enter_context(mock.patch.object(
+                                context_orient, "_finalize_to_cap",
+                                side_effect=ValueError("orientation finalizer exploded"),
+                            ))
+                        _, calls = self._run_pr_flow_for_tool_proof(
+                            root=root,
+                            profile_resolved="normal",
+                            multipass_enabled=False,
+                            llm_side_effect=llm_side_effect,
+                            extra_cli_args=["--pr-context"],
+                            gh_api_list_side_effect=fetch_side_effect,
+                        )
+                    session_dir = next((root / "sandboxes").iterdir())
+                    authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+                    context_meta = authoritative["pr_context"]
+                    mirror = json.loads((session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8"))
+                    self.assertEqual(calls[-1:], ["review.md"])
+                    self.assertEqual(calls.count("review.md"), 1)
+                    self.assertEqual(
+                        (context_meta["outcome"], context_meta["reason"], context_meta["context_mode"]),
+                        ("degraded", reason, "off"),
+                    )
+                    self.assertEqual(context_meta["counts"], counts)
+                    self.assertEqual(
+                        context_meta["latency_ms"],
+                        {"fetch": 0, "selection": 0, "orientation": 0, "delivery": 0, "total_enrichment": 500},
+                    )
+                    expected_orientation_usage = 17 if stage in {"orientation_finalizer", "orientation_write"} else None
+                    self.assertEqual(
+                        context_meta["provider_usage"],
+                        {
+                            "orientation_input_tokens": expected_orientation_usage,
+                            "orientation_output_tokens": 5 if expected_orientation_usage else None,
+                            "delivery_input_tokens": None,
+                            "delivery_output_tokens": None,
+                            "fallback_input_tokens": None,
+                            "fallback_output_tokens": None,
+                        },
+                    )
+                    estimated = {
+                        "selected_events": 41 if stage.startswith("orientation") else 0,
+                        "orientation_prompt": 231 if stage.startswith("orientation") else 0,
+                        "orientation_output": 151 if stage == "orientation_write" else 0,
+                        "injected": 0,
+                    }
+                    expected_context_meta = {
+                        "outcome": "degraded",
+                        "reason": reason,
+                        "enabled": True,
+                        "enablement_source": "cli_explicit",
+                        "eligible": True,
+                        "counts": counts,
+                        "estimated_tokens": estimated,
+                        "provider_usage": {
+                            "orientation_input_tokens": expected_orientation_usage,
+                            "orientation_output_tokens": 5 if expected_orientation_usage else None,
+                            "delivery_input_tokens": None,
+                            "delivery_output_tokens": None,
+                            "fallback_input_tokens": None,
+                            "fallback_output_tokens": None,
+                        },
+                        "truncation": {
+                            "event_body": False,
+                            "event_count": False,
+                            "prompt_budget": False,
+                            "orientation_output": False,
+                            "injected_context": False,
+                        },
+                        "latency_ms": {
+                            "fetch": 0,
+                            "selection": 0,
+                            "orientation": 0,
+                            "delivery": 0,
+                            "total_enrichment": 500,
+                        },
+                        "persistence": persistence,
+                        "context_mode": "off",
+                    }
+                    self.assertEqual(context_meta, expected_context_meta)
+                    self.assertEqual(mirror, expected_context_meta)
+                    self.assertEqual(authoritative["status"], "done")
+                    self.assertEqual(
+                        (session_dir / "review.md").read_text(encoding="utf-8").splitlines()[0],
+                        "ordinary context-free review",
+                    )
+                    warnings = [
+                        call for call in log_mock.call_args_list
+                        if call.args and "PR context degraded (" in str(call.args[0])
+                    ]
+                    self.assertEqual(len(warnings), 1)
+                    self.assertIn(f"PR context degraded ({reason})", str(warnings[0].args[0]))
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap18_pr_context_pr_flow_final_mirror_failure_preserves_completed_route_without_rerun(self) -> None:
+        root = ROOT / ".tmp_test_pr_context_final_mirror_failure_route"
+        mirror_attempts: list[dict[str, object]] = []
+        completed_reviews_at_mirror: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "pr_context_draft.md":
+                output_path.write_text("blind draft\n", encoding="utf-8")
+                return rf.LlmRunResult(
+                    adapter_meta=self._write_helper_command_events(
+                        work_dir=work_dir, commands=["search", "research"]
+                    )
+                )
+            self.assertEqual(output_path.name, "pr_context_reconciled.md")
+            output_path.write_text("completed contextual review\n", encoding="utf-8")
+            return rf.LlmRunResult(
+                adapter_meta={"usage": {"input_tokens": 19, "output_tokens": 4}}
+            )
+
+        def fail_mirror(path: Path, payload: dict[str, object]) -> None:
+            mirror_attempts.append(json.loads(json.dumps(payload)))
+            completed_reviews_at_mirror.append(
+                (path.parent.parent / "review.md").read_text(encoding="utf-8")
+            )
+            raise OSError("mirror disk full")
+
+        try:
+            with (
+                mock.patch.object(rf, "atomic_write_metadata", side_effect=fail_mirror),
+                mock.patch.object(rf, "log") as log_mock,
+            ):
+                with mock.patch.object(
+                    rf, "_pr_context_monotonic", side_effect=[10.0, 10.2, 10.3, 10.6]
+                ):
+                    _, calls = self._run_pr_flow_for_tool_proof(
+                        root=root,
+                        profile_resolved="normal",
+                        multipass_enabled=False,
+                        llm_side_effect=llm_side_effect,
+                        extra_cli_args=["--pr-context"],
+                        pr_context_result_override={
+                            "orientation_brief": "contextual brief",
+                            "meta": {
+                                "counts": {"fetched": 2, "normalized": 2, "selected": 1, "omitted": 1, "truncated_events": 0},
+                                "provider_usage": {"input_tokens": 13, "output_tokens": 3},
+                                "latency_ms": {"fetch": 7, "selection": 8, "orientation": 9, "total_enrichment": 24},
+                            },
+                        },
+                    )
+            session_dir = next((root / "sandboxes").iterdir())
+            authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            context_meta = authoritative["pr_context"]
+            self.assertEqual(calls, ["pr_context_draft.md", "pr_context_reconciled.md"])
+            self.assertEqual(len(mirror_attempts), 1)
+            self.assertEqual(completed_reviews_at_mirror, ["completed contextual review\n"])
+            completed_review = (session_dir / "review.md").read_text(encoding="utf-8")
+            retained_body, footer_separator, _footer = completed_review.partition(
+                "\n---\n<!-- CURE_REVIEW_FOOTER_START -->"
+            )
+            self.assertTrue(footer_separator)
+            self.assertEqual(retained_body, completed_reviews_at_mirror[0])
+            self.assertEqual(authoritative["status"], "done")
+            self.assertEqual(
+                (context_meta["outcome"], context_meta["reason"], context_meta["context_mode"]),
+                ("used", "context_delivered", "on"),
+            )
+            self.assertEqual(context_meta["provider_usage"], {
+                "orientation_input_tokens": 13,
+                "orientation_output_tokens": 3,
+                "delivery_input_tokens": 19,
+                "delivery_output_tokens": 4,
+                "fallback_input_tokens": None,
+                "fallback_output_tokens": None,
+            })
+            self.assertEqual(context_meta["latency_ms"], {
+                "fetch": 7,
+                "selection": 8,
+                "orientation": 9,
+                "delivery": 100,
+                "total_enrichment": 599,
+            })
+            expected_before_mirror = json.loads(json.dumps(context_meta))
+            expected_before_mirror["persistence"].update(
+                meta_artifact="written", warning=None
+            )
+            self.assertEqual(mirror_attempts[0], expected_before_mirror)
+            self.assertEqual(context_meta["persistence"], {
+                "discussion_artifact": "written",
+                "orientation_artifact": "written",
+                "meta_artifact": "failed",
+                "warning": "meta_artifact_write_failed",
+            })
+            self.assertFalse((session_dir / "work" / "pr_context_meta.json").exists())
+            self.assertEqual(
+                len([
+                    call for call in log_mock.call_args_list
+                    if call.args and "PR context metadata mirror failed" in str(call.args[0])
+                ]),
+                1,
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap18_pr_context_pr_flow_no_selected_context_bypasses_orientation_and_completes_ordinary_route(self) -> None:
+        import cure_pr_context as context_package
+
+        root = ROOT / ".tmp_test_pr_context_no_selected_route"
+        event = {
+            "id": 1,
+            "body": "discussion",
+            "user": {"login": "dev"},
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+
+        def fetch_side_effect(**kwargs: object) -> list[dict[str, object]]:
+            path = str(kwargs["path"])
+            return [event] if path.endswith("issues/14/comments") else []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            self.assertEqual(output_path.name, "review.md", "orientation provider must be bypassed")
+            output_path.write_text("ordinary no-selected review\n", encoding="utf-8")
+            return rf.LlmRunResult(
+                adapter_meta=self._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                )
+            )
+
+        try:
+            with (
+                mock.patch.object(context_package.time, "monotonic", return_value=1.0),
+                mock.patch.object(rf, "_pr_context_monotonic", side_effect=[10.0, 10.4]),
+                mock.patch.object(
+                    context_package,
+                    "select_orientation_events",
+                    return_value={
+                        "selected_discussion": [],
+                        "meta": {"selected": 0, "omitted": 1, "truncated_events": 0},
+                    },
+                ),
+            ):
+                _, calls = self._run_pr_flow_for_tool_proof(
+                    root=root,
+                    profile_resolved="normal",
+                    multipass_enabled=False,
+                    llm_side_effect=llm_side_effect,
+                    extra_cli_args=["--pr-context"],
+                    gh_api_list_side_effect=fetch_side_effect,
+                )
+            session_dir = next((root / "sandboxes").iterdir())
+            authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            context_meta = authoritative["pr_context"]
+            mirror = json.loads((session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8"))
+            discussion = json.loads((session_dir / "work" / "pr_context_discussion.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(authoritative["status"], "done")
+            self.assertEqual(
+                (context_meta["outcome"], context_meta["reason"], context_meta["context_mode"]),
+                ("bypassed", "no_selected_context", "off"),
+            )
+            self.assertEqual(context_meta["counts"], {
+                "fetched": 1, "normalized": 1, "selected": 0,
+                "omitted": 1, "truncated_events": 0,
+            })
+            self.assertEqual(context_meta["latency_ms"], {
+                "fetch": 0, "selection": 0, "orientation": 0,
+                "delivery": 0, "total_enrichment": 400,
+            })
+            self.assertEqual(context_meta["persistence"], {
+                "discussion_artifact": "written",
+                "orientation_artifact": "not_attempted",
+                "meta_artifact": "written",
+                "warning": None,
+            })
+            self.assertEqual(mirror, context_meta)
+            self.assertEqual(len(discussion), 1)
+            self.assertEqual(discussion[0]["body"], event["body"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_singlepass_pr_context_reconcile_fail_open_retains_blind_draft_only_for_execution_failure(self) -> None:
+        root = ROOT / ".tmp_test_singlepass_pr_context_reconcile_fail_open"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "pr_context_draft.md":
+                output_path.write_text("blind draft retained\n", encoding="utf-8")
+                return rf.LlmRunResult(
+                    adapter_meta=self._write_helper_command_events(
+                        work_dir=work_dir, commands=["search", "research"]
+                    )
+                )
+            raise rf.ReviewflowSubprocessError(
+                cmd=["provider", "reconcile provider failed"], cwd=None, exit_code=1, stdout="", stderr="reconcile provider failed"
+            )
+
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
+            )
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["pr_context"]["reason"], "reconciliation_failed")
+            self.assertEqual(meta["pr_context"]["context_mode"], "off")
+            self.assertEqual((session_dir / "review.md").read_text(encoding="utf-8").splitlines()[0], "blind draft retained")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_singlepass_pr_context_does_not_swallow_reconcile_nontransport_failures(self) -> None:
+        failures = (
+            rf.ReviewflowError("reconcile configuration failed"),
+            OSError("reconcile output write failed"),
+        )
+        for index, failure in enumerate(failures):
+            with self.subTest(failure=type(failure).__name__):
+                root = ROOT / f".tmp_test_singlepass_pr_context_reconcile_boundary_{index}"
+                reconcile_calls = 0
+
+                def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+                    nonlocal reconcile_calls
+                    if output_path.name == "pr_context_draft.md":
+                        output_path.write_text("blind draft must not be promoted\n", encoding="utf-8")
+                        return rf.LlmRunResult(
+                            adapter_meta=self._write_helper_command_events(
+                                work_dir=work_dir, commands=["search", "research"]
+                            )
+                        )
+                    reconcile_calls += 1
+                    raise failure
+
+                try:
+                    self._run_pr_flow_for_tool_proof(
+                        root=root,
+                        profile_resolved="normal",
+                        multipass_enabled=False,
+                        llm_side_effect=llm_side_effect,
+                        expect_error=str(failure),
+                        expect_error_type=type(failure),
+                        extra_cli_args=["--pr-context"],
+                        pr_context_result_override={
+                            "orientation_brief": "singlepass context", "meta": {}
+                        },
+                    )
+                    self.assertEqual(reconcile_calls, 1)
+                    session_dir = next((root / "sandboxes").iterdir())
+                    meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+                    self.assertEqual(meta["status"], "error")
+                    self.assertNotIn("pr_context", meta)
+                    self.assertFalse((session_dir / "work" / "pr_context_meta.json").exists())
+                    self.assertFalse((session_dir / "review.md").exists())
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_singlepass_pr_context_does_not_swallow_reconcile_output_validation_failure(self) -> None:
+        root = ROOT / ".tmp_test_singlepass_pr_context_reconcile_output_failure"
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "pr_context_draft.md":
+                output_path.write_text("blind draft must not be promoted\n", encoding="utf-8")
+                adapter_meta = self._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                )
+            else:
+                adapter_meta = {"usage": {"input_tokens": 1}}
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+                expect_error="fresh non-empty pass-two artifact",
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
+            )
+            session_dir = next((root / "sandboxes").iterdir())
+            self.assertFalse((session_dir / "review.md").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap17_tap18_pr_context_pr_flow_multipass_fresh_success_has_exact_present_usage_and_route_latency(self) -> None:
+        root = ROOT / ".tmp_test_multipass_opaque_prior_context"
+        sentinel = (
+            "keep:$PRIOR_CONTEXT|$OTHER|${OTHER}|$PLAN_JSON_PATH|${PLAN_JSON_PATH}|"
+            "$AGENT_DESC|__CURE_OPAQUE_PRIOR_CONTEXT_7F3A9C__"
+        )
+        synth_prompts: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "### Plan JSON\n```json\n"
+                    + json.dumps({"abort": False, "abort_reason": None, "jira_keys": [], "steps": [{"id": "01", "title": "API", "focus": "proof"}]})
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "### Step Result: 01 — API\n**Focus**: proof\n\n### Steps taken\n- checked\n\n### Findings\n- None.\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name in {"review.md", "review.candidate.md"}:
+                synth_prompts.append(str(kwargs["prompt"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+                adapter_meta["usage"] = {"input_tokens": 23, "output_tokens": 7}
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        try:
+            with mock.patch.object(
+                rf, "_pr_context_monotonic", side_effect=[30.0, 30.5, 30.7, 30.8]
+            ):
+                _, calls = self._run_pr_flow_for_tool_proof(
+                    root=root,
+                    profile_resolved="big",
+                    multipass_enabled=True,
+                    llm_side_effect=llm_side_effect,
+                    extra_cli_args=["--agent-desc", "AGENT", "--pr-context"],
+                    pr_context_result_override={
+                        "orientation_brief": sentinel + ("x" * 9000),
+                        "meta": {"orientation": {"estimated_tokens": 2278, "truncated": False}},
+                    },
+                )
+            expected = str(rf.finalize_injected_context(sentinel + ("x" * 9000))["brief"])
+            self.assertEqual(calls.count("review.plan.md"), 1)
+            self.assertEqual(calls.count("review.step-01.md"), 1)
+            self.assertEqual(len(synth_prompts), 1)
+            self.assertIn(expected, synth_prompts[0])
+            self.assertEqual(synth_prompts[0].count(expected), 1)
+            session_dir = next((root / "sandboxes").iterdir())
+            self.assertEqual(
+                (session_dir / "work" / "pr_context_orientation.md").read_bytes(),
+                expected.encode("utf-8"),
+            )
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertLessEqual(meta["pr_context"]["estimated_tokens"]["injected"], 2000)
+            self.assertTrue(meta["pr_context"]["truncation"]["injected_context"])
+            self.assertEqual(meta["pr_context"]["estimated_tokens"]["orientation_output"], 2278)
+            self.assertFalse(meta["pr_context"]["truncation"]["orientation_output"])
+            self.assertEqual(meta["pr_context"]["latency_ms"]["delivery"], 199)
+            self.assertEqual(meta["pr_context"]["latency_ms"]["total_enrichment"], 800)
+            self.assertEqual(meta["pr_context"]["provider_usage"]["delivery_input_tokens"], 23)
+            self.assertEqual(meta["pr_context"]["provider_usage"]["delivery_output_tokens"], 7)
+            self.assertIsNone(meta["pr_context"]["provider_usage"]["fallback_input_tokens"])
+            self.assertIsNone(meta["pr_context"]["provider_usage"]["fallback_output_tokens"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap17_tap18_pr_context_pr_flow_multipass_fresh_fallback_has_exact_absent_usage_and_route_latency(self) -> None:
+        root = ROOT / ".tmp_test_multipass_pr_context_fallback_success"
+        sentinel = "fresh-route-prior-context"
+        synth_prompts: list[str] = []
+
+        def llm_side_effect(
+            output_path: Path, work_dir: Path, kwargs: dict[str, object]
+        ) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "### Plan JSON\n```json\n"
+                    + json.dumps({"abort": False, "abort_reason": None, "jira_keys": [], "steps": [{"id": "01", "title": "API", "focus": "proof"}]})
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "### Step Result: 01 — API\n**Focus**: proof\n\n### Steps taken\n- checked\n\n### Findings\n- None.\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name in {"review.md", "review.candidate.md"}:
+                synth_prompts.append(str(kwargs["prompt"]))
+                if len(synth_prompts) == 1:
+                    raise rf.ReviewflowSubprocessError(
+                        cmd=["provider", "fresh context synth failed"], cwd=None, exit_code=1, stdout="", stderr="fresh context synth failed"
+                    )
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        try:
+            with mock.patch.object(
+                rf,
+                "_pr_context_monotonic",
+                side_effect=[20.0, 20.1, 20.2, 20.25, 20.5, 20.55, 20.6],
+            ):
+                _, calls = self._run_pr_flow_for_tool_proof(
+                    root=root,
+                    profile_resolved="big",
+                    multipass_enabled=True,
+                    llm_side_effect=llm_side_effect,
+                    extra_cli_args=["--pr-context"],
+                    pr_context_result_override={"orientation_brief": sentinel, "meta": {}},
+                )
+            self.assertEqual(calls.count("review.plan.md"), 1)
+            self.assertEqual(calls.count("review.step-01.md"), 1)
+            self.assertEqual(len(synth_prompts), 2)
+            self.assertIn(sentinel, synth_prompts[0])
+            self.assertNotIn(sentinel, synth_prompts[1])
+            inserted = str(rf.finalize_injected_context(sentinel)["brief"])
+            self.assertEqual(synth_prompts[0].replace(inserted, ""), synth_prompts[1])
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertEqual(meta["pr_context"]["context_mode"], "off")
+            self.assertEqual(meta["pr_context"]["latency_ms"]["delivery"], 399)
+            self.assertEqual(meta["pr_context"]["latency_ms"]["total_enrichment"], 600)
+            self.assertEqual(
+                meta["pr_context"]["provider_usage"],
+                {
+                    "orientation_input_tokens": None,
+                    "orientation_output_tokens": None,
+                    "delivery_input_tokens": None,
+                    "delivery_output_tokens": None,
+                    "fallback_input_tokens": None,
+                    "fallback_output_tokens": None,
+                },
+            )
+            self.assertEqual(
+                json.loads(
+                    (session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8")
+                ),
+                meta["pr_context"],
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tap17_tap18_pr_context_pr_flow_multipass_fresh_synthesis_fallback_fatal_captures_two_executor_calls(self) -> None:
+        root = ROOT / ".tmp_test_multipass_pr_context_fallback_fatal"
+        sentinel = "fresh-route-prior-context"
+        synth_prompts: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "### Plan JSON\n```json\n"
+                    + json.dumps({"abort": False, "abort_reason": None, "jira_keys": [], "steps": [{"id": "01", "title": "API", "focus": "proof"}]})
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "### Step Result: 01 — API\n**Focus**: proof\n\n### Steps taken\n- checked\n\n### Findings\n- None.\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            else:
+                raise AssertionError(f"unexpected non-synth output path: {output_path}")
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        def synth_stage(**kwargs: object) -> None:
+            synth_prompts.append(str(kwargs["synth_prompt"]))
+            raise rf._PrContextSynthesisExecutionFailure(
+                rf.ReviewflowSubprocessError(
+                    cmd=["provider", "fresh ordinary fallback failed"], cwd=None, exit_code=1, stdout="", stderr="fresh ordinary fallback failed"
+                )
+            )
+
+        try:
+            _, calls = self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="big",
+                multipass_enabled=True,
+                llm_side_effect=llm_side_effect,
+                expect_error="fresh ordinary fallback failed",
+                expect_error_type=rf.ReviewflowSubprocessError,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={"orientation_brief": sentinel, "meta": {}},
+                synth_stage_side_effect=synth_stage,
+            )
+            self.assertEqual(calls.count("review.plan.md"), 1)
+            self.assertEqual(calls.count("review.step-01.md"), 1)
+            self.assertEqual(len(synth_prompts), 2)
+            self.assertIn(sentinel, synth_prompts[0])
+            self.assertNotIn(sentinel, synth_prompts[1])
+            inserted = str(rf.finalize_injected_context(sentinel)["brief"])
+            self.assertEqual(synth_prompts[0].replace(inserted, ""), synth_prompts[1])
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertEqual(meta["status"], "error")
+            self.assertFalse((session_dir / "work" / "pr_context_meta.json").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _tap22_llm_success(self, output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+        if output_path.name == "review.plan.md":
+            output_path.write_text(
+                "### Plan JSON\n```json\n"
+                + json.dumps({"abort": False, "abort_reason": None, "jira_keys": [], "steps": [{"id": "01", "title": "API", "focus": "proof"}]})
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+        elif output_path.name == "review.step-01.md":
+            output_path.write_text(
+                "### Step Result: 01 — API\n**Focus**: proof\n\n### Steps taken\n- checked\n\n### Findings\n- None.\n",
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+        elif output_path.name in {"review.md", "review.candidate.md", "pr_context_draft.md"}:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+        else:
+            raise AssertionError(f"unexpected TAP-22 output path: {output_path}")
+        return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+    def _assert_tap22_fresh_fault(
+        self,
+        *,
+        label: str,
+        failure: BaseException,
+        flow_patch: Any | None = None,
+        llm_fault_path: str | None = None,
+        multipass_enabled: bool = True,
+    ) -> None:
+        root = ROOT / f".tmp_test_tap22_{label}"
+        calls_at_fault: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            if output_path.name == llm_fault_path:
+                calls_at_fault.append(output_path.name)
+                raise failure
+            return self._tap22_llm_success(output_path, work_dir)
+
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="big" if multipass_enabled else "normal",
+                multipass_enabled=multipass_enabled,
+                llm_side_effect=llm_side_effect,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={"orientation_brief": "TAP-22 nonempty context", "meta": {}},
+                flow_patch=flow_patch,
+                expected_exception=failure,
+            )
+            if llm_fault_path is not None:
+                self.assertEqual(calls_at_fault, [llm_fault_path])
+            session_dirs = list((root / "sandboxes").iterdir())
+            if session_dirs:
+                meta = json.loads((session_dirs[0] / "meta.json").read_text(encoding="utf-8"))
+                context_meta = meta.get("pr_context")
+                if isinstance(context_meta, dict):
+                    self.assertNotEqual(context_meta.get("reason"), "context_synthesis_failed")
+                mirror_path = session_dirs[0] / "work" / "pr_context_meta.json"
+                if mirror_path.exists():
+                    mirror = json.loads(mirror_path.read_text(encoding="utf-8"))
+                    self.assertNotEqual(mirror.get("reason"), "context_synthesis_failed")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_pr_context_does_not_swallow_build_or_orientation_file_faults(self) -> None:
+        event = {
+            "id": 1,
+            "body": "discussion",
+            "user": {"login": "dev"},
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        original_unlink = Path.unlink
+        original_read_text = Path.read_text
+
+        for seam, failure in (
+            ("build_oserror", OSError("TAP-22 build OSError")),
+            ("build_unicode", UnicodeError("TAP-22 build UnicodeError")),
+            ("raw_cleanup", OSError("TAP-22 raw cleanup OSError")),
+            ("raw_read", UnicodeError("TAP-22 raw read UnicodeError")),
+        ):
+            with self.subTest(seam=seam):
+                root = ROOT / f".tmp_test_tap22_{seam}"
+
+                def llm_side_effect(
+                    output_path: Path, work_dir: Path
+                ) -> rf.LlmRunResult:
+                    if output_path.name == "pr_context_orientation.raw.md":
+                        output_path.write_text(
+                            "## Problem areas\n- inspect", encoding="utf-8"
+                        )
+                        return rf.LlmRunResult(adapter_meta={})
+                    if output_path.name == "review.md":
+                        output_path.write_text(
+                            _sectioned_review_markdown(
+                                business="APPROVE", technical="APPROVE"
+                            ),
+                            encoding="utf-8",
+                        )
+                        return rf.LlmRunResult(
+                            adapter_meta=self._write_helper_command_events(
+                                work_dir=work_dir, commands=["search", "research"]
+                            )
+                        )
+                    return self._tap22_llm_success(output_path, work_dir)
+
+                def patch_fault(stack: contextlib.ExitStack) -> None:
+                    if seam.startswith("build_"):
+                        stack.enter_context(
+                            mock.patch.object(rf, "build_pr_context", side_effect=failure)
+                        )
+                    elif seam == "raw_cleanup":
+                        def unlink(path: Path, *args: object, **kwargs: object) -> None:
+                            if path.name == "pr_context_orientation.raw.md":
+                                raise failure
+                            original_unlink(path, *args, **kwargs)
+                        stack.enter_context(
+                            mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink)
+                        )
+                    else:
+                        def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                            if path.name == "pr_context_orientation.raw.md":
+                                raise failure
+                            return original_read_text(path, *args, **kwargs)
+                        stack.enter_context(
+                            mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text)
+                        )
+
+                def fetch_side_effect(**kwargs: object) -> list[dict[str, object]]:
+                    return [event] if str(kwargs["path"]).endswith("issues/14/comments") else []
+
+                try:
+                    self._run_pr_flow_for_tool_proof(
+                        root=root,
+                        profile_resolved="normal",
+                        multipass_enabled=False,
+                        llm_side_effect=llm_side_effect,
+                        extra_cli_args=["--pr-context"],
+                        gh_api_list_side_effect=fetch_side_effect,
+                        flow_patch=patch_fault,
+                        expected_exception=failure,
+                    )
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_pr_context_does_not_swallow_checkout_failure(self) -> None:
+        failure = RuntimeError("TAP-22 checkout")
+        self._assert_tap22_fresh_fault(
+            label="checkout", failure=failure,
+            flow_patch=lambda stack: stack.enter_context(mock.patch.object(rf, "checkout_pr_in_repo", side_effect=failure)),
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_config_failure(self) -> None:
+        failure = RuntimeError("TAP-22 config")
+        self._assert_tap22_fresh_fault(
+            label="config", failure=failure,
+            flow_patch=lambda stack: stack.enter_context(mock.patch.object(rf, "resolve_llm_config_from_args", side_effect=failure)),
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_keyboard_interrupt_cancellation(self) -> None:
+        failure = KeyboardInterrupt("TAP-22 cancellation")
+        self._assert_tap22_fresh_fault(
+            label="cancellation", failure=failure,
+            flow_patch=lambda stack: stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight", side_effect=failure)),
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_singlepass_draft_failure(self) -> None:
+        self._assert_tap22_fresh_fault(
+            label="draft", failure=RuntimeError("TAP-22 draft"),
+            llm_fault_path="pr_context_draft.md", multipass_enabled=False,
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_multipass_plan_failure(self) -> None:
+        self._assert_tap22_fresh_fault(
+            label="plan", failure=RuntimeError("TAP-22 plan"), llm_fault_path="review.plan.md",
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_multipass_step_failure(self) -> None:
+        self._assert_tap22_fresh_fault(
+            label="step", failure=RuntimeError("TAP-22 step"), llm_fault_path="review.step-01.md",
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_acceptance_failure(self) -> None:
+        failure = RuntimeError("TAP-22 acceptance")
+        self._assert_tap22_fresh_fault(
+            label="acceptance", failure=failure,
+            flow_patch=lambda stack: stack.enter_context(mock.patch.object(rf.SessionProgress, "done", side_effect=failure)),
+        )
+
+    def test_pr_flow_pr_context_does_not_swallow_final_session_flush_failure(self) -> None:
+        failure = RuntimeError("TAP-22 final flush")
+        real_flush = rf.SessionProgress.flush
+
+        def patch_flush(stack: contextlib.ExitStack) -> None:
+            def flush(progress: rf.SessionProgress) -> None:
+                if "verdicts" in progress.meta:
+                    raise failure
+                real_flush(progress)
+            stack.enter_context(mock.patch.object(rf.SessionProgress, "flush", autospec=True, side_effect=flush))
+
+        self._assert_tap22_fresh_fault(label="final_flush", failure=failure, flow_patch=patch_flush)
+
+    def test_pr_flow_pr_context_does_not_swallow_posting_because_posting_is_structurally_absent(self) -> None:
+        root = ROOT / ".tmp_test_tap22_posting_absent"
+        network_posts: list[object] = []
+
+        def post_bomb(request: object, *_args: object, **_kwargs: object) -> None:
+            network_posts.append(request)
+            raise AssertionError("fresh cure pr must not post a review")
+
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="big",
+                multipass_enabled=True,
+                llm_side_effect=self._tap22_llm_success,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={"orientation_brief": "TAP-22 nonempty context", "meta": {}},
+                flow_patch=lambda stack: stack.enter_context(mock.patch.object(rf.urllib.request, "urlopen", side_effect=post_bomb)),
+            )
+            self.assertEqual(network_posts, [], "fresh cure pr has no posting stage")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_pr_flow_multipass_synth_renders_empty_prior_context(self) -> None:
+        root = ROOT / ".tmp_test_multipass_empty_prior_context"
+        sentinel = (
+            "keep:$PRIOR_CONTEXT|$OTHER|${OTHER}|$PLAN_JSON_PATH|${PLAN_JSON_PATH}|"
+            "$AGENT_DESC|__CURE_OPAQUE_PRIOR_CONTEXT_7F3A9C__"
+        )
+        synth_prompts: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> rf.LlmRunResult:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "### Plan JSON\n```json\n"
+                    + json.dumps({"abort": False, "abort_reason": None, "jira_keys": [], "steps": [{"id": "01", "title": "API", "focus": "proof"}]})
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search", "research"])
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "### Step Result: 01 — API\n**Focus**: proof\n\n### Steps taken\n- checked\n\n### Findings\n- None.\n",
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_helper_command_events(work_dir=work_dir, commands=["search"])
+            elif output_path.name in {"review.md", "review.candidate.md"}:
+                synth_prompts.append(str(kwargs["prompt"]))
+                output_path.write_text(
+                    _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                    encoding="utf-8",
+                )
+                adapter_meta = self._write_codex_events(work_dir=work_dir, tool_names=[])
+            else:
+                raise AssertionError(f"unexpected output path: {output_path}")
+            return rf.LlmRunResult(adapter_meta=adapter_meta)
+
+        try:
+            self._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="big",
+                multipass_enabled=True,
+                llm_side_effect=llm_side_effect,
+                extra_cli_args=["--agent-desc", "AGENT", "--pr-context"],
+                pr_context_result_override={"orientation_brief": "", "meta": {}},
+            )
+            self.assertEqual(len(synth_prompts), 1)
+            self.assertNotIn("$PRIOR_CONTEXT", synth_prompts[0])
+            self.assertNotIn(sentinel, synth_prompts[0])
+            session_dir = next((root / "sandboxes").iterdir())
+            self.assertFalse((session_dir / "work" / "pr_context_orientation.md").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -10494,7 +11806,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_resume_flow_completed_multipass_latest_head_noop_refreshes_footer(self) -> None:
+    def test_tap18_tap19_resume_flow_from_synth_prior_context_same_head_d17_completed_latest_head_is_exact_no_delivery_state(self) -> None:
         root = ROOT / ".tmp_test_resume_incremental_noop_footer"
         cfg = root / "reviewflow.toml"
         head_sha = "1111111111111111111111111111111111111111"
@@ -10542,6 +11854,11 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "base_ref_for_review": "cure_base__main",
                 "head_sha": head_sha,
                 "review_head_sha": head_sha,
+                "pr_context": {
+                    "outcome": "used",
+                    "reason": "context_delivered",
+                    "sentinel": {"nested": [1, "exact"]},
+                },
                 "llm": {
                     "provider": "codex",
                     "model": "gpt-5.4",
@@ -10566,6 +11883,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 },
             }
             (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            original_pr_context = json.loads(json.dumps(meta["pr_context"]))
 
             args = argparse.Namespace(
                 session_id="session-1",
@@ -10603,12 +11921,28 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         side_effect=AssertionError("latest-head no-op resume should not rerun review generation"),
                     )
                 )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "read_persisted_context",
+                        side_effect=AssertionError("no-delivery resume must not read PR context"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_mirror_pr_context_metadata",
+                        side_effect=AssertionError("no-delivery resume must not mirror PR context"),
+                    )
+                )
                 rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             review_md_text = review_md.read_text(encoding="utf-8")
             self.assertEqual(rc, 0)
             self.assertEqual(refreshed["status"], "done")
+            self.assertEqual(refreshed["pr_context"], original_pr_context)
+            self.assertFalse((work_dir / "pr_context_meta.json").exists())
             self.assertEqual(review_md_text.count("<!-- CURE_REVIEW_FOOTER_START -->"), 1)
             self.assertIn("review generated with [CURe]", review_md_text)
             self.assertIn("multi-stage - stages: 1", review_md_text)
@@ -13973,9 +15307,13 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
         prompt_mock.assert_called_once()
         self.assertEqual(choice, "keep")
 
-    def test_resume_flow_from_synth_keeps_grounding_skipped_steps_in_non_tty_mode(self) -> None:
+    def test_resume_flow_from_synth_pr_context_synthesis_reuses_exact_crlf_and_fallback_captures_calls(self) -> None:
         root = ROOT / ".tmp_test_resume_from_synth_keeps_skipped_steps"
         cfg = root / "reviewflow.toml"
+        sentinel = (
+            "keep:$PRIOR_CONTEXT|$OTHER|${OTHER}|$PLAN_JSON_PATH|${PLAN_JSON_PATH}|"
+            "$AGENT_DESC|__CURE_OPAQUE_PRIOR_CONTEXT_7F3A9C__"
+        )
         valid_step_markdown = "\n".join(
             [
                 "### Step Result: 02 — Tests review",
@@ -14005,6 +15343,14 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             chunkhound_dir = work_dir / "chunkhound"
             repo_dir.mkdir(parents=True, exist_ok=True)
             chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            from cure_pr_context.orient import finalize_orientation_brief
+
+            persisted_brief = finalize_orientation_brief(
+                f"## Problem areas\n- {sentinel}"
+            )[0].replace("\n", "\r\n")
+            (work_dir / "pr_context_orientation.md").write_bytes(persisted_brief.encode("utf-8"))
+            agent_desc_path = work_dir / "agent_desc.md"
+            agent_desc_path.write_text("AGENT", encoding="utf-8")
             (repo_dir / "src").mkdir(parents=True, exist_ok=True)
             (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
             plan_json = work_dir / "review_plan.json"
@@ -14035,6 +15381,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 "repo": "repo",
                 "number": 9,
                 "base_ref_for_review": "cure_base__main",
+                "pr_context": {"outcome": "used"},
                 "llm": {
                     "provider": "codex",
                     "model": "gpt-5.4",
@@ -14050,6 +15397,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
                     "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
                     "review_md": str(review_md),
+                    "agent_desc": str(agent_desc_path),
                 },
                 "multipass": {
                     "enabled": True,
@@ -14078,12 +15426,21 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
             calls: list[str] = []
+            synth_prompts: list[str] = []
+            mode = {"fatal": False}
 
             def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
                 output_path = Path(str(kwargs["output_path"]))
                 calls.append(output_path.name)
+                synth_prompts.append(str(kwargs["prompt"]))
                 if output_path.name != "review.md":
                     raise AssertionError(f"unexpected rerun during synth-only resume: {output_path.name}")
+                if mode["fatal"] or len(synth_prompts) == 1:
+                    raise rf._PrContextSynthesisExecutionFailure(
+                        rf.ReviewflowSubprocessError(
+                            cmd=["provider", "regular resume synth failed"], cwd=None, exit_code=1, stdout="", stderr="regular resume synth failed"
+                        )
+                    )
                 output_path.write_text(valid_synth_markdown, encoding="utf-8")
                 return rf.LlmRunResult(resume=None, adapter_meta={"usage": {"input_tokens": 1, "output_tokens": 1}})
 
@@ -14192,10 +15549,416 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rf, "_enforce_chunkhound_tool_proof", return_value={}))
                 stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
                 rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                success_refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+                success_prompts = list(synth_prompts)
+
+                reusable_origin = {
+                    "outcome": "used",
+                    "reason": "context_delivered",
+                    "sentinel": {"nested": [1, "reusable-review-artifact"]},
+                }
+                reusable_meta = json.loads(json.dumps(meta))
+                reusable_meta["pr_context"] = reusable_origin
+                reusable_meta["status"] = "error"
+                reusable_meta.pop("completed_at", None)
+                reusable_meta["multipass"]["grounding_skipped_steps"] = []
+                (session_dir / "review.step-01.md").write_text(
+                    valid_step_markdown.replace("02 — Tests review", "01 — API review"),
+                    encoding="utf-8",
+                )
+                (session_dir / "meta.json").write_text(json.dumps(reusable_meta), encoding="utf-8")
+                (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+                calls.clear()
+                synth_prompts.clear()
+                args.from_phase = "auto"
+                with (
+                    mock.patch.object(
+                        rf,
+                        "read_persisted_context",
+                        side_effect=AssertionError("reusable artifact must not enter PR-context delivery"),
+                    ),
+                    mock.patch.object(
+                        rf,
+                        "_mirror_pr_context_metadata",
+                        side_effect=AssertionError("reusable artifact must not mirror PR-context metadata"),
+                    ),
+                ):
+                    reusable_rc = rf.resume_flow(
+                        args, paths=paths, config_path=cfg, codex_base_config_path=cfg
+                    )
+                reusable_refreshed = json.loads(
+                    (session_dir / "meta.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(reusable_rc, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(synth_prompts, [])
+                self.assertEqual(reusable_refreshed["pr_context"], reusable_origin)
+                self.assertFalse((work_dir / "pr_context_meta.json").exists())
+
+                args.from_phase = "synth"
+                mode["fatal"] = True
+                calls.clear()
+                synth_prompts.clear()
+                review_md.unlink(missing_ok=True)
+                (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+                (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    rf.ReviewflowSubprocessError, "regular resume synth failed"
+                ):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+
+            fatal_refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(success_prompts), 2)
+            self.assertIn(persisted_brief, success_prompts[0])
+            self.assertEqual(success_prompts[0].count(persisted_brief), 1)
+            self.assertIn("\r\n", persisted_brief)
+            self.assertNotIn(sentinel, success_prompts[1])
+            self.assertEqual(success_refreshed["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertEqual(success_refreshed["pr_context"]["context_mode"], "off")
+            self.assertEqual(calls, ["review.md", "review.md"])
+            self.assertEqual(len(synth_prompts), 2)
+            self.assertIn(sentinel, synth_prompts[0])
+            self.assertNotIn(sentinel, synth_prompts[1])
+            self.assertEqual(fatal_refreshed["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertEqual(fatal_refreshed["status"], "error")
+            self.assertFalse((work_dir / "pr_context_meta.json").exists())
+            self.assertEqual(
+                success_refreshed["multipass"]["artifacts"]["synth_step_outputs"],
+                [str(session_dir / "review.step-02.md")],
+            )
+            self.assertNotIn(
+                "grounding_skipped_override",
+                success_refreshed["multipass"].get("resume", {}),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_tap19_resume_flow_from_synth_prior_context_non_used_and_used_invalid_render_empty(self) -> None:
+        root = ROOT / ".tmp_test_resume_from_synth_absent_prior_context"
+        cfg = root / "reviewflow.toml"
+        sentinel = (
+            "keep:$PRIOR_CONTEXT|$OTHER|${OTHER}|$PLAN_JSON_PATH|${PLAN_JSON_PATH}|"
+            "$AGENT_DESC|__CURE_OPAQUE_PRIOR_CONTEXT_7F3A9C__"
+        )
+        valid_step_markdown = "\n".join(
+            [
+                "### Step Result: 02 — Tests review",
+                "**Focus**: tests",
+                "",
+                "### Steps taken",
+                "- checked repo",
+                "",
+                "### Findings",
+                "- Grounded finding. Sources: `src/app.py:2`",
+                "",
+            ]
+        )
+        valid_synth_markdown = self._valid_synth_markdown(primary_citation="src/app.py:2")
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            base_cfg = root / "chunkhound-base.json"
+            base_cfg.write_text("{}", encoding="utf-8")
+            cfg.write_text(
+                f"[chunkhound]\nbase_config_path = {json.dumps(str(base_cfg))}\n",
+                encoding="utf-8",
+            )
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            chunkhound_dir = work_dir / "chunkhound"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            chunkhound_dir.mkdir(parents=True, exist_ok=True)
+            agent_desc_path = work_dir / "agent_desc.md"
+            agent_desc_path.write_text("AGENT", encoding="utf-8")
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            plan_json = work_dir / "review_plan.json"
+            plan_json.write_text(
+                json.dumps(
+                    {
+                        "abort": False,
+                        "abort_reason": None,
+                        "jira_keys": ["ABC-1"],
+                        "steps": [
+                            {"id": "01", "title": "API review", "focus": "api"},
+                            {"id": "02", "title": "Tests review", "focus": "tests"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "review.step-02.md").write_text(valid_step_markdown, encoding="utf-8")
+            review_md = session_dir / "review.md"
+            meta = {
+                "session_id": "session-1",
+                "status": "error",
+                "failed_at": "2026-03-10T01:00:00+00:00",
+                "created_at": "2026-03-10T00:00:00+00:00",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "repo",
+                "number": 9,
+                "base_ref_for_review": "cure_base__main",
+                "llm": {
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "capabilities": {"supports_resume": True},
+                },
+                "notes": {"no_index": False},
+                "paths": {
+                    "session_dir": str(session_dir),
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "chunkhound_cwd": str(chunkhound_dir),
+                    "chunkhound_db": str(chunkhound_dir / ".chunkhound.db"),
+                    "chunkhound_config": str(chunkhound_dir / "chunkhound.json"),
+                    "review_md": str(review_md),
+                    "agent_desc": str(agent_desc_path),
+                },
+                "multipass": {
+                    "enabled": True,
+                    "plan_json_path": str(plan_json),
+                    "grounding_mode": "strict",
+                    "step_states": [
+                        {
+                            "step_index": 1,
+                            "step_id": "01",
+                            "step_title": "API review",
+                            "status": "completed",
+                        },
+                        {
+                            "step_index": 2,
+                            "step_id": "02",
+                            "step_title": "Tests review",
+                            "status": "completed",
+                        },
+                    ],
+                    "grounding_skipped_steps": [
+                        {"step_id": "01", "step_title": "API review", "reason": "bad cite"}
+                    ],
+                    "validation": {"mode": "strict", "invalid_artifacts": [], "has_invalid_artifacts": False},
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            calls: list[str] = []
+            synth_prompts: list[str] = []
+
+            def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
+                output_path = Path(str(kwargs["output_path"]))
+                calls.append(output_path.name)
+                synth_prompts.append(str(kwargs["prompt"]))
+                if output_path.name != "review.md":
+                    raise AssertionError(f"unexpected rerun during synth-only resume: {output_path.name}")
+                output_path.write_text(valid_synth_markdown, encoding="utf-8")
+                return rf.LlmRunResult(resume=None, adapter_meta={"usage": {"input_tokens": 1, "output_tokens": 1}})
+
+            args = argparse.Namespace(
+                session_id="session-1",
+                from_phase="synth",
+                no_index=False,
+                codex_model=None,
+                codex_effort=None,
+                codex_plan_effort=None,
+                quiet=True,
+                no_stream=True,
+                ui="off",
+                verbosity="normal",
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_cfg),
+                            {"chunkhound": {"base_config_path": str(base_cfg)}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "materialize_chunkhound_env_config",
+                        side_effect=self._fake_materialize_chunkhound_env_config,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            _review_intelligence_cfg(),
+                            _review_intelligence_meta(_review_intelligence_cfg()),
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "require_builtin_review_intelligence"))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=(
+                            {
+                                "provider": "codex",
+                                "preset": "test-codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "medium",
+                                "plan_reasoning_effort": "high",
+                                "capabilities": {"supports_resume": True},
+                            },
+                            {
+                                "resolved": {
+                                    "model_source": "cli",
+                                    "reasoning_effort_source": "cli",
+                                    "plan_reasoning_effort_source": "preset",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value=self._codex_runtime_policy(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_reviewflow_multipass_defaults",
+                        return_value=(
+                            {
+                                "enabled": True,
+                                "max_steps": 20,
+                                "grounding_mode": "strict",
+                                "step_reasoning_effort": "low",
+                                "synth_reasoning_effort": "xhigh",
+                            },
+                            {
+                                "multipass": {
+                                    "enabled": True,
+                                    "max_steps": 20,
+                                    "grounding_mode": "strict",
+                                    "step_reasoning_effort": "low",
+                                    "synth_reasoning_effort": "xhigh",
+                                }
+                            },
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_enforce_chunkhound_tool_proof", return_value={}))
+                stack.enter_context(mock.patch.object(
+                    rf, "gh_api_list",
+                    side_effect=AssertionError("resume prior-context validation must not fetch network context"),
+                ))
+                stack.enter_context(mock.patch.object(
+                    rf, "build_pr_context",
+                    side_effect=AssertionError("resume prior-context validation must not run orientation"),
+                ))
+                stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_pr_context_monotonic",
+                        side_effect=[10.0, 10.2, 10.6, 20.0, 20.2, 20.6],
+                    )
+                )
+                rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                non_used_refreshed = json.loads(
+                    (session_dir / "meta.json").read_text(encoding="utf-8")
+                )
+                expected_non_used = rf.metadata_for_resume(
+                    {}, brief="", reason="resume_without_used_context"
+                )
+                expected_non_used["provider_usage"].update(
+                    delivery_input_tokens=1, delivery_output_tokens=1
+                )
+                expected_non_used["latency_ms"].update(
+                    delivery=400, total_enrichment=599
+                )
+                expected_non_used["persistence"].update(
+                    meta_artifact="written", warning=None
+                )
+                self.assertEqual(
+                    non_used_refreshed["pr_context"], expected_non_used
+                )
+                self.assertEqual(
+                    json.loads(
+                        (work_dir / "pr_context_meta.json").read_text(encoding="utf-8")
+                    ),
+                    expected_non_used,
+                )
+
+                invalid_meta = json.loads(json.dumps(meta))
+                invalid_meta["pr_context"] = {"outcome": "used"}
+                (session_dir / "meta.json").write_text(
+                    json.dumps(invalid_meta), encoding="utf-8"
+                )
+                (work_dir / "pr_context_orientation.md").write_text(
+                    "invalid persisted context", encoding="utf-8"
+                )
+                (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+                calls.clear()
+                synth_prompts.clear()
+                invalid_rc = rf.resume_flow(
+                    args, paths=paths, config_path=cfg, codex_base_config_path=cfg
+                )
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(rc, 0)
+            self.assertEqual((rc, invalid_rc), (0, 0))
             self.assertEqual(calls, ["review.md"])
+            self.assertEqual(len(synth_prompts), 1)
+            self.assertNotIn("$PRIOR_CONTEXT", synth_prompts[0])
+            self.assertNotIn(sentinel, synth_prompts[0])
+            self.assertNotIn("invalid persisted context", synth_prompts[0])
+            self.assertEqual(refreshed["pr_context"]["outcome"], "bypassed")
+            self.assertEqual(
+                refreshed["pr_context"]["reason"], "resume_invalid_context"
+            )
+            self.assertEqual(refreshed["pr_context"]["context_mode"], "off")
+            self.assertEqual(
+                refreshed["pr_context"]["provider_usage"]["delivery_input_tokens"], 1
+            )
+            self.assertEqual(
+                refreshed["pr_context"]["provider_usage"]["delivery_output_tokens"], 1
+            )
+            self.assertEqual(refreshed["pr_context"]["latency_ms"]["delivery"], 400)
+            self.assertEqual(
+                refreshed["pr_context"]["latency_ms"]["total_enrichment"], 600
+            )
+            self.assertEqual(
+                json.loads(
+                    (work_dir / "pr_context_meta.json").read_text(encoding="utf-8")
+                ),
+                refreshed["pr_context"],
+            )
+            expected_invalid = rf.metadata_for_resume(
+                {"outcome": "used"}, brief="", reason="resume_invalid_context"
+            )
+            expected_invalid["provider_usage"].update(
+                delivery_input_tokens=1, delivery_output_tokens=1
+            )
+            expected_invalid["latency_ms"].update(
+                delivery=400, total_enrichment=600
+            )
+            expected_invalid["persistence"].update(
+                meta_artifact="written", warning=None
+            )
+            self.assertEqual(refreshed["pr_context"], expected_invalid)
             self.assertEqual(
                 refreshed["multipass"]["artifacts"]["synth_step_outputs"],
                 [str(session_dir / "review.step-02.md")],
@@ -15743,7 +17506,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             {"01"},
         )
 
-    def test_incremental_completed_resume_threads_verbose_guidance_into_resume_synth_prompt(self) -> None:
+    def test_tap20_incremental_completed_resume_pr_context_synthesis_reuses_exact_crlf_and_fallback_captures_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_dir = root / "session-1"
@@ -15765,26 +17528,56 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             step_output.write_text("step output\n", encoding="utf-8")
             meta_path = session_dir / "meta.json"
             progress = rf.SessionProgress(meta_path, quiet=True)
-            progress.init(
-                {
-                    "session_id": "session-1",
-                    "pr_url": "https://github.com/acme/repo/pull/1",
-                    "number": 1,
-                    "multipass": {
-                        "runs": [],
-                        "plan_json_path": str(existing_plan),
-                        "resume": {},
-                        "artifacts": {},
-                    },
-                    "llm": {},
-                    "codex": {},
-                }
-            )
+            from cure_pr_context.orient import finalize_orientation_brief
 
-            captured: dict[str, str] = {}
+            persisted_brief = finalize_orientation_brief(
+                "## Problem areas\n- incremental-route-prior-context"
+            )[0].replace("\n", "\r\n")
+            (work_dir / "pr_context_orientation.md").write_bytes(persisted_brief.encode("utf-8"))
+            initial_meta = {
+                "session_id": "session-1",
+                "pr_url": "https://github.com/acme/repo/pull/1",
+                "number": 1,
+                "pr_context": {"outcome": "used"},
+                "multipass": {
+                    "runs": [],
+                    "plan_json_path": str(existing_plan),
+                    "resume": {},
+                    "artifacts": {},
+                },
+                "llm": {},
+                "codex": {},
+            }
+            progress.init(initial_meta)
+
+            synth_prompts: list[str] = []
+            synth_attempts: list[dict[str, object]] = []
+            mode = {"fatal": False}
 
             def fake_execute_multipass_synth_stage(**kwargs: Any) -> None:
-                captured["prompt"] = str(kwargs["synth_prompt"])
+                synth_prompts.append(str(kwargs["synth_prompt"]))
+                synth_attempts.append(
+                    {
+                        "run_kind": kwargs["run_kind"],
+                        "review_stage": kwargs["review_stage"],
+                        "prompt_template_name": kwargs["prompt_template_name"],
+                        "synth_step_outputs": list(kwargs["synth_step_outputs"]),
+                    }
+                )
+                usage = (
+                    {"input_tokens": 11, "output_tokens": 2}
+                    if len(synth_prompts) == 1
+                    else {"input_tokens": 7, "output_tokens": 3}
+                )
+                progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
+                    {"kind": "resume_synth", "usage": usage}
+                )
+                if mode["fatal"] or persisted_brief in synth_prompts[-1]:
+                    raise rf._PrContextSynthesisExecutionFailure(
+                        rf.ReviewflowSubprocessError(
+                            cmd=["provider", "incremental resume synth failed"], cwd=None, exit_code=1, stdout="", stderr="incremental resume synth failed"
+                        )
+                    )
                 return None
 
             llm_result = rf.LlmRunResult(adapter_meta={"usage": {}}, resume=None)
@@ -15805,21 +17598,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 )
             ]
 
-            with (
-                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
-                mock.patch.object(
-                    rf,
-                    "parse_incremental_resume_plan_json",
-                    return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
-                ),
-                mock.patch.object(rf, "_record_multipass_stage_llm"),
-                mock.patch.object(rf, "record_llm_usage"),
-                mock.patch.object(rf, "record_llm_resume", return_value=None),
-                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
-                mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
-                mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
-                mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
-            ):
+            def run_incremental() -> None:
                 rf._run_incremental_completed_multipass_resume(
                     progress=progress,
                     session_id="session-1",
@@ -15858,8 +17637,169 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     cod_ledger_enabled=False,
                 )
 
-            prompt = captured["prompt"]
-            self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", prompt)
-            self.assertIn("<details open>", prompt)
-            self.assertIn("SEVERITY_LABEL", prompt)
-            self.assertIn("LIKELIHOOD_LABEL", prompt)
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "parse_incremental_resume_plan_json",
+                    return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
+                ),
+                mock.patch.object(rf, "_record_multipass_stage_llm"),
+                mock.patch.object(rf, "record_llm_usage"),
+                mock.patch.object(rf, "record_llm_resume", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
+                mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
+                mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
+                mock.patch.object(
+                    rf, "_pr_context_monotonic", side_effect=[20.0, 20.2, 20.5, 20.8]
+                ),
+            ):
+                run_incremental()
+
+            success_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            success_prompts = list(synth_prompts)
+            self.assertEqual(len(success_prompts), 2)
+            self.assertIn(persisted_brief, success_prompts[0])
+            self.assertEqual(success_prompts[0].count(persisted_brief), 1)
+            self.assertIn("\r\n", persisted_brief)
+            self.assertNotIn(persisted_brief, success_prompts[1])
+            self.assertEqual(
+                success_prompts[0].replace(persisted_brief, ""), success_prompts[1]
+            )
+            self.assertEqual(synth_attempts[:2], [
+                {
+                    "run_kind": "resume_synth",
+                    "review_stage": "multipass_resume_synth",
+                    "prompt_template_name": "mrereview_gh_local_big_resume_synth.md",
+                    "synth_step_outputs": [str(step_output)],
+                },
+                {
+                    "run_kind": "resume_synth",
+                    "review_stage": "multipass_resume_synth",
+                    "prompt_template_name": "mrereview_gh_local_big_resume_synth.md",
+                    "synth_step_outputs": [str(step_output)],
+                },
+            ])
+            self.assertNotIn("$VERBOSE_FINDING_MODE_GUIDANCE", success_prompts[1])
+            self.assertIn("<details open>", success_prompts[1])
+            self.assertIn("SEVERITY_LABEL", success_prompts[1])
+            self.assertIn("LIKELIHOOD_LABEL", success_prompts[1])
+            self.assertEqual(success_meta["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertEqual(success_meta["pr_context"]["context_mode"], "off")
+            self.assertEqual(
+                success_meta["pr_context"]["provider_usage"],
+                {
+                    "orientation_input_tokens": None,
+                    "orientation_output_tokens": None,
+                    "delivery_input_tokens": 11,
+                    "delivery_output_tokens": 2,
+                    "fallback_input_tokens": 7,
+                    "fallback_output_tokens": 3,
+                },
+            )
+            self.assertEqual(success_meta["pr_context"]["latency_ms"]["delivery"], 600)
+            self.assertEqual(
+                success_meta["pr_context"]["latency_ms"]["total_enrichment"], 800
+            )
+            self.assertEqual(
+                json.loads(
+                    (work_dir / "pr_context_meta.json").read_text(encoding="utf-8")
+                ),
+                success_meta["pr_context"],
+            )
+
+            rejected_cases = [
+                ({"outcome": "degraded"}, None, "resume_without_used_context"),
+                ({"outcome": "used"}, "invalid persisted context", "resume_invalid_context"),
+            ]
+            for origin, persisted_text, expected_reason in rejected_cases:
+                with self.subTest(incremental_reason=expected_reason):
+                    rejected_meta = json.loads(json.dumps(initial_meta))
+                    rejected_meta["pr_context"] = origin
+                    progress.init(rejected_meta)
+                    if persisted_text is None:
+                        (work_dir / "pr_context_orientation.md").unlink(missing_ok=True)
+                    else:
+                        (work_dir / "pr_context_orientation.md").write_text(
+                            persisted_text, encoding="utf-8"
+                        )
+                    (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+                    synth_prompts.clear()
+                    synth_attempts.clear()
+                    with (
+                        mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                        mock.patch.object(
+                            rf,
+                            "parse_incremental_resume_plan_json",
+                            return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
+                        ),
+                        mock.patch.object(rf, "_record_multipass_stage_llm"),
+                        mock.patch.object(rf, "record_llm_usage"),
+                        mock.patch.object(rf, "record_llm_resume", return_value=None),
+                        mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                        mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
+                        mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
+                        mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
+                        mock.patch.object(rf, "_pr_context_monotonic", side_effect=[30.0, 30.2, 30.6]),
+                        mock.patch.object(rf, "gh_api_list", side_effect=AssertionError("incremental validation must not fetch")),
+                        mock.patch.object(rf, "build_pr_context", side_effect=AssertionError("incremental validation must not orient")),
+                    ):
+                        run_incremental()
+                    rejected = json.loads(meta_path.read_text(encoding="utf-8"))["pr_context"]
+                    self.assertEqual(len(synth_prompts), 1)
+                    self.assertNotIn("invalid persisted context", synth_prompts[0])
+                    self.assertNotIn("$PRIOR_CONTEXT", synth_prompts[0])
+                    expected = rf.metadata_for_resume(
+                        origin, brief="", reason=expected_reason
+                    )
+                    expected["provider_usage"].update(
+                        delivery_input_tokens=11, delivery_output_tokens=2
+                    )
+                    expected["latency_ms"].update(
+                        delivery=400, total_enrichment=600
+                    )
+                    expected["persistence"].update(
+                        meta_artifact="written", warning=None
+                    )
+                    self.assertEqual(rejected, expected)
+                    self.assertEqual(
+                        json.loads(
+                            (work_dir / "pr_context_meta.json").read_text(encoding="utf-8")
+                        ),
+                        expected,
+                    )
+
+            (work_dir / "pr_context_orientation.md").write_bytes(
+                persisted_brief.encode("utf-8")
+            )
+            mode["fatal"] = True
+            synth_prompts.clear()
+            synth_attempts.clear()
+            progress.init(json.loads(json.dumps(initial_meta)))
+            (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "parse_incremental_resume_plan_json",
+                    return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
+                ),
+                mock.patch.object(rf, "_record_multipass_stage_llm"),
+                mock.patch.object(rf, "record_llm_usage"),
+                mock.patch.object(rf, "record_llm_resume", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
+                mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
+                mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
+                self.assertRaisesRegex(
+                    rf.ReviewflowSubprocessError, "incremental resume synth failed"
+                ),
+            ):
+                run_incremental()
+            self.assertEqual(len(synth_prompts), 2)
+            self.assertIn(persisted_brief, synth_prompts[0])
+            self.assertNotIn(persisted_brief, synth_prompts[1])
+            fatal_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(fatal_meta["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertFalse((work_dir / "pr_context_meta.json").exists())

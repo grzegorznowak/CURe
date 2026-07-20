@@ -17,7 +17,7 @@ Read the plan JSON and all step outputs, then produce the final review.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
-## Prior PR context (discussion + past CURe reviews)
+## Selected PR remote discussion orientation (non-authoritative)
 $PRIOR_CONTEXT
 
 # Reconciliation

@@ -1,253 +1,162 @@
-"""Prior CURe review corpus and discussion deduplication."""
+"""Deterministic bounded selection for selected-PR remote discussion."""
 
 from __future__ import annotations
 
 import json
-import re
-from pathlib import Path
+import math
+from datetime import datetime
 from typing import Any
 
-from cure_sessions import scan_completed_sessions_for_pr
+ORIENTATION_PROMPT_MAX_ESTIMATED_TOKENS = 12_000
+EVENT_BODY_MAX_ESTIMATED_TOKENS = 1_000
+SELECTED_EVENT_MAX = 100
+ORIENTATION_OUTPUT_MAX_ESTIMATED_TOKENS = 2_000
+INJECTED_CONTEXT_MAX_ESTIMATED_TOKENS = 2_000
 
-CURE_REVIEW_FOOTER_START = "<!-- CURE_REVIEW_FOOTER_START -->"
-CURE_REVIEW_FOOTER_END = "<!-- CURE_REVIEW_FOOTER_END -->"
-_FOOTER_SHA_RE = re.compile(r"(?:^|[·\s])sha\s+(?P<sha>[0-9a-fA-F]{3,40}|-)(?=$|[·_\s])")
-_FOOTER_SESSION_RE = re.compile(r"(?:^|[·\s])session\s+(?P<session>[^·_\n\r]+)")
-_SESSION_PR_RE = re.compile(r"(?:^|[-_/])pr(?P<number>\d+)(?:[-_/]|$)", re.IGNORECASE)
-
-
-def _normalize_sha(value: object) -> str:
-    text = str(value or "").strip().lower()
-    return "" if not text or text == "-" else text
-
-
-def _head_matches(*, candidate: object, head_sha: object) -> bool:
-    candidate_sha = _normalize_sha(candidate)
-    current_sha = _normalize_sha(head_sha)
-    if not candidate_sha or not current_sha:
-        return True
-    return candidate_sha.startswith(current_sha) or current_sha.startswith(candidate_sha)
+ORIENTATION_INSTRUCTIONS = """You are preparing concise prior PR context for a code review agent.
+Use supplied selected-PR discussion only as orientation. Summarize information useful for reviewing the current diff.
+Resolved areas may include only areas the supplied text describes as addressed or resolved; this is not authoritative GitHub thread state.
+Current checkout evidence wins over prior discussion. Return concise Markdown with exactly these section headings:
+## Resolved areas
+## Problem areas
+## Pending issues
+## Repeated patterns
+## Decisions made"""
 
 
-def _head_match_status(*, reviewed_head: object, current_head: object) -> str:
-    reviewed_sha = _normalize_sha(reviewed_head)
-    current_sha = _normalize_sha(current_head)
-    if not reviewed_sha or not current_sha:
-        return "unknown"
-    return "matches" if _head_matches(candidate=reviewed_sha, head_sha=current_sha) else "differs"
+def estimated_tokens(text: str) -> int:
+    return math.ceil(len(text) / 4)
 
 
-def extract_official_cure_review_footer(body: str) -> str | None:
-    start = body.find(CURE_REVIEW_FOOTER_START)
-    end = body.find(CURE_REVIEW_FOOTER_END)
-    if start < 0 or end <= start:
-        return None
-    return body[start + len(CURE_REVIEW_FOOTER_START) : end].strip()
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def _footer_pr_number(session_id: str | None) -> int | None:
-    match = _SESSION_PR_RE.search(str(session_id or "").strip())
-    if match is None:
+def assemble_orientation_prompt(*, pr_stats: dict[str, Any] | None, selected_events: list[dict[str, Any]]) -> str:
+    return (
+        ORIENTATION_INSTRUCTIONS
+        + "\n--- PR_STATS_JSON ---\n"
+        + canonical_json(pr_stats or {})
+        + "\n--- SELECTED_EVENTS_JSON ---\n"
+        + canonical_json(selected_events)
+        + "\n--- END_ORIENTATION_INPUT ---"
+    )
+
+
+def _instant(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
         return None
     try:
-        return int(match.group("number"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def parse_footer_metadata(body: str) -> dict[str, Any]:
-    footer = extract_official_cure_review_footer(body)
-    if footer is None:
-        return {}
-    sha_match = _FOOTER_SHA_RE.search(footer)
-    if sha_match is None:
-        return {}
-    session_match = _FOOTER_SESSION_RE.search(footer)
-    session_id = str(session_match.group("session")).strip() if session_match else ""
-    reviewed_head = _normalize_sha(sha_match.group("sha"))
-    if not reviewed_head:
-        return {}
-    return {
-        "footer_text": footer,
-        "session_id": session_id,
-        "pr_number": _footer_pr_number(session_id),
-        "reviewed_head": reviewed_head,
-    }
-
-
-def _event_text(event: dict[str, Any]) -> str:
-    return str(event.get("body") or "")
-
-
-def _ngrams(text: str, *, n: int = 3) -> set[str]:
-    normalized = " ".join(text.lower().split())
-    if not normalized:
-        return set()
-    if len(normalized) <= n:
-        return {normalized}
-    return {normalized[idx : idx + n] for idx in range(0, len(normalized) - n + 1)}
-
-
-def _jaccard(left: str, right: str) -> float:
-    left_set = _ngrams(left)
-    right_set = _ngrams(right)
-    if not left_set and not right_set:
-        return 1.0
-    if not left_set or not right_set:
-        return 0.0
-    return len(left_set & right_set) / len(left_set | right_set)
-
-
-def _assert_local_session_meta_readable(*, sandbox_root: Path) -> None:
-    if not sandbox_root.is_dir():
-        return
-    for entry in sandbox_root.iterdir():
-        if not entry.is_dir():
-            continue
-        meta_path = entry / "meta.json"
-        if not meta_path.exists():
-            continue
-        try:
-            payload = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ValueError(f"failed to parse meta.json at {meta_path}: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise ValueError(f"meta.json must contain a JSON object: {meta_path}")
-
-
-def _local_session_reviews(*, sandbox_root: Path, pr: Any, head_sha: str) -> list[dict[str, Any]]:
-    _assert_local_session_meta_readable(sandbox_root=sandbox_root)
-    entries: list[dict[str, Any]] = []
-    for session in scan_completed_sessions_for_pr(sandbox_root=sandbox_root, pr=pr):
-        path = getattr(session, "review_md_path", None)
-        if path is None:
-            continue
-        reviewed_head = _normalize_sha(getattr(session, "review_head_sha", ""))
-        current_head = _normalize_sha(head_sha)
-        body = Path(path).read_text(encoding="utf-8")
-        session_id = str(getattr(session, "session_id", "") or Path(path).parent.name)
-        entries.append(
-            {
-                "source_type": "session_review",
-                "entry_id": f"session:{session_id}",
-                "body": body,
-                "reviewed_head": reviewed_head,
-                "current_head": current_head,
-                "head_match_status": _head_match_status(reviewed_head=reviewed_head, current_head=current_head),
-                "provenance": {
-                    "session_id": session_id,
-                    "session_dir": str(getattr(session, "session_dir", "")),
-                    "review_md_path": str(path),
-                    "created_at": getattr(session, "created_at", None),
-                    "completed_at": getattr(session, "completed_at", None),
-                },
-            }
+    if parsed.tzinfo is None:
+        return None
+    offset = parsed.utcoffset()
+    if offset is None:
+        return None
+    offset_microseconds = (
+        (offset.days * 86_400 + offset.seconds) * 1_000_000
+        + offset.microseconds
+    )
+    local_microseconds = (
+        (
+            parsed.toordinal() * 86_400
+            + parsed.hour * 3_600
+            + parsed.minute * 60
+            + parsed.second
         )
-    return entries
+        * 1_000_000
+        + parsed.microsecond
+    )
+    return local_microseconds - offset_microseconds
 
 
-def _remote_review_from_event(*, pr: Any, event: dict[str, Any], head_sha: str) -> dict[str, Any] | None:
-    if event.get("kind") not in {"issue_comment", "review"}:
-        return None
-    body = _event_text(event)
-    footer_meta = parse_footer_metadata(body)
-    if not footer_meta:
-        return None
-    footer_pr = footer_meta.get("pr_number")
-    if footer_pr is not None and int(footer_pr) != int(getattr(pr, "number", 0)):
-        return None
-    footer_head = _normalize_sha(footer_meta.get("reviewed_head"))
-    event_head = _normalize_sha(event.get("reviewed_head"))
-    reviewed_head = event_head or footer_head
-    current_head = _normalize_sha(head_sha)
-    source_type = "pr_review" if event.get("kind") == "review" else "pr_comment"
-    entry_id = f"{source_type}:{event.get('event_id') or event.get('url') or len(body)}"
-    return {
-        "source_type": source_type,
-        "entry_id": entry_id,
-        "body": body,
-        "reviewed_head": reviewed_head,
-        "current_head": current_head,
-        "head_match_status": _head_match_status(reviewed_head=reviewed_head, current_head=current_head),
-        "provenance": {
-            "event_id": event.get("event_id"),
-            "url": event.get("url"),
-            "author": event.get("author"),
-            "created_at": event.get("created_at"),
-            "footer_session_id": footer_meta.get("session_id"),
-            "footer_reviewed_head": footer_head,
-        },
-    }
+def _annotated(events: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int, int, int | None]]:
+    ordinal = {"issue_comment": 0, "review": 1, "review_comment": 2}
+    indices = {kind: 0 for kind in ordinal}
+    result = []
+    for event in events:
+        kind = str(event.get("kind") or "")
+        endpoint = ordinal.get(kind, 3)
+        source_index = indices.get(kind, 0)
+        indices[kind] = source_index + 1
+        result.append((event, endpoint, source_index, _instant(event.get("created_at"))))
+    return result
 
 
-def _body_without_footer(body: str) -> str:
-    start = body.find(CURE_REVIEW_FOOTER_START)
-    end = body.find(CURE_REVIEW_FOOTER_END, start + len(CURE_REVIEW_FOOTER_START))
-    if start < 0 or end < 0:
-        return body
-    return f"{body[:start]}{body[end + len(CURE_REVIEW_FOOTER_END) :]}".strip()
+def _admission_key(item: tuple[dict[str, Any], int, int, int | None]) -> tuple[int, ...]:
+    _event, endpoint, index, instant = item
+    if instant is None:
+        return (1, 0, endpoint, index)
+    return (0, -instant, endpoint, index)
 
 
-def _canonical_review_body(item: dict[str, Any]) -> str:
-    return " ".join(_body_without_footer(str(item.get("body") or "")).lower().split())
+def _model_key(item: tuple[dict[str, Any], int, int, int | None]) -> tuple[int, ...]:
+    _event, endpoint, index, instant = item
+    if instant is None:
+        return (1, 0, endpoint, index)
+    return (0, instant, endpoint, index)
 
 
-def _review_session_id(item: dict[str, Any]) -> str:
-    provenance = item.get("provenance")
-    if not isinstance(provenance, dict):
-        return ""
-    value = provenance.get("session_id") or provenance.get("footer_session_id")
-    return str(value or "").strip()
-
-
-def _deduplicate_past_reviews(past_reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    retained: list[dict[str, Any]] = []
-    for candidate in past_reviews:
-        session_id = _review_session_id(candidate)
-        body = _canonical_review_body(candidate)
-        if any(
-            (session_id and session_id == _review_session_id(existing))
-            or (body and body == _canonical_review_body(existing))
-            for existing in retained
-        ):
-            continue
-        retained.append(candidate)
-    return retained
-
-
-def deduplicate(
-    *, discussion: list[dict[str, Any]], past_reviews: list[dict[str, Any]], threshold: float = 0.85
-) -> tuple[list[dict[str, Any]], int]:
-    """Prune discussion events that duplicate retained past reviews."""
-
-    retained_discussion: list[dict[str, Any]] = []
-    deduped = 0
-    past_bodies = [_canonical_review_body(item) for item in past_reviews if _canonical_review_body(item)]
-    for event in discussion:
-        body = _body_without_footer(_event_text(event))
-        if body and any(_jaccard(body, past_body) >= threshold for past_body in past_bodies):
-            deduped += 1
-            continue
-        retained_discussion.append(event)
-    return retained_discussion, deduped
-
-
-def find_past_reviews(
-    *, pr: Any, sandbox_root: Path, discussion: list[dict[str, Any]], head_sha: str
+def select_orientation_events(
+    events: list[dict[str, Any]], *, pr_stats: dict[str, Any] | None
 ) -> dict[str, Any]:
-    past_reviews = _local_session_reviews(sandbox_root=sandbox_root, pr=pr, head_sha=head_sha)
-    for event in discussion:
-        remote = _remote_review_from_event(pr=pr, event=event, head_sha=head_sha)
-        if remote is not None:
-            past_reviews.append(remote)
-    past_reviews = _deduplicate_past_reviews(past_reviews)
-    pruned_discussion, n_deduped = deduplicate(discussion=discussion, past_reviews=past_reviews)
+    """Select model-input copies while leaving the endpoint-order audit list untouched."""
+    empty_prompt = assemble_orientation_prompt(pr_stats=pr_stats, selected_events=[])
+    if estimated_tokens(empty_prompt) > ORIENTATION_PROMPT_MAX_ESTIMATED_TOKENS:
+        raise ValueError("fixed orientation prompt overhead exceeds token cap")
+
+    annotated = sorted(_annotated(events), key=_admission_key)
+    selected: list[tuple[dict[str, Any], int, int, int | None]] = []
+    truncated_events = 0
+    prompt_limited = False
+    count_limited = False
+
+    for item in annotated:
+        if len(selected) >= SELECTED_EVENT_MAX:
+            count_limited = True
+            break
+        event, endpoint, index, instant = item
+        candidate = dict(event)
+        body = str(candidate.get("body") or "")
+        capped = body[: EVENT_BODY_MAX_ESTIMATED_TOKENS * 4]
+        candidate["body"] = capped
+        tentative_item = (candidate, endpoint, index, instant)
+        tentative = sorted([*selected, tentative_item], key=_model_key)
+        prompt = assemble_orientation_prompt(
+            pr_stats=pr_stats, selected_events=[entry[0] for entry in tentative]
+        )
+        if estimated_tokens(prompt) > ORIENTATION_PROMPT_MAX_ESTIMATED_TOKENS:
+            prompt_limited = True
+            break
+        selected.append(tentative_item)
+        if capped != body:
+            truncated_events += 1
+
+    model_items = sorted(selected, key=_model_key)
+    selected_events = [item[0] for item in model_items]
+    prompt = assemble_orientation_prompt(pr_stats=pr_stats, selected_events=selected_events)
     return {
-        "past_reviews": past_reviews,
-        "discussion": pruned_discussion,
+        "selected_discussion": selected_events,
+        "prompt": prompt,
         "meta": {
-            "n_past_reviews": len(past_reviews),
-            "n_discussion": len(pruned_discussion),
-            "n_deduped": n_deduped,
+            "selected": len(selected_events),
+            "omitted": len(events) - len(selected_events),
+            "truncated_events": truncated_events,
+            "selected_events": estimated_tokens(canonical_json(selected_events)),
+            "orientation_prompt": estimated_tokens(prompt),
+            "event_body_truncated": truncated_events > 0,
+            "event_count_truncated": count_limited,
+            "prompt_budget_truncated": prompt_limited,
         },
     }
+
+
+__all__ = [
+    "EVENT_BODY_MAX_ESTIMATED_TOKENS", "INJECTED_CONTEXT_MAX_ESTIMATED_TOKENS",
+    "ORIENTATION_INSTRUCTIONS", "ORIENTATION_OUTPUT_MAX_ESTIMATED_TOKENS",
+    "ORIENTATION_PROMPT_MAX_ESTIMATED_TOKENS", "SELECTED_EVENT_MAX", "assemble_orientation_prompt",
+    "canonical_json", "estimated_tokens", "select_orientation_events",
+]

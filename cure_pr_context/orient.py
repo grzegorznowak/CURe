@@ -1,95 +1,152 @@
-"""LLM orientation brief construction for PR discussion context."""
+"""Bounded five-section orientation brief construction."""
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Callable
 
+from .corpus import (
+    INJECTED_CONTEXT_MAX_ESTIMATED_TOKENS,
+    ORIENTATION_INSTRUCTIONS,
+    ORIENTATION_OUTPUT_MAX_ESTIMATED_TOKENS,
+    assemble_orientation_prompt,
+    estimated_tokens,
+)
+
 RunLlm = Callable[[str], str]
 
-_SECTION_HEADERS = (
-    "Resolved areas",
-    "Problem areas",
-    "Pending issues",
-    "Repeated patterns",
-    "Decisions made",
-)
-_USAGE_NOTE = (
-    "Use this prior context as orientation only: avoid re-requesting resolved work, "
-    "prioritize unresolved risks, and verify every finding against the current checkout."
-)
 
-_USAGE_INSTRUCTIONS = """This brief summarizes prior discussion — it is orientation only. You must still perform a complete, independent review of every changed file. The sections below highlight patterns; they are not a substitute for thoroughness.
+class OrientationFinalizationFailure(RuntimeError):
+    """Base marker for an internal PR-context finalization failure."""
 
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+class OrientationOutputFinalizationFailure(OrientationFinalizationFailure):
+    """Marks finalization of provider output as an orientation-stage failure."""
+
+
+class InjectedContextFinalizationFailure(OrientationFinalizationFailure):
+    """Marks independent finalization of fresh context before delivery."""
+
+
+SECTION_HEADERS = ("Resolved areas", "Problem areas", "Pending issues", "Repeated patterns", "Decisions made")
+USAGE_INSTRUCTIONS = '''INSTRUCTIONS FOR USING PRIOR_CONTEXT:
 - "Resolved areas": do not spend time re-evaluating them unless the diff touches them
 - "Problem areas": prioritize them in your review plan
 - "Pending issues": verify whether the diff resolved them or not
 - "Repeated patterns": mention them as a cross-cutting theme if still present
 - "Decisions made": do not question them, accept them as context
-- If a section is empty, ignore it"""
+- If a section is empty, ignore it'''
 
 
-def _payload(discussion: list[dict[str, Any]], past_reviews: list[dict[str, Any]], pr_stats: dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "discussion": discussion,
-            "past_reviews": past_reviews,
-            "pr_stats": pr_stats,
-        },
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-    )
+def _markdown_structure(text: str) -> tuple[set[str], tuple[str, int] | None]:
+    headings: set[str] = set()
+    open_fence: tuple[str, int] | None = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if open_fence is None:
+            opener = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
+            if opener is not None:
+                run = opener.group(1)
+                open_fence = (run[0], len(run))
+                continue
+            heading = re.match(r"^##[ \t]+(.+?)[ \t]*$", line)
+            if heading is not None:
+                headings.add(heading.group(1))
+            continue
+
+        closer = re.match(r"^(`{3,}|~{3,})[ \t]*$", stripped)
+        if closer is not None:
+            run = closer.group(1)
+            if run[0] == open_fence[0] and len(run) >= open_fence[1]:
+                open_fence = None
+    return headings, open_fence
 
 
-def _ensure_sections(text: str) -> str:
-    body = text.strip()
-    if not body:
-        body = ""
-    parts: list[str] = [f"## How to use this context\n{_USAGE_NOTE}"]
-    if body:
-        parts.append(body)
-    for header in _SECTION_HEADERS:
-        heading_pattern = rf"^##[ \t]+{re.escape(header)}[ \t]*$"
-        if re.search(heading_pattern, body, flags=re.MULTILINE) is None:
-            parts.append(f"## {header}\n- None identified.")
+def _compose(raw: str) -> str:
+    raw = raw.strip().replace(USAGE_INSTRUCTIONS, "").strip()
+    headings, fence = _markdown_structure(raw)
+    parts = [raw] if raw else []
+    if fence is not None:
+        parts.append(fence[0] * fence[1])
+    parts.append(USAGE_INSTRUCTIONS)
+    for heading in SECTION_HEADERS:
+        if heading not in headings:
+            parts.append(f"## {heading}\n- None identified.")
     return "\n\n".join(parts).strip()
 
 
+def _finalize_to_cap(raw: str, max_estimated_tokens: int) -> tuple[str, bool]:
+    original = raw
+    retained = raw[: max_estimated_tokens * 4]
+    while True:
+        brief = _compose(retained)
+        if estimated_tokens(brief) <= max_estimated_tokens:
+            return brief, retained != original
+        excess = len(brief) - max_estimated_tokens * 4
+        retained = retained[: max(0, len(retained) - max(1, excess))]
+
+
+def finalize_orientation_brief(raw: str) -> tuple[str, bool]:
+    try:
+        return _finalize_to_cap(raw, ORIENTATION_OUTPUT_MAX_ESTIMATED_TOKENS)
+    except Exception as exc:
+        raise OrientationOutputFinalizationFailure(exc) from exc
+
+
+def finalize_injected_context(brief: str) -> dict[str, Any]:
+    """Finalize fresh injected context under its independent delivery cap."""
+    try:
+        finalized, truncated = _finalize_to_cap(
+            brief, INJECTED_CONTEXT_MAX_ESTIMATED_TOKENS
+        )
+        return {
+            "brief": finalized,
+            "estimated_tokens": estimated_tokens(finalized),
+            "truncated": truncated,
+        }
+    except Exception as exc:
+        raise InjectedContextFinalizationFailure(exc) from exc
+
+
+def _is_valid_at_cap(text: str, max_estimated_tokens: int) -> bool:
+    if not text.strip() or estimated_tokens(text) > max_estimated_tokens:
+        return False
+    headings, fence = _markdown_structure(text)
+    return fence is None and text.count(USAGE_INSTRUCTIONS) == 1 and all(
+        heading in headings for heading in SECTION_HEADERS
+    )
+
+
+def is_valid_orientation_brief(text: str) -> bool:
+    return _is_valid_at_cap(text, ORIENTATION_OUTPUT_MAX_ESTIMATED_TOKENS)
+
+
+def is_valid_injected_context(text: str) -> bool:
+    return _is_valid_at_cap(text, INJECTED_CONTEXT_MAX_ESTIMATED_TOKENS)
+
+
 def build_orientation_brief(
-    *,
-    discussion: list[dict[str, Any]],
-    past_reviews: list[dict[str, Any]],
-    pr_stats: dict[str, Any],
-    run_llm: RunLlm,
-) -> str:
-    """Run a single LLM scan and return a structured prior-context brief."""
+    *, discussion: list[dict[str, Any]], pr_stats: dict[str, Any], run_llm: RunLlm
+) -> dict[str, Any]:
+    prompt = assemble_orientation_prompt(pr_stats=pr_stats, selected_events=discussion)
+    raw = run_llm(prompt)
+    brief, truncated = finalize_orientation_brief(str(raw or ""))
+    return {"brief": brief, "meta": {"estimated_tokens": estimated_tokens(brief), "truncated": truncated}}
 
-    if not discussion and not past_reviews:
-        return ""
-    prompt = f"""
-You are preparing concise prior PR context for a code review agent.
 
-{_USAGE_NOTE}
-
-Summarize only information useful for reviewing the current diff. Populate
-Resolved areas only when supplied discussion or past-review text describes an
-area as addressed or resolved. This is not authoritative GitHub review-thread resolution state;
-do not infer resolution merely from an event's presence or review state. Return Markdown
-with these exact section headings:
-- Resolved areas
-- Problem areas
-- Pending issues
-- Repeated patterns
-- Decisions made
-
-Also include the following usage instructions block verbatim at the top of your output:
-{_USAGE_INSTRUCTIONS}
-
-Input JSON:
-```json
-{_payload(discussion, past_reviews, pr_stats)}
-```
-""".strip()
-    return _ensure_sections(run_llm(prompt))
+__all__ = [
+    "InjectedContextFinalizationFailure",
+    "ORIENTATION_INSTRUCTIONS",
+    "OrientationFinalizationFailure",
+    "OrientationOutputFinalizationFailure",
+    "USAGE_INSTRUCTIONS",
+    "build_orientation_brief",
+    "finalize_injected_context",
+    "finalize_orientation_brief",
+    "is_valid_injected_context",
+    "is_valid_orientation_brief",
+]

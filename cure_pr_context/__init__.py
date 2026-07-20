@@ -1,83 +1,229 @@
-"""Simple PR discussion context for CURe review prompts."""
+"""Bounded selected-PR remote discussion context."""
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from .corpus import find_past_reviews
+from .corpus import select_orientation_events
 from .fetcher import fetch_pr_discussion
-from .orient import build_orientation_brief
+from .orient import (
+    InjectedContextFinalizationFailure,
+    OrientationFinalizationFailure,
+    OrientationOutputFinalizationFailure,
+    build_orientation_brief,
+)
 
 GhFetch = Callable[[str], list[Any]]
 RunLlm = Callable[[str], str]
+UsageObserver = Callable[[], Mapping[str, int] | None]
+
+
+class OrientationProviderExecutionFailure(RuntimeError):
+    """Marks only an orientation provider execution failure as degradable."""
+
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+class PrContextStageError(RuntimeError):
+    """Failure attributed to one named PR-context enrichment stage."""
+
+    def __init__(
+        self, stage: str, cause: Exception, *, meta: dict[str, Any] | None = None
+    ) -> None:
+        self.stage = stage
+        self.meta = dict(meta or {})
+        super().__init__(str(cause))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
 
 
 def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def _discussion_kind_counts(discussion: list[dict[str, Any]]) -> dict[str, int]:
-    return {
-        "n_comments": sum(1 for event in discussion if event.get("kind") == "issue_comment"),
-        "n_reviews": sum(1 for event in discussion if event.get("kind") == "review"),
-        "n_review_comments": sum(1 for event in discussion if event.get("kind") == "review_comment"),
-    }
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def build_pr_context(
     *,
     pr: Any,
-    sandbox_root: Path,
-    work_dir: Path,
-    pr_stats: dict[str, Any],
-    head_sha: str,
+    work_dir: str | Path,
+    pr_stats: dict[str, Any] | None,
     gh_fetch: GhFetch,
     run_llm: RunLlm,
+    usage_observer: UsageObserver | None = None,
 ) -> dict[str, Any]:
-    """Build prior PR context and debug artifacts.
+    """Fetch, preserve, select, and orient remote discussion only."""
+    work = Path(work_dir)
+    total_started = time.monotonic()
+    fetch_started = time.monotonic()
+    fetched_count = 0
 
-    The function intentionally fails hard: GitHub, filesystem, and LLM errors are
-    allowed to propagate so ``cure pr`` aborts before prompt rendering.
-    """
+    def record_fetched(count: int) -> None:
+        nonlocal fetched_count
+        fetched_count = count
 
-    discussion = fetch_pr_discussion(pr=pr, gh_fetch=gh_fetch)
-    corpus = find_past_reviews(
-        pr=pr,
-        sandbox_root=sandbox_root,
-        discussion=discussion,
-        head_sha=head_sha,
-    )
-    pruned_discussion = list(corpus["discussion"])
-    past_reviews = list(corpus["past_reviews"])
-    orientation_brief = build_orientation_brief(
-        discussion=pruned_discussion,
-        past_reviews=past_reviews,
-        pr_stats=pr_stats,
-        run_llm=run_llm,
-    )
-    _write_json(work_dir / "pr_context_discussion.json", pruned_discussion)
-    _write_json(work_dir / "pr_context_past_reviews.json", past_reviews)
-    meta = {
-        "head_sha": str(head_sha or ""),
-        **_discussion_kind_counts(discussion),
-        "n_discussion_fetched": len(discussion),
-        "n_discussion": len(pruned_discussion),
-        "n_past_reviews": len(past_reviews),
-        "n_deduped": int(corpus.get("meta", {}).get("n_deduped", 0)),
-        "artifacts": {
-            "discussion": str(work_dir / "pr_context_discussion.json"),
-            "past_reviews": str(work_dir / "pr_context_past_reviews.json"),
+    try:
+        discussion = fetch_pr_discussion(
+            pr=pr, gh_fetch=gh_fetch, fetched_observer=record_fetched
+        )
+    except Exception as exc:
+        fetch_ms = int(max(0.0, time.monotonic() - fetch_started) * 1000)
+        total_ms = int(max(0.0, time.monotonic() - total_started) * 1000)
+        raise PrContextStageError(
+            "fetch_failed",
+            exc,
+            meta={
+                "counts": {
+                    "fetched": fetched_count,
+                    "normalized": 0,
+                    "selected": 0,
+                    "omitted": 0,
+                    "truncated_events": 0,
+                },
+                "latency_ms": {
+                    "fetch": fetch_ms,
+                    "selection": 0,
+                    "orientation": 0,
+                    "total_enrichment": total_ms,
+                },
+            },
+        ) from exc
+    fetch_ms = int(max(0.0, time.monotonic() - fetch_started) * 1000)
+    base_counts = {
+        "fetched": fetched_count, "normalized": len(discussion), "selected": 0,
+        "omitted": 0, "truncated_events": 0,
+    }
+    try:
+        _write_json(work / "pr_context_discussion.json", discussion)
+    except Exception as exc:
+        raise PrContextStageError(
+            "artifact_write_failed",
+            exc,
+            meta={
+                "counts": base_counts,
+                "latency_ms": {
+                    "fetch": fetch_ms,
+                    "selection": 0,
+                    "orientation": 0,
+                    "total_enrichment": int(
+                        max(0.0, time.monotonic() - total_started) * 1000
+                    ),
+                },
+            },
+        ) from exc
+    if not discussion:
+        return {
+            "orientation_brief": "", "discussion": discussion, "selected_discussion": [],
+            "meta": {
+                "reason": "no_remote_context", "counts": base_counts,
+                "latency_ms": {
+                    "fetch": fetch_ms, "selection": 0, "orientation": 0,
+                    "total_enrichment": int(max(0.0, time.monotonic() - total_started) * 1000),
+                },
+            },
+        }
+
+    selection_started = time.monotonic()
+    try:
+        selection = select_orientation_events(discussion, pr_stats=pr_stats)
+        selected = selection["selected_discussion"]
+        selection_meta = selection["meta"]
+    except Exception as exc:
+        selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+        raise PrContextStageError(
+            "selection_failed",
+            exc,
+            meta={
+                "counts": base_counts,
+                "latency_ms": {
+                    "fetch": fetch_ms,
+                    "selection": selection_ms,
+                    "orientation": 0,
+                    "total_enrichment": int(
+                        max(0.0, time.monotonic() - total_started) * 1000
+                    ),
+                },
+            },
+        ) from exc
+    selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+    counts = {
+        **base_counts,
+        "selected": selection_meta["selected"],
+        "omitted": selection_meta["omitted"],
+        "truncated_events": selection_meta["truncated_events"],
+    }
+    if not selected:
+        return {
+            "orientation_brief": "", "discussion": discussion, "selected_discussion": [],
+            "meta": {
+                "reason": "no_selected_context", "counts": counts, "selection": selection_meta,
+                "latency_ms": {
+                    "fetch": fetch_ms, "selection": selection_ms, "orientation": 0,
+                    "total_enrichment": int(max(0.0, time.monotonic() - total_started) * 1000),
+                },
+            },
+        }
+
+    orientation_started = time.monotonic()
+    try:
+        orientation = build_orientation_brief(
+            discussion=selected, pr_stats=pr_stats or {}, run_llm=run_llm
+        )
+    except (OrientationProviderExecutionFailure, OrientationOutputFinalizationFailure) as exc:
+        try:
+            usage = usage_observer() if usage_observer is not None else None
+        except Exception:
+            usage = None
+        orientation_ms = int(max(0.0, time.monotonic() - orientation_started) * 1000)
+        raise PrContextStageError(
+            "orientation_failed",
+            exc,
+            meta={
+                "counts": counts,
+                "selection": selection_meta,
+                "provider_usage": dict(usage) if usage else None,
+                "latency_ms": {
+                    "fetch": fetch_ms,
+                    "selection": selection_ms,
+                    "orientation": orientation_ms,
+                    "total_enrichment": int(
+                        max(0.0, time.monotonic() - total_started) * 1000
+                    ),
+                },
+            },
+        ) from exc
+    try:
+        usage = usage_observer() if usage_observer is not None else None
+    except Exception:
+        usage = None
+    orientation_ms = int(max(0.0, time.monotonic() - orientation_started) * 1000)
+    return {
+        "orientation_brief": orientation["brief"],
+        "discussion": discussion,
+        "selected_discussion": selected,
+        "meta": {
+            "reason": "context_built", "counts": counts, "selection": selection_meta,
+            "orientation": orientation["meta"], "provider_usage": dict(usage) if usage else None,
+            "latency_ms": {
+                "fetch": fetch_ms, "selection": selection_ms, "orientation": orientation_ms,
+                "total_enrichment": int(max(0.0, time.monotonic() - total_started) * 1000),
+            },
         },
     }
-    return {
-        "orientation_brief": orientation_brief,
-        "discussion": pruned_discussion,
-        "past_reviews": past_reviews,
-        "meta": meta,
-    }
 
 
-__all__ = ["build_pr_context", "fetch_pr_discussion", "find_past_reviews", "build_orientation_brief"]
+__all__ = [
+    "InjectedContextFinalizationFailure", "OrientationFinalizationFailure",
+    "OrientationOutputFinalizationFailure", "OrientationProviderExecutionFailure",
+    "PrContextStageError",
+    "build_pr_context", "build_orientation_brief",
+    "fetch_pr_discussion", "select_orientation_events",
+]

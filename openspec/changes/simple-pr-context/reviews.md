@@ -161,3 +161,9 @@
     - The implementation matches the initiative/proposal/design contract for a four-file `cure_pr_context` package, list-capable GitHub discussion fetch, retained-side prior-review dedup, five built-in prompt insertions, fail-hard behavior, and package installability. Sources: `openspec/initiatives/simple-pr-context/initiative.md:29-33`, `openspec/changes/simple-pr-context/proposal.md:13`, `openspec/changes/simple-pr-context/design.md:43`, `openspec/changes/simple-pr-context/design.md:167-171`, `pyproject.toml:18`, `cure.py:9898`, `cure.py:10553`
   - Debt Friction: none
   - Next action: proceed with `/openspec-pr simple-pr-context simple-pr-context` or the equivalent PR delivery/evidence step; no implementation resume is required
+
+- 2026-07-17 Planning supersession note (not a new lifecycle review)
+  - The historical approval and request-change records above remain unchanged evidence of the contracts reviewed at those times.
+  - Operator-approved FB-021–FB-024 now materially supersede automatic activation, unbounded complete-corpus model input, local CURe session/history discovery, and fail-hard enrichment assumptions in those reviews.
+  - Current story state is `Plan: 🟠 PLAN CHANGES REQUESTED`, `Status: 🔄 IN PROGRESS`; S17–S28 cover A19–A28/A31–A32, A29/A30 are direct closure acceptances, and all A19–A32 plus replacement R10–R12 remain provisional/unchecked.
+  - This note records planning coordination only. It does not approve the amended plan, claim implementation evidence, run a lifecycle command, or authorize default-on/general release.

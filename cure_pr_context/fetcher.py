@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 GhFetch = Callable[..., list[Any]]
+FetchedObserver = Callable[[int], None]
 
 _DISCUSSION_KEYS = ("kind", "author", "body", "created_at", "url", "path", "line", "review_state")
 
@@ -72,13 +73,14 @@ def _items_from_payload(payload: Any, *, path: str) -> list[dict[str, Any]]:
     return items
 
 
-def fetch_pr_discussion(*, pr: Any, gh_fetch: GhFetch) -> list[dict[str, Any]]:
-    """Fetch issue comments, PR reviews, and inline review comments.
+def fetch_pr_discussion(
+    *, pr: Any, gh_fetch: GhFetch, fetched_observer: FetchedObserver | None = None
+) -> list[dict[str, Any]]:
+    """Fetch and then normalize issue comments, reviews, and inline comments.
 
-    ``gh_fetch`` must be a list-capable callable such as ``cure.gh_api_list``.
-    It is called with the endpoint path as a positional argument so tests can
-    use a compact ``lambda path: ...``; callers may bind host-specific keyword
-    arguments around CURe's production helper.
+    ``fetched_observer`` runs only after every endpoint payload and item passes
+    the strict list/object boundary, but before normalization begins.  This
+    keeps fetched and normalized completion telemetry transactionally distinct.
     """
 
     endpoints = (
@@ -86,10 +88,15 @@ def fetch_pr_discussion(*, pr: Any, gh_fetch: GhFetch) -> list[dict[str, Any]]:
         ("review", f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"),
         ("review_comment", f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"),
     )
-    events: list[dict[str, Any]] = []
+    fetched: list[tuple[str, list[dict[str, Any]]]] = []
     for kind, path in endpoints:
-        payload = gh_fetch(path)
-        for item in _items_from_payload(payload, path=path):
+        fetched.append((kind, _items_from_payload(gh_fetch(path), path=path)))
+    if fetched_observer is not None:
+        fetched_observer(sum(len(items) for _, items in fetched))
+
+    events: list[dict[str, Any]] = []
+    for kind, items in fetched:
+        for item in items:
             event = _normalize_item(kind, item)
             for key in _DISCUSSION_KEYS:
                 event.setdefault(key, None if key == "line" else "")
