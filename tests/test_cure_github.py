@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,8 +29,18 @@ def _error(*, stderr: str, cmd: list[str] | None = None) -> ReviewflowSubprocess
 
 
 @pytest.fixture(autouse=True)
-def _reset_slurp_capability() -> None:
+def _reset_slurp_capability(monkeypatch: pytest.MonkeyPatch) -> None:
     cure_github._GH_API_SLURP_SUPPORTED = None
+
+    class DelegatingOpener:
+        def open(self, request: Any, *, timeout: float | None = None) -> Any:
+            return cure_github.urllib.request.urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(
+        cure_github.urllib.request,
+        "build_opener",
+        lambda *_handlers: DelegatingOpener(),
+    )
     yield
     cure_github._GH_API_SLURP_SUPPORTED = None
 
@@ -176,6 +187,171 @@ class _Response:
         return self._body
 
 
+def test_github_public_api_list_uses_bounded_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, float | None]] = []
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        captured.append((request.full_url, timeout))
+        return _Response(b"[]")
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+
+    assert cure_github._github_public_api_list(path="repos/acme/repo/issues/1/comments") == []
+    assert captured == [("https://api.github.com/repos/acme/repo/issues/1/comments", 30.0)]
+
+
+@pytest.mark.parametrize(
+    "next_url",
+    [
+        "http://api.github.com/items",
+        "https://user@api.github.com/items",
+        "https://api.github.com/items#fragment",
+        "https://api.github.com:444/items",
+        "mailto:unsafe@example.com",
+        "https://[invalid/items",
+    ],
+)
+def test_github_public_api_list_rejects_every_unsafe_next_before_request(
+    monkeypatch: pytest.MonkeyPatch, next_url: str
+) -> None:
+    requested: list[str] = []
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        requested.append(request.full_url)
+        return _Response(b"[]", link=f'<{next_url}>; rel="next"')
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ReviewflowError, match="unsafe|origin|malformed"):
+        cure_github._github_public_api_list(path="repos/acme/repo/issues/1/comments")
+    assert requested == ["https://api.github.com/repos/acme/repo/issues/1/comments"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("timed out"),
+        urllib.error.URLError("network down"),
+        OSError("transport failed"),
+    ],
+)
+def test_github_public_api_list_translates_transport_failures(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    calls: list[float | None] = []
+
+    def urlopen(_request: Any, *, timeout: float | None = None) -> _Response:
+        calls.append(timeout)
+        raise failure
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ReviewflowError, match="Public GitHub API request failed") as raised:
+        cure_github._github_public_api_list(path="repos/acme/repo/issues/1/comments")
+    assert raised.value.__cause__ is failure
+    assert calls == [30.0]
+
+
+def test_github_public_api_list_resolves_relative_next_against_current_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        _Response(b'[{"page":1}]', link='<?page=2>; rel="next"'),
+        _Response(b'[{"page":2}]'),
+    ]
+    requested: list[str] = []
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        requested.append(request.full_url)
+        return responses.pop(0)
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+    assert cure_github._github_public_api_list(path="items?page=1") == [
+        {"page": 1}, {"page": 2}
+    ]
+    assert requested == [
+        "https://api.github.com/items?page=1",
+        "https://api.github.com/items?page=2",
+    ]
+
+
+def test_github_public_api_list_rejects_cross_origin_next_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        requested.append(request.full_url)
+        return _Response(b"[]", link='<https://evil.example/items?page=2>; rel="next"')
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(ReviewflowError, match="unsafe|origin"):
+        cure_github._github_public_api_list(path="repos/acme/repo/issues/1/comments")
+    assert requested == ["https://api.github.com/repos/acme/repo/issues/1/comments"]
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_public_list_redirect_handler_rejects_before_followup(status: int) -> None:
+    request = cure_github.urllib.request.Request("https://api.github.com/items")
+    with pytest.raises(ReviewflowError, match="redirect rejected"):
+        cure_github._RejectRedirects().redirect_request(
+            request, None, status, "redirect", {}, "https://api.github.com/other"
+        )
+
+
+def test_github_public_api_list_rejects_equivalent_cycle_before_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        requested.append(request.full_url)
+        return _Response(
+            b"[]",
+            link='<https://API.GITHUB.COM:443/repos/acme/./repo/issues/1/comments>; rel="next"',
+        )
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ReviewflowError, match="cycle"):
+        cure_github._github_public_api_list(path="repos/acme/repo/issues/1/comments")
+    assert requested == ["https://api.github.com/repos/acme/repo/issues/1/comments"]
+
+
+def test_github_public_api_list_terminal_page_100_succeeds_and_next_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
+        nonlocal calls
+        calls += 1
+        link = (
+            f'<https://api.github.com/items?page={calls + 1}>; rel="next"'
+            if calls < 100
+            else ""
+        )
+        return _Response(f"[{{\"page\":{calls}}}]".encode(), link=link)
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
+    result = cure_github._github_public_api_list(path="items?page=1")
+    assert calls == 100
+    assert [result[0], result[-1]] == [{"page": 1}, {"page": 100}]
+
+    calls = 0
+
+    def overflowing(request: Any, *, timeout: float | None = None) -> _Response:
+        nonlocal calls
+        calls += 1
+        return _Response(
+            b"[]",
+            link=f'<https://api.github.com/items?page={calls + 1}>; rel="next"',
+        )
+
+    monkeypatch.setattr(cure_github.urllib.request, "urlopen", overflowing)
+    with pytest.raises(ReviewflowError, match="100 pages"):
+        cure_github._github_public_api_list(path="items?page=1")
+    assert calls == 100
+
+
 def test_github_public_api_list_follows_link_pages_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     next_url = "https://api.github.com/repositories/1/issues/1/comments?page=2"
     responses = [
@@ -184,8 +360,9 @@ def test_github_public_api_list_follows_link_pages_in_order(monkeypatch: pytest.
     ]
     requested: list[str] = []
 
-    def urlopen(request: Any) -> _Response:
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
         requested.append(request.full_url)
+        assert timeout == 30.0
         return responses.pop(0)
 
     monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)
@@ -213,8 +390,9 @@ def test_github_public_api_list_rejects_invalid_or_non_array_later_page(
     ]
     requested: list[str] = []
 
-    def urlopen(request: Any) -> _Response:
+    def urlopen(request: Any, *, timeout: float | None = None) -> _Response:
         requested.append(request.full_url)
+        assert timeout == 30.0
         return responses.pop(0)
 
     monkeypatch.setattr(cure_github.urllib.request, "urlopen", urlopen)

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .corpus import select_orientation_events
@@ -33,35 +31,28 @@ class PrContextStageError(RuntimeError):
     """Failure attributed to one named PR-context enrichment stage."""
 
     def __init__(
-        self, stage: str, cause: Exception, *, meta: dict[str, Any] | None = None
+        self,
+        stage: str,
+        cause: Exception,
+        *,
+        meta: dict[str, Any] | None = None,
+        discussion: list[dict[str, Any]] | None = None,
     ) -> None:
         self.stage = stage
         self.meta = dict(meta or {})
+        self.discussion = list(discussion) if discussion is not None else None
         super().__init__(str(cause))
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def build_pr_context(
     *,
     pr: Any,
-    work_dir: str | Path,
     pr_stats: dict[str, Any] | None,
     gh_fetch: GhFetch,
     run_llm: RunLlm,
     usage_observer: UsageObserver | None = None,
 ) -> dict[str, Any]:
-    """Fetch, preserve, select, and orient remote discussion only."""
-    work = Path(work_dir)
+    """Fetch, preserve, select, and orient remote discussion without persistence."""
     total_started = time.monotonic()
     fetch_started = time.monotonic()
     fetched_count = 0
@@ -101,24 +92,6 @@ def build_pr_context(
         "fetched": fetched_count, "normalized": len(discussion), "selected": 0,
         "omitted": 0, "truncated_events": 0,
     }
-    try:
-        _write_json(work / "pr_context_discussion.json", discussion)
-    except Exception as exc:
-        raise PrContextStageError(
-            "artifact_write_failed",
-            exc,
-            meta={
-                "counts": base_counts,
-                "latency_ms": {
-                    "fetch": fetch_ms,
-                    "selection": 0,
-                    "orientation": 0,
-                    "total_enrichment": int(
-                        max(0.0, time.monotonic() - total_started) * 1000
-                    ),
-                },
-            },
-        ) from exc
     if not discussion:
         return {
             "orientation_brief": "", "discussion": discussion, "selected_discussion": [],
@@ -152,6 +125,7 @@ def build_pr_context(
                     ),
                 },
             },
+            discussion=discussion,
         ) from exc
     selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
     counts = {
@@ -199,6 +173,7 @@ def build_pr_context(
                     ),
                 },
             },
+            discussion=discussion,
         ) from exc
     try:
         usage = usage_observer() if usage_observer is not None else None

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import posixpath
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -168,38 +171,128 @@ def _classify_gh_api_list_error(error: ReviewflowSubprocessError) -> str:
     return "subprocess"
 
 
+_PUBLIC_LIST_TIMEOUT_SECONDS = 30.0
+_PUBLIC_LIST_MAX_PAGES = 100
+_UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        raise ReviewflowError(f"Public GitHub API redirect rejected ({code}): {req.full_url}")
+
+
+def _decode_unreserved_escapes(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        char = chr(int(match.group(1), 16))
+        return char if char in _UNRESERVED else f"%{match.group(1).upper()}"
+
+    return re.sub(r"%([0-9A-Fa-f]{2})", replace, value)
+
+
+def _canonical_public_list_url(url: str) -> tuple[str, str]:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ReviewflowError(f"Public GitHub API returned malformed next URL: {url}") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != "api.github.com"
+        or (port not in {None, 443})
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+    ):
+        raise ReviewflowError(f"Public GitHub API returned unsafe next URL origin: {url}")
+    raw_path = parsed.path or "/"
+    normalized_path = posixpath.normpath(_decode_unreserved_escapes(raw_path))
+    if not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+    canonical_query = _decode_unreserved_escapes(parsed.query)
+    canonical = urllib.parse.urlunsplit(
+        ("https", "api.github.com:443", normalized_path, canonical_query, "")
+    )
+    request_url = urllib.parse.urlunsplit(
+        ("https", "api.github.com", parsed.path or "/", parsed.query, "")
+    )
+    return request_url, canonical
+
+
+def _next_link(link_header: str) -> str:
+    for part in link_header.split(","):
+        if 'rel="next"' not in part:
+            continue
+        start = part.find("<")
+        end = part.find(">", start + 1)
+        if start >= 0 and end > start:
+            return part[start + 1 : end]
+    return ""
+
+
 def _github_public_api_list(*, path: str) -> list[Any]:
     normalized = path.lstrip("/")
-    url = f"https://api.github.com/{normalized}"
+    current_url = f"https://api.github.com/{normalized}"
+    opener = urllib.request.build_opener(_RejectRedirects())
     items: list[Any] = []
-    while url:
-        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"}, method="GET")
+    requested: set[str] = set()
+    page = 0
+    while current_url:
+        request_url, canonical = _canonical_public_list_url(current_url)
+        if canonical in requested:
+            raise ReviewflowError(f"Public GitHub API pagination cycle rejected: {request_url}")
+        if page >= _PUBLIC_LIST_MAX_PAGES:
+            raise ReviewflowError("Public GitHub API pagination exceeded 100 pages")
+        requested.add(canonical)
+        page += 1
+        req = urllib.request.Request(
+            request_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "cure/0.1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="GET",
+        )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with opener.open(req, timeout=_PUBLIC_LIST_TIMEOUT_SECONDS) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 link_header = resp.headers.get("Link", "")
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
+        except ReviewflowError:
+            raise
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
             raise ReviewflowError(
-                f"Public GitHub API request failed ({getattr(e, 'code', '?')}): {normalized}\n{body}"
-            ) from e
-        except urllib.error.URLError as e:
-            raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
+                f"Public GitHub API request failed ({getattr(exc, 'code', '?')}): {normalized}\n{body}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{exc}") from exc
         try:
             payload = json.loads(body)
-        except Exception as e:
-            raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
+        except Exception as exc:
+            raise ReviewflowError(
+                f"Public GitHub API returned invalid JSON for {normalized}: {exc}"
+            ) from exc
         if not isinstance(payload, list):
-            raise ReviewflowError(f"Public GitHub API returned unexpected list payload for {normalized}")
+            raise ReviewflowError(
+                f"Public GitHub API returned unexpected list payload for {normalized}"
+            )
         items.extend(payload)
-        next_url = ""
-        for part in link_header.split(","):
-            if 'rel="next"' in part:
-                start = part.find("<")
-                end = part.find(">", start + 1)
-                if start >= 0 and end > start:
-                    next_url = part[start + 1 : end]
-        url = next_url
+        next_value = _next_link(link_header)
+        if not next_value:
+            current_url = ""
+            continue
+        if page >= _PUBLIC_LIST_MAX_PAGES:
+            raise ReviewflowError("Public GitHub API pagination exceeded 100 pages")
+        try:
+            current_url = urllib.parse.urljoin(request_url, next_value)
+        except (TypeError, ValueError) as exc:
+            raise ReviewflowError(
+                f"Public GitHub API returned malformed next URL: {next_value}"
+            ) from exc
+        # Validate before the next request, including cycle/origin checks.
+        _, next_canonical = _canonical_public_list_url(current_url)
+        if next_canonical in requested:
+            raise ReviewflowError(f"Public GitHub API pagination cycle rejected: {current_url}")
     return items
 
 

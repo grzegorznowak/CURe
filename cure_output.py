@@ -581,6 +581,7 @@ class ReviewflowOutput:
         check: bool,
         stream_requested: bool,
         codex_json_events_path: Path | None = None,
+        codex_display_log_path: Path | None = None,
         codex_event_callback: Callable[[dict[str, Any]], None] | None = None,
         stream_text_callback: Callable[[str], None] | None = None,
     ):
@@ -590,11 +591,19 @@ class ReviewflowOutput:
         if stream:
             sink: Any = self.stream_sink(kind)
             raw_fh: TextIO | None = None
+            display_fh: TextIO | None = None
             try:
                 if capture_codex_json:
                     assert codex_json_events_path is not None
                     codex_json_events_path.parent.mkdir(parents=True, exist_ok=True)
                     raw_fh = codex_json_events_path.open("a", encoding="utf-8", buffering=1)
+                    display_file = self.codex_log
+                    if codex_display_log_path is not None:
+                        codex_display_log_path.parent.mkdir(parents=True, exist_ok=True)
+                        display_fh = codex_display_log_path.open(
+                            "a", encoding="utf-8", buffering=1
+                        )
+                        display_file = display_fh
                     also_to = (
                         None
                         if (self.ui_enabled or self.no_stream or self.verbosity is Verbosity.quiet)
@@ -602,7 +611,7 @@ class ReviewflowOutput:
                     )
                     sink = CodexJsonEventSink(
                         raw_file=raw_fh,
-                        display_file=self.codex_log,
+                        display_file=display_file,
                         tail=self.tails["codex"],
                         also_to=also_to,
                         on_activity=self.state.ping,
@@ -620,16 +629,21 @@ class ReviewflowOutput:
                     stream_label=label,
                 )
             finally:
+                active_exception = sys.exc_info()[0] is not None
+                cleanup_error: Exception | None = None
+                cleanup_actions: list[Callable[[], object]] = []
                 if raw_fh is not None:
+                    cleanup_actions.extend((sink.flush, raw_fh.flush, raw_fh.close))
+                if display_fh is not None:
+                    cleanup_actions.extend((display_fh.flush, display_fh.close))
+                for cleanup in cleanup_actions:
                     try:
-                        sink.flush()
-                    except Exception:
-                        pass
-                    try:
-                        raw_fh.flush()
-                        raw_fh.close()
-                    except Exception:
-                        pass
+                        cleanup()
+                    except Exception as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                if cleanup_error is not None and not active_exception:
+                    raise cleanup_error
         res = run_cmd(cmd, cwd=cwd, env=env, check=check, stream=False)
         try:
             self.stream_sink(kind).write(res.stdout)

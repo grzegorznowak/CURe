@@ -43,22 +43,26 @@ USAGE_INSTRUCTIONS = '''INSTRUCTIONS FOR USING PRIOR_CONTEXT:
 
 
 def _markdown_structure(text: str) -> tuple[set[str], tuple[str, int] | None]:
+    """Scan CommonMark-style structural headings and fences used by fresh/resume validation."""
     headings: set[str] = set()
     open_fence: tuple[str, int] | None = None
     for line in text.splitlines():
-        stripped = line.lstrip()
+        structural = re.match(r"^[ ]{0,3}(.*)$", line)
+        if structural is None:  # Four or more spaces are indented code.
+            continue
+        content = structural.group(1)
         if open_fence is None:
-            opener = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
+            opener = re.match(r"^(`{3,}|~{3,})(.*)$", content)
             if opener is not None:
                 run = opener.group(1)
                 open_fence = (run[0], len(run))
                 continue
-            heading = re.match(r"^##[ \t]+(.+?)[ \t]*$", line)
+            heading = re.match(r"^##[ \t]+(.+?)[ \t]*$", content)
             if heading is not None:
                 headings.add(heading.group(1))
             continue
 
-        closer = re.match(r"^(`{3,}|~{3,})[ \t]*$", stripped)
+        closer = re.match(r"^(`{3,}|~{3,})[ \t]*$", content)
         if closer is not None:
             run = closer.group(1)
             if run[0] == open_fence[0] and len(run) >= open_fence[1]:

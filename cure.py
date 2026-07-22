@@ -9064,11 +9064,10 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _finalize_and_persist_fresh_pr_context(
     *,
-    work_dir: Path,
     context_meta: dict[str, Any],
     built: dict[str, Any],
 ) -> str:
-    """Independently cap, account for, and byte-exactly persist fresh context."""
+    """Independently cap/account for fresh context; publication is route-owned."""
     source_brief = str(built.get("orientation_brief") or "")
     try:
         finalized = finalize_injected_context(source_brief) if source_brief else {
@@ -9082,11 +9081,36 @@ def _finalize_and_persist_fresh_pr_context(
     apply_build_metadata(context_meta, built, brief)
     context_meta["estimated_tokens"]["injected"] = int(finalized["estimated_tokens"])
     context_meta["truncation"]["injected_context"] = bool(finalized["truncated"])
-    context_meta["persistence"]["discussion_artifact"] = "written"
-    if brief:
-        atomic_write_persisted_context(work_dir / "pr_context_orientation.md", brief)
-        context_meta["persistence"]["orientation_artifact"] = "written"
     return brief
+
+
+def _publish_fresh_pr_context(
+    *, work_dir: Path, built: dict[str, Any], brief: str, include_brief: bool
+) -> None:
+    discussion = built.get("discussion")
+    if not isinstance(discussion, list):
+        raise ReviewflowError("PR-context build result has no discussion list")
+    _atomic_write_text(
+        work_dir / "pr_context_discussion.json",
+        json.dumps(discussion, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+    if include_brief and brief:
+        atomic_write_persisted_context(work_dir / "pr_context_orientation.md", brief)
+
+
+def _remove_fresh_pr_context_artifacts(work_dir: Path) -> None:
+    paths = (
+        work_dir / "pr_context_discussion.json",
+        work_dir / "pr_context_orientation.raw.md",
+        work_dir / "pr_context_orientation.md",
+    )
+    for path in paths:
+        path.unlink(missing_ok=True)
+    remaining = [str(path) for path in paths if path.exists()]
+    if remaining:
+        raise ReviewflowError(
+            "Could not establish PR-context artifact absence: " + ", ".join(remaining)
+        )
 
 
 def _render_synth_prompt_with_prior_context(
@@ -9238,6 +9262,16 @@ def _execute_pr_context_synth_with_fallback(
         record_elapsed()
         warn(f"PR context degraded (context_synthesis_failed): {exc}")
         flush()
+    except Exception:
+        record_usage("delivery", observed_usage())
+        context_meta.update(
+            outcome="degraded",
+            reason="delivery_validation_failed",
+            context_mode="on",
+        )
+        record_elapsed()
+        flush()
+        raise
 
     fallback_prompt = render_synth("")
     try:
@@ -9511,6 +9545,7 @@ def _pr_flow_impl(
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
+    pr_context_result: dict[str, Any] | None = None
     prior_context: str = ""
     context_bearing_singlepass = False
     singlepass_output_path = review_md_path
@@ -9757,40 +9792,90 @@ def _pr_flow_impl(
                 progress.flush()
 
             orientation_usage: dict[str, int] | None = None
+            orientation_runtime_roots: list[Path] = []
+
+            def _assert_orientation_runtime_absent() -> None:
+                remaining = [str(path) for path in orientation_runtime_roots if path.exists()]
+                if remaining:
+                    raise ReviewflowError(
+                        "PR-context orientation runtime cleanup failed: " + ", ".join(remaining)
+                    )
 
             def _run_pr_context_orientation(prompt: str) -> str:
                 nonlocal orientation_usage
-                raw_orientation_path = work_dir / "pr_context_orientation.raw.md"
-                raw_orientation_path.unlink(missing_ok=True)
-                orientation_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
-                try:
-                    orientation_result = run_llm_exec(
-                        repo_dir=repo_dir,
-                        resolved=llm_resolved,
-                        resolution_meta=llm_resolution_meta,
-                        output_path=raw_orientation_path,
-                        prompt=prompt,
-                        env=orientation_env,
-                        stream=False,
-                        progress=progress,
-                        add_dirs=[],
-                        runtime_policy=None,
-                    )
-                except ReviewflowSubprocessError as exc:
-                    raise OrientationProviderExecutionFailure(exc) from exc
-                orientation_usage = _normalize_llm_usage(
-                    orientation_result.adapter_meta.get("usage")
+                runtime_root = session_dir / (
+                    ".pr-context-orientation-runtime-" + secrets.token_hex(8)
                 )
-                if not raw_orientation_path.is_file():
-                    raise ReviewflowError("PR-context orientation did not produce a fresh output artifact")
-                return raw_orientation_path.read_text(encoding="utf-8")
+                orientation_runtime_roots.append(runtime_root)
+                runtime_root.mkdir(parents=True, exist_ok=False)
+                raw_orientation_path = runtime_root / "pr_context_orientation.raw.md"
+                orientation_env = apply_llm_env(
+                    build_curated_subprocess_env(), resolved=llm_resolved
+                )
+                orientation_progress = SessionProgress(
+                    runtime_root / "meta.json", quiet=True
+                )
+                orientation_progress.init(
+                    {
+                        "kind": "pr_context_orientation",
+                        "logs": {
+                            "codex_events": str(
+                                runtime_root / "logs" / "codex.events.jsonl"
+                            ),
+                            "codex": str(runtime_root / "logs" / "codex.log"),
+                        },
+                    }
+                )
+                if str(llm_resolved.get("provider") or "") == "codex":
+                    source_home = Path(
+                        orientation_env.get("CODEX_HOME")
+                        or (real_user_home_dir() / ".codex")
+                    )
+                    orientation_codex_home = runtime_root / "codex-home"
+                    orientation_codex_home.mkdir()
+                    for name in ("auth.json", "config.toml"):
+                        source = source_home / name
+                        if source.exists():
+                            if not source.is_file():
+                                raise ReviewflowError(
+                                    f"PR-context Codex input is not a regular file: {source}"
+                                )
+                            shutil.copy2(source, orientation_codex_home / name)
+                    orientation_env["CODEX_HOME"] = str(orientation_codex_home)
+                try:
+                    try:
+                        orientation_result = run_llm_exec(
+                            repo_dir=repo_dir,
+                            resolved=llm_resolved,
+                            resolution_meta=llm_resolution_meta,
+                            output_path=raw_orientation_path,
+                            prompt=prompt,
+                            env=orientation_env,
+                            stream=False,
+                            progress=orientation_progress,
+                            add_dirs=[],
+                            runtime_policy=None,
+                        )
+                    except ReviewflowSubprocessError as exc:
+                        raise OrientationProviderExecutionFailure(exc) from exc
+                    orientation_usage = _normalize_llm_usage(
+                        orientation_result.adapter_meta.get("usage")
+                    )
+                    if not raw_orientation_path.is_file():
+                        raise ReviewflowError(
+                            "PR-context orientation did not produce a fresh output artifact"
+                        )
+                    return raw_orientation_path.read_text(encoding="utf-8")
+                finally:
+                    shutil.rmtree(runtime_root)
+                    _assert_orientation_runtime_absent()
 
             if pr_context_meta["enabled"] and pr_context_meta["eligible"]:
                 with phase("build_pr_context", progress=progress, quiet=quiet):
                     try:
+                        _remove_fresh_pr_context_artifacts(work_dir)
                         pr_context_result = build_pr_context(
                             pr=pr,
-                            work_dir=work_dir,
                             pr_stats=pr_stats,
                             gh_fetch=lambda path: gh_api_list(
                                 host=pr.host, path=path, allow_public_fallback=True
@@ -9800,10 +9885,17 @@ def _pr_flow_impl(
                         )
                         try:
                             prior_context = _finalize_and_persist_fresh_pr_context(
-                                work_dir=work_dir,
                                 context_meta=pr_context_meta,
                                 built=pr_context_result,
                             )
+                            if not pr_context_result.get("discussion"):
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                                pr_context_meta["persistence"]["discussion_artifact"] = "written"
                         except (OSError, UnicodeError) as exc:
                             prior_context = ""
                             pr_context_meta.update(
@@ -9828,6 +9920,13 @@ def _pr_flow_impl(
                             )
                     except PrContextStageError as exc:
                         prior_context = ""
+                        if exc.discussion is not None:
+                            pr_context_result = {
+                                "discussion": exc.discussion,
+                                "orientation_brief": "",
+                                "selected_discussion": [],
+                                "meta": exc.meta,
+                            }
                         apply_build_metadata(
                             pr_context_meta, {"meta": exc.meta}, ""
                         )
@@ -9837,8 +9936,6 @@ def _pr_flow_impl(
                         if exc.stage == "artifact_write_failed":
                             pr_context_meta["persistence"]["discussion_artifact"] = "failed"
                             pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
-                        elif exc.stage in {"selection_failed", "orientation_failed"}:
-                            pr_context_meta["persistence"]["discussion_artifact"] = "written"
                         log(f"PR context degraded ({exc.stage}): {exc}", quiet=quiet)
                     if not prior_context:
                         _flush_fresh_pr_context_authority()
@@ -10162,6 +10259,7 @@ def _pr_flow_impl(
                 progress.flush()
 
                 plan_tool_report: dict[str, Any] | None = None
+                _assert_orientation_runtime_absent()
                 with phase("multipass_plan", progress=progress, quiet=quiet):
                     plan_template = load_builtin_prompt_text(templates["plan"])
                     plan_prompt = render_prompt(
@@ -10279,6 +10377,49 @@ def _pr_flow_impl(
                             meta=progress.meta, markdown_path=review_md_path
                         ) is not None:
                             progress.flush()
+                        if isinstance(pr_context_result, dict):
+                            try:
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                            except (OSError, UnicodeError) as exc:
+                                pr_context_meta.update(
+                                    outcome="degraded",
+                                    reason="artifact_write_failed",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"]["warning"] = (
+                                    "artifact_write_failed"
+                                )
+                                log(
+                                    f"PR context degraded (artifact_write_failed): {exc}",
+                                    quiet=quiet,
+                                )
+                            else:
+                                pr_context_meta.update(
+                                    outcome="bypassed",
+                                    reason="plan_aborted",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "not_attempted"
+                            _flush_fresh_pr_context_authority()
+                            _mirror_pr_context_metadata(
+                                progress=progress,
+                                work_dir=work_dir,
+                                context_meta=pr_context_meta,
+                                quiet=quiet,
+                            )
                         progress.done()
                         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
                         success_markdown_path = review_md_path
@@ -10435,10 +10576,58 @@ def _pr_flow_impl(
                                 multipass_cfg=multipass_defaults,
                             )
 
+                        delivery_context = prior_context
+                        published_for_delivery = False
+                        if delivery_context:
+                            try:
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief=delivery_context,
+                                    include_brief=True,
+                                )
+                            except (OSError, UnicodeError) as exc:
+                                _remove_fresh_pr_context_artifacts(work_dir)
+                                delivery_context = ""
+                                pr_context_meta.update(
+                                    outcome="degraded",
+                                    reason="artifact_write_failed",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"]["warning"] = (
+                                    "artifact_write_failed"
+                                )
+                                log(
+                                    f"PR context degraded (artifact_write_failed): {exc}",
+                                    quiet=quiet,
+                                )
+                                _flush_fresh_pr_context_authority()
+                            else:
+                                published_for_delivery = True
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "written"
+
+                        def _render_fresh_synth_with_cleanup(context: str) -> str:
+                            nonlocal published_for_delivery
+                            if not context and published_for_delivery:
+                                _remove_fresh_pr_context_artifacts(work_dir)
+                                published_for_delivery = False
+                            return _render_fresh_synth(context)
+
                         success_resume_command = _execute_pr_context_synth_with_fallback(
-                            prior_context=prior_context,
+                            prior_context=delivery_context,
                             context_meta=pr_context_meta,
-                            render_synth=_render_fresh_synth,
+                            render_synth=_render_fresh_synth_with_cleanup,
                             execute_synth=_execute_fresh_synth,
                             flush=_flush_fresh_pr_context_authority,
                             warn=lambda message: log(message, quiet=quiet),
@@ -10447,8 +10636,22 @@ def _pr_flow_impl(
                                 progress.meta, kind="synth"
                             ),
                             clock=_pr_context_monotonic,
+                            delivery_entered=bool(prior_context),
                         )
                         if prior_context:
+                            if pr_context_meta.get("context_mode") == "off":
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "not_attempted"
                             _flush_fresh_pr_context_authority()
 
                     progress.meta.setdefault("multipass", {})["status"] = "done"
@@ -10524,6 +10727,7 @@ def _pr_flow_impl(
                 )
                 if context_bearing_singlepass:
                     singlepass_output_path.unlink(missing_ok=True)
+                _assert_orientation_runtime_absent()
                 with phase(
                     _singlepass_review_phase_name(provider=llm_resolved.get("provider")),
                     progress=progress,
@@ -10574,7 +10778,38 @@ def _pr_flow_impl(
                         )
                     progress.flush()
 
-        # Two-pass singlepass: reconcile draft with prior context (Option B rules).
+        # Two-pass singlepass: publish only after the blind draft, immediately before reconcile.
+        if (not use_multipass) and context_bearing_singlepass:
+            try:
+                _publish_fresh_pr_context(
+                    work_dir=work_dir,
+                    built=pr_context_result,
+                    brief=prior_context,
+                    include_brief=True,
+                )
+            except (OSError, UnicodeError) as exc:
+                _remove_fresh_pr_context_artifacts(work_dir)
+                _atomic_write_text(
+                    review_md_path,
+                    singlepass_output_path.read_text(encoding="utf-8"),
+                )
+                pr_context_meta.update(
+                    outcome="degraded",
+                    reason="artifact_write_failed",
+                    context_mode="off",
+                )
+                pr_context_meta["estimated_tokens"]["injected"] = 0
+                pr_context_meta["truncation"]["injected_context"] = False
+                pr_context_meta["persistence"]["discussion_artifact"] = "failed"
+                pr_context_meta["persistence"]["orientation_artifact"] = "failed"
+                pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                log(f"PR context degraded (artifact_write_failed): {exc}", quiet=quiet)
+                context_bearing_singlepass = False
+                _flush_fresh_pr_context_authority()
+            else:
+                pr_context_meta["persistence"]["discussion_artifact"] = "written"
+                pr_context_meta["persistence"]["orientation_artifact"] = "written"
+
         # Enrichment failure retains the ordinary blind draft.
         if (not use_multipass) and context_bearing_singlepass:
             with phase("reconcile_prior_context", progress=progress, quiet=quiet):
@@ -10653,6 +10888,33 @@ def _pr_flow_impl(
                         outcome="used", reason="context_delivered", context_mode="on"
                     )
                 _flush_fresh_pr_context_authority()
+
+        if (
+            isinstance(pr_context_result, dict)
+            and pr_context_result.get("discussion")
+            and pr_context_meta["persistence"]["discussion_artifact"] == "not_attempted"
+        ):
+            try:
+                _publish_fresh_pr_context(
+                    work_dir=work_dir,
+                    built=pr_context_result,
+                    brief="",
+                    include_brief=False,
+                )
+            except (OSError, UnicodeError) as exc:
+                if pr_context_meta.get("outcome") != "degraded":
+                    pr_context_meta.update(
+                        outcome="degraded",
+                        reason="artifact_write_failed",
+                        context_mode="off",
+                    )
+                pr_context_meta["persistence"]["discussion_artifact"] = "failed"
+                pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                log(f"PR context degraded (artifact_write_failed): {exc}", quiet=quiet)
+            else:
+                pr_context_meta["persistence"]["discussion_artifact"] = "written"
+            progress.meta["pr_context"] = pr_context_meta
+            progress.flush()
 
         context_meta = progress.meta.get("pr_context")
         if isinstance(context_meta, dict):

@@ -8688,8 +8688,16 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     mock.patch.object(rf, "gh_api_list", side_effect=gh_api_list_side_effect)
                 )
             if pr_context_result_override is not None:
+                pr_context_result = dict(pr_context_result_override)
+                if "discussion" not in pr_context_result:
+                    pr_context_result["discussion"] = (
+                        [{"kind": "issue_comment", "event_id": "proof-1", "body": "discussion"}]
+                        if pr_context_result.get("orientation_brief")
+                        else []
+                    )
+                pr_context_result.setdefault("selected_discussion", list(pr_context_result["discussion"]))
                 stack.enter_context(
-                    mock.patch.object(rf, "build_pr_context", return_value=pr_context_result_override)
+                    mock.patch.object(rf, "build_pr_context", return_value=pr_context_result)
                 )
             stack.enter_context(
                 mock.patch.object(
@@ -9516,13 +9524,13 @@ class CodexToolProofFlowTests(unittest.TestCase):
             ),
             "discussion_write": (
                 "artifact_write_failed",
-                {"fetched": 1, "normalized": 1, "selected": 0, "omitted": 0, "truncated_events": 0},
-                {"discussion_artifact": "failed", "orientation_artifact": "not_attempted", "meta_artifact": "written", "warning": None},
+                {"fetched": 1, "normalized": 1, "selected": 1, "omitted": 0, "truncated_events": 0},
+                {"discussion_artifact": "failed", "orientation_artifact": "failed", "meta_artifact": "written", "warning": None},
             ),
             "orientation_write": (
                 "artifact_write_failed",
                 {"fetched": 1, "normalized": 1, "selected": 1, "omitted": 0, "truncated_events": 0},
-                {"discussion_artifact": "written", "orientation_artifact": "failed", "meta_artifact": "written", "warning": None},
+                {"discussion_artifact": "failed", "orientation_artifact": "failed", "meta_artifact": "written", "warning": None},
             ),
         }
         event = {
@@ -9554,7 +9562,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             )
                         output_path.write_text("## Problem areas\n- inspect", encoding="utf-8")
                         return rf.LlmRunResult(adapter_meta={"usage": {"input_tokens": 17, "output_tokens": 5}})
-                    self.assertEqual(output_path.name, "review.md")
+                    expected_output = (
+                        "pr_context_draft.md"
+                        if stage in {"discussion_write", "orientation_write"}
+                        else "review.md"
+                    )
+                    self.assertEqual(output_path.name, expected_output)
                     output_path.write_text("ordinary context-free review\n", encoding="utf-8")
                     return rf.LlmRunResult(
                         adapter_meta=self._write_helper_command_events(
@@ -9583,7 +9596,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             ))
                         elif stage == "discussion_write":
                             stack.enter_context(mock.patch.object(
-                                context_package, "_write_json",
+                                rf, "_publish_fresh_pr_context",
                                 side_effect=OSError("discussion write exploded"),
                             ))
                         elif stage == "orientation_finalizer":
@@ -9603,8 +9616,13 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
                     context_meta = authoritative["pr_context"]
                     mirror = json.loads((session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8"))
-                    self.assertEqual(calls[-1:], ["review.md"])
-                    self.assertEqual(calls.count("review.md"), 1)
+                    expected_review_call = (
+                        "pr_context_draft.md"
+                        if stage in {"discussion_write", "orientation_write"}
+                        else "review.md"
+                    )
+                    self.assertEqual(calls[-1:], [expected_review_call])
+                    self.assertEqual(calls.count(expected_review_call), 1)
                     self.assertEqual(
                         (context_meta["outcome"], context_meta["reason"], context_meta["context_mode"]),
                         ("degraded", reason, "off"),
@@ -9614,7 +9632,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         context_meta["latency_ms"],
                         {"fetch": 0, "selection": 0, "orientation": 0, "delivery": 0, "total_enrichment": 500},
                     )
-                    expected_orientation_usage = 17 if stage in {"orientation_finalizer", "orientation_write"} else None
+                    expected_orientation_usage = 17 if stage in {"orientation_finalizer", "discussion_write", "orientation_write"} else None
                     self.assertEqual(
                         context_meta["provider_usage"],
                         {
@@ -9627,9 +9645,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         },
                     )
                     estimated = {
-                        "selected_events": 41 if stage.startswith("orientation") else 0,
-                        "orientation_prompt": 231 if stage.startswith("orientation") else 0,
-                        "orientation_output": 151 if stage == "orientation_write" else 0,
+                        "selected_events": 41 if stage in {"orientation_provider", "orientation_finalizer", "discussion_write", "orientation_write"} else 0,
+                        "orientation_prompt": 231 if stage in {"orientation_provider", "orientation_finalizer", "discussion_write", "orientation_write"} else 0,
+                        "orientation_output": 151 if stage in {"discussion_write", "orientation_write"} else 0,
                         "injected": 0,
                     }
                     expected_context_meta = {
@@ -15427,7 +15445,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
             calls: list[str] = []
             synth_prompts: list[str] = []
-            mode = {"fatal": False}
+            mode = {"fatal": False, "validation": False}
 
             def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
                 output_path = Path(str(kwargs["output_path"]))
@@ -15435,7 +15453,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 synth_prompts.append(str(kwargs["prompt"]))
                 if output_path.name != "review.md":
                     raise AssertionError(f"unexpected rerun during synth-only resume: {output_path.name}")
-                if mode["fatal"] or len(synth_prompts) == 1:
+                if (not mode["validation"]) and (mode["fatal"] or len(synth_prompts) == 1):
                     raise rf._PrContextSynthesisExecutionFailure(
                         rf.ReviewflowSubprocessError(
                             cmd=["provider", "regular resume synth failed"], cwd=None, exit_code=1, stdout="", stderr="regular resume synth failed"
@@ -15606,8 +15624,42 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                     rf.ReviewflowSubprocessError, "regular resume synth failed"
                 ):
                     rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                fatal_calls = list(calls)
+                fatal_prompts = list(synth_prompts)
+                fatal_refreshed = json.loads(
+                    (session_dir / "meta.json").read_text(encoding="utf-8")
+                )
 
-            fatal_refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+                mode.update(fatal=False, validation=True)
+                calls.clear()
+                synth_prompts.clear()
+                review_md.unlink(missing_ok=True)
+                (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+                (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+                validation_failure = ValueError("regular resume post-provider validation failed")
+                with (
+                    mock.patch.object(
+                        rf, "_validate_or_reuse_synth_artifact", side_effect=validation_failure
+                    ),
+                    self.assertRaises(ValueError) as validation_raised,
+                ):
+                    rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
+                self.assertIs(validation_raised.exception, validation_failure)
+                validation_refreshed = json.loads(
+                    (session_dir / "meta.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(len(synth_prompts), 1)
+                self.assertIn(persisted_brief, synth_prompts[0])
+                self.assertEqual(
+                    validation_refreshed["pr_context"]["reason"],
+                    "delivery_validation_failed",
+                )
+                self.assertEqual(
+                    validation_refreshed["pr_context"]["provider_usage"]["delivery_input_tokens"],
+                    1,
+                )
+                self.assertFalse((work_dir / "pr_context_meta.json").exists())
+
             self.assertEqual(rc, 0)
             self.assertEqual(len(success_prompts), 2)
             self.assertIn(persisted_brief, success_prompts[0])
@@ -15616,10 +15668,10 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertNotIn(sentinel, success_prompts[1])
             self.assertEqual(success_refreshed["pr_context"]["reason"], "context_synthesis_failed")
             self.assertEqual(success_refreshed["pr_context"]["context_mode"], "off")
-            self.assertEqual(calls, ["review.md", "review.md"])
-            self.assertEqual(len(synth_prompts), 2)
-            self.assertIn(sentinel, synth_prompts[0])
-            self.assertNotIn(sentinel, synth_prompts[1])
+            self.assertEqual(fatal_calls, ["review.md", "review.md"])
+            self.assertEqual(len(fatal_prompts), 2)
+            self.assertIn(sentinel, fatal_prompts[0])
+            self.assertNotIn(sentinel, fatal_prompts[1])
             self.assertEqual(fatal_refreshed["pr_context"]["reason"], "context_synthesis_failed")
             self.assertEqual(fatal_refreshed["status"], "error")
             self.assertFalse((work_dir / "pr_context_meta.json").exists())
@@ -17552,7 +17604,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
 
             synth_prompts: list[str] = []
             synth_attempts: list[dict[str, object]] = []
-            mode = {"fatal": False}
+            mode = {"fatal": False, "validation": False}
 
             def fake_execute_multipass_synth_stage(**kwargs: Any) -> None:
                 synth_prompts.append(str(kwargs["synth_prompt"]))
@@ -17572,6 +17624,8 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 progress.meta.setdefault("multipass", {}).setdefault("runs", []).append(
                     {"kind": "resume_synth", "usage": usage}
                 )
+                if mode["validation"]:
+                    raise ValueError("incremental resume post-provider validation failed")
                 if mode["fatal"] or persisted_brief in synth_prompts[-1]:
                     raise rf._PrContextSynthesisExecutionFailure(
                         rf.ReviewflowSubprocessError(
@@ -17802,4 +17856,40 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             self.assertNotIn(persisted_brief, synth_prompts[1])
             fatal_meta = json.loads(meta_path.read_text(encoding="utf-8"))
             self.assertEqual(fatal_meta["pr_context"]["reason"], "context_synthesis_failed")
+            self.assertFalse((work_dir / "pr_context_meta.json").exists())
+
+            mode.update(fatal=False, validation=True)
+            synth_prompts.clear()
+            synth_attempts.clear()
+            progress.init(json.loads(json.dumps(initial_meta)))
+            (work_dir / "pr_context_meta.json").unlink(missing_ok=True)
+            validation_failure = "incremental resume post-provider validation failed"
+            with (
+                mock.patch.object(rf, "run_llm_exec", return_value=llm_result),
+                mock.patch.object(
+                    rf,
+                    "parse_incremental_resume_plan_json",
+                    return_value={"decision": "synth_only", "reason": "small delta", "reopen_step_ids": [], "new_steps": []},
+                ),
+                mock.patch.object(rf, "_record_multipass_stage_llm"),
+                mock.patch.object(rf, "record_llm_usage"),
+                mock.patch.object(rf, "record_llm_resume", return_value=None),
+                mock.patch.object(rf, "_enforce_chunkhound_tool_proof"),
+                mock.patch.object(rf, "_build_incremental_resume_step_entries", return_value=step_entries),
+                mock.patch.object(rf, "_prepare_synth_inputs", return_value=([str(step_output)], "- None.")),
+                mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=fake_execute_multipass_synth_stage),
+                mock.patch.object(rf, "_pr_context_monotonic", side_effect=[40.0, 40.1, 40.2, 40.3]),
+                self.assertRaisesRegex(ValueError, validation_failure),
+            ):
+                run_incremental()
+            validation_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(synth_prompts), 1)
+            self.assertIn(persisted_brief, synth_prompts[0])
+            self.assertEqual(
+                validation_meta["pr_context"]["reason"], "delivery_validation_failed"
+            )
+            self.assertEqual(
+                validation_meta["pr_context"]["provider_usage"]["delivery_input_tokens"],
+                11,
+            )
             self.assertFalse((work_dir / "pr_context_meta.json").exists())

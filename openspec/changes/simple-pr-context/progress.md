@@ -1,13 +1,13 @@
 # Progress: simple-pr-context
 
 ## Current Claim
-- Claimed at: 2026-07-20T12:22:10Z
-- Claimed by: pi coding agent fresh session (resume)
+- Claimed at: 2026-07-22T05:21:20Z
+- Claimed by: pi coding agent focused child session (resume)
 - Model: coding agent
-- Scope: Remediate GATE-001, PRC-001, and PRC-002 from the latest implementation review with RED-first prompt provenance proof, canonical complete-delta Ruff coverage, and sole D-15 validator ownership.
+- Scope: Close the remaining integrated R15 orientation-runtime capability proof and reconcile only if every canonical gate passes; exclude FB-035/FB-039.
 - Main-tree targets: CURe
-- Primary write surfaces: `cure.py`, `prompts/mrereview_gh_local_big_synth.md`, targeted prompt/proof owners, and OpenSpec coordination artifacts; preserve unrelated dirty work
-- Status: 🟣 IN REVIEW
+- Primary write surfaces: `tests/test_cure_pr_flow.py`, bounded product seams genuinely exposed by RED, and OpenSpec coordination artifacts; preserve unrelated dirty work
+- Status: 🔄 IN PROGRESS
 
 ## PR State
 - PR URL: https://github.com/grzegorznowak/CURe/pull/28
@@ -22,6 +22,61 @@
 - Last synced: 2026-07-20T13:46:51Z
 
 ## Progress Timeline
+- [2026-07-22T06:29:19Z] **Delivery checkpoint**: Preserved the fresh review's `🔄 IN PROGRESS` lifecycle while preparing the operator-authorized default-off opt-in pilot push.
+  - Review: REQUEST CHANGES identified three follow-ups in fresh-launch isolation checking, integrated proof shape, and indented-code Markdown handling. The operator accepted them as non-release-blocking for this pilot; this does not claim review approval or `✅ DONE`.
+  - Test: PASS — full regression 812; complete 20-path Ruff; scoped mypy 7 files; merge-base diff hygiene.
+  - Delivery: PR #28 remains open on `simple-pr-context-impl`; commit and push authorized with FB-035/FB-039 still excluded.
+
+- [2026-07-22T05:29:16Z] **Step**: Completed R15 canonical reconciliation and transitioned the story to review.
+  - Changed: `cure_output.py`, `tests/test_cure_pr_flow.py`, `story.md`, `tasks.md`, and this progress record in this continuation; all prior dirty-tree product/test/coordination changes remain preserved.
+  - Test: PASS — named capability/pagination owners 2; flow 69; package/GitHub 95; runtime/flow 77; regular/incremental resume 4 plus 2 subtests; combined amended 607 plus 30 subtests; full regression 812; six Codex event/display/log regressions; complete 20-path Ruff; scoped mypy 7 files; disposable wheel/install/import; merge-base diff hygiene; default-off and structural S17–S32/A19–A34/TAP-14–TAP-23/D-09/D-14/D-18/D-19/D-20 gates.
+  - Notes: All three R15 tasks are checked and A22/A24/A25/A26/A29/A31/A32 are final. FB-035/FB-039 remain excluded. Status transition `🔄 IN PROGRESS` → `🟣 IN REVIEW`.
+
+- [2026-07-22T05:26:03Z] **Step**: Closed the remaining integrated orientation-runtime proof seam RED-first and corrected display-log cleanup propagation.
+  - Changed: `tests/test_cure_pr_flow.py` and `cure_output.py`.
+  - Test: RED — the genuine `_pr_flow_impl` display-log close-failure variant launched later review agents because `ReviewflowOutput.run_logged_cmd` swallowed cleanup failure; GREEN — the named integrated capability owner and pagination owner pass, plus six Codex event/display/log routing regressions and focused Ruff.
+  - Notes: The canonical owner now drives normal Codex JSON stdout through the real event sink from the genuine orientation invocation, confines rollout/raw/display/live-progress state to the invocation root, proves ordinary-session/inherited-home non-contamination and root deletion, and proves zero later review calls after display-route, display-close, or runtime-root cleanup failure.
+
+- [2026-07-22T05:21:20Z] **Resume**: Continue approved R15 at the remaining integrated orientation-runtime capability proof in the operator-designated dirty primary checkout.
+  Worktrees: none
+  Main-tree targets: CURe
+  Claim: Exercise normal Codex JSON stdout, rollout/event/display/live-progress confinement through the genuine `_pr_flow_impl` orientation invocation; inject display-routing/close and runtime-root cleanup failures; prove no later review agent launches; then run canonical gates and reconcile honestly.
+
+- [2026-07-21T15:47:03Z] **Step**: Added the missing named R15 proof owners, bounded malformed-next handling, and both-resume post-provider validation captures; all executable and release gates pass, but lifecycle remains IN PROGRESS pending a stricter proof-shape follow-up.
+  - Changed: `tests/test_cure_pr_flow.py`, `tests/test_cure_github.py`, `tests/_reviewflow_unittest_grounding_impl.py`, and `cure_github.py` plus this coordination record.
+  - Test: RED — malformed IPv6 pagination next escaped as raw `ValueError`; GREEN — named TAP owners, 31 adapter/fetch-degradation tests, regular/incremental resume captures, 607 combined plus 30 subtests, 812 full tests, 20-path Ruff, 7-file mypy, disposable wheel/install/import, and merge-base diff hygiene.
+  - Notes: The named capability owner now drives normal Codex JSON stdout through the real sink, confines rollout/raw/display/live-progress sentinel state, proves deletion, and latches to genuine singlepass/multipass/no-selected/parse-fallback/plan-abort routes. R15 remains unchecked because the normal-stdout confinement segment is composed adjacent to genuine `_pr_flow_impl` routes rather than produced by the same real-flow orientation invocation, and explicit display-close/runtime-root-cleanup failure injection with a no-review-agent assertion is still absent. No proof maturity was overstated.
+
+- [2026-07-21T15:38:11Z] **Resume**: Continue approved R15 from the prior partial implementation in the operator-designated dirty primary checkout.
+  Worktrees: none
+  Main-tree targets: CURe
+  Claim: Add and collect the missing named capability, pagination-degradation, and both-resume validation owners; correct only exposed seams; run canonical gates and reconcile honestly.
+
+- [2026-07-21T15:00:43Z] **Step**: Implemented bounded R15 product seams and passed all currently collected regression/quality gates, but retained IN PROGRESS because the approved canonical new real-flow owners are not yet complete.
+  - Changed: `cure.py`, `cure_llm.py`, `cure_output.py`, `cure_github.py`, `cure_pr_context/{__init__,orient}.py`, focused package/flow/adapter tests, and established grounding owners.
+  - Test: GREEN — combined amended 595 plus 30 subtests; full regression 800; canonical 20-path Ruff; scoped mypy 7 source files; disposable wheel/install/import smoke; merge-base diff hygiene.
+  - Notes: Implemented pure `build_pr_context`, delayed route-owned artifact publication, isolated orientation progress/Codex home/log routing and cleanup, shared 0–3-space Markdown grammar, bounded no-redirect same-origin transactional public pagination, and delivery-validation authority. R15 remains unchecked because `test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts` and `test_public_fallback_pagination_failure_degrades_context_free_without_partial_artifacts` do not yet exist, and the required real normal-JSON-stdout sentinel plus plan-parse-fallback/plan-abort/both-resume validation matrices have not been collected. FB-035/FB-039 remain excluded.
+
+- [2026-07-21T14:43:00Z] **Step**: Established initial R15 RED at pure-composition, shared-Markdown, and D-19 public-pagination boundaries.
+  - Changed: `tests/cure_pr_context/test_init.py`, `tests/cure_pr_context/test_orient.py`, and `tests/test_cure_github.py` only.
+  - Test: RED — pure `build_pr_context` signature still exposed `work_dir`; 1–3-space structural headings failed validation; bounded timeout/cross-origin pagination probes failed against the unbounded helper (cross-origin fixture timed out following the unsafe URL).
+  - Notes: No product source changed before these reproductions; existing already-correct 0-space and wrong/short fence behavior was not manufactured as RED.
+
+- [2026-07-21T14:41:06Z] **Resume**: Resume approved R15 implementation in the operator-designated dirty primary checkout while preserving all existing coordination edits.
+  Worktrees: none
+  Main-tree targets: CURe
+  Claim: Add executable RED seams, implement only the proved FB-034/FB-036/FB-037/FB-038 plus PLAN-010 repairs, and complete canonical verification without absorbing FB-035/FB-039.
+
+- [2026-07-21T12:31:23Z] **Replanning checkpoint from feedback absorption**
+  - Feedback IDs: FB-034, FB-036, FB-037, FB-038.
+  - Contract sections updated: `story.md` Plan/Status, Concrete Defaults, S20/S22/S23/S24/S32, A22/A24/A25/A26/A29/A31, Verification and feedback disposition, fail-open/input/surface/trace/risk/TAP/proof matrices, R15, D-09/D-14/D-18/D-19, Critical Files and Discovery Notes; aligned affected package/data-flow, orientation/resume, public-fallback, metadata, persistence/fail-open, and proof-ownership sections in `design.md`.
+  - Risk / miss categories: prompt and process/filesystem capability blindness; shared Markdown input-boundary structure; external public-API timeout/origin/cycle/page-budget/transactional failure handling; post-provider validation versus provider-failure attribution; resume metadata authority and telemetry preservation.
+  - Plan lane: `🟢 PLAN APPROVED` → `🟠 PLAN CHANGES REQUESTED`.
+  - Status: story authority transitions `✅ DONE` → `🔄 IN PROGRESS`; `Current Claim` and PR State remain unchanged coordination history.
+  - Phase C: PASS — R15 covers amended A22/A24/A25/A26/A29/A31 with RED-first seams while preserving every prior obligation and proof owner.
+  - Evidence disposition: affected A22/A24/A25/A26/A29/A31 proof rows are provisional with concrete R15 open details; prior GREEN remains historical and cannot close the amended boundaries.
+  - Required next action: `/openspec-story-plan-review simple-pr-context simple-pr-context`.
+
 - [2026-07-20T12:26:22Z] **Step**: Completed GATE-001/PRC-001/PRC-002 R14 remediation and transitioned the story to review.
   - Changed: `cure.py`, both multipass synth templates, `tests/cure_pr_context/test_templates.py`, and OpenSpec story/tasks/progress coordination.
   - Test: PASS — prompt/runtime 14; flow 67; resume 4 plus 2 subtests; combined amended 579 plus 30 subtests; full regression 784; complete 18-path Ruff inventory including both previously omitted untracked owners; mypy 6 source files; package smoke; merge-base diff hygiene; structural/provenance/sole-validator scans.
@@ -237,18 +292,18 @@
 
 ## Session Handoff
 
-- **Timestamp**: 2026-07-20T12:26:22Z
+- **Timestamp**: 2026-07-22T05:29:16Z
 - **Plan**: 🟢 PLAN APPROVED
 - **Status**: 🟣 IN REVIEW
 - **Completed In This Session**:
-  - Acknowledged and remediated GATE-001, PRC-001, and PRC-002 under R14 without changing the approved product contract.
-  - Repaired the canonical Ruff inventory to include untracked non-ignored Python owners, corrected remote-only orientation provenance labels RED-first, and removed the dead reader that bypassed D-15 validation.
-  - Reconciled all focused, broad, quality/type, package, hygiene, and structural proof.
-- **Remaining**:
-  - Completely fresh, oblivious implementation review only.
-  - Default-on/general release remains outside this story and requires separate operator approval.
+  - Integrated normal Codex JSON stdout/rollout/event/display/live-progress confinement into the genuine `_pr_flow_impl` orientation invocation and proved root deletion plus ordinary-session/inherited-home non-contamination before later agents.
+  - Added real-flow display-route, display-close, and runtime-root-cleanup failure injections proving zero subsequent review-agent launches.
+  - Reproduced swallowed display-close failure RED and made `ReviewflowOutput.run_logged_cmd` propagate cleanup failure after attempting all owned flush/close actions.
+  - Passed every canonical focused, combined, full, Ruff, mypy, package, default-off, diff-hygiene, and structural reconciliation gate.
+  - Checked all three R15 tasks and promoted A22/A24/A25/A26/A29/A31/A32 to final.
+- **Remaining**: none in the approved R15 contract; FB-035/FB-039 remain excluded.
 - **Blockers**: none.
-- **Next Steps**: Run `/openspec-story-review simple-pr-context simple-pr-context` from a completely fresh oblivious session.
+- **Next Steps**: Open a completely fresh, oblivious session and run `/openspec-story-review simple-pr-context simple-pr-context` without implementation notebook or chat context.
 - **Worktrees**: none
 - **Main-tree targets**: CURe
-- **Proof Statement**: Ready for review. All tasks complete. Focused prompt/runtime/flow/resume proof, 579-test amended proof plus 30 subtests, 784-test full regression, complete 18-path Ruff, scoped mypy, merge-base diff hygiene, structural/provenance/sole-validator scans, and disposable wheel/install/import smoke pass.
+- **Proof Statement**: Ready for review. All tasks complete. Implementation proof passes: 607 amended tests plus 30 subtests, 812 full tests, complete 20-path Ruff, scoped 7-file mypy, disposable wheel/install/import, default-off, merge-base diff hygiene, and structural reconciliation.

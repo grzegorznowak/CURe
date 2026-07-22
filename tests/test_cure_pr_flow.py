@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import shutil
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 import pytest
 
 import cure
+import cure_github
+import cure_llm
+import cure_output
 import cure_pr_context
 from cure_pr_context.corpus import estimated_tokens
 from cure_pr_context.orient import finalize_orientation_brief
@@ -64,6 +71,390 @@ def _args(**overrides: object) -> argparse.Namespace:
     values = {"pr_context": None, "prompt": None, "prompt_file": None, "prompt_profile": "auto"}
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Canonical TAP-16/TAP-17 owner for orientation-state confinement and fresh routes."""
+    sentinel = "R15_ORIENTATION_SENTINEL_7f8e2c"
+    from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+    original_run_logged_cmd = cure_output.ReviewflowOutput.run_logged_cmd
+    original_path_open = Path.open
+
+    def run_integrated_orientation_flow(mode: str) -> tuple[Path, list[str]]:
+        root = tmp_path / f"integrated-{mode}"
+        inherited_home = root / "inherited-codex-home"
+        inherited_sessions = inherited_home / "sessions"
+        inherited_sessions.mkdir(parents=True)
+        inherited_seed = inherited_sessions / "seed.jsonl"
+        inherited_seed.write_text("inherited-only\n", encoding="utf-8")
+        review_calls: list[str] = []
+        orientation_output_path: Path | None = None
+        case = CodexToolProofFlowTests()
+
+        def fake_codex_process(cmd: list[str], **kwargs: Any) -> object:
+            del cmd
+            env = dict(kwargs["env"])
+            codex_home = Path(env["CODEX_HOME"])
+            runtime_root = codex_home.parent
+            assert runtime_root.name.startswith(".pr-context-orientation-runtime-")
+            rollout = codex_home / "sessions" / "2026" / "07" / "22" / "rollout-proof.jsonl"
+            rollout.parent.mkdir(parents=True, exist_ok=True)
+            rollout.write_text(sentinel + "\n", encoding="utf-8")
+            sink = kwargs["stream_to"]
+            sink.write(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": _valid_brief() + "\n" + sentinel,
+                        },
+                    }
+                )
+                + "\n"
+            )
+            sink.flush()
+            assert orientation_output_path is not None
+            orientation_output_path.write_text(_valid_brief() + "\n" + sentinel, encoding="utf-8")
+
+            class Result:
+                stdout = ""
+                stderr = ""
+                duration_seconds = 0.0
+
+            return Result()
+
+        def integrated_run_llm_exec(**kwargs: object) -> cure.LlmRunResult:
+            nonlocal orientation_output_path
+            output_path = Path(str(kwargs["output_path"]))
+            if output_path.parent.name.startswith(".pr-context-orientation-runtime-"):
+                orientation_output_path = output_path
+                codex_result = cure_llm.run_codex_exec(
+                    repo_dir=Path(str(kwargs["repo_dir"])),
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt=str(kwargs["prompt"]),
+                    env=dict(kwargs["env"]),
+                    stream=False,
+                    progress=kwargs["progress"],
+                    add_dirs=[],
+                )
+                return cure.LlmRunResult(
+                    resume=codex_result.resume,
+                    adapter_meta={"usage": {}},
+                )
+            review_calls.append(output_path.name)
+            session_dir = Path(str(kwargs["repo_dir"])).parent
+            assert not list(session_dir.glob(".pr-context-orientation-runtime-*"))
+            for path in (
+                session_dir / "work" / "logs" / "codex.events.jsonl",
+                session_dir / "work" / "logs" / "codex.log",
+                session_dir / "meta.json",
+                inherited_seed,
+            ):
+                if path.exists():
+                    assert sentinel not in path.read_text(encoding="utf-8")
+            output_path.write_text("ordinary blind review\n", encoding="utf-8")
+            return cure.LlmRunResult(
+                adapter_meta=case._write_helper_command_events(
+                    work_dir=session_dir / "work", commands=["search", "research"]
+                )
+            )
+
+        def gh_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any]:
+            assert host == "github.com" and allow_public_fallback
+            if path.endswith("/comments") and "/issues/" in path:
+                return [{"id": 1, "body": "integrated discussion", "created_at": "2026-07-22T00:00:00Z"}]
+            return []
+
+        def flow_patch(stack: contextlib.ExitStack) -> None:
+            helper_run_logged_cmd = cure_output.ReviewflowOutput.run_logged_cmd
+
+            def routed_run_logged_cmd(
+                output: cure_output.ReviewflowOutput, cmd: list[str], **kwargs: Any
+            ) -> object:
+                if kwargs.get("kind") == "codex":
+                    return original_run_logged_cmd(output, cmd, **kwargs)
+                return helper_run_logged_cmd(output, cmd, **kwargs)
+
+            stack.enter_context(mock.patch.object(cure, "real_user_home_dir", return_value=root))
+            stack.enter_context(mock.patch.object(cure_output, "run_cmd", side_effect=fake_codex_process))
+            stack.enter_context(
+                mock.patch.object(
+                    cure_output.ReviewflowOutput,
+                    "run_logged_cmd",
+                    new=routed_run_logged_cmd,
+                )
+            )
+            stack.enter_context(mock.patch.object(cure, "run_llm_exec", side_effect=integrated_run_llm_exec))
+            if mode == "display_route":
+                stack.enter_context(
+                    mock.patch.object(
+                        cure_llm,
+                        "_resolve_codex_display_log_path",
+                        side_effect=OSError("display route failed"),
+                    )
+                )
+            elif mode == "display_close":
+                def open_with_failing_display_close(path: Path, *args: Any, **kwargs: Any) -> Any:
+                    handle = original_path_open(path, *args, **kwargs)
+                    if path.name != "codex.log" or not path.parent.parent.name.startswith(
+                        ".pr-context-orientation-runtime-"
+                    ):
+                        return handle
+
+                    class FailingClose:
+                        def __getattr__(self, name: str) -> Any:
+                            return getattr(handle, name)
+
+                        def close(self) -> None:
+                            handle.close()
+                            raise OSError("display close failed")
+
+                    return FailingClose()
+
+                stack.enter_context(mock.patch.object(Path, "open", new=open_with_failing_display_close))
+            elif mode == "runtime_cleanup":
+                real_rmtree = shutil.rmtree
+
+                def retain_orientation_root(path: Path | str, *args: Any, **kwargs: Any) -> None:
+                    if Path(path).name.startswith(".pr-context-orientation-runtime-"):
+                        return
+                    real_rmtree(path, *args, **kwargs)
+
+                stack.enter_context(mock.patch.object(cure.shutil, "rmtree", side_effect=retain_orientation_root))
+
+        expected_error = None if mode == "success" else "failed"
+        case._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("helper LLM seam must be replaced")
+            ),
+            extra_cli_args=["--pr-context"],
+            gh_api_list_side_effect=gh_list,
+            flow_patch=flow_patch,
+            expect_error=expected_error,
+            expect_error_type=OSError if mode in {"display_route", "display_close"} else cure.ReviewflowError,
+        )
+        return root, review_calls
+
+    success_root, success_review_calls = run_integrated_orientation_flow("success")
+    success_session = next((success_root / "sandboxes").iterdir())
+    assert success_review_calls == ["pr_context_draft.md", "pr_context_reconciled.md"]
+    assert not list(success_session.glob(".pr-context-orientation-runtime-*"))
+    assert sentinel not in (success_session / "meta.json").read_text(encoding="utf-8")
+
+    for failure_mode in ("display_route", "display_close", "runtime_cleanup"):
+        failure_root, failure_review_calls = run_integrated_orientation_flow(failure_mode)
+        assert failure_review_calls == []
+        shutil.rmtree(failure_root, ignore_errors=True)
+
+    # Keep the canonical owner latched to genuine fresh route owners for ordinary
+    # multipass success/fallback, no-selected, plan-parse-fallback, and plan-abort behavior.
+
+    route_owners = [
+        "test_tap18_pr_context_pr_flow_singlepass_fresh_success_has_exact_authority_usage_and_route_latency",
+        "test_tap17_tap18_pr_context_pr_flow_multipass_fresh_success_has_exact_present_usage_and_route_latency",
+        "test_tap17_tap18_pr_context_pr_flow_multipass_fresh_fallback_has_exact_absent_usage_and_route_latency",
+        "test_tap18_pr_context_pr_flow_no_selected_context_bypasses_orientation_and_completes_ordinary_route",
+    ]
+    for method_name in route_owners:
+        case = CodexToolProofFlowTests(methodName=method_name)
+        getattr(case, method_name)()
+
+    brief = _valid_brief() + "\n" + sentinel
+    discussion = [{"kind": "issue_comment", "event_id": "r15", "body": sentinel}]
+
+    def assert_absent(work_dir: Path, prompt: str) -> None:
+        assert sentinel not in prompt
+        for name in (
+            "pr_context_discussion.json",
+            "pr_context_orientation.raw.md",
+            "pr_context_orientation.md",
+        ):
+            assert not (work_dir / name).exists()
+            assert name not in prompt
+
+    # Successful plan abort: plan stays blind, then only the audit is published
+    # and authoritative bypass metadata is mirrored before the early return.
+    abort_root = Path(__file__).resolve().parents[1] / ".tmp_test_r15_plan_abort"
+    abort_case = CodexToolProofFlowTests()
+
+    def abort_llm(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> cure.LlmRunResult:
+        assert output_path.name == "review.plan.md"
+        assert_absent(work_dir, str(kwargs["prompt"]))
+        output_path.write_text(
+            "### Plan JSON\n```json\n"
+            + json.dumps(
+                {
+                    "abort": True,
+                    "abort_reason": "bounded abort",
+                    "jira_keys": [],
+                    "steps": [],
+                }
+            )
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        return cure.LlmRunResult(
+            adapter_meta=abort_case._write_helper_command_events(
+                work_dir=work_dir, commands=["search", "research"]
+            )
+        )
+
+    try:
+        _root, abort_calls = abort_case._run_pr_flow_for_tool_proof(
+            root=abort_root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=abort_llm,
+            extra_cli_args=["--pr-context"],
+            pr_context_result_override={
+                "discussion": discussion,
+                "selected_discussion": discussion,
+                "orientation_brief": brief,
+                "meta": {},
+            },
+        )
+        session_dir = next((abort_root / "sandboxes").iterdir())
+        work_dir = session_dir / "work"
+        meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+        assert abort_calls == ["review.plan.md"]
+        assert meta["pr_context"]["reason"] == "plan_aborted"
+        assert json.loads((work_dir / "pr_context_discussion.json").read_text()) == discussion
+        assert not (work_dir / "pr_context_orientation.md").exists()
+        assert json.loads((work_dir / "pr_context_meta.json").read_text()) == meta["pr_context"]
+    finally:
+        shutil.rmtree(abort_root, ignore_errors=True)
+
+    # Malformed-plan fallback keeps both plan and blind draft context-free,
+    # then publishes immediately before reconciliation.
+    fallback_root = Path(__file__).resolve().parents[1] / ".tmp_test_r15_plan_parse_fallback"
+    fallback_case = CodexToolProofFlowTests()
+
+    def fallback_llm(output_path: Path, work_dir: Path, kwargs: dict[str, object]) -> cure.LlmRunResult:
+        prompt = str(kwargs["prompt"])
+        if output_path.name == "review.plan.md":
+            assert_absent(work_dir, prompt)
+            output_path.write_text("malformed plan", encoding="utf-8")
+            adapter_meta = fallback_case._write_helper_command_events(
+                work_dir=work_dir, commands=["search"]
+            )
+        elif output_path.name == "pr_context_draft.md":
+            assert_absent(work_dir, prompt)
+            output_path.write_text("blind draft", encoding="utf-8")
+            adapter_meta = fallback_case._write_helper_command_events(
+                work_dir=work_dir, commands=["search", "research"]
+            )
+        elif output_path.name == "pr_context_reconciled.md":
+            assert sentinel in prompt
+            assert (work_dir / "pr_context_discussion.json").is_file()
+            assert (work_dir / "pr_context_orientation.md").is_file()
+            output_path.write_text("reconciled", encoding="utf-8")
+            adapter_meta = {"usage": {"input_tokens": 3, "output_tokens": 1}}
+        else:
+            raise AssertionError(output_path.name)
+        return cure.LlmRunResult(adapter_meta=adapter_meta)
+
+    try:
+        _root, fallback_calls = fallback_case._run_pr_flow_for_tool_proof(
+            root=fallback_root,
+            profile_resolved="big",
+            multipass_enabled=True,
+            llm_side_effect=fallback_llm,
+            extra_cli_args=["--pr-context"],
+            pr_context_result_override={
+                "discussion": discussion,
+                "selected_discussion": discussion,
+                "orientation_brief": brief,
+                "meta": {},
+            },
+        )
+        assert fallback_calls == [
+            "review.plan.md",
+            "pr_context_draft.md",
+            "pr_context_reconciled.md",
+        ]
+    finally:
+        shutil.rmtree(fallback_root, ignore_errors=True)
+
+
+def test_public_fallback_pagination_failure_degrades_context_free_without_partial_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical TAP-17/TAP-22 owner crossing D-19 into genuine fresh flow."""
+    requested: list[tuple[str, float | None]] = []
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = {
+                "Link": '<https://evil.example/partial?page=2>; rel="next"'
+            }
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'[{"id": 1, "body": "must never escape transaction"}]'
+
+    class Opener:
+        def open(self, request: Any, *, timeout: float | None = None) -> Response:
+            requested.append((request.full_url, timeout))
+            return Response()
+
+    monkeypatch.setattr(cure_github.urllib.request, "build_opener", lambda *_args: Opener())
+    from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+    case = CodexToolProofFlowTests()
+    root = Path(__file__).resolve().parents[1] / ".tmp_test_public_pagination_degrades_fresh_flow"
+
+    def gh_list(*, host: str, path: str, allow_public_fallback: bool = False) -> list[Any]:
+        assert host == "github.com" and allow_public_fallback
+        return cure_github._github_public_api_list(path=path)
+
+    def ordinary_review(output_path: Path, work_dir: Path) -> cure.LlmRunResult:
+        assert output_path.name == "review.md"
+        output_path.write_text("context-free review\n", encoding="utf-8")
+        return cure.LlmRunResult(
+            adapter_meta=case._write_helper_command_events(
+                work_dir=work_dir, commands=["search", "research"]
+            )
+        )
+
+    try:
+        _root, calls = case._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=ordinary_review,
+            extra_cli_args=["--pr-context"],
+            gh_api_list_side_effect=gh_list,
+        )
+        session_dir = next((root / "sandboxes").iterdir())
+        meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+        assert calls == ["review.md"]
+        assert meta["pr_context"]["outcome"] == "degraded"
+        assert meta["pr_context"]["reason"] == "fetch_failed"
+        assert requested == [
+            ("https://api.github.com/repos/acme/repo/issues/14/comments", 30.0)
+        ]
+        for name in (
+            "pr_context_discussion.json",
+            "pr_context_orientation.raw.md",
+            "pr_context_orientation.md",
+        ):
+            assert not (session_dir / "work" / name).exists()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_parser_pr_context_is_paired_and_defaults_off() -> None:
@@ -671,7 +1062,6 @@ def test_pr_context_does_not_swallow_orientation_control_or_output_failures(
     with pytest.raises(type(failure), match=str(failure)) as raised:
         cure.build_pr_context(
             pr=argparse.Namespace(owner="acme", repo="repo", number=1),
-            work_dir=tmp_path,
             pr_stats={},
             gh_fetch=lambda path: discussion if path.endswith("issues/1/comments") else [],
             run_llm=lambda _prompt: (_ for _ in ()).throw(failure),
@@ -702,10 +1092,12 @@ def test_pr_context_does_not_swallow_core_metadata_failure() -> None:
         pass
 
     attempts: list[str] = []
+    meta = classify_fresh(_args(pr_context=True))
+    meta["provider_usage"]["delivery_input_tokens"] = 17
     with pytest.raises(ValueError, match="metadata exploded"):
         cure._execute_pr_context_synth_with_fallback(
             prior_context="brief",
-            context_meta=classify_fresh(_args(pr_context=True)),
+            context_meta=meta,
             render_synth=lambda context: f"prompt:{context}",
             execute_synth=lambda prompt: attempts.append(prompt) or (_ for _ in ()).throw(
                 ValueError("metadata exploded")
@@ -713,10 +1105,17 @@ def test_pr_context_does_not_swallow_core_metadata_failure() -> None:
             retryable_failure=SynthesisExecutionFailure,
             flush=lambda: None,
             warn=lambda _message: None,
-            clock=iter([1.0]).__next__,
+            clock=iter([1.0, 1.5]).__next__,
         )
 
     assert attempts == ["prompt:brief"]
+    assert (meta["outcome"], meta["reason"], meta["context_mode"]) == (
+        "degraded",
+        "delivery_validation_failed",
+        "on",
+    )
+    assert meta["provider_usage"]["delivery_input_tokens"] == 17
+    assert meta["latency_ms"]["delivery"] == 500
 
 
 def test_pr_context_does_not_swallow_core_metadata_mirror_failure(
@@ -853,7 +1252,6 @@ def test_pr_context_metadata_fresh_injection_finalization_fail_open_is_orientati
 
     with pytest.raises(cure.PrContextStageError) as raised:
         cure._finalize_and_persist_fresh_pr_context(
-            work_dir=tmp_path,
             context_meta=meta,
             built=built,
         )
@@ -863,7 +1261,7 @@ def test_pr_context_metadata_fresh_injection_finalization_fail_open_is_orientati
     assert not (tmp_path / "pr_context_orientation.md").exists()
 
 
-def test_fresh_pr_context_independently_finalizes_before_persist_and_delivery(
+def test_fresh_pr_context_independently_finalizes_before_route_owned_delivery(
     tmp_path: Path,
 ) -> None:
     meta = classify_fresh(_args(pr_context=True))
@@ -876,21 +1274,20 @@ def test_fresh_pr_context_independently_finalizes_before_persist_and_delivery(
     }
 
     delivered = cure._finalize_and_persist_fresh_pr_context(
-        work_dir=tmp_path,
         context_meta=meta,
         built=built,
     )
 
     assert estimated_tokens(delivered) <= 2000
     assert estimated_tokens(str(built["orientation_brief"])) > 2000
-    assert (tmp_path / "pr_context_orientation.md").read_bytes() == delivered.encode("utf-8")
+    assert not (tmp_path / "pr_context_orientation.md").exists()
     assert meta["estimated_tokens"]["orientation_output"] == 2255
     assert meta["estimated_tokens"]["injected"] == estimated_tokens(delivered)
     assert meta["truncation"]["orientation_output"] is False
     assert meta["truncation"]["injected_context"] is True
     assert meta["persistence"] == {
-        "discussion_artifact": "written",
-        "orientation_artifact": "written",
+        "discussion_artifact": "not_attempted",
+        "orientation_artifact": "not_attempted",
         "meta_artifact": "not_attempted",
         "warning": None,
     }

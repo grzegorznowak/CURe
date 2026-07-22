@@ -138,6 +138,44 @@ def test_validation_rejects_fence_would_be_closer_with_trailing_content() -> Non
     assert not is_valid_orientation_brief(malformed)
 
 
+@pytest.mark.parametrize("indent", ["", " ", "  ", "   "])
+def test_shared_markdown_grammar_accepts_structural_indentation(indent: str) -> None:
+    brief = "\n".join(
+        [
+            f"{indent}````python",
+            "## fenced pseudo-heading",
+            f"{indent}`````",
+            *(f"{indent}## {heading}" for heading in HEADINGS),
+            USAGE_INSTRUCTIONS,
+        ]
+    )
+    assert is_valid_orientation_brief(brief)
+
+
+def test_shared_markdown_grammar_treats_four_space_constructs_as_code() -> None:
+    brief = "\n".join(
+        [
+            *(f"    ## {heading}" for heading in HEADINGS),
+            USAGE_INSTRUCTIONS,
+        ]
+    )
+    assert not is_valid_orientation_brief(brief)
+
+
+@pytest.mark.parametrize("closer", ["~~~", "```"])
+def test_shared_markdown_grammar_rejects_wrong_or_short_fence_closer(closer: str) -> None:
+    brief = "\n".join(
+        [
+            "````python",
+            "inside",
+            closer,
+            *(f"## {heading}" for heading in HEADINGS),
+            USAGE_INSTRUCTIONS,
+        ]
+    )
+    assert not is_valid_orientation_brief(brief)
+
+
 def test_fresh_injected_context_cap_minus_one_is_preserved_with_exact_metadata() -> None:
     original = _valid_brief_at_estimate(1999)
 

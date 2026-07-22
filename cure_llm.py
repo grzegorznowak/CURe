@@ -408,6 +408,7 @@ def run_codex_exec(
     out = active_output()
     codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir)
     codex_display_log_path = _resolve_codex_display_log_path(progress=progress, repo_dir=repo_dir)
+    codex_root = Path(env.get("CODEX_HOME") or (real_user_home_dir() / ".codex")).resolve()
     events_start_offset = _path_size(codex_events_log_path)
     artifact_override: dict[str, str | None] = {"text": None}
     _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
@@ -444,6 +445,7 @@ def run_codex_exec(
                 check=True,
                 stream_requested=True,
                 codex_json_events_path=codex_events_log_path,
+                codex_display_log_path=codex_display_log_path,
                 codex_event_callback=_handle_codex_event,
             )
         else:
@@ -481,6 +483,7 @@ def run_codex_exec(
                 codex_flags=codex_flags,
                 codex_config_overrides=codex_config_overrides,
                 add_dirs=add_dirs,
+                codex_root=codex_root,
             ),
             events_log_path=codex_events_log_path,
             events_start_offset=events_start_offset,
@@ -525,6 +528,7 @@ def run_codex_exec(
                     check=True,
                     stream_requested=True,
                     codex_json_events_path=codex_events_log_path,
+                    codex_display_log_path=codex_display_log_path,
                     codex_event_callback=_handle_codex_event,
                 )
             else:
@@ -565,6 +569,7 @@ def run_codex_exec(
                 codex_flags=codex_flags,
                 codex_config_overrides=codex_config_overrides,
                 add_dirs=add_dirs,
+                codex_root=codex_root,
             ),
             events_log_path=codex_events_log_path,
             events_start_offset=events_start_offset,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,9 +20,9 @@ def test_remote_endpoint_order_is_public_and_artifact_order(tmp_path: Path) -> N
         "repos/acme/rocket/pulls/7/comments": [{"id": "rc", "body": "inline", "created_at": "2026-01-02T00:00:00Z"}],
     }
     result = build_pr_context(
-        pr=PR(), work_dir=tmp_path / "work", pr_stats={}, gh_fetch=lambda path: fixtures[path],
+        pr=PR(), pr_stats={}, gh_fetch=lambda path: fixtures[path],
         run_llm=lambda _prompt: "## Problem areas\n- inspect",
     )
     assert [item["event_id"] for item in result["discussion"]] == ["c", "r", "rc"]
     assert [item["event_id"] for item in result["selected_discussion"]] == ["r", "rc", "c"]
-    assert json.loads((tmp_path / "work/pr_context_discussion.json").read_text()) == result["discussion"]
+    assert list(tmp_path.rglob("pr_context_*")) == []

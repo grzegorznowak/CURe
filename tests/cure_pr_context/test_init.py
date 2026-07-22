@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +28,18 @@ class PR:
     number: int = 7
 
 
+def test_build_pr_context_is_pure_and_has_no_work_dir_parameter(tmp_path: Path) -> None:
+    assert "work_dir" not in inspect.signature(build_pr_context).parameters
+    result = build_pr_context(
+        pr=PR(),
+        pr_stats={},
+        gh_fetch=lambda _path: [],
+        run_llm=lambda _prompt: "unused",
+    )
+    assert result["discussion"] == []
+    assert list(tmp_path.rglob("pr_context_*")) == []
+
+
 def test_build_pr_context_is_remote_only_and_preserves_complete_audit(tmp_path: Path) -> None:
     audit = [
         {"id": 1, "body": "x" * 4001, "user": {"login": "dev"}, "created_at": "2026-01-01T00:00:00Z"},
@@ -39,14 +51,13 @@ def test_build_pr_context_is_remote_only_and_preserves_complete_audit(tmp_path: 
         return audit if path.endswith("issues/7/comments") else []
 
     result = build_pr_context(
-        pr=PR(), work_dir=tmp_path / "work", pr_stats={"changed_files": 1},
+        pr=PR(), pr_stats={"changed_files": 1},
         gh_fetch=fetch, run_llm=lambda prompt: prompts.append(prompt) or "## Problem areas\n- inspect",
     )
     assert set(result) == {"orientation_brief", "discussion", "selected_discussion", "meta"}
     assert [item["body"] for item in result["discussion"]] == [audit[0]["body"], audit[1]["body"]]
     assert len(result["selected_discussion"][0]["body"]) == 4000
-    written = json.loads((tmp_path / "work/pr_context_discussion.json").read_text())
-    assert written == result["discussion"]
+    assert list(tmp_path.rglob("pr_context_*")) == []
     assert len(prompts) == 1
     assert result["meta"]["counts"] == {"fetched": 2, "normalized": 2, "selected": 2, "omitted": 0, "truncated_events": 1}
 
@@ -79,7 +90,7 @@ def test_normalization_failure_retains_fetched_but_not_normalized_count(
 
     with pytest.raises(PrContextStageError, match="normalization exploded") as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "work", pr_stats={}, gh_fetch=fetch,
+            pr=PR(), pr_stats={}, gh_fetch=fetch,
             run_llm=lambda _prompt: "unused",
         )
 
@@ -102,38 +113,6 @@ def test_normalization_failure_retains_fetched_but_not_normalized_count(
     assert not (tmp_path / "work/pr_context_discussion.json").exists()
 
 
-def test_partial_stage_failures_expose_exact_completed_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    event = {"id": 1, "body": "body", "created_at": "2026-01-01T00:00:00Z"}
-
-    def fetch(path: str) -> list[dict[str, object]]:
-        return [event] if path.endswith("issues/7/comments") else []
-
-    monkeypatch.setattr(cure_pr_context.time, "monotonic", iter([1.0, 2.0, 3.0, 4.0]).__next__)
-    monkeypatch.setattr(
-        cure_pr_context,
-        "_write_json",
-        lambda _path, _payload: (_ for _ in ()).throw(OSError("audit write failed")),
-    )
-    with pytest.raises(PrContextStageError, match="audit write failed") as write_error:
-        build_pr_context(
-            pr=PR(), work_dir=tmp_path / "write", pr_stats={}, gh_fetch=fetch,
-            run_llm=lambda _prompt: "unused",
-        )
-    assert write_error.value.stage == "artifact_write_failed"
-    assert write_error.value.meta == {
-        "counts": {
-            "fetched": 1, "normalized": 1, "selected": 0,
-            "omitted": 0, "truncated_events": 0,
-        },
-        "latency_ms": {
-            "fetch": 1000, "selection": 0, "orientation": 0,
-            "total_enrichment": 3000,
-        },
-    }
-
-
 def test_selection_failure_exposes_exact_completed_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -150,7 +129,7 @@ def test_selection_failure_exposes_exact_completed_metadata(
     )
     with pytest.raises(PrContextStageError, match="selection failed") as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "selection", pr_stats={}, gh_fetch=fetch,
+            pr=PR(), pr_stats={}, gh_fetch=fetch,
             run_llm=lambda _prompt: "unused",
         )
     assert raised.value.stage == "selection_failed"
@@ -192,7 +171,7 @@ def test_orientation_failure_exposes_exact_completed_metadata_and_usage(
     )
     with pytest.raises(PrContextStageError, match="orientation failed") as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "orientation", pr_stats={}, gh_fetch=fetch,
+            pr=PR(), pr_stats={}, gh_fetch=fetch,
             run_llm=lambda _prompt: (_ for _ in ()).throw(
                 OrientationProviderExecutionFailure(RuntimeError("orientation failed"))
             ),
@@ -246,7 +225,7 @@ def test_pr_context_metadata_orientation_finalization_fail_open_preserves_comple
 
     with pytest.raises(PrContextStageError) as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "orientation", pr_stats={}, gh_fetch=fetch,
+            pr=PR(), pr_stats={}, gh_fetch=fetch,
             run_llm=lambda _prompt: "scanner output",
             usage_observer=lambda: {"input_tokens": 17},
         )
@@ -264,11 +243,7 @@ def test_pr_context_metadata_orientation_finalization_fail_open_preserves_comple
             "total_enrichment": 7000,
         },
     }
-    persisted_discussion = json.loads(
-        (tmp_path / "orientation/pr_context_discussion.json").read_text()
-    )
-    assert len(persisted_discussion) == 1
-    assert persisted_discussion[0]["body"] == event["body"]
+    assert list(tmp_path.rglob("pr_context_*")) == []
 
 
 @pytest.mark.parametrize(
@@ -293,7 +268,7 @@ def test_orientation_nonprovider_failures_propagate_without_stage_attribution(
 
     with pytest.raises(type(failure), match=str(failure)) as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "orientation", pr_stats={}, gh_fetch=fetch,
+            pr=PR(), pr_stats={}, gh_fetch=fetch,
             run_llm=lambda _prompt: (_ for _ in ()).throw(failure),
         )
 
@@ -307,12 +282,12 @@ def test_empty_remote_writes_empty_audit_and_skips_orientation(tmp_path: Path) -
         called = True
         return "unused"
     result = build_pr_context(
-        pr=PR(), work_dir=tmp_path / "work", pr_stats={}, gh_fetch=lambda _path: [], run_llm=run_llm
+        pr=PR(), pr_stats={}, gh_fetch=lambda _path: [], run_llm=run_llm
     )
     assert result["orientation_brief"] == ""
     assert result["discussion"] == []
     assert result["meta"]["reason"] == "no_remote_context"
-    assert json.loads((tmp_path / "work/pr_context_discussion.json").read_text()) == []
+    assert list(tmp_path.rglob("pr_context_*")) == []
     assert called is False
 
 
@@ -354,7 +329,7 @@ def test_fixed_overhead_over_cap_is_degraded_selection_failed_with_truthful_part
     )
     with pytest.raises(PrContextStageError) as raised:
         build_pr_context(
-            pr=PR(), work_dir=tmp_path / "work", pr_stats=stats,
+            pr=PR(), pr_stats=stats,
             gh_fetch=fetch, run_llm=run_llm,
         )
 
@@ -368,21 +343,7 @@ def test_fixed_overhead_over_cap_is_degraded_selection_failed_with_truthful_part
     }
     assert raised.value.meta["latency_ms"]["orientation"] == 0
     assert called is False
-    assert json.loads(
-        (tmp_path / "work/pr_context_discussion.json").read_text(encoding="utf-8")
-    ) == [
-        {
-            "kind": "issue_comment",
-            "event_id": "1",
-            "author": "dev",
-            "body": "body",
-            "created_at": "2026-01-01T00:00:00Z",
-            "url": "",
-            "path": "",
-            "line": None,
-            "review_state": "",
-        }
-    ]
+    assert list(tmp_path.rglob("pr_context_*")) == []
 
 
 def test_nonempty_zero_selected_at_exact_cap_skips_orientation_and_preserves_audit(
@@ -399,8 +360,7 @@ def test_nonempty_zero_selected_at_exact_cap_skips_orientation_and_preserves_aud
         return "unused"
 
     result = build_pr_context(
-        pr=PR(), work_dir=tmp_path / "work",
-        pr_stats=_stats_for_exact_empty_prompt_tokens(
+        pr=PR(), pr_stats=_stats_for_exact_empty_prompt_tokens(
             ORIENTATION_PROMPT_MAX_ESTIMATED_TOKENS
         ),
         gh_fetch=fetch, run_llm=run_llm,
@@ -414,7 +374,5 @@ def test_nonempty_zero_selected_at_exact_cap_skips_orientation_and_preserves_aud
         "truncated_events": 0,
     }
     assert len(result["discussion"]) == 1 and result["selected_discussion"] == []
-    assert json.loads(
-        (tmp_path / "work/pr_context_discussion.json").read_text(encoding="utf-8")
-    ) == result["discussion"]
+    assert list(tmp_path.rglob("pr_context_*")) == []
     assert called is False
