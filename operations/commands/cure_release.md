@@ -94,8 +94,8 @@ Do not edit `pyproject.toml` or `CHANGELOG.md` until this checkpoint is approved
 
 Run these commands before any tag push:
 
-- `python -m unittest discover -s tests -p 'test_release_workflow_unittest.py'`
-- `python -m unittest discover -s tests -p 'test_*.py'`
+- `python -m pytest tests/test_release_workflow_unittest.py`
+- `python -m pytest`
 - `ruff check tests/test_release_workflow_unittest.py`
 - touched-file lint only if the release itself required a code or test fix
 - `mypy`

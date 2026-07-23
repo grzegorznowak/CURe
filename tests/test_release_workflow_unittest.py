@@ -38,6 +38,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("repository-url: https://test.pypi.org/legacy/", workflow)
         self.assertNotIn("name: testpypi", workflow)
 
+    def test_publish_workflow_installs_and_runs_pytest(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
+
+        workflow_lines = workflow.splitlines()
+        self.assertIn("        run: python -m pip install --upgrade build twine pytest", workflow_lines)
+        self.assertIn("        run: python -m pytest", workflow_lines)
+
     def test_publish_workflow_gates_release_tag_shape_and_package_version(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 
@@ -89,8 +96,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_canonical_release_command_documents_working_proveout_and_schema_links(self) -> None:
         command_doc = (ROOT / "operations" / "commands" / "cure_release.md").read_text(encoding="utf-8")
 
-        self.assertIn("python -m unittest discover -s tests -p 'test_release_workflow_unittest.py'", command_doc)
-        self.assertNotIn("python -m unittest tests/test_release_workflow_unittest.py", command_doc)
+        command_lines = command_doc.splitlines()
+        self.assertIn("- `python -m pytest tests/test_release_workflow_unittest.py`", command_lines)
+        self.assertIn("- `python -m pytest`", command_lines)
+        self.assertNotIn("python -m unittest", command_doc)
         self.assertIn("CHANGELOG.md", command_doc)
 
     def test_publish_workflow_builds_and_releases_standalone_assets(self) -> None:
