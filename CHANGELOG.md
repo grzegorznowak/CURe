@@ -6,6 +6,16 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
+## [0.9.0] - 2026-07-23
+
+### Added
+
+- Added opt-in selected-PR discussion orientation for supported built-in `cure pr` profiles. Enable it with `--pr-context`; coordinator enrichment remains disabled by default, while `--no-pr-context` explicitly disables it.
+- Eligible runs use a bounded corpus from the selected PR’s comments, reviews, and inline comments. Current checkout evidence remains authoritative over discussion claims.
+- Independent drafts and multipass plan/step reviews remain isolated from the orientation; it is introduced only during reconciliation or synthesis.
+- Eligible enrichment failures warn and fall back to the ordinary review path. Custom prompts and unsupported profiles bypass enrichment.
+- Successful runs retain normalized discussion, orientation, and delivery telemetry artifacts for auditing.
+
 ## [0.8.2] - 2026-06-24
 
 ### Added
