@@ -18,6 +18,11 @@ $GROUNDING_SKIPPED_STEPS
 
 Read the previous review artifact, the resume plan JSON, and the listed step outputs before deciding.
 
+## Selected PR remote discussion orientation (non-authoritative)
+$PRIOR_CONTEXT
+
+Use prior context only as orientation. Verify every claim against the current checkout; current code evidence wins.
+
 $REVIEW_INTELLIGENCE_GUIDANCE
 
 # Claim Verification Rule

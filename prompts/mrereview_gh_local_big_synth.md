@@ -17,6 +17,22 @@ Read the plan JSON and all step outputs, then produce the final review.
 
 $REVIEW_INTELLIGENCE_GUIDANCE
 
+## Selected PR remote discussion orientation (non-authoritative)
+$PRIOR_CONTEXT
+
+# Reconciliation
+You have independent step findings produced WITHOUT seeing the prior context above. Reconcile them now:
+
+**Option B rules:**
+1. If a step finding and the context agree → keep the step finding as-is.
+2. If the context flags something no step found → inspect that specific file/path BEFORE adding the finding. Only add it if the code evidence supports it. Cite path:line.
+3. If the context says an area is "resolved" but a step found an issue there → inspect that file. Code evidence wins over context claims.
+4. If the context is blank or irrelevant → return step findings unchanged.
+5. Do NOT re-review code the steps already covered well. Only inspect disputed areas.
+
+# Output
+Produce the final review. Integrate validated context signals. Where code evidence and context disagree, code evidence wins. Cite path:line, not context claims.
+
 # Claim Verification Rule
 Treat step outputs as hypotheses, not authority. Before carrying any claim into the final review, verify that primary evidence in the current checkout or stable `work/` artifacts supports the claim itself, not just that a cited line exists.
 

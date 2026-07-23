@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Callable, Mapping, TextIO
 from urllib.parse import urlparse
 
 from cure_branding import PRIMARY_CLI_COMMAND
@@ -83,6 +83,16 @@ from paths import (
     seed_dir,
 )
 from run import CommandResult, ReviewflowSubprocessError, merged_env, run_cmd
+from cure_github import (
+    _decode_gh_api_list_stdout,
+    _looks_like_gh_auth_error,
+    _public_github_repo_clone_url,
+    _raise_gh_auth_error,
+    _supports_public_github_fallback,
+    gh_api_json,
+    gh_api_list,
+    require_gh_auth,
+)
 from cure_runtime import _normalize_optional_reasoning_effort
 
 from ui import UiSnapshot, Verbosity, build_dashboard_lines
@@ -5426,20 +5436,24 @@ def _execute_multipass_synth_stage(
 
     while True:
         current_review_md_path = candidate_review_md_path if preserve_failed_artifact else review_md_path
+        synth_run_entry.pop("usage", None)
         progress.flush()
-        synth_result = run_llm_exec(
-            repo_dir=repo_dir,
-            resolved=synth_llm["resolved"],
-            resolution_meta=synth_llm["resolution_meta"],
-            output_path=current_review_md_path,
-            prompt=synth_prompt,
-            env=env,
-            stream=stream,
-            progress=progress,
-            add_dirs=add_dirs,
-            codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
-            runtime_policy=synth_runtime_policy,
-        )
+        try:
+            synth_result = run_llm_exec(
+                repo_dir=repo_dir,
+                resolved=synth_llm["resolved"],
+                resolution_meta=synth_llm["resolution_meta"],
+                output_path=current_review_md_path,
+                prompt=synth_prompt,
+                env=env,
+                stream=stream,
+                progress=progress,
+                add_dirs=add_dirs,
+                codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
+                runtime_policy=synth_runtime_policy,
+            )
+        except ReviewflowSubprocessError as exc:
+            raise _PrContextSynthesisExecutionFailure(exc) from exc
         record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
         _record_multipass_stage_llm(
             meta=progress.meta,
@@ -6197,6 +6211,7 @@ def _build_multipass_step_entries(
     agent_desc: str,
     review_intelligence_cfg: ReviewIntelligenceConfig,
     review_intelligence_capabilities: dict[str, Any] | None,
+    prior_context: str = "",
     cod_ledger_enabled: bool = False,
 ) -> list[MultipassStepEntry]:
     step_template = load_builtin_prompt_text(templates["step"])
@@ -7098,101 +7113,6 @@ def _execute_multipass_step_stage(
             _eprint(f"Multipass step failed. To resume: {PRIMARY_CLI_COMMAND} resume {session_id}")
         raise first_error
     return success_resume_command, skipped_records
-
-
-def require_gh_auth(host: str) -> None:
-    try:
-        run_cmd(["gh", "auth", "status", "--hostname", host], check=True)
-    except ReviewflowSubprocessError as e:
-        _raise_gh_auth_error(host=host, error=e)
-
-
-def _gh_error_text(error: ReviewflowSubprocessError) -> str:
-    return (error.stderr or error.stdout or str(error)).strip()
-
-
-def _looks_like_gh_auth_error(error: ReviewflowSubprocessError) -> bool:
-    text = _gh_error_text(error).lower()
-    needles = (
-        "gh auth login",
-        "not logged into any github hosts",
-        "not authenticated",
-        "populate the gh_token",
-        "please run:  gh auth login",
-        "please run gh auth login",
-    )
-    return any(needle in text for needle in needles)
-
-
-def _raise_gh_auth_error(*, host: str, error: ReviewflowSubprocessError) -> None:
-    msg = _gh_error_text(error) or str(error)
-    raise ReviewflowError(
-        f"`gh` is not authenticated for {host}.\n"
-        f"- Try: gh auth login -h {host}\n"
-        f"- Details: {msg}"
-    ) from error
-
-
-def _supports_public_github_fallback(host: str) -> bool:
-    return host == "github.com"
-
-
-def _public_github_repo_clone_url(*, host: str, owner: str, repo: str) -> str:
-    if not _supports_public_github_fallback(host):
-        raise ReviewflowError(
-            f"Unauthenticated public clone fallback is only supported for github.com, got: {host}"
-        )
-    return f"https://github.com/{owner}/{repo}.git"
-
-
-def _github_public_api_json(*, path: str) -> dict[str, Any]:
-    normalized = path if path.startswith("/") else f"/{path}"
-    req = urllib.request.Request(
-        f"https://api.github.com{normalized}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "cure/0.1.0",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise ReviewflowError(
-            f"Public GitHub API request failed ({getattr(e, 'code', '?')}): {normalized}\n{body}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise ReviewflowError(f"Public GitHub API request failed: {normalized}\n{e}") from e
-    try:
-        payload = json.loads(body)
-    except Exception as e:
-        raise ReviewflowError(f"Public GitHub API returned invalid JSON for {normalized}: {e}") from e
-    if not isinstance(payload, dict):
-        raise ReviewflowError(f"Public GitHub API returned unexpected payload for {normalized}")
-    return payload
-
-
-def gh_api_json(*, host: str, path: str, allow_public_fallback: bool = False) -> dict[str, Any]:
-    cmd = ["gh", "api", "--hostname", host, path]
-    try:
-        result = run_cmd(cmd)
-    except ReviewflowSubprocessError as e:
-        if _looks_like_gh_auth_error(e):
-            if allow_public_fallback and _supports_public_github_fallback(host):
-                _eprint(f"`gh` is not authenticated for {host}; falling back to the public GitHub API.")
-                return _github_public_api_json(path=path)
-            _raise_gh_auth_error(host=host, error=e)
-        raise
-    try:
-        payload = json.loads(result.stdout)
-    except Exception as e:
-        raise ReviewflowError(f"`gh api` returned invalid JSON for {path}: {e}") from e
-    if not isinstance(payload, dict):
-        raise ReviewflowError(f"`gh api` returned unexpected payload for {path}")
-    return payload
 
 
 def write_pr_context_file(
@@ -9135,6 +9055,283 @@ def _raise_on_multipass_plan_abort_contradiction(
     )
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _finalize_and_persist_fresh_pr_context(
+    *,
+    context_meta: dict[str, Any],
+    built: dict[str, Any],
+) -> str:
+    """Independently cap/account for fresh context; publication is route-owned."""
+    source_brief = str(built.get("orientation_brief") or "")
+    try:
+        finalized = finalize_injected_context(source_brief) if source_brief else {
+            "brief": "", "estimated_tokens": 0, "truncated": False
+        }
+    except InjectedContextFinalizationFailure as exc:
+        raise PrContextStageError(
+            "orientation_failed", exc, meta=dict(built.get("meta") or {})
+        ) from exc
+    brief = str(finalized["brief"])
+    apply_build_metadata(context_meta, built, brief)
+    context_meta["estimated_tokens"]["injected"] = int(finalized["estimated_tokens"])
+    context_meta["truncation"]["injected_context"] = bool(finalized["truncated"])
+    return brief
+
+
+def _publish_fresh_pr_context(
+    *, work_dir: Path, built: dict[str, Any], brief: str, include_brief: bool
+) -> None:
+    discussion = built.get("discussion")
+    if not isinstance(discussion, list):
+        raise ReviewflowError("PR-context build result has no discussion list")
+    _atomic_write_text(
+        work_dir / "pr_context_discussion.json",
+        json.dumps(discussion, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+    if include_brief and brief:
+        atomic_write_persisted_context(work_dir / "pr_context_orientation.md", brief)
+
+
+def _remove_fresh_pr_context_artifacts(work_dir: Path) -> None:
+    paths = (
+        work_dir / "pr_context_discussion.json",
+        work_dir / "pr_context_orientation.raw.md",
+        work_dir / "pr_context_orientation.md",
+    )
+    for path in paths:
+        path.unlink(missing_ok=True)
+    remaining = [str(path) for path in paths if path.exists()]
+    if remaining:
+        raise ReviewflowError(
+            "Could not establish PR-context artifact absence: " + ", ".join(remaining)
+        )
+
+
+def _render_synth_prompt_with_prior_context(
+    template_text: str,
+    *,
+    prior_context: str,
+    base_ref_for_review: str,
+    pr_url: str,
+    pr_number: int,
+    gh_host: str,
+    gh_owner: str,
+    gh_repo_name: str,
+    gh_repo: str,
+    agent_desc: str,
+    head_ref: str = "HEAD",
+    extra_vars: dict[str, str] | None = None,
+) -> str:
+    """Render non-context regions, then atomically insert opaque prior context."""
+    owned_token = "$PRIOR_CONTEXT"
+    if template_text.count(owned_token) != 1:
+        raise ReviewflowError("Synth template must contain exactly one $PRIOR_CONTEXT token")
+    prefix, _, suffix = template_text.partition(owned_token)
+    render_vars = dict(extra_vars or {})
+    render_vars.pop("PRIOR_CONTEXT", None)
+
+    def render_region(region: str) -> str:
+        return render_prompt(
+            region,
+            base_ref_for_review=base_ref_for_review,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            gh_host=gh_host,
+            gh_owner=gh_owner,
+            gh_repo_name=gh_repo_name,
+            gh_repo=gh_repo,
+            agent_desc=agent_desc,
+            head_ref=head_ref,
+            extra_vars=render_vars,
+        )
+
+    return f"{render_region(prefix)}{prior_context}{render_region(suffix)}"
+
+
+def _multipass_run_usage(meta: dict[str, Any], *, kind: str) -> dict[str, int] | None:
+    runs = meta.get("multipass", {}).get("runs", [])
+    if not isinstance(runs, list):
+        return None
+    for entry in reversed(runs):
+        if isinstance(entry, dict) and entry.get("kind") == kind:
+            return _normalize_llm_usage(entry.get("usage"))
+    return None
+
+
+class _PrContextSynthesisExecutionFailure(ReviewflowError):
+    """Marks only the provider execution call as eligible for context-free retry."""
+
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+class _PrContextReconciliationExecutionFailure(ReviewflowError):
+    """Marks only reconciliation provider execution as eligible for blind-draft fallback."""
+
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+def _pr_context_monotonic() -> float:
+    """Narrow clock seam for deterministic PR-context delivery telemetry tests."""
+    return time.monotonic()
+
+
+def _execute_pr_context_synth_with_fallback(
+    *,
+    prior_context: str,
+    context_meta: dict[str, Any],
+    render_synth: Callable[[str], str],
+    execute_synth: Callable[[str], Any],
+    flush: Callable[[], None],
+    warn: Callable[[str], None],
+    retryable_failure: type[Exception] | tuple[type[Exception], ...] = Exception,
+    usage: Callable[[], dict[str, int] | None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    delivery_entered: bool = False,
+    total_started_at: float | None = None,
+) -> Any:
+    """Execute synth, retrying exactly once without context after context-specific failure."""
+    prior_total_ms = int(context_meta["latency_ms"].get("total_enrichment", 0))
+
+    def execute_preserving_subprocess_failure(prompt: str) -> Any:
+        try:
+            return execute_synth(prompt)
+        except _PrContextSynthesisExecutionFailure as exc:
+            if isinstance(exc.cause, ReviewflowSubprocessError):
+                raise exc.cause
+            raise
+
+    if not prior_context and not delivery_entered:
+        return execute_preserving_subprocess_failure(render_synth(""))
+
+    delivery_started = clock()
+
+    def observed_usage() -> dict[str, int] | None:
+        if usage is None:
+            return None
+        try:
+            return _normalize_llm_usage(usage())
+        except Exception:
+            return None
+
+    def record_usage(prefix: str, observed: dict[str, int] | None) -> None:
+        if observed is None:
+            return
+        context_meta["provider_usage"][f"{prefix}_input_tokens"] = observed.get("input_tokens")
+        context_meta["provider_usage"][f"{prefix}_output_tokens"] = observed.get("output_tokens")
+
+    def record_elapsed() -> None:
+        now = clock()
+        elapsed_ms = int(max(0.0, now - delivery_started) * 1000)
+        context_meta["latency_ms"]["delivery"] = elapsed_ms
+        context_meta["latency_ms"]["total_enrichment"] = (
+            int(max(0.0, now - total_started_at) * 1000)
+            if total_started_at is not None
+            else prior_total_ms + elapsed_ms
+        )
+
+    if not prior_context:
+        try:
+            return execute_preserving_subprocess_failure(render_synth(""))
+        finally:
+            record_usage("delivery", observed_usage())
+            record_elapsed()
+            flush()
+
+    prompt = render_synth(prior_context)
+    try:
+        result = execute_synth(prompt)
+        record_usage("delivery", observed_usage())
+        context_meta.update(outcome="used", reason="context_delivered", context_mode="on")
+        record_elapsed()
+        return result
+    except retryable_failure as exc:
+        record_usage("delivery", observed_usage())
+        context_meta.update(
+            outcome="degraded", reason="context_synthesis_failed", context_mode="off"
+        )
+        record_elapsed()
+        warn(f"PR context degraded (context_synthesis_failed): {exc}")
+        flush()
+    except Exception:
+        record_usage("delivery", observed_usage())
+        context_meta.update(
+            outcome="degraded",
+            reason="delivery_validation_failed",
+            context_mode="on",
+        )
+        record_elapsed()
+        flush()
+        raise
+
+    fallback_prompt = render_synth("")
+    try:
+        result = execute_preserving_subprocess_failure(fallback_prompt)
+    finally:
+        record_usage("fallback", observed_usage())
+        record_elapsed()
+        flush()
+    return result
+
+
+def _mirror_pr_context_metadata(
+    *,
+    progress: SessionProgress,
+    work_dir: Path,
+    context_meta: dict[str, Any],
+    quiet: bool,
+) -> None:
+    """Flush final authority before mirroring it, correcting authority if mirroring fails."""
+    context_meta["persistence"]["meta_artifact"] = "written"
+    context_meta["persistence"]["warning"] = None
+    progress.flush()
+    try:
+        atomic_write_metadata(work_dir / "pr_context_meta.json", context_meta)
+    except (OSError, UnicodeError) as exc:
+        context_meta["persistence"]["meta_artifact"] = "failed"
+        context_meta["persistence"]["warning"] = "meta_artifact_write_failed"
+        log(f"PR context metadata mirror failed: {exc}", quiet=quiet)
+        progress.flush()
+
+
+def _reconcile_prior_context(
+    *,
+    draft_review: str,
+    orientation_brief: str,
+    run_llm: Callable[[str], str],
+) -> str:
+    """Reconcile an independent draft review with prior PR context."""
+    if not orientation_brief:
+        return draft_review
+    reconcile_prompt = f"""You are reconciling a completed draft code review with prior PR context.
+
+## Selected PR remote discussion orientation (non-authoritative)
+{orientation_brief}
+
+## Draft review (produced independently, without seeing the context above)
+{draft_review}
+
+## Reconciliation rules (Option B)
+1. If the draft and context agree on a finding -> keep the draft as-is.
+2. If the context flags something the draft missed -> inspect that specific file/path BEFORE adding the finding. Only add it if the code evidence supports it. Cite path:line.
+3. If the context says an area is "resolved" but the draft found an issue there -> inspect that file. Code evidence wins over context claims.
+4. If the context is blank or irrelevant -> return the draft unchanged.
+5. Do NOT re-review files the draft already covered well. Only inspect disputed areas.
+
+## Output
+Return the final review in the same format as the draft. Integrate validated context signals. Where code evidence and context disagree, code evidence wins. Cite path:line."""
+    return run_llm(reconcile_prompt)
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -9348,6 +9545,10 @@ def _pr_flow_impl(
     seed_source_db_path: Path | None = None
     seed_source_meta: dict[str, Any] | None = None
     pr_stats: dict[str, Any] | None = None
+    pr_context_result: dict[str, Any] | None = None
+    prior_context: str = ""
+    context_bearing_singlepass = False
+    singlepass_output_path = review_md_path
     profile_resolved: str | None = None
     profile_reason: str | None = None
     profile_template_name: str | None = None
@@ -9569,6 +9770,175 @@ def _pr_flow_impl(
                 }
             progress.meta["pr_stats"] = pr_stats
             progress.flush()
+
+        if not bool(args.no_review):
+            if llm_resolved is None or llm_resolution_meta is None:
+                raise ReviewflowError("LLM configuration was not resolved before PR context orientation.")
+
+            pr_context_meta = classify_fresh(args)
+            pr_context_started: float | None = None
+            if pr_context_meta["enabled"] and pr_context_meta["eligible"]:
+                pr_context_started = _pr_context_monotonic()
+            else:
+                progress.meta["pr_context"] = pr_context_meta
+                progress.flush()
+
+            def _flush_fresh_pr_context_authority() -> None:
+                if pr_context_started is not None:
+                    pr_context_meta["latency_ms"]["total_enrichment"] = int(
+                        max(0.0, _pr_context_monotonic() - pr_context_started) * 1000
+                    )
+                progress.meta["pr_context"] = pr_context_meta
+                progress.flush()
+
+            orientation_usage: dict[str, int] | None = None
+            orientation_runtime_roots: list[Path] = []
+
+            def _assert_orientation_runtime_absent() -> None:
+                remaining = [str(path) for path in orientation_runtime_roots if path.exists()]
+                if remaining:
+                    raise ReviewflowError(
+                        "PR-context orientation runtime cleanup failed: " + ", ".join(remaining)
+                    )
+
+            def _run_pr_context_orientation(prompt: str) -> str:
+                nonlocal orientation_usage
+                runtime_root = session_dir / (
+                    ".pr-context-orientation-runtime-" + secrets.token_hex(8)
+                )
+                orientation_runtime_roots.append(runtime_root)
+                runtime_root.mkdir(parents=True, exist_ok=False)
+                raw_orientation_path = runtime_root / "pr_context_orientation.raw.md"
+                orientation_env = apply_llm_env(
+                    build_curated_subprocess_env(), resolved=llm_resolved
+                )
+                orientation_progress = SessionProgress(
+                    runtime_root / "meta.json", quiet=True
+                )
+                orientation_progress.init(
+                    {
+                        "kind": "pr_context_orientation",
+                        "logs": {
+                            "codex_events": str(
+                                runtime_root / "logs" / "codex.events.jsonl"
+                            ),
+                            "codex": str(runtime_root / "logs" / "codex.log"),
+                        },
+                    }
+                )
+                if str(llm_resolved.get("provider") or "") == "codex":
+                    source_home = Path(
+                        orientation_env.get("CODEX_HOME")
+                        or (real_user_home_dir() / ".codex")
+                    )
+                    orientation_codex_home = runtime_root / "codex-home"
+                    orientation_codex_home.mkdir()
+                    for name in ("auth.json", "config.toml"):
+                        source = source_home / name
+                        if source.exists():
+                            if not source.is_file():
+                                raise ReviewflowError(
+                                    f"PR-context Codex input is not a regular file: {source}"
+                                )
+                            shutil.copy2(source, orientation_codex_home / name)
+                    orientation_env["CODEX_HOME"] = str(orientation_codex_home)
+                try:
+                    try:
+                        orientation_result = run_llm_exec(
+                            repo_dir=repo_dir,
+                            resolved=llm_resolved,
+                            resolution_meta=llm_resolution_meta,
+                            output_path=raw_orientation_path,
+                            prompt=prompt,
+                            env=orientation_env,
+                            stream=False,
+                            progress=orientation_progress,
+                            add_dirs=[],
+                            runtime_policy=None,
+                        )
+                    except ReviewflowSubprocessError as exc:
+                        raise OrientationProviderExecutionFailure(exc) from exc
+                    orientation_usage = _normalize_llm_usage(
+                        orientation_result.adapter_meta.get("usage")
+                    )
+                    if not raw_orientation_path.is_file():
+                        raise ReviewflowError(
+                            "PR-context orientation did not produce a fresh output artifact"
+                        )
+                    return raw_orientation_path.read_text(encoding="utf-8")
+                finally:
+                    shutil.rmtree(runtime_root)
+                    _assert_orientation_runtime_absent()
+
+            if pr_context_meta["enabled"] and pr_context_meta["eligible"]:
+                with phase("build_pr_context", progress=progress, quiet=quiet):
+                    try:
+                        _remove_fresh_pr_context_artifacts(work_dir)
+                        pr_context_result = build_pr_context(
+                            pr=pr,
+                            pr_stats=pr_stats,
+                            gh_fetch=lambda path: gh_api_list(
+                                host=pr.host, path=path, allow_public_fallback=True
+                            ),
+                            run_llm=_run_pr_context_orientation,
+                            usage_observer=lambda: orientation_usage,
+                        )
+                        try:
+                            prior_context = _finalize_and_persist_fresh_pr_context(
+                                context_meta=pr_context_meta,
+                                built=pr_context_result,
+                            )
+                            if not pr_context_result.get("discussion"):
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                                pr_context_meta["persistence"]["discussion_artifact"] = "written"
+                        except (OSError, UnicodeError) as exc:
+                            prior_context = ""
+                            pr_context_meta.update(
+                                outcome="degraded",
+                                reason="artifact_write_failed",
+                                context_mode="off",
+                            )
+                            pr_context_meta["estimated_tokens"]["injected"] = 0
+                            pr_context_meta["truncation"]["injected_context"] = False
+                            pr_context_meta["provider_usage"].update(
+                                delivery_input_tokens=None,
+                                delivery_output_tokens=None,
+                                fallback_input_tokens=None,
+                                fallback_output_tokens=None,
+                            )
+                            pr_context_meta["latency_ms"]["delivery"] = 0
+                            pr_context_meta["persistence"]["orientation_artifact"] = "failed"
+                            pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                            log(
+                                f"PR context degraded (artifact_write_failed): {exc}",
+                                quiet=quiet,
+                            )
+                    except PrContextStageError as exc:
+                        prior_context = ""
+                        if exc.discussion is not None:
+                            pr_context_result = {
+                                "discussion": exc.discussion,
+                                "orientation_brief": "",
+                                "selected_discussion": [],
+                                "meta": exc.meta,
+                            }
+                        apply_build_metadata(
+                            pr_context_meta, {"meta": exc.meta}, ""
+                        )
+                        pr_context_meta.update(
+                            outcome="degraded", reason=exc.stage, context_mode="off"
+                        )
+                        if exc.stage == "artifact_write_failed":
+                            pr_context_meta["persistence"]["discussion_artifact"] = "failed"
+                            pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                        log(f"PR context degraded ({exc.stage}): {exc}", quiet=quiet)
+                    if not prior_context:
+                        _flush_fresh_pr_context_authority()
 
         if bool(args.no_review):
             progress.meta.setdefault("multipass", {})["enabled"] = False
@@ -9889,6 +10259,7 @@ def _pr_flow_impl(
                 progress.flush()
 
                 plan_tool_report: dict[str, Any] | None = None
+                _assert_orientation_runtime_absent()
                 with phase("multipass_plan", progress=progress, quiet=quiet):
                     plan_template = load_builtin_prompt_text(templates["plan"])
                     plan_prompt = render_prompt(
@@ -10006,6 +10377,49 @@ def _pr_flow_impl(
                             meta=progress.meta, markdown_path=review_md_path
                         ) is not None:
                             progress.flush()
+                        if isinstance(pr_context_result, dict):
+                            try:
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                            except (OSError, UnicodeError) as exc:
+                                pr_context_meta.update(
+                                    outcome="degraded",
+                                    reason="artifact_write_failed",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"]["warning"] = (
+                                    "artifact_write_failed"
+                                )
+                                log(
+                                    f"PR context degraded (artifact_write_failed): {exc}",
+                                    quiet=quiet,
+                                )
+                            else:
+                                pr_context_meta.update(
+                                    outcome="bypassed",
+                                    reason="plan_aborted",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "not_attempted"
+                            _flush_fresh_pr_context_authority()
+                            _mirror_pr_context_metadata(
+                                progress=progress,
+                                work_dir=work_dir,
+                                context_meta=pr_context_meta,
+                                quiet=quiet,
+                            )
                         progress.done()
                         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
                         success_markdown_path = review_md_path
@@ -10107,56 +10521,138 @@ def _pr_flow_impl(
                     with phase("multipass_synth", progress=progress, quiet=quiet):
                         synth_template = load_builtin_prompt_text(templates["synth"])
                         step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
-                        synth_prompt = render_prompt(
-                            synth_template,
-                            base_ref_for_review=base_ref_for_review,
-                            pr_url=str(args.pr_url),
-                            pr_number=int(pr.number),
-                            gh_host=str(pr.host),
-                            gh_owner=str(pr.owner),
-                            gh_repo_name=str(pr.repo),
-                            gh_repo=str(pr.gh_repo),
-                            agent_desc=agent_desc,
-                            head_ref="HEAD",
-                            extra_vars={
-                                **review_intelligence_prompt_vars(
-                                    review_intelligence_cfg,
-                                    capability_summary=review_intelligence_capabilities,
-                                ),
-                                **verbose_review_findings_prompt_vars(
-                                    enabled=bool(getattr(args, "wtf", False))
-                                ),
-                                **cod_hypothesis_ledger_prompt_vars(
-                                    enabled=bool(getattr(args, "cod_ledger", False))
-                                ),
-                                "PLAN_JSON_PATH": str(plan_json_path),
-                                "STEP_OUTPUT_PATHS": step_paths_text,
-                                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
-                            },
+                        def _render_fresh_synth(context: str) -> str:
+                            return _render_synth_prompt_with_prior_context(
+                                synth_template,
+                                prior_context=context,
+                                base_ref_for_review=base_ref_for_review,
+                                pr_url=str(args.pr_url),
+                                pr_number=int(pr.number),
+                                gh_host=str(pr.host),
+                                gh_owner=str(pr.owner),
+                                gh_repo_name=str(pr.repo),
+                                gh_repo=str(pr.gh_repo),
+                                agent_desc=agent_desc,
+                                head_ref="HEAD",
+                                extra_vars={
+                                    **review_intelligence_prompt_vars(
+                                        review_intelligence_cfg,
+                                        capability_summary=review_intelligence_capabilities,
+                                    ),
+                                    **verbose_review_findings_prompt_vars(
+                                        enabled=bool(getattr(args, "wtf", False))
+                                    ),
+                                    **cod_hypothesis_ledger_prompt_vars(
+                                        enabled=bool(getattr(args, "cod_ledger", False))
+                                    ),
+                                    "PLAN_JSON_PATH": str(plan_json_path),
+                                    "STEP_OUTPUT_PATHS": step_paths_text,
+                                    "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
+                                },
+                            )
+
+                        def _execute_fresh_synth(prompt: str) -> str | None:
+                            return _execute_multipass_synth_stage(
+                                progress=progress,
+                                repo_dir=repo_dir,
+                                work_dir=work_dir,
+                                session_id=session_id,
+                                review_md_path=review_md_path,
+                                synth_prompt=prompt,
+                                synth_llm=synth_llm,
+                                synth_runtime_policy=synth_runtime_policy,
+                                synth_step_outputs=synth_step_outputs,
+                                grounding_mode=grounding_mode,
+                                env=env,
+                                stream=stream,
+                                add_dirs=add_dirs,
+                                codex_meta=codex_meta,
+                                ui_enabled=ui_enabled,
+                                prompt_template_name=templates["synth"],
+                                run_kind="synth",
+                                review_stage="multipass_synth",
+                                stage_label="multipass synth",
+                                failure_message="Multipass synth grounding validation failed for review.md.",
+                                multipass_cfg=multipass_defaults,
+                            )
+
+                        delivery_context = prior_context
+                        published_for_delivery = False
+                        if delivery_context:
+                            try:
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief=delivery_context,
+                                    include_brief=True,
+                                )
+                            except (OSError, UnicodeError) as exc:
+                                _remove_fresh_pr_context_artifacts(work_dir)
+                                delivery_context = ""
+                                pr_context_meta.update(
+                                    outcome="degraded",
+                                    reason="artifact_write_failed",
+                                    context_mode="off",
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "failed"
+                                pr_context_meta["persistence"]["warning"] = (
+                                    "artifact_write_failed"
+                                )
+                                log(
+                                    f"PR context degraded (artifact_write_failed): {exc}",
+                                    quiet=quiet,
+                                )
+                                _flush_fresh_pr_context_authority()
+                            else:
+                                published_for_delivery = True
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "written"
+
+                        def _render_fresh_synth_with_cleanup(context: str) -> str:
+                            nonlocal published_for_delivery
+                            if not context and published_for_delivery:
+                                _remove_fresh_pr_context_artifacts(work_dir)
+                                published_for_delivery = False
+                            return _render_fresh_synth(context)
+
+                        success_resume_command = _execute_pr_context_synth_with_fallback(
+                            prior_context=delivery_context,
+                            context_meta=pr_context_meta,
+                            render_synth=_render_fresh_synth_with_cleanup,
+                            execute_synth=_execute_fresh_synth,
+                            flush=_flush_fresh_pr_context_authority,
+                            warn=lambda message: log(message, quiet=quiet),
+                            retryable_failure=_PrContextSynthesisExecutionFailure,
+                            usage=lambda: _multipass_run_usage(
+                                progress.meta, kind="synth"
+                            ),
+                            clock=_pr_context_monotonic,
+                            delivery_entered=bool(prior_context),
                         )
-                        success_resume_command = _execute_multipass_synth_stage(
-                            progress=progress,
-                            repo_dir=repo_dir,
-                            work_dir=work_dir,
-                            session_id=session_id,
-                            review_md_path=review_md_path,
-                            synth_prompt=synth_prompt,
-                            synth_llm=synth_llm,
-                            synth_runtime_policy=synth_runtime_policy,
-                            synth_step_outputs=synth_step_outputs,
-                            grounding_mode=grounding_mode,
-                            env=env,
-                            stream=stream,
-                            add_dirs=add_dirs,
-                            codex_meta=codex_meta,
-                            ui_enabled=ui_enabled,
-                            prompt_template_name=templates["synth"],
-                            run_kind="synth",
-                            review_stage="multipass_synth",
-                            stage_label="multipass synth",
-                            failure_message="Multipass synth grounding validation failed for review.md.",
-                            multipass_cfg=multipass_defaults,
-                        )
+                        if prior_context:
+                            if pr_context_meta.get("context_mode") == "off":
+                                _publish_fresh_pr_context(
+                                    work_dir=work_dir,
+                                    built=pr_context_result,
+                                    brief="",
+                                    include_brief=False,
+                                )
+                                pr_context_meta["persistence"][
+                                    "discussion_artifact"
+                                ] = "written"
+                                pr_context_meta["persistence"][
+                                    "orientation_artifact"
+                                ] = "not_attempted"
+                            _flush_fresh_pr_context_authority()
 
                     progress.meta.setdefault("multipass", {})["status"] = "done"
                     progress.flush()
@@ -10225,6 +10721,13 @@ def _pr_flow_impl(
                         prompt = rendered
 
                 assert prompt is not None
+                context_bearing_singlepass = bool(prior_context) and isinstance(profile_template_name, str)
+                singlepass_output_path = (
+                    work_dir / "pr_context_draft.md" if context_bearing_singlepass else review_md_path
+                )
+                if context_bearing_singlepass:
+                    singlepass_output_path.unlink(missing_ok=True)
+                _assert_orientation_runtime_absent()
                 with phase(
                     _singlepass_review_phase_name(provider=llm_resolved.get("provider")),
                     progress=progress,
@@ -10234,7 +10737,7 @@ def _pr_flow_impl(
                         repo_dir=repo_dir,
                         resolved=llm_resolved,
                         resolution_meta=llm_resolution_meta,
-                        output_path=review_md_path,
+                        output_path=singlepass_output_path,
                         prompt=prompt,
                         env=env,
                         stream=stream,
@@ -10266,7 +10769,158 @@ def _pr_flow_impl(
                         prompt_template_name=profile_template_name if args.prompt is None and args.prompt_file is None else None,
                         adapter_meta=review_result.adapter_meta,
                     )
+                    if context_bearing_singlepass and (
+                        not singlepass_output_path.is_file()
+                        or not singlepass_output_path.read_text(encoding="utf-8").strip()
+                    ):
+                        raise ReviewflowError(
+                            "Context-bearing singlepass did not produce a fresh non-empty pass-one artifact"
+                        )
                     progress.flush()
+
+        # Two-pass singlepass: publish only after the blind draft, immediately before reconcile.
+        if (not use_multipass) and context_bearing_singlepass:
+            try:
+                _publish_fresh_pr_context(
+                    work_dir=work_dir,
+                    built=pr_context_result,
+                    brief=prior_context,
+                    include_brief=True,
+                )
+            except (OSError, UnicodeError) as exc:
+                _remove_fresh_pr_context_artifacts(work_dir)
+                _atomic_write_text(
+                    review_md_path,
+                    singlepass_output_path.read_text(encoding="utf-8"),
+                )
+                pr_context_meta.update(
+                    outcome="degraded",
+                    reason="artifact_write_failed",
+                    context_mode="off",
+                )
+                pr_context_meta["estimated_tokens"]["injected"] = 0
+                pr_context_meta["truncation"]["injected_context"] = False
+                pr_context_meta["persistence"]["discussion_artifact"] = "failed"
+                pr_context_meta["persistence"]["orientation_artifact"] = "failed"
+                pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                log(f"PR context degraded (artifact_write_failed): {exc}", quiet=quiet)
+                context_bearing_singlepass = False
+                _flush_fresh_pr_context_authority()
+            else:
+                pr_context_meta["persistence"]["discussion_artifact"] = "written"
+                pr_context_meta["persistence"]["orientation_artifact"] = "written"
+
+        # Enrichment failure retains the ordinary blind draft.
+        if (not use_multipass) and context_bearing_singlepass:
+            with phase("reconcile_prior_context", progress=progress, quiet=quiet):
+                draft = singlepass_output_path.read_text(encoding="utf-8")
+                reconcile_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+
+                reconciled_output_path = work_dir / "pr_context_reconciled.md"
+                reconciled_output_path.unlink(missing_ok=True)
+
+                reconciliation_started = _pr_context_monotonic()
+                reconciliation_usage: dict[str, int] | None = None
+
+                def _run_prior_context_reconcile(prompt: str) -> str:
+                    nonlocal reconciliation_usage
+                    try:
+                        reconcile_result = run_llm_exec(
+                            repo_dir=repo_dir,
+                            resolved=llm_resolved,
+                            resolution_meta=llm_resolution_meta,
+                            output_path=reconciled_output_path,
+                            prompt=prompt,
+                            env=reconcile_env,
+                            stream=False,
+                            progress=progress,
+                            add_dirs=add_dirs,
+                            runtime_policy=None,
+                        )
+                    except ReviewflowSubprocessError as exc:
+                        raise _PrContextReconciliationExecutionFailure(exc) from exc
+                    reconciliation_usage = _normalize_llm_usage(
+                        reconcile_result.adapter_meta.get("usage")
+                    )
+                    record_llm_usage(progress.meta.setdefault("llm", {}), reconcile_result.adapter_meta)
+                    if not reconciled_output_path.is_file():
+                        return ""
+                    return reconciled_output_path.read_text(encoding="utf-8")
+
+                context_meta = pr_context_meta
+                prior_total_ms = int(context_meta["latency_ms"].get("total_enrichment", 0))
+
+                def _record_reconciliation_observations() -> None:
+                    if not isinstance(context_meta, dict):
+                        return
+                    elapsed_ms = int(max(0.0, _pr_context_monotonic() - reconciliation_started) * 1000)
+                    context_meta["latency_ms"]["delivery"] = elapsed_ms
+                    context_meta["latency_ms"]["total_enrichment"] = prior_total_ms + elapsed_ms
+                    if reconciliation_usage is not None:
+                        context_meta["provider_usage"]["delivery_input_tokens"] = (
+                            reconciliation_usage.get("input_tokens")
+                        )
+                        context_meta["provider_usage"]["delivery_output_tokens"] = (
+                            reconciliation_usage.get("output_tokens")
+                        )
+
+                try:
+                    reconciled_review = _reconcile_prior_context(
+                        draft_review=draft,
+                        orientation_brief=prior_context,
+                        run_llm=_run_prior_context_reconcile,
+                    )
+                except _PrContextReconciliationExecutionFailure as exc:
+                    _atomic_write_text(review_md_path, draft)
+                    _record_reconciliation_observations()
+                    context_meta.update(
+                        outcome="degraded", reason="reconciliation_failed", context_mode="off"
+                    )
+                    log(f"PR context degraded (reconciliation_failed): {exc.cause}", quiet=quiet)
+                else:
+                    if not reconciled_review.strip() or not reconciled_output_path.is_file():
+                        raise ReviewflowError(
+                            "Context-bearing singlepass did not produce a fresh non-empty pass-two artifact"
+                        )
+                    reconciled_output_path.replace(review_md_path)
+                    _record_reconciliation_observations()
+                    context_meta.update(
+                        outcome="used", reason="context_delivered", context_mode="on"
+                    )
+                _flush_fresh_pr_context_authority()
+
+        if (
+            isinstance(pr_context_result, dict)
+            and pr_context_result.get("discussion")
+            and pr_context_meta["persistence"]["discussion_artifact"] == "not_attempted"
+        ):
+            try:
+                _publish_fresh_pr_context(
+                    work_dir=work_dir,
+                    built=pr_context_result,
+                    brief="",
+                    include_brief=False,
+                )
+            except (OSError, UnicodeError) as exc:
+                if pr_context_meta.get("outcome") != "degraded":
+                    pr_context_meta.update(
+                        outcome="degraded",
+                        reason="artifact_write_failed",
+                        context_mode="off",
+                    )
+                pr_context_meta["persistence"]["discussion_artifact"] = "failed"
+                pr_context_meta["persistence"]["warning"] = "artifact_write_failed"
+                log(f"PR context degraded (artifact_write_failed): {exc}", quiet=quiet)
+            else:
+                pr_context_meta["persistence"]["discussion_artifact"] = "written"
+            progress.meta["pr_context"] = pr_context_meta
+            progress.flush()
+
+        context_meta = progress.meta.get("pr_context")
+        if isinstance(context_meta, dict):
+            _mirror_pr_context_metadata(
+                progress=progress, work_dir=work_dir, context_meta=context_meta, quiet=quiet
+            )
 
         if review_md_path.is_file() and (
             persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
@@ -10680,54 +11334,94 @@ def _run_incremental_completed_multipass_resume(
     progress.flush()
     with phase("multipass_resume_synth", progress=progress, quiet=quiet):
         step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs) if synth_step_outputs else "- None."
-        synth_prompt = render_prompt(
-            load_builtin_prompt_text(templates["resume_synth"]),
-            base_ref_for_review=base_ref_for_review,
-            pr_url=str(meta.get("pr_url") or ""),
-            pr_number=int(meta.get("number") or pr.number),
-            gh_host=str(pr.host),
-            gh_owner=str(pr.owner),
-            gh_repo_name=str(pr.repo),
-            gh_repo=str(pr.gh_repo),
-            agent_desc=agent_desc,
-            head_ref="HEAD",
-            extra_vars={
-                **review_intelligence_prompt_vars(
-                    review_intelligence_cfg,
-                    capability_summary=review_intelligence_capabilities,
-                ),
-                **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
-                **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
-                "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
-                "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
-                "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
-                "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
-                "STEP_OUTPUT_PATHS": step_paths_text,
-                "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
-            },
+        resume_context_started = _pr_context_monotonic()
+        prior_context, prior_context_reason = read_persisted_context(
+            work_dir, meta.get("pr_context")
         )
-        success_resume_command = _execute_multipass_synth_stage(
-            progress=progress,
-            repo_dir=repo_dir,
-            work_dir=work_dir,
-            session_id=session_id,
-            review_md_path=review_md_path,
-            synth_prompt=synth_prompt,
-            synth_llm=synth_llm,
-            synth_runtime_policy=synth_runtime_policy,
-            synth_step_outputs=synth_step_outputs,
-            grounding_mode=grounding_mode,
-            env=env,
-            stream=stream,
-            add_dirs=add_dirs,
-            codex_meta=codex_meta,
-            ui_enabled=ui_enabled,
-            prompt_template_name=templates["resume_synth"],
-            run_kind="resume_synth",
-            review_stage="multipass_resume_synth",
-            stage_label="multipass resume synth",
-            failure_message="Incremental multipass synth grounding validation failed for review.md.",
-            multipass_cfg=multipass_cfg,
+        resume_context_meta = metadata_for_resume(
+            meta.get("pr_context"), brief=prior_context, reason=prior_context_reason
+        )
+        if not prior_context:
+            progress.meta["pr_context"] = resume_context_meta
+            progress.flush()
+
+        def _flush_incremental_pr_context_authority() -> None:
+            progress.meta["pr_context"] = resume_context_meta
+            progress.flush()
+
+        def _render_incremental_synth(context: str) -> str:
+            return _render_synth_prompt_with_prior_context(
+                load_builtin_prompt_text(templates["resume_synth"]),
+                prior_context=context,
+                base_ref_for_review=base_ref_for_review,
+                pr_url=str(meta.get("pr_url") or ""),
+                pr_number=int(meta.get("number") or pr.number),
+                gh_host=str(pr.host),
+                gh_owner=str(pr.owner),
+                gh_repo_name=str(pr.repo),
+                gh_repo=str(pr.gh_repo),
+                agent_desc=agent_desc,
+                head_ref="HEAD",
+                extra_vars={
+                    **review_intelligence_prompt_vars(
+                        review_intelligence_cfg,
+                        capability_summary=review_intelligence_capabilities,
+                    ),
+                    **cod_hypothesis_ledger_prompt_vars(enabled=cod_ledger_enabled),
+                    **verbose_review_findings_prompt_vars(enabled=wtf_enabled),
+                    "PREVIOUS_REVIEW_MD": str(previous_review_snapshot_path),
+                    "PREVIOUS_REVIEW_HEAD_SHA": str(previous_review_point.head_sha or "").strip(),
+                    "CURRENT_REVIEW_HEAD_SHA": current_review_head_sha,
+                    "RESUME_PLAN_JSON_PATH": str(resume_plan_json_path),
+                    "STEP_OUTPUT_PATHS": step_paths_text,
+                    "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
+                },
+            )
+
+        def _execute_incremental_synth(prompt: str) -> str | None:
+            return _execute_multipass_synth_stage(
+                progress=progress,
+                repo_dir=repo_dir,
+                work_dir=work_dir,
+                session_id=session_id,
+                review_md_path=review_md_path,
+                synth_prompt=prompt,
+                synth_llm=synth_llm,
+                synth_runtime_policy=synth_runtime_policy,
+                synth_step_outputs=synth_step_outputs,
+                grounding_mode=grounding_mode,
+                env=env,
+                stream=stream,
+                add_dirs=add_dirs,
+                codex_meta=codex_meta,
+                ui_enabled=ui_enabled,
+                prompt_template_name=templates["resume_synth"],
+                run_kind="resume_synth",
+                review_stage="multipass_resume_synth",
+                stage_label="multipass resume synth",
+                failure_message="Incremental multipass synth grounding validation failed for review.md.",
+                multipass_cfg=multipass_cfg,
+            )
+
+        success_resume_command = _execute_pr_context_synth_with_fallback(
+            prior_context=prior_context,
+            context_meta=resume_context_meta,
+            render_synth=_render_incremental_synth,
+            execute_synth=_execute_incremental_synth,
+            flush=_flush_incremental_pr_context_authority,
+            warn=lambda message: log(message, quiet=quiet),
+            retryable_failure=_PrContextSynthesisExecutionFailure,
+            usage=lambda: _multipass_run_usage(
+                progress.meta, kind="resume_synth"
+            ),
+            clock=_pr_context_monotonic,
+            delivery_entered=True,
+            total_started_at=resume_context_started,
+        )
+        if prior_context:
+            _flush_incremental_pr_context_authority()
+        _mirror_pr_context_metadata(
+            progress=progress, work_dir=work_dir, context_meta=resume_context_meta, quiet=quiet
         )
 
     progress.meta["review_head_sha"] = current_review_head_sha
@@ -11588,56 +12282,99 @@ def _resume_flow_impl(
             with phase("multipass_synth", progress=progress, quiet=quiet):
                 did_work = True
                 synth_template = load_builtin_prompt_text(templates["synth"])
-                step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
-                synth_prompt = render_prompt(
-                    synth_template,
-                    base_ref_for_review=base_ref_for_review,
-                    pr_url=pr_url,
-                    pr_number=int(meta.get("number") or pr.number),
-                    gh_host=str(pr.host),
-                    gh_owner=str(pr.owner),
-                    gh_repo_name=str(pr.repo),
-                    gh_repo=str(pr.gh_repo),
-                    agent_desc=agent_desc,
-                    head_ref="HEAD",
-                    extra_vars={
-                        **review_intelligence_prompt_vars(
-                            review_intelligence_cfg,
-                            capability_summary=review_intelligence_capabilities,
-                        ),
-                        **verbose_review_findings_prompt_vars(
-                            enabled=bool(getattr(args, "wtf", False))
-                        ),
-                        **cod_hypothesis_ledger_prompt_vars(
-                            enabled=bool(getattr(args, "cod_ledger", False))
-                        ),
-                        "PLAN_JSON_PATH": str(plan_json_path),
-                        "STEP_OUTPUT_PATHS": step_paths_text,
-                        "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
-                    },
+                resume_context_started = _pr_context_monotonic()
+                prior_context, prior_context_reason = read_persisted_context(
+                    work_dir, meta.get("pr_context")
                 )
-                success_resume_command = _execute_multipass_synth_stage(
+                resume_context_meta = metadata_for_resume(
+                    meta.get("pr_context"), brief=prior_context, reason=prior_context_reason
+                )
+                if not prior_context:
+                    progress.meta["pr_context"] = resume_context_meta
+                    progress.flush()
+
+                def _flush_regular_pr_context_authority() -> None:
+                    progress.meta["pr_context"] = resume_context_meta
+                    progress.flush()
+
+                step_paths_text = "\n".join(f"- `{p}`" for p in synth_step_outputs)
+                def _render_regular_resume_synth(context: str) -> str:
+                    return _render_synth_prompt_with_prior_context(
+                        synth_template,
+                        prior_context=context,
+                        base_ref_for_review=base_ref_for_review,
+                        pr_url=pr_url,
+                        pr_number=int(meta.get("number") or pr.number),
+                        gh_host=str(pr.host),
+                        gh_owner=str(pr.owner),
+                        gh_repo_name=str(pr.repo),
+                        gh_repo=str(pr.gh_repo),
+                        agent_desc=agent_desc,
+                        head_ref="HEAD",
+                        extra_vars={
+                            **review_intelligence_prompt_vars(
+                                review_intelligence_cfg,
+                                capability_summary=review_intelligence_capabilities,
+                            ),
+                            **verbose_review_findings_prompt_vars(
+                                enabled=bool(getattr(args, "wtf", False))
+                            ),
+                            **cod_hypothesis_ledger_prompt_vars(
+                                enabled=bool(getattr(args, "cod_ledger", False))
+                            ),
+                            "PLAN_JSON_PATH": str(plan_json_path),
+                            "STEP_OUTPUT_PATHS": step_paths_text,
+                            "GROUNDING_SKIPPED_STEPS": skipped_prompt_text,
+                        },
+                    )
+
+                def _execute_regular_resume_synth(prompt: str) -> str | None:
+                    return _execute_multipass_synth_stage(
+                        progress=progress,
+                        repo_dir=repo_dir,
+                        work_dir=work_dir,
+                        session_id=session_id,
+                        review_md_path=review_md_path,
+                        synth_prompt=prompt,
+                        synth_llm=synth_llm,
+                        synth_runtime_policy=synth_runtime_policy,
+                        synth_step_outputs=synth_step_outputs,
+                        grounding_mode=grounding_mode,
+                        env=env,
+                        stream=stream,
+                        add_dirs=add_dirs,
+                        codex_meta=codex_meta,
+                        ui_enabled=ui_enabled,
+                        prompt_template_name=templates["synth"],
+                        run_kind="synth",
+                        review_stage="multipass_synth",
+                        stage_label="multipass synth",
+                        failure_message="Multipass synth grounding validation failed for review.md.",
+                        multipass_cfg=multipass_cfg,
+                    )
+
+                success_resume_command = _execute_pr_context_synth_with_fallback(
+                    prior_context=prior_context,
+                    context_meta=resume_context_meta,
+                    render_synth=_render_regular_resume_synth,
+                    execute_synth=_execute_regular_resume_synth,
+                    flush=_flush_regular_pr_context_authority,
+                    warn=lambda message: log(message, quiet=quiet),
+                    retryable_failure=_PrContextSynthesisExecutionFailure,
+                    usage=lambda: _multipass_run_usage(
+                        progress.meta, kind="synth"
+                    ),
+                    clock=_pr_context_monotonic,
+                    delivery_entered=True,
+                    total_started_at=resume_context_started,
+                )
+                if prior_context:
+                    _flush_regular_pr_context_authority()
+                _mirror_pr_context_metadata(
                     progress=progress,
-                    repo_dir=repo_dir,
                     work_dir=work_dir,
-                    session_id=session_id,
-                    review_md_path=review_md_path,
-                    synth_prompt=synth_prompt,
-                    synth_llm=synth_llm,
-                    synth_runtime_policy=synth_runtime_policy,
-                    synth_step_outputs=synth_step_outputs,
-                    grounding_mode=grounding_mode,
-                    env=env,
-                    stream=stream,
-                    add_dirs=add_dirs,
-                    codex_meta=codex_meta,
-                    ui_enabled=ui_enabled,
-                    prompt_template_name=templates["synth"],
-                    run_kind="synth",
-                    review_stage="multipass_synth",
-                    stage_label="multipass synth",
-                    failure_message="Multipass synth grounding validation failed for review.md.",
-                    multipass_cfg=multipass_cfg,
+                    context_meta=resume_context_meta,
+                    quiet=quiet,
                 )
 
         if did_work:
@@ -14484,6 +15221,23 @@ from cure_runtime import (
     resolve_verbosity,
     toml_string,
 )
+from cure_pr_context import (
+    OrientationProviderExecutionFailure,
+    PrContextStageError,
+    build_pr_context,
+)
+from cure_pr_context.orient import (
+    InjectedContextFinalizationFailure,
+    finalize_injected_context,
+)
+from cure_pr_context.runtime import (
+    apply_build_metadata,
+    atomic_write_metadata,
+    atomic_write_persisted_context,
+    classify_fresh,
+    metadata_for_resume,
+    read_persisted_context,
+)
 from cure_flows import (
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
@@ -14638,6 +15392,15 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         dest="codex_plan_effort",
         default=None,
         help=argparse.SUPPRESS,
+    )
+    pcg = prp.add_mutually_exclusive_group()
+    pcg.add_argument(
+        "--pr-context", dest="pr_context", action="store_true", default=None,
+        help="Enable bounded selected-PR discussion orientation (opt-in pilot)",
+    )
+    pcg.add_argument(
+        "--no-pr-context", dest="pr_context", action="store_false", default=None,
+        help="Disable selected-PR discussion orientation (default)",
     )
     mpg = prp.add_mutually_exclusive_group()
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")

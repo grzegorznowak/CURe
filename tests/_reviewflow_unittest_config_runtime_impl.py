@@ -2407,5 +2407,3 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(request["json"]["reasoning"]["effort"], "high")
         self.assertEqual(request["json"]["max_output_tokens"], 9000)
         self.assertEqual(request["json"]["provider"]["sort"], "latency")
-
-

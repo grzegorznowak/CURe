@@ -9,6 +9,7 @@ Your job in this call is to produce a **multipass review plan** for this PR that
 # Mandatory review-intelligence gate (ABORT if you can't)
 Use the configured review-intelligence guidance below to gather the required product, PR, ticket, and external context for this review plan.
 $REVIEW_INTELLIGENCE_GUIDANCE
+
 If any required intelligence read fails, or you cannot gather enough context to understand the requested outcome, ABORT (do not continue).
 
 Safety guardrail:

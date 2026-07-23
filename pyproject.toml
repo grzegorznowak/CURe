@@ -14,8 +14,8 @@ dependencies = []
 cure = "cure:console_main"
 
 [tool.setuptools]
-py-modules = ["cure", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_citations", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_chunkhound", "cure_flows", "cure_commands", "chunkhound_summary"]
-packages = ["prompts", "_doctor_chunkhound_fixture"]
+py-modules = ["cure", "paths", "run", "meta", "ui", "cure_errors", "cure_branding", "cure_citations", "cure_output", "cure_sessions", "cure_runtime", "cure_llm", "cure_chunkhound", "cure_flows", "cure_commands", "cure_github", "chunkhound_summary"]
+packages = ["prompts", "_doctor_chunkhound_fixture", "cure_pr_context"]
 include-package-data = true
 
 [tool.setuptools.package-data]
@@ -41,6 +41,7 @@ exclude = '(^build/|^dist/|^dist-public-proveout/|^[^/]+\\.egg-info/|^\\.tmp_|^t
 files = [
     "chunkhound_summary.py",
     "cure_errors.py",
+    "cure_github.py",
     "cure_output.py",
     "cure_sessions.py",
     "meta.py",
