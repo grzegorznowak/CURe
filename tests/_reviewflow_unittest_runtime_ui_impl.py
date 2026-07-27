@@ -3486,6 +3486,25 @@ class InstallAndDoctorTests(unittest.TestCase):
             ),
         )
 
+    def test_readme_documents_supported_llm_model_configuration(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## Changing The Review Model", readme)
+        self.assertIn('[llm]\ndefault_preset = "review_codex"', readme)
+        self.assertIn("[llm_presets.review_codex]", readme)
+        self.assertIn('preset = "codex-cli"', readme)
+        self.assertIn('model = "gpt-5.4"', readme)
+        self.assertIn('reasoning_effort = "high"', readme)
+        self.assertNotIn("openai-responses", readme)
+        self.assertNotIn("openrouter-responses", readme)
+        self.assertIn(
+            "--llm-preset codex-cli --llm-model gpt-5.4 --llm-effort high",
+            readme,
+        )
+        self.assertNotIn(
+            '[llm]\n# One execution effort now applies to plan, step, and synth.\nreasoning_effort = "high"',
+            readme,
+        )
+
     def test_build_chunkhound_install_command_uses_expected_specs(self) -> None:
         with mock.patch.object(rf, "_running_in_uv_tool_environment", return_value=False), mock.patch.object(
             rf.importlib.util, "find_spec", return_value=object()

@@ -457,7 +457,7 @@ def test_public_fallback_pagination_failure_degrades_context_free_without_partia
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_parser_pr_context_is_paired_and_defaults_off() -> None:
+def test_parser_pr_context_retains_omitted_and_explicit_tri_state() -> None:
     parser = cure.build_parser()
     base = ["pr", "https://github.com/acme/repo/pull/1"]
     assert parser.parse_args(base).pr_context is None
@@ -468,23 +468,30 @@ def test_parser_pr_context_is_paired_and_defaults_off() -> None:
 
 
 @pytest.mark.parametrize(
-    ("args", "reason", "enabled", "eligible", "source"),
+    ("args", "reason", "enabled", "eligible", "source", "outcome"),
     [
-        (_args(), "disabled_default", False, True, "default"),
-        (_args(pr_context=False), "disabled_cli", False, True, "cli_explicit"),
-        (_args(pr_context=True, prompt="custom"), "custom_prompt", True, False, "cli_explicit"),
-        (_args(pr_context=True, prompt_file="custom.md"), "custom_prompt", True, False, "cli_explicit"),
-        (_args(pr_context=True, prompt_profile="default"), "unsupported_profile", True, False, "cli_explicit"),
+        (_args(), "context_delivered", True, True, "default", "used"),
+        (_args(pr_context=True), "context_delivered", True, True, "cli_explicit", "used"),
+        (_args(pr_context=False), "disabled_cli", False, True, "cli_explicit", "bypassed"),
+        (_args(prompt="custom"), "custom_prompt", True, False, "default", "bypassed"),
+        (_args(prompt_file="custom.md"), "custom_prompt", True, False, "default", "bypassed"),
+        (_args(prompt_profile="default"), "unsupported_profile", True, False, "default", "bypassed"),
     ],
 )
 def test_pr_context_eligibility_pre_io_metadata(
-    args: argparse.Namespace, reason: str, enabled: bool, eligible: bool, source: str
+    args: argparse.Namespace,
+    reason: str,
+    enabled: bool,
+    eligible: bool,
+    source: str,
+    outcome: str,
 ) -> None:
     meta = classify_fresh(args)
     assert (meta["reason"], meta["enabled"], meta["eligible"], meta["enablement_source"]) == (
         reason, enabled, eligible, source
     )
-    assert meta["outcome"] == "bypassed" and meta["context_mode"] == "off"
+    assert meta["outcome"] == outcome
+    assert meta["context_mode"] == "off"
 
 
 def _valid_brief() -> str:

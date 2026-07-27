@@ -9284,11 +9284,10 @@ class CodexToolProofFlowTests(unittest.TestCase):
         custom_prompt_file = ROOT / ".tmp_test_pr_context_custom_prompt.md"
         custom_prompt_file.write_text("custom prompt", encoding="utf-8")
         cases = [
-            ("omitted", [], "disabled_default"),
             ("explicit_off", ["--no-pr-context"], "disabled_cli"),
-            ("custom", ["--pr-context", "--prompt", "custom prompt"], "custom_prompt"),
-            ("custom_file", ["--pr-context", "--prompt-file", str(custom_prompt_file)], "custom_prompt"),
-            ("unsupported", ["--pr-context", "--prompt-profile", "default"], "unsupported_profile"),
+            ("custom", ["--prompt", "custom prompt"], "custom_prompt"),
+            ("custom_file", ["--prompt-file", str(custom_prompt_file)], "custom_prompt"),
+            ("unsupported", ["--prompt-profile", "default"], "unsupported_profile"),
         ]
 
         def ordinary_review(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
@@ -9325,6 +9324,28 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 finally:
                     shutil.rmtree(root, ignore_errors=True)
 
+        invalid_root = ROOT / ".tmp_test_pr_context_invalid_no_index"
+        invalid_gh_calls: list[object] = []
+
+        def record_invalid_gh_call(*args: object, **kwargs: object) -> list[object]:
+            invalid_gh_calls.append((args, kwargs))
+            return []
+
+        try:
+            _, invalid_llm_calls = self._run_pr_flow_for_tool_proof(
+                root=invalid_root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=ordinary_review,
+                extra_cli_args=["--no-index"],
+                expect_error="--no-index is not supported with the built-in prompt profiles",
+                gh_api_list_side_effect=record_invalid_gh_call,
+            )
+            self.assertEqual(invalid_gh_calls, [])
+            self.assertEqual(invalid_llm_calls, [])
+        finally:
+            shutil.rmtree(invalid_root, ignore_errors=True)
+
         root = ROOT / ".tmp_test_pr_context_no_remote_genuine_route"
         try:
             self._run_pr_flow_for_tool_proof(
@@ -9332,11 +9353,13 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 profile_resolved="normal",
                 multipass_enabled=False,
                 llm_side_effect=ordinary_review,
-                extra_cli_args=["--pr-context"],
             )
             session_dir = next((root / "sandboxes").iterdir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["pr_context"]["reason"], "no_remote_context")
+            self.assertTrue(meta["pr_context"]["enabled"])
+            self.assertTrue(meta["pr_context"]["eligible"])
+            self.assertEqual(meta["pr_context"]["enablement_source"], "default")
             self.assertEqual(
                 json.loads(
                     (session_dir / "work" / "pr_context_discussion.json").read_text(

@@ -23,6 +23,7 @@ If you are using CURe from an agent session, treat [SKILL.md](SKILL.md) as an as
 - [Secondary Standalone Install](#secondary-standalone-install)
 - [Advanced / Pre-Provisioned Environments](#advanced--pre-provisioned-environments)
 - [Minimal Config](#minimal-config)
+- [Changing The Review Model](#changing-the-review-model)
 - [Jira CLI](#jira-cli)
 - [Tests](#tests)
 
@@ -193,6 +194,8 @@ Start a fresh review:
 cure pr <PR_URL> --if-reviewed new
 ```
 
+Selected-PR discussion orientation is enabled by default for the built-in `auto`, `normal`, and `big` prompt profiles. Use `--no-pr-context` to opt out for a run; `--pr-context` remains available as an explicit enable flag. Custom prompts, prompt files, and `--prompt-profile default` bypass this enrichment.
+
 Check status:
 
 ```bash
@@ -335,10 +338,6 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 # off    = skip grounding validation
 grounding_mode = "strict"
 step_workers = 4
-
-[llm]
-# One execution effort now applies to plan, step, and synth.
-reasoning_effort = "high"
 ```
 
 On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in Codex defaults are explicit: `codex-cli` defaults to effort `high`.
@@ -350,6 +349,30 @@ If an embedding key is already present in the environment, `cure setup` adds the
 If no supported key is present, an assisting agent should stop with the exact local config path, the minimal snippet to add, the required env var name, and the rerun command instead of improvising a manual review. Agents must not ask the operator to paste secret values into chat, infer secret values, or persist secrets outside operator-approved local mechanisms.
 
 The structured `review_intelligence` source registry now feeds prompt guidance, session metadata, and `cure doctor --json` capability summaries. Only `mode = "required"` sources are preflighted before review generation; optional sources stay lazy and surface as `available`, `unavailable`, or `unknown` based on the runtime facts CURe already has.
+
+## Changing The Review Model
+
+CURe reads persistent model settings from the active `cure.toml` (normally `~/.config/cure/cure.toml`). Define a named preset and select it as the default:
+
+```toml
+[llm]
+default_preset = "review_codex"
+
+[llm_presets.review_codex]
+preset = "codex-cli"
+model = "gpt-5.4"
+reasoning_effort = "high"
+```
+
+Named presets use `[llm_presets.<name>]`, not `[llm.presets.<name>]`. The example above configures the supported Codex CLI path. `cure setup` may persist `default_preset = "codex-cli"` after an approved Codex choice, but it does not choose a model or create a complete named preset.
+
+For one review, override the selected preset, model, and effort on the command line:
+
+```bash
+cure pr <PR_URL> --llm-preset codex-cli --llm-model gpt-5.4 --llm-effort high
+```
+
+CLI model and effort overrides take precedence over the selected preset. CURe uses the resolved main model for the review stages and selected-PR orientation; the current `cure pr` workflow does not apply separate coordinator, reviewer, synthesis, or utility model settings.
 
 ## Jira CLI
 

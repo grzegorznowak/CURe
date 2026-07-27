@@ -6,6 +6,11 @@ Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag.
 
 ## Unreleased
 
+### Changed
+
+- Selected-PR discussion orientation is now enabled by default for supported built-in `cure pr` profiles. Use `--no-pr-context` to opt out; custom prompts and the unsupported `default` prompt profile continue to bypass it.
+- Documented how to select the review model persistently with a named LLM preset or temporarily with CLI overrides.
+
 ## [0.9.0] - 2026-07-23
 
 ### Added

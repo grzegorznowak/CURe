@@ -38,8 +38,6 @@ def empty_metadata(*, enabled: bool, eligible: bool, enablement_source: str, out
 def classify_fresh(args: Any) -> dict[str, Any]:
     value = getattr(args, "pr_context", None)
     source = "default" if value is None else "cli_explicit"
-    if value is None:
-        return empty_metadata(enabled=False, eligible=True, enablement_source=source, outcome="bypassed", reason="disabled_default")
     if value is False:
         return empty_metadata(enabled=False, eligible=True, enablement_source=source, outcome="bypassed", reason="disabled_cli")
     if getattr(args, "prompt", None) is not None or getattr(args, "prompt_file", None) is not None:
