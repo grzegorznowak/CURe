@@ -9774,6 +9774,16 @@ def _pr_flow_impl(
         if not bool(args.no_review):
             if llm_resolved is None or llm_resolution_meta is None:
                 raise ReviewflowError("LLM configuration was not resolved before PR context orientation.")
+            if (
+                bool(getattr(args, "no_index", False))
+                and getattr(args, "prompt", None) is None
+                and getattr(args, "prompt_file", None) is None
+            ):
+                raise ReviewflowError(
+                    "--no-index is not supported with the built-in prompt profiles. "
+                    "These prompts require CURe-managed ChunkHound helper access; run without --no-index, "
+                    "or use a custom --prompt/--prompt-file that does not require ChunkHound."
+                )
 
             pr_context_meta = classify_fresh(args)
             pr_context_started: float | None = None
@@ -10040,13 +10050,6 @@ def _pr_flow_impl(
                     "mode"
                 ] = "multipass" if use_multipass else "singlepass"
                 progress.flush()
-
-                if bool(getattr(args, "no_index", False)) and (not bool(getattr(args, "no_review", False))):
-                    raise ReviewflowError(
-                        "--no-index is not supported with the built-in prompt profiles. "
-                        "These prompts require CURe-managed ChunkHound helper access; run without --no-index, "
-                        "or use a custom --prompt/--prompt-file that does not require ChunkHound."
-                    )
 
         if not args.no_index:
             assert base_cache_meta is not None
@@ -15396,11 +15399,11 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     pcg = prp.add_mutually_exclusive_group()
     pcg.add_argument(
         "--pr-context", dest="pr_context", action="store_true", default=None,
-        help="Enable bounded selected-PR discussion orientation (opt-in pilot)",
+        help="Explicitly enable bounded selected-PR discussion orientation (default for supported built-in profiles)",
     )
     pcg.add_argument(
         "--no-pr-context", dest="pr_context", action="store_false", default=None,
-        help="Disable selected-PR discussion orientation (default)",
+        help="Disable selected-PR discussion orientation",
     )
     mpg = prp.add_mutually_exclusive_group()
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
