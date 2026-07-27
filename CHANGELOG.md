@@ -4,12 +4,17 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
-## Unreleased
+## [0.9.1] - 2026-07-27
 
 ### Changed
 
 - Selected-PR discussion orientation is now enabled by default for supported built-in `cure pr` profiles. Use `--no-pr-context` to opt out; custom prompts and the unsupported `default` prompt profile continue to bypass it.
 - Documented how to select the review model persistently with a named LLM preset or temporarily with CLI overrides.
+
+### Fixed
+
+- Incompatible built-in `--no-index` reviews now fail before PR-context network or LLM work begins.
+- Package publishing now installs and runs pytest so the full test suite gates release builds.
 
 ## [0.9.0] - 2026-07-23
 
