@@ -364,7 +364,7 @@ model = "gpt-5.4"
 reasoning_effort = "high"
 ```
 
-Named presets use `[llm_presets.<name>]`, not `[llm.presets.<name>]`. Supported built-in presets are `codex-cli`, `openai-responses`, and `openrouter-responses`. `cure setup` may persist `default_preset = "codex-cli"` after an approved Codex choice, but it does not choose a model or create a complete named preset.
+Named presets use `[llm_presets.<name>]`, not `[llm.presets.<name>]`. The example above configures the supported Codex CLI path. `cure setup` may persist `default_preset = "codex-cli"` after an approved Codex choice, but it does not choose a model or create a complete named preset.
 
 For one review, override the selected preset, model, and effort on the command line:
 
@@ -373,8 +373,6 @@ cure pr <PR_URL> --llm-preset codex-cli --llm-model gpt-5.4 --llm-effort high
 ```
 
 CLI model and effort overrides take precedence over the selected preset. CURe uses the resolved main model for the review stages and selected-PR orientation; the current `cure pr` workflow does not apply separate coordinator, reviewer, synthesis, or utility model settings.
-
-For HTTP presets, the current configuration requires an `api_key` in the named preset; general provider/model environment variables such as `OPENAI_API_KEY` are not substituted for review-LLM authentication. Keep any config containing an API key private.
 
 ## Jira CLI
 

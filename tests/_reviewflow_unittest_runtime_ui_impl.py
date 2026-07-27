@@ -3494,8 +3494,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn('preset = "codex-cli"', readme)
         self.assertIn('model = "gpt-5.4"', readme)
         self.assertIn('reasoning_effort = "high"', readme)
-        self.assertIn("openai-responses", readme)
-        self.assertIn("openrouter-responses", readme)
+        self.assertNotIn("openai-responses", readme)
+        self.assertNotIn("openrouter-responses", readme)
         self.assertIn(
             "--llm-preset codex-cli --llm-model gpt-5.4 --llm-effort high",
             readme,
