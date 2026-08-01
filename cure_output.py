@@ -14,7 +14,13 @@ from typing import Any, Callable, TextIO, cast
 from chunkhound_summary import parse_chunkhound_index_summary
 from cure_branding import RUNTIME_SLUG
 from cure_errors import ReviewflowError
-from run import run_cmd
+from run import (
+    CommandResult,
+    LosslessCommandCapture,
+    OwnedProcessRegistry,
+    OwnedProcessRole,
+    run_cmd,
+)
 from ui import Dashboard, TailBuffer, UiState, Verbosity, StreamSink
 
 CURE_PROJECT_URL = "https://github.com/grzegorznowak/CURe"
@@ -584,7 +590,10 @@ class ReviewflowOutput:
         codex_display_log_path: Path | None = None,
         codex_event_callback: Callable[[dict[str, Any]], None] | None = None,
         stream_text_callback: Callable[[str], None] | None = None,
-    ):
+        lossless_capture: LosslessCommandCapture | None = None,
+        owned_processes: OwnedProcessRegistry | None = None,
+        owned_role: OwnedProcessRole | None = None,
+    ) -> CommandResult:
         capture_codex_json = kind == "codex" and codex_json_events_path is not None
         stream = True if (self.ui_enabled or capture_codex_json) else bool(stream_requested)
         label = None if capture_codex_json else (self.stream_label(kind) if stream else None)
@@ -627,6 +636,9 @@ class ReviewflowOutput:
                     stream=True,
                     stream_to=sink,
                     stream_label=label,
+                    lossless_capture=lossless_capture,
+                    owned_processes=owned_processes,
+                    owned_role=owned_role,
                 )
             finally:
                 active_exception = sys.exc_info()[0] is not None
@@ -644,7 +656,37 @@ class ReviewflowOutput:
                             cleanup_error = exc
                 if cleanup_error is not None and not active_exception:
                     raise cleanup_error
-        res = run_cmd(cmd, cwd=cwd, env=env, check=check, stream=False)
+        if lossless_capture is not None:
+            res = run_cmd(
+                cmd,
+                cwd=cwd,
+                env=env,
+                check=check,
+                stream=False,
+                lossless_capture=lossless_capture,
+                owned_processes=owned_processes,
+                owned_role=owned_role,
+            )
+            sink = self.stream_sink(kind)
+            for chunks in (
+                lossless_capture.iter_stdout_chunks(),
+                lossless_capture.iter_stderr_chunks(),
+            ):
+                for chunk in chunks:
+                    sink.write(chunk)
+                    if stream_text_callback is not None:
+                        stream_text_callback(chunk)
+            return res
+
+        res = run_cmd(
+            cmd,
+            cwd=cwd,
+            env=env,
+            check=check,
+            stream=False,
+            owned_processes=owned_processes,
+            owned_role=owned_role,
+        )
         try:
             self.stream_sink(kind).write(res.stdout)
             self.stream_sink(kind).write(res.stderr)

@@ -114,7 +114,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "import sys",
                         "from pathlib import Path",
                         "",
-                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "if len(sys.argv) > 2 and sys.argv[1:3] == ['-I', '-c']:",
                         f"    runtime_dir = Path({json.dumps(str(runtime_dir))})",
                         f"    derived_lock = Path({json.dumps(str(derived_lock))})",
                         f"    derived_log = Path({json.dumps(str(derived_log))})",

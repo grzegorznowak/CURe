@@ -45,6 +45,32 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("        run: python -m pip install --upgrade build twine pytest", workflow_lines)
         self.assertIn("        run: python -m pytest", workflow_lines)
 
+    def test_publish_workflow_runs_checkout_isolated_daemon_aware_wheel_smoke(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
+
+        self.assertIn("tests/daemon_aware_research_calls_smoke.py", workflow)
+        self.assertIn("env -u PYTHONPATH PYTHONSAFEPATH=1", workflow)
+        self.assertIn('--cure-bin "$smoke_root/venv/bin/cure"', workflow)
+        self.assertIn('cd "$smoke_root/run"', workflow)
+
+    def test_daemon_aware_wheel_smoke_owns_complete_a25_residue_matrix(self) -> None:
+        smoke = (ROOT / "tests" / "daemon_aware_research_calls_smoke.py").read_text(
+            encoding="utf-8"
+        )
+
+        for scenario in (
+            "success",
+            "failure",
+            "provider-ctrl-c-publication",
+            "helper-ctrl-c-publication",
+            "spawn-wins",
+            "close-wins",
+            "keeper-db-release",
+        ):
+            self.assertIn(f'"{scenario}"', smoke)
+        self.assertIn("_assert_process_gone", smoke)
+        self.assertIn("_assert_database_unlocked", smoke)
+
     def test_publish_workflow_gates_release_tag_shape_and_package_version(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 

@@ -35,7 +35,12 @@ from paths import (
     ReviewflowPaths,
     real_user_home_dir,
 )
-from run import ReviewflowSubprocessError, run_cmd
+from run import (
+    OwnedProcessRegistry,
+    OwnedProcessRole,
+    ReviewflowSubprocessError,
+    run_cmd,
+)
 from ui import TailBuffer
 
 if TYPE_CHECKING:
@@ -403,7 +408,11 @@ def run_codex_exec(
     approval_policy: str = "never",
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
+    owned_processes: OwnedProcessRegistry | None = None,
 ) -> CodexRunResult:
+    owned_role: OwnedProcessRole | None = (
+        "review-provider" if owned_processes is not None else None
+    )
     started_at = datetime.now(timezone.utc)
     out = active_output()
     codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir)
@@ -447,6 +456,8 @@ def run_codex_exec(
                 codex_json_events_path=codex_events_log_path,
                 codex_display_log_path=codex_display_log_path,
                 codex_event_callback=_handle_codex_event,
+                owned_processes=owned_processes,
+                owned_role=owned_role,
             )
         else:
             codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -469,6 +480,8 @@ def run_codex_exec(
                     stream=True,
                     stream_to=sink,
                     stream_label=None,
+                    owned_processes=owned_processes,
+                    owned_role=owned_role,
                 )
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
@@ -530,6 +543,8 @@ def run_codex_exec(
                     codex_json_events_path=codex_events_log_path,
                     codex_display_log_path=codex_display_log_path,
                     codex_event_callback=_handle_codex_event,
+                    owned_processes=owned_processes,
+                    owned_role=owned_role,
                 )
             else:
                 codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,6 +567,8 @@ def run_codex_exec(
                         stream=True,
                         stream_to=sink,
                         stream_label=None,
+                        owned_processes=owned_processes,
+                        owned_role=owned_role,
                     )
         except ReviewflowSubprocessError:
             _finalize_codex_live_progress(progress=progress, status="error")
@@ -731,6 +748,7 @@ def run_llm_exec(
     add_dirs: list[Path] | None = None,
     codex_config_overrides: list[str] | None = None,
     runtime_policy: dict[str, Any] | None = None,
+    owned_processes: OwnedProcessRegistry | None = None,
 ) -> LlmRunResult:
     rf = _reviewflow()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -755,6 +773,7 @@ def run_llm_exec(
             approval_policy=str(policy.get("approval_policy") or "never"),
             dangerously_bypass_approvals_and_sandbox=bool(policy.get("dangerously_bypass_approvals_and_sandbox", True)),
             include_shell_environment_inherit_all=bool(policy.get("include_shell_environment_inherit_all", False)),
+            owned_processes=owned_processes,
         )
         resume = None
         if result.resume is not None:

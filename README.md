@@ -159,6 +159,8 @@ Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper ra
 
 Helper-backed Codex runs also export `PYTHONSAFEPATH=1` so a ChunkHound daemon started while reviewing the `chunkhound` repo does not import the checked-out repo package by accident. If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
+For fresh indexed Linux Codex standard, big, and initial multipass reviews, CURe retains one private ChunkHound keeper from final-index readiness through review teardown so helper calls can reuse the daemon without becoming a CURe query broker. Missing capabilities, unhealthy native status, receipt/identity/filter/generation mismatches, or unsupported helper-bearing routes fail before model work; HTTP, no-index, no-review, and other ineligible routes retain their existing behavior. CURe drains owned provider/helper processes, closes the keeper, observes release, and always performs sensitive cleanup with privacy-safe diagnostics. Native startup may create only an initially absent `.chunkhound/daemon.log` (and absent parent); CURe excludes it from indexing and rejects every other source mutation.
+
 Codex executor paths need internet / network access to obtain code-under-review context. In constrained agent sandboxes, treat that as an operator-visible prerequisite and ask for help instead of claiming CURe can guarantee end-to-end setup or runtime access. When `cure doctor` resolves Codex, look for the `executor-network` advisory check instead of claiming the sandbox already proved that prerequisite.
 
 Codex explicit override example:

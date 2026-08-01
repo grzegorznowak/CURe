@@ -734,6 +734,187 @@ class ChunkHoundConfigTests(unittest.TestCase):
         finally:
             output.unlink(missing_ok=True)
 
+    def test_materialize_chunkhound_env_config_preserves_excludes_and_injects_chunkhound_once(
+        self,
+    ) -> None:
+        output = ROOT / ".tmp_test_materialized_chunkhound_exclude.json"
+        resolved_config = {
+            "indexing": {"exclude": ["**/.git/**", "**/openspec/**"]},
+        }
+        try:
+            rf.materialize_chunkhound_env_config(
+                resolved_config=resolved_config,
+                output_config_path=output,
+                database_provider="duckdb",
+                database_path=ROOT / ".tmp_test_chunkhound_db",
+            )
+
+            materialized = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                materialized["indexing"]["exclude"],
+                ["**/.git/**", "**/openspec/**", "**/.chunkhound/**"],
+            )
+            self.assertEqual(
+                materialized["indexing"]["exclude"].count("**/.chunkhound/**"),
+                1,
+            )
+            self.assertEqual(
+                resolved_config,
+                {"indexing": {"exclude": ["**/.git/**", "**/openspec/**"]}},
+            )
+        finally:
+            output.unlink(missing_ok=True)
+
+    def test_materialize_chunkhound_env_config_is_idempotent_and_dedupes_chunkhound_exclude(
+        self,
+    ) -> None:
+        materializers = (
+            ("cure", rf.materialize_chunkhound_env_config),
+            ("cure_flows", cure_flows.materialize_chunkhound_env_config),
+        )
+        for route_name, materialize in materializers:
+            with self.subTest(route=route_name):
+                first_output = ROOT / f".tmp_test_materialized_chunkhound_{route_name}_dedup_first.json"
+                second_output = ROOT / f".tmp_test_materialized_chunkhound_{route_name}_dedup_second.json"
+                try:
+                    materialize(
+                        resolved_config={
+                            "indexing": {
+                                "exclude": [
+                                    "**/.git/**",
+                                    "**/.chunkhound/**",
+                                    "**/.chunkhound/**",
+                                ]
+                            }
+                        },
+                        output_config_path=first_output,
+                        database_provider="duckdb",
+                        database_path=ROOT / ".tmp_test_chunkhound_db",
+                    )
+                    first = json.loads(first_output.read_text(encoding="utf-8"))
+
+                    materialize(
+                        resolved_config=first,
+                        output_config_path=second_output,
+                        database_provider="duckdb",
+                        database_path=ROOT / ".tmp_test_chunkhound_db",
+                    )
+                    second = json.loads(second_output.read_text(encoding="utf-8"))
+
+                    self.assertEqual(
+                        first["indexing"]["exclude"],
+                        ["**/.git/**", "**/.chunkhound/**"],
+                    )
+                    self.assertEqual(second, first)
+                    self.assertEqual(second["indexing"]["exclude"].count("**/.chunkhound/**"), 1)
+                finally:
+                    first_output.unlink(missing_ok=True)
+                    second_output.unlink(missing_ok=True)
+
+    def test_materialize_chunkhound_env_config_adds_missing_indexing(self) -> None:
+        output = ROOT / ".tmp_test_materialized_chunkhound_missing_indexing.json"
+        try:
+            rf.materialize_chunkhound_env_config(
+                resolved_config={"research": {"algorithm": "semantic"}},
+                output_config_path=output,
+                database_provider="duckdb",
+                database_path=ROOT / ".tmp_test_chunkhound_db",
+            )
+
+            materialized = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(materialized["indexing"], {"exclude": ["**/.chunkhound/**"]})
+        finally:
+            output.unlink(missing_ok=True)
+
+    def test_materialize_chunkhound_env_config_rejects_malformed_indexing_or_exclude(
+        self,
+    ) -> None:
+        malformed_configs = (
+            ("indexing-is-null", {"indexing": None}),
+            ("indexing-is-list", {"indexing": []}),
+            ("indexing-is-string", {"indexing": "invalid"}),
+            ("exclude-is-null", {"indexing": {"exclude": None}}),
+            ("exclude-is-string", {"indexing": {"exclude": "**/.git/**"}}),
+            ("exclude-is-object", {"indexing": {"exclude": {"pattern": "**/.git/**"}}}),
+        )
+        for case_name, resolved_config in malformed_configs:
+            with self.subTest(case=case_name):
+                output = ROOT / f".tmp_test_materialized_chunkhound_malformed_{case_name}.json"
+                output.unlink(missing_ok=True)
+                try:
+                    with self.assertRaises(rf.ReviewflowError):
+                        rf.materialize_chunkhound_env_config(
+                            resolved_config=resolved_config,
+                            output_config_path=output,
+                            database_provider="duckdb",
+                            database_path=ROOT / ".tmp_test_chunkhound_db",
+                        )
+                    self.assertFalse(output.exists())
+                finally:
+                    output.unlink(missing_ok=True)
+
+    def test_materialize_chunkhound_env_config_converts_gitignore_sentinel_to_exact_exclusion(
+        self,
+    ) -> None:
+        output = ROOT / ".tmp_test_materialized_chunkhound_legacy_sentinel.json"
+        resolved_config = {"indexing": {"exclude": ".gitignore"}}
+        try:
+            rf.materialize_chunkhound_env_config(
+                resolved_config=resolved_config,
+                output_config_path=output,
+                database_provider="duckdb",
+                database_path=ROOT / ".tmp_test_chunkhound_db",
+            )
+
+            materialized = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                materialized["indexing"]["exclude"],
+                ["**/.chunkhound/**"],
+            )
+            self.assertEqual(resolved_config, {"indexing": {"exclude": ".gitignore"}})
+        finally:
+            output.unlink(missing_ok=True)
+
+    def test_materialize_chunkhound_env_config_preserves_gitignore_sentinel_semantics_across_modes(
+        self,
+    ) -> None:
+        materializers = (
+            ("cure", rf.materialize_chunkhound_env_config),
+            ("cure_flows", cure_flows.materialize_chunkhound_env_config),
+        )
+        for route_name, materialize in materializers:
+            for exclude_mode in (None, "combined", "config_only", "gitignore_only"):
+                with self.subTest(route=route_name, exclude_mode=exclude_mode):
+                    output = ROOT / (
+                        f".tmp_test_materialized_chunkhound_{route_name}_gitignore_mode_"
+                        f"{exclude_mode or 'unset'}.json"
+                    )
+                    indexing = {"exclude": ".gitignore"}
+                    if exclude_mode is not None:
+                        indexing["exclude_mode"] = exclude_mode
+                    resolved_config = {"indexing": indexing}
+                    expected_resolved_config = {"indexing": dict(indexing)}
+                    try:
+                        materialize(
+                            resolved_config=resolved_config,
+                            output_config_path=output,
+                            database_provider="duckdb",
+                            database_path=ROOT / ".tmp_test_chunkhound_db",
+                        )
+
+                        materialized = json.loads(output.read_text(encoding="utf-8"))
+                        self.assertEqual(
+                            materialized["indexing"]["exclude"],
+                            ["**/.chunkhound/**"],
+                        )
+                        self.assertEqual(
+                            materialized["indexing"]["exclude_mode"],
+                            "gitignore_only",
+                        )
+                        self.assertEqual(resolved_config, expected_resolved_config)
+                    finally:
+                        output.unlink(missing_ok=True)
+
     def test_chunkhound_env_can_infer_embedding_key_from_explicit_base_config_path(self) -> None:
         base_cfg = ROOT / ".tmp_test_chunkhound_base_env.json"
         try:
