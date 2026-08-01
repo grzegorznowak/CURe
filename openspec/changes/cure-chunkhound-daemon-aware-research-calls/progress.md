@@ -106,6 +106,7 @@
   - Changed: `tests/daemon_aware_research_calls_smoke.py`, `tests/test_release_workflow_unittest.py`, `tasks.md`, `progress.md`
   - Test: RED then PASS — release owner for the complete A25 scenario matrix; PASS — source process probe; PASS — isolated sdist/wheel build, Twine, and external-cwd installed-wheel smoke; PASS — 13 release tests; PASS — full pytest (876 tests); PASS — Ruff; PASS — configured/scoped mypy; PASS — strict OpenSpec validation
   - Notes: the installed smoke now exercises success and failure, provider/helper Ctrl-C after child creation before publication, spawn-first snapshot cleanup with a TERM-ignoring descendant, close-first pre-`Popen` rejection, keeper-process exit, and nonblocking database-lock reacquisition. The joint A23–A25 task is checked; no product implementation change was required.
+- 2026-08-01T06:39:58Z Opened PR delivery record — https://github.com/grzegorznowak/CURe/pull/33 (status: open)
 
 ## Session Handoff
 
@@ -124,16 +125,16 @@
 - **Proof Statement**: PASS — focused 74 tests plus 72 subtests; full 918 tests with 2 default-skipped live tests; Ruff; configured and scoped mypy; isolated build, Twine, and installed-wheel smoke; strict completed OpenSpec status; independent re-review; and enabled live non-empty/zero-chunk canaries (2 passed in 31.72s).
 
 ## PR State
-- PR URL:
-- Number:
-- Title:
-- Branch: main
-- Opened at:
-- PR status:
+- PR URL: https://github.com/grzegorznowak/CURe/pull/33
+- Number: 33
+- Title: Retain one ChunkHound daemon across indexed review research calls
+- Branch: feat/daemon-aware-chunkhound-research-calls
+- Opened at: 2026-08-01T06:39:32Z
+- PR status: open
 - Review decision:
 - Merge commit: —
 - Merged at: —
-- Last synced: 2026-07-29T12:02:26Z
+- Last synced: 2026-08-01T06:39:58Z
 
 ## Unresolved Debt Friction
 - None.
