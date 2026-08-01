@@ -113,7 +113,7 @@ def _write_a22_live_config(
                 "database": {"provider": "duckdb", "path": str(database_path)},
                 "embedding": {
                     "provider": "voyageai",
-                    "api_key": "cure-canary-not-used",
+                    "api_key": "cure-canary-not-used",  # pragma: allowlist secret
                 },
                 "indexing": {
                     "include": include,
@@ -121,7 +121,7 @@ def _write_a22_live_config(
                 },
                 "llm": {
                     "provider": "openai",
-                    "api_key": "cure-canary-not-used",
+                    "api_key": "cure-canary-not-used",  # pragma: allowlist secret
                     "model": "gpt-5-nano",
                     "base_url": "http://127.0.0.1:9/v1",
                 },

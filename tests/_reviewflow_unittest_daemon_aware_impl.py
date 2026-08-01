@@ -1747,7 +1747,7 @@ class ChunkHoundKeeperRuntimeTests(unittest.TestCase):
                 os.environ,
                 {
                     "PATH": str(ambient_binary.parent),
-                    "CURE_AMBIENT_SECRET": "must-not-be-inherited",
+                    "CURE_AMBIENT_SECRET": "must-not-be-inherited",  # pragma: allowlist secret
                 },
                 clear=False,
             ):
@@ -1836,7 +1836,7 @@ class ChunkHoundKeeperRuntimeTests(unittest.TestCase):
                     "PATH": str(ambient_binary.parent),
                     "CURE_RUNTIME_MARKER": "/ambient/runtime",
                     "CURE_REGISTRY_MARKER": "/ambient/registry.json",
-                    "CURE_AMBIENT_SECRET": "must-not-be-inherited",
+                    "CURE_AMBIENT_SECRET": "must-not-be-inherited",  # pragma: allowlist secret
                 },
                 clear=False,
             ), mock.patch.object(
@@ -2860,7 +2860,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         proof = CodexToolProofFlowTests()
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        seeded_secret = "daemon-continuity-secret-SHOULD-NOT-PERSIST"
+        seeded_secret = "daemon-continuity-secret-SHOULD-NOT-PERSIST"  # pragma: allowlist secret
         continuity_failure = RuntimeError(
             f"keeper continuity lost after plan dispatch: {seeded_secret}"
         )
@@ -3597,7 +3597,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
         events: list[str] = []
-        seeded_secret = "daemon-auth-token-SHOULD-NOT-PERSIST"
+        seeded_secret = "daemon-auth-token-SHOULD-NOT-PERSIST"  # pragma: allowlist secret
         readiness_failure = lifecycle.ExpectedSessionReadinessError(
             f"expected session is not ready: {seeded_secret}"
         )
