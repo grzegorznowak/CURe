@@ -70,6 +70,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn(f'"{scenario}"', smoke)
         self.assertIn("_assert_process_gone", smoke)
         self.assertIn("_assert_database_unlocked", smoke)
+        for scenario in ("initializing-then-ready", "never-ready-timeout"):
+            self.assertIn(f'"{scenario}"', smoke)
+        self.assertIn("for scenario in _READINESS_SCENARIOS:", smoke)
+        self.assertIn("_run_readiness_scenario(root, cure_bin, scenario)", smoke)
+        self.assertIn("lease.adjudicate_expected_session(", smoke)
+        self.assertIn("ExpectedSessionReadinessTimeoutError", smoke)
 
     def test_publish_workflow_gates_release_tag_shape_and_package_version(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")

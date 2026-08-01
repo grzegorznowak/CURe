@@ -100,6 +100,7 @@ from cure_chunkhound_lifecycle import (
     DaemonGenerationIdentity,
     ExpectedSessionReadinessError,
     ExpectedSessionReceiptV1,
+    PreNativeSpawnLeaseOpenError,
     assert_daemon_log_startup_precondition,
     build_launch_identity,
     observe_native_daemon_generation,
@@ -10518,11 +10519,30 @@ def _pr_flow_impl(
                     daemon_lease = candidate_lease
                     try:
                         candidate_lease.open()
+                    except PreNativeSpawnLeaseOpenError as exc:
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Keep the failed lease owned so outer teardown retries and
+                            # records cleanup without replacing the startup failure.
+                            pass
+                        else:
+                            daemon_lease = None
+                            if startup_attempt == 0:
+                                continue
+                        raise ReviewflowError(
+                            "ChunkHound daemon startup/readiness failed "
+                            f"({type(exc).__name__})."
+                        ) from None
                     except Exception as exc:
-                        candidate_lease.close()
-                        daemon_lease = None
-                        if startup_attempt == 0:
-                            continue
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve the terminal open failure as primary; outer
+                            # teardown still owns and retries the candidate cleanup.
+                            pass
+                        else:
+                            daemon_lease = None
                         raise ReviewflowError(
                             "ChunkHound daemon startup/readiness failed "
                             f"({type(exc).__name__})."
@@ -10538,8 +10558,14 @@ def _pr_flow_impl(
                                 "newly opened ChunkHound generation is not CURe-owned"
                             )
                     except Exception as exc:
-                        candidate_lease.close()
-                        daemon_lease = None
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve attestation/generation failure as primary; the
+                            # outer teardown still owns the candidate cleanup.
+                            pass
+                        else:
+                            daemon_lease = None
                         raise ReviewflowError(
                             "ChunkHound daemon startup/readiness failed "
                             f"({type(exc).__name__})."
@@ -10562,11 +10588,15 @@ def _pr_flow_impl(
                                 witness=witness,
                             )
                     except Exception as exc:
-                        candidate_lease.close()
-                        daemon_lease = None
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve readiness as primary and retain ownership for
+                            # the outer teardown retry/diagnostic path.
+                            pass
+                        else:
+                            daemon_lease = None
                         expected_daemon_generation = None
-                        if startup_attempt == 0:
-                            continue
                         raise ReviewflowError(
                             "ChunkHound daemon startup/readiness failed "
                             f"({type(exc).__name__})."

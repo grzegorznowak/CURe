@@ -1,12 +1,12 @@
 # Progress: cure-chunkhound-daemon-aware-research-calls
 
 ## Current Claim
-- Claimed at: 2026-07-30T14:01:47Z
-- Claimed by: pi fresh session (resume)
+- Claimed at: 2026-08-01T11:13:28Z
+- Claimed by: pi PR #33 readiness correction completion
 - Model: gpt-5.6-sol
-- Scope: Add the opt-in real installed-ChunkHound no-LLM canary and reconcile its task evidence without duplicating completed deterministic or wheel proof.
+- Scope: Completed asynchronous native readiness on one retained owned lease/generation with deterministic, live, installed-wheel, broad-gate, and independent-review proof.
 - Main-tree targets: CURe
-- Primary write surfaces: tests/test_daemon_aware_chunkhound_live.py, openspec/changes/cure-chunkhound-daemon-aware-research-calls/
+- Primary write surfaces: lifecycle/orchestration readiness tests and implementation, installed-runtime/wheel proof, openspec/changes/cure-chunkhound-daemon-aware-research-calls/
 - Status: ✅ DONE
 
 ## Progress Timeline
@@ -196,3 +196,16 @@
   - Review: GO — DONE state, tasks 34/45 and all 32 checkboxes, all 28 final proof rows, historical two-case insufficiency, exact four-case live closure, current TAP-05 behavior, append-only progress, schema/status consistency, and sole-staged config all agree.
   - Evidence: no current normative A22/TAP-05 pending, provisional, or blocked language; no unproven claim, post-live harness change, or product regression found.
   - Notes: no files were modified or staged by the reviewer.
+
+- 2026-08-01T08:50:06Z — **PR #33 local readiness correction opened**: reopened TAP-02/TAP-03/TAP-05/TAP-07 readiness proof before product edits.
+  - Failure: one-shot strict native readiness observed exact `status="initializing"` with `query_ready=false`; the first attempt closed, and its retry collided with the newly created canonical `.chunkhound/daemon.log`. No helper or model work started.
+  - Runtime evidence: an observed installed-runtime warm readiness interval was about 128 seconds, so retained-lease waiting requires a distinct bounded deadline rather than immediate rejection or close/reopen.
+  - Required correction: wait only for the exact transient on one owned lease/generation with no pre-ready helper/model/search; timeout and degraded/malformed/transport/liveness/generation faults remain fail closed with one cleanup. TAP-05 must reuse the production primitive and TAP-07 receives proportionate delayed-ready/timeout coverage.
+  - Status: implementation and proof are not complete; A22 semantics and its absent-log startup precondition remain unchanged.
+
+- 2026-08-01T11:13:28Z — **PR #33 readiness correction complete; independent final GO**: closed all eight reopened tasks and restored DONE without changing A22 semantics.
+  - Implementation: one owned lease/generation waits only on exact typed `status="initializing"` plus `query_ready=false`; every probe rechecks liveness/generation, authoritative top-level daemon `status` determines degraded/terminal state while backend-dependent dictionary `scan_progress` remains opaque, and search/helper/model dispatch stays behind ready. Exactly one retry remains only for typed `PreNativeSpawnLeaseOpenError` before native spawn and before any helper/model dispatch.
+  - Budgets: native readiness is separately bounded at 600 seconds with 0.5-second polling; witness search retains its separate 60-second timeout; locked TERM/KILL/drain budgets remain unchanged.
+  - Proof: PASS — full pytest `937 passed, 4 skipped, 122 subtests`; enabled TAP-05 production-route matrix `4 passed in 76.85s` (latest); isolated sdist/wheel build, Twine, and external-cwd installed-wheel lifecycle smoke; Ruff; configured mypy (9 files); scoped lifecycle mypy (3 files); strict OpenSpec; detect-secrets; diff checks; independent final review GO.
+  - Packaging boundary: TAP-07 lifecycle-only readiness smoke proves delayed-ready/timeout behavior and no pre-ready search; it does not claim installed CLI `_pr_flow_impl` execution. TAP-03 owns no pre-ready helper/model dispatch.
+  - Reconciliation: all acceptance rows remain final and now cite current correction evidence; historical runs remain append-only and are not current completion proof.

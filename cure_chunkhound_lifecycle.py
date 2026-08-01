@@ -125,6 +125,21 @@ class ExpectedSessionReadinessError(RuntimeError):
     """Raised when a held daemon cannot prove expected-session readiness."""
 
 
+class ExpectedSessionReadinessTimeoutError(ExpectedSessionReadinessError):
+    """Raised when an exact transient readiness state outlives its deadline."""
+
+
+class PreNativeSpawnLeaseOpenError(RuntimeError):
+    """Raised when lease opening fails before native spawn construction."""
+
+
+class NativeDaemonReadinessSignal(Enum):
+    """Typed result of strict native daemon-status adjudication."""
+
+    READY = auto()
+    INITIALIZING = auto()
+
+
 class LaunchIdentityConstructionError(RuntimeError):
     """Raised when canonical launch inputs cannot form an exact identity."""
 
@@ -811,6 +826,8 @@ _NATIVE_RESULTS_FOOTER = re.compile(
 )
 _READINESS_STATUS_TIMEOUT_SECONDS = 10.0
 _READINESS_SEARCH_TIMEOUT_SECONDS = 60.0
+_EXPECTED_SESSION_READINESS_TIMEOUT_SECONDS = 600.0
+_EXPECTED_SESSION_READINESS_POLL_INTERVAL_SECONDS = 0.5
 
 
 def _strict_tool_text(
@@ -867,12 +884,16 @@ def _strict_tool_text(
     return item["text"]
 
 
-def _require_healthy_native_status(session: JsonRpcSession) -> None:
+def _require_healthy_native_status(
+    session: JsonRpcSession,
+    *,
+    timeout_seconds: float = _READINESS_STATUS_TIMEOUT_SECONDS,
+) -> NativeDaemonReadinessSignal:
     text = _strict_tool_text(
         session,
         tool="daemon_status",
         arguments={},
-        timeout_seconds=_READINESS_STATUS_TIMEOUT_SECONDS,
+        timeout_seconds=timeout_seconds,
     )
     try:
         status = json.loads(text)
@@ -889,12 +910,19 @@ def _require_healthy_native_status(session: JsonRpcSession) -> None:
         or not isinstance(status["server_version"], str)
         or type(status["query_ready"]) is not bool
         or not isinstance(status["scan_progress"], dict)
-        or status["status"] != "ready"
-        or status["query_ready"] is not True
     ):
         raise ExpectedSessionReadinessError(
-            "native ChunkHound daemon is not strictly query-ready"
+            "native ChunkHound daemon_status returned invalid field types"
         )
+    # Installed ChunkHound derives the authoritative top-level state from
+    # backend-specific scan_progress details; keep that nested payload opaque.
+    if status["status"] == "ready" and status["query_ready"] is True:
+        return NativeDaemonReadinessSignal.READY
+    if status["status"] == "initializing" and status["query_ready"] is False:
+        return NativeDaemonReadinessSignal.INITIALIZING
+    raise ExpectedSessionReadinessError(
+        "native ChunkHound daemon is not strictly query-ready"
+    )
 
 
 def _require_safe_witness(witness: ExpectedSearchWitness) -> None:
@@ -1157,9 +1185,14 @@ class ChunkHoundDaemonLease:
 
         session: JsonRpcSession | None = None
         try:
-            generation_before = self._observe_generation()
-            if self._pre_spawn_validation is not None:
-                self._pre_spawn_validation()
+            try:
+                generation_before = self._observe_generation()
+                if self._pre_spawn_validation is not None:
+                    self._pre_spawn_validation()
+            except Exception as exc:
+                raise PreNativeSpawnLeaseOpenError(
+                    "ChunkHound lease failed before native spawn construction"
+                ) from exc
             session = JsonRpcSession(
                 config_path=self._config_path,
                 repo_path=self._repo_path,
@@ -1253,19 +1286,88 @@ class ChunkHoundDaemonLease:
         *,
         witness: ExpectedSearchWitness | None = None,
         expected_generation: ExpectedGenerationEvidence | None = None,
+        readiness_timeout_seconds: float = (
+            _EXPECTED_SESSION_READINESS_TIMEOUT_SECONDS
+        ),
+        readiness_poll_interval_seconds: float = (
+            _EXPECTED_SESSION_READINESS_POLL_INTERVAL_SECONDS
+        ),
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> ExpectedSessionReadiness:
-        try:
-            self.assert_alive()
-        except RuntimeError as exc:
+        if (
+            isinstance(readiness_timeout_seconds, bool)
+            or not isinstance(readiness_timeout_seconds, (int, float))
+            or not math.isfinite(readiness_timeout_seconds)
+            or readiness_timeout_seconds <= 0.0
+            or isinstance(readiness_poll_interval_seconds, bool)
+            or not isinstance(readiness_poll_interval_seconds, (int, float))
+            or not math.isfinite(readiness_poll_interval_seconds)
+            or readiness_poll_interval_seconds <= 0.0
+            or not callable(clock)
+            or not callable(sleep)
+        ):
             raise ExpectedSessionReadinessError(
-                "ChunkHound daemon lease is not live"
-            ) from exc
-        session = self._session
-        assert session is not None
-        identity = self._require_receipt_identity(receipt)
-        generation_before = self._require_current_generation()
-        _require_healthy_native_status(session)
+                "native readiness wait configuration is invalid"
+            )
 
+        def read_clock() -> float:
+            value = clock()
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ExpectedSessionReadinessError(
+                    "native readiness clock returned an invalid value"
+                )
+            return float(value)
+
+        identity = self._require_receipt_identity(receipt)
+        deadline = read_clock() + float(readiness_timeout_seconds)
+
+        def remaining_before_deadline() -> float:
+            remaining = deadline - read_clock()
+            if remaining <= 0.0:
+                raise ExpectedSessionReadinessTimeoutError(
+                    "native ChunkHound daemon readiness deadline expired"
+                )
+            return remaining
+
+        while True:
+            remaining_before_deadline()
+            try:
+                self.assert_alive()
+            except RuntimeError as exc:
+                raise ExpectedSessionReadinessError(
+                    "ChunkHound daemon lease is not live"
+                ) from exc
+            remaining_before_deadline()
+            session = self._session
+            assert session is not None
+            generation_before = self._require_current_generation()
+            remaining = remaining_before_deadline()
+            signal = _require_healthy_native_status(
+                session,
+                timeout_seconds=min(
+                    remaining,
+                    _READINESS_STATUS_TIMEOUT_SECONDS,
+                ),
+            )
+            remaining = remaining_before_deadline()
+            if signal is NativeDaemonReadinessSignal.READY:
+                break
+
+            sleep(
+                min(
+                    float(readiness_poll_interval_seconds),
+                    round(remaining, 12),
+                )
+            )
+
+        # READY must be returned strictly before the readiness deadline. Once it
+        # is, witness validation keeps its independent request timeout while
+        # generation continuity remains fail-closed.
         if receipt.total_chunks == 0:
             if witness is not None:
                 raise ExpectedSessionReadinessError(

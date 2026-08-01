@@ -39,8 +39,11 @@ def _write_fake_chunkhound(
     tools_payload: object,
     marker: str = "curated",
     daemon_status: object | None = None,
+    daemon_status_sequence: tuple[object, ...] | None = None,
     search_text: str = "## `fixture.txt` L1\n\n```text\nfixture\n```\n\n---\nResults 1–1",
     tool_overrides: dict[str, object] | None = None,
+    create_daemon_log: bool = False,
+    daemon_status_no_response: bool = False,
 ) -> None:
     """Write an executable, line-framed stdio JSON-RPC ChunkHound fixture."""
     script = f"""#!/usr/bin/python3
@@ -53,8 +56,12 @@ LEDGER = {str(ledger_path)!r}
 TOOLS = {tools_payload!r}
 MARKER = {marker!r}
 DAEMON_STATUS = {daemon_status if daemon_status is not None else {"status": "ready", "server_version": "fixture-1", "query_ready": True, "scan_progress": {"query_ready_at": "fixture"}}!r}
+DAEMON_STATUS_SEQUENCE = {daemon_status_sequence or ()!r}
 SEARCH_TEXT = {search_text!r}
 TOOL_OVERRIDES = {tool_overrides or {}!r}
+CREATE_DAEMON_LOG = {create_daemon_log!r}
+DAEMON_STATUS_NO_RESPONSE = {daemon_status_no_response!r}
+daemon_status_index = 0
 
 
 def record(event, **fields):
@@ -84,6 +91,12 @@ record(
     ambient_secret=os.environ.get("CURE_AMBIENT_SECRET"),
     child_token=os.environ.get("CURE_CHILD_TOKEN"),
 )
+if CREATE_DAEMON_LOG:
+    daemon_root = sys.argv[-1]
+    daemon_parent = os.path.join(daemon_root, ".chunkhound")
+    os.makedirs(daemon_parent, exist_ok=True)
+    with open(os.path.join(daemon_parent, "daemon.log"), "a", encoding="utf-8") as handle:
+        handle.write("fake native startup diagnostics\\n")
 try:
     for raw in sys.stdin:
         message = json.loads(raw)
@@ -115,13 +128,26 @@ try:
             result = {{"tools": TOOLS}}
         elif method == "tools/call":
             tool = params.get("name") if isinstance(params, dict) else None
+            if tool == "daemon_status" and DAEMON_STATUS_NO_RESPONSE:
+                record("tool-no-response", tool=tool)
+                continue
             override = TOOL_OVERRIDES.get(tool)
             if override is not None:
                 response = {{"jsonrpc": "2.0", "id": message["id"], **override}}
                 sys.stdout.write(json.dumps(response) + "\\n")
                 sys.stdout.flush()
                 continue
-            text = json.dumps(DAEMON_STATUS, sort_keys=True) if tool == "daemon_status" else SEARCH_TEXT
+            if tool == "daemon_status":
+                status = DAEMON_STATUS
+                if DAEMON_STATUS_SEQUENCE:
+                    status = DAEMON_STATUS_SEQUENCE[
+                        min(daemon_status_index, len(DAEMON_STATUS_SEQUENCE) - 1)
+                    ]
+                    daemon_status_index += 1
+                record("tool-response", tool=tool, status=status)
+                text = json.dumps(status, sort_keys=True)
+            else:
+                text = SEARCH_TEXT
             result = {{
                 "content": [{{"type": "text", "text": text}}],
                 "isError": False,
@@ -136,6 +162,12 @@ finally:
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text(script, encoding="utf-8")
     binary.chmod(0o755)
+
+
+def _append_ledger(path: Path, event: str, **fields: object) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
+        handle.flush()
 
 
 def _read_ledger(path: Path) -> list[dict[str, object]]:
@@ -3629,6 +3661,12 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("keeper-readiness-failed")
             raise readiness_failure
 
+        real_close = lifecycle.ChunkHoundDaemonLease.close
+
+        def close_keeper(lease: Any) -> None:
+            events.append("keeper-close")
+            real_close(lease)
+
         def forbidden_helper(**_kwargs: Any) -> None:
             events.append("helper-preflight")
             raise AssertionError("helper ran after failed keeper readiness")
@@ -3671,6 +3709,14 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     side_effect=fail_readiness,
                 )
             )
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "close",
+                    autospec=True,
+                    side_effect=close_keeper,
+                )
+            )
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root) / "route"
@@ -3699,9 +3745,9 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             [
                 "final-index/receipt-ready",
                 "keeper-readiness-failed",
-                "keeper-readiness-failed",
+                "keeper-close",
             ],
-            "startup readiness must retry exactly once before failing closed",
+            "terminal readiness must close exactly once without retrying",
         )
 
     def test_fresh_route_probes_immediately_before_lease_helper_and_model(self) -> None:
@@ -3802,7 +3848,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         proof = CodexToolProofFlowTests()
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
         generation = lifecycle.DaemonGenerationIdentity(pid=4292, process_started_at=1.5)
-        first_failure = lifecycle.ExpectedSessionReadinessError("first open failed")
+        first_failure = lifecycle.PreNativeSpawnLeaseOpenError("first open failed")
         events: list[str] = []
         probe_count = 0
 
@@ -3947,6 +3993,66 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         self.assertEqual(events, ["open"])
 
+    def test_route_synthetic_untyped_open_failure_without_log_is_not_retried(
+        self,
+    ) -> None:
+        """Synthetic orchestration gating: log absence cannot retry an untyped fault."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        open_calls: list[Any] = []
+
+        def fail_open(lease: Any) -> None:
+            open_calls.append(lease)
+            raise lifecycle.ExpectedSessionReadinessError(
+                "post-session bootstrap failed before log publication"
+            )
+
+        def forbidden_work(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("generic open failure reached helper/model work")
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "probe_effective_daemon_log_exclusion",
+                    return_value={"ok": True, "excluded": True, "degraded": False},
+                    create=True,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf, "observe_native_daemon_generation", return_value=None
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "open",
+                    autospec=True,
+                    side_effect=fail_open,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root) / "generic-open-terminal"
+            CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=forbidden_work,
+                helper_preflight_side_effect=forbidden_work,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon startup/readiness failed "
+                    r"\(ExpectedSessionReadinessError\)\."
+                ),
+            )
+        self.assertEqual(len(open_calls), 1)
+        self.assertFalse(
+            (Path(open_calls[0]._repo_path) / ".chunkhound" / "daemon.log").exists()
+        )
+
     def test_startup_retry_reprobes_and_reused_generation_fails_before_second_open(
         self,
     ) -> None:
@@ -3955,7 +4061,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
         generation = lifecycle.DaemonGenerationIdentity(pid=4343, process_started_at=2.0)
-        first_failure = lifecycle.ExpectedSessionReadinessError("first startup failed")
+        first_failure = lifecycle.PreNativeSpawnLeaseOpenError("first startup failed")
         events: list[str] = []
         probes = iter((None, generation))
 
@@ -4310,7 +4416,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     flow_patch=flow_patch,
                     expect_error=(
                         r"ChunkHound daemon startup/readiness failed "
-                        r"\(ExpectedSessionReadinessError\)\."
+                        r"\(PreNativeSpawnLeaseOpenError\)\."
                     ),
                 )
 
@@ -4319,8 +4425,15 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 self.assertNotIn("spawn", events)
                 self.assertNotIn("work", events)
 
-    def test_keeper_startup_retries_once_before_model_work(self) -> None:
-        """TAP-03 A10/A12: one transient startup failure gets one safe retry."""
+    def _run_real_readiness_route(
+        self,
+        *,
+        root: Path,
+        statuses: tuple[dict[str, object], ...],
+        expect_error: str | None = None,
+        adjudication_kwargs: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Run `_pr_flow_impl` through one real retained lease lifecycle."""
         from _reviewflow_unittest_grounding_impl import (
             CodexToolProofFlowTests,
             _sectioned_review_markdown,
@@ -4328,23 +4441,373 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         proof = CodexToolProofFlowTests()
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        transient_failure = lifecycle.ExpectedSessionReadinessError(
-            "transient expected-session startup failure"
+        binary = root.parent / "bin" / f"{root.name}-chunkhound"
+        ledger = root.parent / f"{root.name}.jsonl"
+        _write_fake_chunkhound(
+            binary,
+            ledger_path=ledger,
+            tools_payload=[{"name": tool} for tool in _REQUIRED_KEEPER_TOOLS],
+            daemon_status_sequence=statuses,
+            search_text=(
+                "## `source.py` L1 — witness\n\n```text\n"
+                "tool_proof_witness\n```\n\n---\nResults 1–1"
+            ),
+            create_daemon_log=True,
         )
+        generation = lifecycle.DaemonGenerationIdentity(
+            pid=4242, process_started_at=1234.5
+        )
+        open_calls: list[Any] = []
+        close_calls: list[Any] = []
+        validation_calls: list[Path] = []
+        precondition_log_states: list[bool] = []
+        dispatches: list[str] = []
+        ownership_attestations: list[tuple[Any, int]] = []
+        released = False
+        captured_lease: Any | None = None
+        original_open = lifecycle.ChunkHoundDaemonLease.open
+        original_close = lifecycle.ChunkHoundDaemonLease.close
+        original_assert_alive = lifecycle.ChunkHoundDaemonLease.assert_alive
+        original_adjudicate = lifecycle.ChunkHoundDaemonLease.adjudicate_expected_session
+        original_precondition = rf.assert_daemon_log_startup_precondition
+        real_owned_generation = inspect.getattr_static(
+            lifecycle.ChunkHoundDaemonLease, "owned_generation"
+        )
+
+        class LeaseBoundOwnedGeneration(mock.PropertyMock):
+            def __get__(self, obj: Any, obj_type: Any = None) -> Any:
+                if obj is None:
+                    return self
+                return real_owned_generation.__get__(obj, obj_type)
+
+        def identity_for(**kwargs: object) -> Any:
+            return lifecycle.LaunchIdentity(
+                resolved_executable=binary.resolve(),
+                canonical_root=Path(str(kwargs["repo_path"])).resolve(),
+                resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
+                config_digest="a" * 64,
+                resolved_database_path=Path(str(kwargs["database_path"])).resolve(),
+                cwd=Path(str(kwargs["cwd"])).resolve(),
+                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
+                environment_equality_digest="b" * 64,
+            )
+
+        def final_index_receipt(**kwargs: object) -> Any:
+            identity = identity_for(
+                repo_path=kwargs["repo_dir"],
+                config_path=kwargs["chunkhound_cfg_path"],
+                database_path=kwargs["chunkhound_db_path"],
+                cwd=kwargs["chunkhound_work_dir"],
+            )
+            return lifecycle.ExpectedSessionReceiptV1(
+                schema_version=1,
+                canonical_root=identity.canonical_root,
+                reviewed_head="1" * 40,
+                resolved_config_path=identity.resolved_config_path,
+                config_digest=identity.config_digest,
+                resolved_database_path=identity.resolved_database_path,
+                total_chunks=1,
+                launch_identity_projection=identity,
+            )
+
+        def generation_probe(*_args: object, **_kwargs: object) -> Any:
+            if released:
+                return None
+            return (
+                generation
+                if any(row.get("event") == "launch" for row in _read_ledger(ledger))
+                else None
+            )
+
+        def track_precondition(**kwargs: object) -> None:
+            repo = Path(str(kwargs["repo_path"]))
+            precondition_log_states.append(
+                (repo / ".chunkhound" / "daemon.log").exists()
+            )
+            original_precondition(repo_path=repo)
+
+        def open_real(lease: Any) -> Any:
+            nonlocal captured_lease
+            captured_lease = lease
+            open_calls.append(lease)
+            validation = lease._pre_spawn_validation
+            self.assertTrue(callable(validation))
+
+            def tracked_validation() -> None:
+                validation_calls.append(Path(lease._repo_path))
+                assert validation is not None
+                validation()
+
+            lease._pre_spawn_validation = tracked_validation
+            opened = original_open(lease)
+            evidence = lease.owned_generation
+            self.assertIsInstance(evidence, lifecycle.ExpectedGenerationEvidence)
+            self.assertTrue(evidence._matches(lease._lease_token, generation))
+            return opened
+
+        def close_real(lease: Any) -> None:
+            nonlocal released
+            close_calls.append(lease)
+            original_close(lease)
+            released = True
+
+        def adjudicate_real(lease: Any, receipt: Any, **kwargs: Any) -> Any:
+            return original_adjudicate(
+                lease,
+                receipt,
+                **{**kwargs, **(adjudication_kwargs or {})},
+            )
+
+        def attest_ownership(observed: Any, proxy_pid: int) -> None:
+            ownership_attestations.append((observed, proxy_pid))
+
+        def helper(**_kwargs: Any) -> None:
+            dispatches.append("helper")
+            if expect_error is not None:
+                raise AssertionError("terminal readiness reached helper work")
+
+        def model(output_path: Path, work_dir: Path) -> Any:
+            dispatches.append("model")
+            if expect_error is not None:
+                raise AssertionError("terminal readiness reached model work")
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir, commands=["search", "research"]
+                ),
+            )
+
+        def flow_patch(stack: Any) -> None:
+            patches = (
+                mock.patch.object(
+                    rf,
+                    "_run_session_chunkhound_index_with_rebuild_fallback",
+                    side_effect=final_index_receipt,
+                ),
+                mock.patch.object(rf, "build_launch_identity", side_effect=identity_for),
+                mock.patch.object(
+                    rf,
+                    "probe_effective_daemon_log_exclusion",
+                    return_value={"ok": True, "excluded": True, "degraded": False},
+                ),
+                mock.patch.object(
+                    rf,
+                    "observe_native_daemon_generation",
+                    side_effect=generation_probe,
+                ),
+                mock.patch.object(
+                    rf,
+                    "assert_daemon_log_startup_precondition",
+                    side_effect=track_precondition,
+                ),
+                mock.patch.object(
+                    rf,
+                    "select_git_tracked_source_witness",
+                    return_value=lifecycle.ExpectedSearchWitness(
+                        relative_path="source.py", literal="tool_proof_witness"
+                    ),
+                ),
+                mock.patch.object(
+                    lifecycle,
+                    "attest_native_daemon_generation_ownership",
+                    side_effect=attest_ownership,
+                ),
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "owned_generation",
+                    new=LeaseBoundOwnedGeneration(),
+                ),
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "open",
+                    autospec=True,
+                    side_effect=open_real,
+                ),
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "close",
+                    autospec=True,
+                    side_effect=close_real,
+                ),
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=original_assert_alive,
+                ),
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "adjudicate_expected_session",
+                    autospec=True,
+                    side_effect=adjudicate_real,
+                ),
+            )
+            for patch in patches:
+                stack.enter_context(patch)
+
+        result = proof._run_pr_flow_for_tool_proof(
+            root=root,
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=model,
+            helper_preflight_side_effect=helper,
+            flow_patch=flow_patch,
+            expect_error=expect_error,
+        )
+
+        rows = _read_ledger(ledger)
+        tools = [
+            row.get("tool") for row in rows if row.get("method") == "tools/call"
+        ]
+        self.assertEqual(len(open_calls), 1)
+        self.assertEqual(len(close_calls), 1)
+        self.assertEqual(len(validation_calls), 1)
+        self.assertTrue(precondition_log_states)
+        self.assertNotIn(
+            True,
+            precondition_log_states,
+            "creation-only precondition reran after native startup",
+        )
+        self.assertEqual(
+            len([row for row in rows if row.get("event") == "launch"]), 1
+        )
+        self.assertEqual(len(ownership_attestations), 1)
+        self.assertEqual(ownership_attestations[0][0], generation)
+        self.assertIsNotNone(captured_lease)
+        assert captured_lease is not None
+        self.assertEqual(_state_name(captured_lease.state), "CLOSED")
+        self.assertIsNone(captured_lease.owned_generation)
+        self.assertIsNone(generation_probe())
+        self.assertTrue(
+            _wait_until(
+                lambda: any(
+                    row.get("event") in {"closed", "signal"}
+                    for row in _read_ledger(ledger)
+                )
+            ),
+            _read_ledger(ledger),
+        )
+        if expect_error is None:
+            self.assertEqual(dispatches, ["helper", "model"])
+            self.assertEqual(result[1], ["review.md"])
+            self.assertEqual(tools, ["daemon_status"] * len(statuses) + ["search"])
+        else:
+            self.assertEqual(dispatches, [])
+            self.assertNotIn("search", tools)
+        return {"tools": tools, "rows": rows}
+
+    def test_pr_flow_retains_first_real_lease_while_native_status_becomes_ready(
+        self,
+    ) -> None:
+        """The real route waits on one generation without rerunning startup gates."""
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            self._run_real_readiness_route(
+                root=Path(raw_root) / "retained-readiness-route",
+                statuses=(initializing, initializing, ready),
+            )
+
+    def test_pr_flow_initializing_timeout_uses_production_cleanup_once(
+        self,
+    ) -> None:
+        """A bounded real adjudication timeout is terminal and leaves no residue."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        now = 70.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            result = self._run_real_readiness_route(
+                root=Path(raw_root) / "timeout-readiness-route",
+                statuses=(initializing,),
+                expect_error=(
+                    r"ChunkHound daemon startup/readiness failed "
+                    r"\(ExpectedSessionReadinessTimeoutError\)\."
+                ),
+                adjudication_kwargs={
+                    "readiness_timeout_seconds": 0.5,
+                    "readiness_poll_interval_seconds": 0.2,
+                    "clock": clock,
+                    "sleep": sleep,
+                },
+            )
+        self.assertEqual(result["tools"], ["daemon_status"] * 3)
+        self.assertEqual(sleeps, [0.2, 0.2, 0.1])
+        self.assertEqual(now, 70.5)
+        self.assertTrue(
+            issubclass(
+                lifecycle.ExpectedSessionReadinessTimeoutError,
+                lifecycle.ExpectedSessionReadinessError,
+            )
+        )
+
+    def test_route_synthetic_typed_open_failure_retries_once_before_model_work(
+        self,
+    ) -> None:
+        """Synthetic orchestration gating retries only the explicit typed fault."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        transient_failure = lifecycle.PreNativeSpawnLeaseOpenError(
+            "typed pre-native-spawn failure"
+        )
+        open_attempts: list[Any] = []
+        first_attempt_observation: list[tuple[bool, bool]] = []
         readiness_attempts: list[str] = []
-        close_calls: list[str] = []
+
+        def open_keeper(lease: Any) -> Any:
+            open_attempts.append(lease)
+            if len(open_attempts) == 1:
+                first_attempt_observation.append(
+                    (
+                        lease._session is None,
+                        not (
+                            Path(lease._repo_path) / ".chunkhound" / "daemon.log"
+                        ).exists(),
+                    )
+                )
+                raise transient_failure
+            return lease
 
         def adjudicate(_lease: Any, _receipt: Any, **_kwargs: Any) -> object:
             readiness_attempts.append("attempt")
-            if len(readiness_attempts) == 1:
-                raise transient_failure
             return object()
 
-        def close_keeper(_lease: Any) -> None:
-            close_calls.append("close")
-
         def model(output_path: Path, work_dir: Path) -> Any:
-            self.assertEqual(readiness_attempts, ["attempt", "attempt"])
+            self.assertEqual(len(open_attempts), 2)
+            self.assertEqual(readiness_attempts, ["attempt"])
             output_path.write_text(
                 _sectioned_review_markdown(
                     business="APPROVE",
@@ -4364,6 +4827,14 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(
                     lifecycle.ChunkHoundDaemonLease,
+                    "open",
+                    autospec=True,
+                    side_effect=open_keeper,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
                     "adjudicate_expected_session",
                     autospec=True,
                     side_effect=adjudicate,
@@ -4372,9 +4843,9 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(
                     lifecycle.ChunkHoundDaemonLease,
-                    "close",
-                    autospec=True,
-                    side_effect=close_keeper,
+                    "owned_generation",
+                    new_callable=mock.PropertyMock,
+                    return_value=object(),
                 )
             )
 
@@ -4387,9 +4858,10 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
             )
 
-        self.assertEqual(readiness_attempts, ["attempt", "attempt"])
+        self.assertEqual(len(open_attempts), 2)
+        self.assertEqual(first_attempt_observation, [(True, True)])
+        self.assertEqual(readiness_attempts, ["attempt"])
         self.assertEqual(calls, ["review.md"])
-        self.assertEqual(close_calls, ["close", "close"])
 
     @unittest.skipUnless(
         sys.platform.startswith("linux"), "Linux process-group contract"
@@ -4876,7 +5348,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
                 pre_spawn_validation=reject,
                 generation_probe=observe_generation,
             )
-            with self.assertRaises(lifecycle.ExpectedSessionReadinessError):
+            with self.assertRaises(lifecycle.PreNativeSpawnLeaseOpenError):
                 lease.open()
 
         self.assertEqual(events, ["generation", "validation"])
@@ -5015,7 +5487,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
 
 
 class ExpectedSessionReadinessTests(unittest.TestCase):
-    """RED public contract for native status and expected-index adjudication."""
+    """Native status and expected-index adjudication contract."""
 
     def _api(self) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
@@ -5069,9 +5541,11 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
         *,
         name: str,
         daemon_status: object | None = None,
+        daemon_status_sequence: tuple[object, ...] | None = None,
         search_text: str = "## `src/fixture.py` L1–L2 — witness\n\n````python\nneedle[1]\n```\n````\n\n---\nPage 1 of 1 (results 1–1 of 1)",
         tool_overrides: dict[str, object] | None = None,
         generation_probe: Any | None = None,
+        daemon_status_no_response: bool = False,
     ) -> tuple[Any, Any, Path]:
         repo = root / "repo"
         repo.mkdir(exist_ok=True)
@@ -5084,8 +5558,10 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             ledger_path=ledger,
             tools_payload=[{"name": tool} for tool in _REQUIRED_KEEPER_TOOLS],
             daemon_status=daemon_status,
+            daemon_status_sequence=daemon_status_sequence,
             search_text=search_text,
             tool_overrides=tool_overrides,
+            daemon_status_no_response=daemon_status_no_response,
         )
         identity = self._identity(identity_type, root, binary)
         generation_type = getattr(
@@ -5189,6 +5665,839 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             finally:
                 lease.close()
 
+    def test_pre_native_spawn_open_failure_is_typed_without_launch_or_log(self) -> None:
+        """Only generation/pre-validation failures expose the retryable open type."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        identity_type, _, lease_type, *_ = self._api()
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            repo.mkdir()
+            config = root / "chunkhound.json"
+            config.write_text("{}", encoding="utf-8")
+            binary = root / "bin" / "chunkhound"
+            binary.parent.mkdir()
+            binary.write_text("unused", encoding="utf-8")
+            identity = self._identity(identity_type, root, binary)
+            validation_calls: list[str] = []
+
+            def fail_validation() -> None:
+                validation_calls.append("validation")
+                raise OSError("pre-spawn validation unavailable")
+
+            lease = lease_type(
+                config_path=config,
+                repo_path=repo,
+                cwd=repo,
+                binary=str(binary),
+                env=MappingProxyType({"PATH": str(binary.parent)}),
+                launch_identity=identity,
+                generation_probe=lambda: None,
+                pre_spawn_validation=fail_validation,
+            )
+            with mock.patch.object(lifecycle, "JsonRpcSession") as session_type:
+                with self.assertRaises(lifecycle.PreNativeSpawnLeaseOpenError):
+                    lease.open()
+            session_type.assert_not_called()
+            self.assertEqual(validation_calls, ["validation"])
+            self.assertFalse((repo / ".chunkhound" / "daemon.log").exists())
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+            self.assertIsNone(lease.owned_generation)
+
+    def test_post_session_attestation_failure_is_generic_and_closes_session(
+        self,
+    ) -> None:
+        """A real bootstrapped session fault is terminal, untyped, and cleaned up."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        identity_type, _, lease_type, *_ = self._api()
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            repo.mkdir()
+            config = root / "chunkhound.json"
+            config.write_text("{}", encoding="utf-8")
+            ledger = root / "post-session-attestation.jsonl"
+            binary = root / "bin" / "chunkhound"
+            _write_fake_chunkhound(
+                binary,
+                ledger_path=ledger,
+                tools_payload=[{"name": tool} for tool in _REQUIRED_KEEPER_TOOLS],
+            )
+            identity = self._identity(identity_type, root, binary)
+            generation = lifecycle.DaemonGenerationIdentity(
+                pid=4242, process_started_at=1234.5
+            )
+
+            def generation_probe() -> object | None:
+                return (
+                    generation
+                    if any(
+                        row.get("event") == "launch" for row in _read_ledger(ledger)
+                    )
+                    else None
+                )
+
+            def fail_attestation(_generation: Any, _proxy_pid: int) -> None:
+                raise OSError("ownership attestation unavailable")
+
+            lease = lease_type(
+                config_path=config,
+                repo_path=repo,
+                cwd=repo,
+                binary=str(binary),
+                env=MappingProxyType({"PATH": str(binary.parent)}),
+                launch_identity=identity,
+                generation_probe=generation_probe,
+                generation_attestor=fail_attestation,
+            )
+            with self.assertRaises(lifecycle.ExpectedSessionReadinessError) as caught:
+                lease.open()
+            self.assertNotIsInstance(
+                caught.exception, lifecycle.PreNativeSpawnLeaseOpenError
+            )
+            self.assertEqual(
+                len(
+                    [
+                        row
+                        for row in _read_ledger(ledger)
+                        if row.get("event") == "launch"
+                    ]
+                ),
+                1,
+            )
+            self.assertTrue(
+                _wait_until(
+                    lambda: any(
+                        row.get("event") in {"closed", "signal"}
+                        for row in _read_ledger(ledger)
+                    )
+                ),
+                _read_ledger(ledger),
+            )
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+            self.assertIsNone(lease.owned_generation)
+
+    def test_ready_status_accepts_backend_specific_scan_progress_shape(self) -> None:
+        """Top-level installed status is authoritative over opaque backend details."""
+        identity_type, receipt_type, lease_type, witness_type, *_ = self._api()
+        backend_specific = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {
+                "service_state": "backend-specific-value",
+                "nested": [None, {"future_field": "opaque"}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            lease, identity, _ = self._open_lease(
+                Path(raw_root),
+                lease_type,
+                identity_type,
+                name="opaque-scan-progress",
+                daemon_status=backend_specific,
+            )
+            try:
+                readiness = lease.adjudicate_expected_session(
+                    self._receipt(receipt_type, identity, total_chunks=1),
+                    witness=witness_type(
+                        relative_path="src/fixture.py", literal="needle[1]"
+                    ),
+                )
+                self.assertIsNotNone(readiness)
+            finally:
+                lease.close()
+
+    def test_initializing_then_ready_waits_on_one_held_lease_and_generation(
+        self,
+    ) -> None:
+        """Exact initializing/false waits without closing or searching."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            daemon_generation_type,
+            _,
+            readiness_type,
+            _,
+        ) = self._api()
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        now = 10.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            self.assertGreater(delay, 0.0)
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            ledger = root / "initializing-ready.jsonl"
+            generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
+            generation_observations: list[object | None] = []
+            track_readiness = False
+
+            def generation_probe() -> object | None:
+                observed = (
+                    generation
+                    if any(row.get("event") == "launch" for row in _read_ledger(ledger))
+                    else None
+                )
+                generation_observations.append(observed)
+                if track_readiness:
+                    _append_ledger(ledger, "generation", matches=observed == generation)
+                return observed
+
+            lease, identity, ledger = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="initializing-ready",
+                daemon_status_sequence=(initializing, initializing, ready),
+                generation_probe=generation_probe,
+            )
+            track_readiness = True
+            receipt = self._receipt(receipt_type, identity, total_chunks=1)
+            witness = witness_type(relative_path="src/fixture.py", literal="needle[1]")
+
+            def record_alive() -> None:
+                _append_ledger(ledger, "liveness")
+                lease_type.assert_alive(lease)
+
+            try:
+                with mock.patch.object(
+                    lease, "assert_alive", side_effect=record_alive
+                ) as assert_alive:
+                    readiness = lease.adjudicate_expected_session(
+                        receipt,
+                        witness=witness,
+                        readiness_timeout_seconds=1.0,
+                        readiness_poll_interval_seconds=0.25,
+                        clock=clock,
+                        sleep=sleep,
+                    )
+                self.assertIsInstance(readiness, readiness_type)
+                self.assertEqual(assert_alive.call_count, 3)
+                self.assertEqual(sleeps, [0.25, 0.25])
+                rows = _read_ledger(ledger)
+                tools = [
+                    row.get("tool") for row in rows if row.get("method") == "tools/call"
+                ]
+                self.assertEqual(
+                    tools,
+                    ["daemon_status", "daemon_status", "daemon_status", "search"],
+                )
+                self.assertEqual(
+                    [
+                        row.get("status")
+                        for row in rows
+                        if row.get("event") == "tool-response"
+                    ],
+                    [initializing, initializing, ready],
+                )
+                continuity = [
+                    row.get("event")
+                    for row in rows
+                    if row.get("event") in {"liveness", "generation", "tool-response"}
+                ]
+                self.assertEqual(
+                    continuity[:9],
+                    [
+                        "liveness",
+                        "generation",
+                        "tool-response",
+                        "liveness",
+                        "generation",
+                        "tool-response",
+                        "liveness",
+                        "generation",
+                        "tool-response",
+                    ],
+                    continuity,
+                )
+                self.assertTrue(
+                    all(
+                        row.get("matches") is True
+                        for row in rows
+                        if row.get("event") == "generation"
+                    )
+                )
+                self.assertEqual(
+                    len([row for row in rows if row.get("event") == "launch"]), 1
+                )
+                self.assertFalse(
+                    any(row.get("event") in {"closed", "signal"} for row in rows),
+                    "the held lease must not close/reopen while native readiness advances",
+                )
+                self.assertEqual(_state_name(lease.state), "HELD")
+                self.assertEqual(generation_observations[0], None)
+                self.assertGreaterEqual(len(generation_observations), 5)
+                self.assertTrue(
+                    all(
+                        observed == generation
+                        for observed in generation_observations[1:]
+                    ),
+                    generation_observations,
+                )
+            finally:
+                lease.close()
+            self.assertTrue(
+                _wait_until(
+                    lambda: any(
+                        row.get("event") in {"closed", "signal"}
+                        for row in _read_ledger(ledger)
+                    )
+                ),
+                _read_ledger(ledger),
+            )
+            self.assertEqual(
+                len(
+                    [
+                        row
+                        for row in _read_ledger(ledger)
+                        if row.get("event") == "launch"
+                    ]
+                ),
+                1,
+            )
+
+    def test_initializing_only_times_out_with_deterministic_budget_and_no_search(
+        self,
+    ) -> None:
+        """Deadline exhaustion has a typed, singular lifecycle result."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            daemon_generation_type,
+            _,
+            _,
+            readiness_error,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        timeout_error = getattr(lifecycle, "ExpectedSessionReadinessTimeoutError", None)
+        self.assertIsNotNone(
+            timeout_error,
+            "readiness deadline exhaustion requires ExpectedSessionReadinessTimeoutError",
+        )
+        assert isinstance(timeout_error, type)
+        self.assertTrue(issubclass(timeout_error, readiness_error))
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        now = 20.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            ledger = root / "initializing-timeout.jsonl"
+            generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
+            generation_observations: list[object | None] = []
+
+            def generation_probe() -> object | None:
+                observed = (
+                    generation
+                    if any(row.get("event") == "launch" for row in _read_ledger(ledger))
+                    else None
+                )
+                generation_observations.append(observed)
+                return observed
+
+            lease, identity, ledger = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="initializing-timeout",
+                daemon_status_sequence=(initializing,),
+                generation_probe=generation_probe,
+            )
+            with mock.patch.object(lease, "close", wraps=lease.close) as close:
+                with self.assertRaises(timeout_error):
+                    lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=0.5,
+                        readiness_poll_interval_seconds=0.2,
+                        clock=clock,
+                        sleep=sleep,
+                    )
+                close.assert_not_called()
+                self.assertEqual(_state_name(lease.state), "HELD")
+                lease.close()
+                close.assert_called_once_with()
+            self.assertEqual(sleeps, [0.2, 0.2, 0.1])
+            self.assertEqual(now, 20.5)
+            rows = _read_ledger(ledger)
+            tools = [
+                row.get("tool") for row in rows if row.get("method") == "tools/call"
+            ]
+            self.assertEqual(tools, ["daemon_status"] * 3)
+            self.assertNotIn("search", tools)
+            self.assertEqual(
+                len([row for row in rows if row.get("event") == "launch"]), 1
+            )
+            self.assertEqual(generation_observations[0], None)
+            self.assertTrue(
+                all(item == generation for item in generation_observations[1:]),
+                generation_observations,
+            )
+            self.assertTrue(
+                _wait_until(
+                    lambda: any(
+                        row.get("event") in {"closed", "signal"}
+                        for row in _read_ledger(ledger)
+                    )
+                ),
+                _read_ledger(ledger),
+            )
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+
+    def test_ready_response_completing_at_deadline_is_timeout(self) -> None:
+        """A ready result is not accepted when its request consumes the budget."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            _,
+            _,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        now = 40.0
+        request_timeouts: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def slow_ready(
+            _session: Any,
+            *,
+            tool: str,
+            arguments: dict[str, Any],
+            timeout_seconds: float,
+        ) -> str:
+            nonlocal now
+            self.assertEqual(tool, "daemon_status")
+            self.assertEqual(arguments, {})
+            request_timeouts.append(timeout_seconds)
+            now += timeout_seconds
+            return json.dumps(ready)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            lease, identity, ledger = self._open_lease(
+                Path(raw_root), lease_type, identity_type, name="slow-ready"
+            )
+            try:
+                with mock.patch.object(
+                    lifecycle, "_strict_tool_text", side_effect=slow_ready
+                ):
+                    with self.assertRaises(
+                        lifecycle.ExpectedSessionReadinessTimeoutError
+                    ):
+                        lease.adjudicate_expected_session(
+                            self._receipt(receipt_type, identity, total_chunks=1),
+                            witness=witness_type(
+                                relative_path="src/fixture.py", literal="needle[1]"
+                            ),
+                            readiness_timeout_seconds=0.5,
+                            readiness_poll_interval_seconds=0.1,
+                            clock=clock,
+                            sleep=lambda _delay: self.fail("deadline path slept"),
+                        )
+                self.assertEqual(request_timeouts, [0.5])
+                self.assertNotIn(
+                    "search",
+                    [
+                        row.get("tool")
+                        for row in _read_ledger(ledger)
+                        if row.get("method") == "tools/call"
+                    ],
+                )
+            finally:
+                lease.close()
+
+    def test_ready_before_deadline_keeps_independent_search_timeout(self) -> None:
+        """The readiness budget ends when READY completes before its deadline."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            readiness_type,
+            _,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        now = 50.0
+        request_timeouts: list[tuple[str, float]] = []
+        strict_tool_text = lifecycle._strict_tool_text
+
+        def clock() -> float:
+            return now
+
+        def timed_tool(
+            session: Any,
+            *,
+            tool: str,
+            arguments: dict[str, Any],
+            timeout_seconds: float,
+        ) -> str:
+            nonlocal now
+            request_timeouts.append((tool, timeout_seconds))
+            if tool == "daemon_status":
+                now = 50.49
+                return json.dumps(ready)
+            self.assertEqual(tool, "search")
+            self.assertEqual(timeout_seconds, 60.0)
+            now = 75.0
+            return strict_tool_text(
+                session,
+                tool=tool,
+                arguments=arguments,
+                timeout_seconds=timeout_seconds,
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            lease, identity, _ = self._open_lease(
+                Path(raw_root), lease_type, identity_type, name="ready-before-deadline"
+            )
+            try:
+                with mock.patch.object(
+                    lifecycle, "_strict_tool_text", side_effect=timed_tool
+                ):
+                    result = lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=0.5,
+                        readiness_poll_interval_seconds=0.1,
+                        clock=clock,
+                        sleep=lambda _delay: self.fail("ready path slept"),
+                    )
+                self.assertIsInstance(result, readiness_type)
+                self.assertEqual(request_timeouts, [("daemon_status", 0.5), ("search", 60.0)])
+                self.assertGreater(now, 50.5)
+            finally:
+                lease.close()
+
+    def test_process_loss_while_initializing_is_terminal_without_more_work(
+        self,
+    ) -> None:
+        """A real held proxy exit is detected before another status request."""
+        identity_type, receipt_type, lease_type, witness_type, *_, readiness_error = (
+            self._api()
+        )
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        sleeps: list[float] = []
+        now = 60.0
+        with tempfile.TemporaryDirectory() as raw_root:
+            lease, identity, ledger = self._open_lease(
+                Path(raw_root),
+                lease_type,
+                identity_type,
+                name="process-loss",
+                daemon_status_sequence=(initializing,),
+            )
+            session = lease._session
+            self.assertIsNotNone(session)
+
+            def clock() -> float:
+                return now
+
+            def lose_process(delay: float) -> None:
+                nonlocal now
+                sleeps.append(delay)
+                now += delay
+                assert session is not None
+                session.proc.terminate()
+                session.proc.wait(timeout=2.0)
+
+            try:
+                with self.assertRaises(readiness_error):
+                    lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=1.0,
+                        readiness_poll_interval_seconds=0.1,
+                        clock=clock,
+                        sleep=lose_process,
+                    )
+                self.assertEqual(sleeps, [0.1])
+                tools = [
+                    row.get("tool")
+                    for row in _read_ledger(ledger)
+                    if row.get("method") == "tools/call"
+                ]
+                self.assertEqual(tools, ["daemon_status"])
+                self.assertNotIn("search", tools)
+                self.assertEqual(_state_name(lease.state), "HELD")
+            finally:
+                lease.close()
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+
+    def test_status_transport_timeout_is_terminal_without_sleep_or_search(
+        self,
+    ) -> None:
+        """A real unanswered JSON-RPC status request fails at its request budget."""
+        identity_type, receipt_type, lease_type, witness_type, *_, readiness_error = (
+            self._api()
+        )
+        sleeps: list[float] = []
+        with tempfile.TemporaryDirectory() as raw_root:
+            lease, identity, ledger = self._open_lease(
+                Path(raw_root),
+                lease_type,
+                identity_type,
+                name="status-timeout",
+                daemon_status_no_response=True,
+            )
+            try:
+                with self.assertRaises(readiness_error):
+                    lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=0.2,
+                        readiness_poll_interval_seconds=0.01,
+                        sleep=sleeps.append,
+                    )
+                self.assertEqual(sleeps, [])
+                tools = [
+                    row.get("tool")
+                    for row in _read_ledger(ledger)
+                    if row.get("method") == "tools/call"
+                ]
+                self.assertEqual(tools, ["daemon_status"])
+                self.assertNotIn("search", tools)
+                self.assertEqual(_state_name(lease.state), "HELD")
+            finally:
+                lease.close()
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+
+    def test_contradictory_status_pairs_are_immediate_terminal_without_sleep(
+        self,
+    ) -> None:
+        """Only exact initializing/false is transient; contradictory pairs abort."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            _,
+            readiness_error,
+        ) = self._api()
+        cases = {
+            "initializing-true": {
+                "status": "initializing",
+                "server_version": "fixture-1",
+                "query_ready": True,
+                "scan_progress": {"query_ready_at": None},
+            },
+            "ready-false": {
+                "status": "ready",
+                "server_version": "fixture-1",
+                "query_ready": False,
+                "scan_progress": {"query_ready_at": None},
+            },
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            for index, (name, status) in enumerate(cases.items()):
+                with self.subTest(name=name):
+                    sleeps: list[float] = []
+                    lease, identity, ledger = self._open_lease(
+                        root,
+                        lease_type,
+                        identity_type,
+                        name=f"contradictory-{index}",
+                        daemon_status=status,
+                    )
+                    try:
+                        with self.assertRaises(readiness_error):
+                            lease.adjudicate_expected_session(
+                                self._receipt(receipt_type, identity, total_chunks=1),
+                                witness=witness_type(
+                                    relative_path="src/fixture.py", literal="needle[1]"
+                                ),
+                                readiness_timeout_seconds=1.0,
+                                readiness_poll_interval_seconds=0.2,
+                                clock=lambda: 10.0,
+                                sleep=sleeps.append,
+                            )
+                        self.assertEqual(sleeps, [])
+                        tools = [
+                            row.get("tool")
+                            for row in _read_ledger(ledger)
+                            if row.get("method") == "tools/call"
+                        ]
+                        self.assertEqual(tools, ["daemon_status"])
+                        self.assertNotIn("search", tools)
+                        self.assertEqual(_state_name(lease.state), "HELD")
+                    finally:
+                        lease.close()
+
+    def test_generation_loss_during_initializing_is_terminal_before_second_probe(
+        self,
+    ) -> None:
+        """Each retry re-proves liveness and generation before native status."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            daemon_generation_type,
+            _,
+            _,
+            readiness_error,
+        ) = self._api()
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        sleeps: list[float] = []
+        now = 30.0
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            ledger = root / "generation-loss.jsonl"
+            generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
+            track_readiness = False
+
+            def generation_probe() -> object | None:
+                launched = any(
+                    row.get("event") == "launch" for row in _read_ledger(ledger)
+                )
+                status_samples = sum(
+                    row.get("event") == "tool-response" for row in _read_ledger(ledger)
+                )
+                observed = generation if launched and status_samples == 0 else None
+                if track_readiness:
+                    _append_ledger(
+                        ledger,
+                        "generation" if observed is not None else "generation-loss",
+                    )
+                return observed
+
+            lease, identity, ledger = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="generation-loss",
+                daemon_status_sequence=(initializing,),
+                generation_probe=generation_probe,
+            )
+            track_readiness = True
+
+            def record_alive() -> None:
+                _append_ledger(ledger, "liveness")
+                lease_type.assert_alive(lease)
+
+            try:
+                with mock.patch.object(lease, "assert_alive", side_effect=record_alive):
+                    with self.assertRaises(readiness_error):
+                        lease.adjudicate_expected_session(
+                            self._receipt(receipt_type, identity, total_chunks=1),
+                            witness=witness_type(
+                                relative_path="src/fixture.py", literal="needle[1]"
+                            ),
+                            readiness_timeout_seconds=1.0,
+                            readiness_poll_interval_seconds=0.1,
+                            clock=clock,
+                            sleep=sleep,
+                        )
+                self.assertEqual(sleeps, [0.1])
+                rows = _read_ledger(ledger)
+                tools = [
+                    row.get("tool") for row in rows if row.get("method") == "tools/call"
+                ]
+                self.assertEqual(tools, ["daemon_status"])
+                self.assertNotIn("search", tools)
+                continuity = [
+                    row.get("event")
+                    for row in rows
+                    if row.get("event")
+                    in {"liveness", "generation", "tool-response", "generation-loss"}
+                ]
+                self.assertEqual(
+                    continuity,
+                    [
+                        "liveness",
+                        "generation",
+                        "tool-response",
+                        "liveness",
+                        "generation-loss",
+                    ],
+                )
+                self.assertEqual(_state_name(lease.state), "HELD")
+            finally:
+                lease.close()
+
     def test_strict_status_envelope_and_health_fail_closed_before_search(self) -> None:
         (
             identity_type,
@@ -5255,10 +6564,6 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             "wrong-type": ({**healthy, "query_ready": 1}, None),
             "wrong-scan-progress": ({**healthy, "scan_progress": []}, None),
             "invented-generation": ({**healthy, "generation": "not-native"}, None),
-            "initializing": (
-                {**healthy, "status": "initializing", "query_ready": False},
-                None,
-            ),
             "degraded": ({**healthy, "status": "degraded"}, None),
         }
         with tempfile.TemporaryDirectory() as raw_root:
@@ -5288,6 +6593,16 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                         self.assertEqual(tools, ["daemon_status"])
                     finally:
                         lease.close()
+                    self.assertTrue(
+                        _wait_until(
+                            lambda: any(
+                                row.get("event") in {"closed", "signal"}
+                                for row in _read_ledger(ledger)
+                            )
+                        ),
+                        _read_ledger(ledger),
+                    )
+                    self.assertEqual(_state_name(lease.state), "CLOSED")
 
     def test_nonempty_receipt_requires_exact_safe_path_and_fenced_literal(self) -> None:
         (

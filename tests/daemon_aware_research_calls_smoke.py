@@ -18,7 +18,8 @@ import run as run_module
 from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
-    ExpectedSearchWitness,
+    ExpectedGenerationEvidence,
+    ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
     LeaseState,
     build_launch_identity,
@@ -35,6 +36,7 @@ _A25_SCENARIOS = (
     "close-wins",
     "keeper-db-release",
 )
+_READINESS_SCENARIOS = ("initializing-then-ready", "never-ready-timeout")
 
 
 def _write_fake_chunkhound(binary: Path) -> None:
@@ -54,6 +56,11 @@ runtime = Path(__file__).resolve().parent
 (runtime / "keeper.pid").write_text(str(os.getpid()), encoding="utf-8")
 with (runtime / "chunkhound.db").open("rb") as database:
     fcntl.flock(database.fileno(), fcntl.LOCK_EX)
+    status_calls = 0
+    event_path = Path(os.environ["WHEEL_SMOKE_EVENT_PATH"])
+    readiness_mode = os.environ["WHEEL_SMOKE_READINESS_MODE"]
+    with event_path.open("a", encoding="utf-8") as events:
+        events.write(f"start:{os.getpid()}\n")
     for raw in sys.stdin:
         message = json.loads(raw)
         if "id" not in message:
@@ -61,6 +68,8 @@ with (runtime / "chunkhound.db").open("rb") as database:
         method = message.get("method")
         params = message.get("params", {})
         if method == "initialize":
+            with event_path.open("a", encoding="utf-8") as events:
+                events.write("initialize\n")
             result = {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {"tools": {}},
@@ -75,13 +84,20 @@ with (runtime / "chunkhound.db").open("rb") as database:
         elif method == "tools/call":
             tool = params.get("name")
             if tool == "daemon_status":
+                status_calls += 1
+                ready = readiness_mode == "initializing-then-ready" and status_calls >= 3
+                status = "ready" if ready else "initializing"
+                with event_path.open("a", encoding="utf-8") as events:
+                    events.write(f"status:{status}:{str(ready).lower()}\n")
                 text = json.dumps({
-                    "status": "ready",
+                    "status": status,
                     "server_version": "wheel-smoke-1",
-                    "query_ready": True,
-                    "scan_progress": {"query_ready_at": "wheel-smoke"},
+                    "query_ready": ready,
+                    "scan_progress": {"query_ready_at": "wheel-smoke" if ready else None},
                 })
             else:
+                with event_path.open("a", encoding="utf-8") as events:
+                    events.write("search\n")
                 text = "## `fixture.txt` L1\n\n```text\nfixture\n```\n\n---\nResults 1–1"
             result = {"content": [{"type": "text", "text": text}], "isError": False}
         else:
@@ -106,6 +122,22 @@ def _assert_process_gone(pid: int, scenario: str) -> None:
         time.sleep(0.01)
     if _process_exists(pid):
         raise SystemExit(f"{scenario}: owned process {pid} survived")
+
+
+def _probe_fake_mcp_generation(runtime: Path) -> DaemonGenerationIdentity | None:
+    try:
+        pid = int((runtime / "keeper.pid").read_text(encoding="utf-8"))
+        stat_fields = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="utf-8"
+        ).rsplit(")", 1)[1].split()
+        if stat_fields[0] == "Z":
+            return None
+        # Linux proc_pid_stat(5): fields after the command start at state (3),
+        # making process start time (22) index 19 in this suffix.
+        started_at = float(int(stat_fields[19]))
+    except (FileNotFoundError, IndexError, ValueError):
+        return None
+    return DaemonGenerationIdentity(pid=pid, process_started_at=started_at)
 
 
 def _assert_database_unlocked(database: Path) -> None:
@@ -304,67 +336,193 @@ def _assert_checkout_isolated(cure_bin: Path) -> None:
         raise SystemExit(f"lifecycle module is outside smoke venv: {lifecycle_origin}")
 
 
-def _run_lifecycle(cure_bin: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="cure-wheel-daemon-smoke-") as raw_root:
-        root = Path(raw_root)
-        repo = root / "repo"
-        runtime = root / "runtime"
-        repo.mkdir()
-        runtime.mkdir()
-        (repo / "fixture.txt").write_text("fixture\n", encoding="utf-8")
-        config = runtime / "chunkhound.json"
-        config.write_text("{}\n", encoding="utf-8")
-        database = runtime / "chunkhound.db"
-        database.write_bytes(b"wheel-smoke")
-        binary = runtime / "chunkhound"
-        _write_fake_chunkhound(binary)
-        environment = {
-            "PATH": f"{cure_bin.resolve().parent}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
-            "PYTHONSAFEPATH": "1",
-        }
-        identity = build_launch_identity(
-            repo_path=repo,
-            config_path=config,
-            database_path=database,
-            cwd=runtime,
-            binary=binary,
-            environment=environment,
-        )
-        receipt = ExpectedSessionReceiptV1(
-            schema_version=1,
-            canonical_root=identity.canonical_root,
-            reviewed_head="1" * 40,
-            resolved_config_path=identity.resolved_config_path,
-            config_digest=identity.config_digest,
-            resolved_database_path=identity.resolved_database_path,
-            total_chunks=1,
-            launch_identity_projection=identity,
-        )
-        lease = ChunkHoundDaemonLease(
-            config_path=config,
-            repo_path=repo,
-            cwd=runtime,
-            binary=str(binary),
-            env=environment,
-            launch_identity=identity,
-            generation_probe=lambda: DaemonGenerationIdentity(pid=os.getpid(), process_started_at=1.0),
-        )
+def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
+    runtime = root / scenario
+    repo = runtime / "repo"
+    repo.mkdir(parents=True)
+    (repo / "fixture.txt").write_text("fixture\n", encoding="utf-8")
+    config = runtime / "chunkhound.json"
+    config.write_text("{}\n", encoding="utf-8")
+    database = runtime / "chunkhound.db"
+    database.write_bytes(b"wheel-smoke")
+    event_path = runtime / "events"
+    binary = runtime / "chunkhound"
+    _write_fake_chunkhound(binary)
+    environment = {
+        "PATH": f"{cure_bin.resolve().parent}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "PYTHONSAFEPATH": "1",
+        "WHEEL_SMOKE_EVENT_PATH": str(event_path),
+        "WHEEL_SMOKE_READINESS_MODE": scenario,
+    }
+    identity = build_launch_identity(
+        repo_path=repo,
+        config_path=config,
+        database_path=database,
+        cwd=runtime,
+        binary=binary,
+        environment=environment,
+    )
+    receipt = ExpectedSessionReceiptV1(
+        schema_version=1,
+        canonical_root=identity.canonical_root,
+        reviewed_head="1" * 40,
+        resolved_config_path=identity.resolved_config_path,
+        config_digest=identity.config_digest,
+        resolved_database_path=identity.resolved_database_path,
+        total_chunks=0,
+        launch_identity_projection=identity,
+    )
+    generation_observations: list[DaemonGenerationIdentity | None] = []
+    attestations: list[tuple[DaemonGenerationIdentity, int]] = []
+
+    def probe_generation() -> DaemonGenerationIdentity | None:
+        generation = _probe_fake_mcp_generation(runtime)
+        generation_observations.append(generation)
+        return generation
+
+    def attest_generation(
+        generation: DaemonGenerationIdentity, proxy_pid: int
+    ) -> None:
+        if generation.pid != proxy_pid:
+            raise RuntimeError(
+                f"fake MCP generation {generation.pid} != proxy {proxy_pid}"
+            )
+        attestations.append((generation, proxy_pid))
+
+    lease = ChunkHoundDaemonLease(
+        config_path=config,
+        repo_path=repo,
+        cwd=runtime,
+        binary=str(binary),
+        env=environment,
+        launch_identity=identity,
+        generation_probe=probe_generation,
+        generation_attestor=attest_generation,
+    )
+    now = 0.0
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    timed_out = False
+    owned_generation: ExpectedGenerationEvidence | None = None
+    readiness_evidence: ExpectedGenerationEvidence | None = None
+    with mock.patch.object(lease, "close", wraps=lease.close) as close:
         try:
             lease.open()
             lease.assert_alive()
+            owned_generation = lease.owned_generation
+            if not isinstance(owned_generation, ExpectedGenerationEvidence):
+                raise SystemExit(f"{scenario}: lease did not issue generation evidence")
             readiness = lease.adjudicate_expected_session(
                 receipt,
-                witness=ExpectedSearchWitness(relative_path="fixture.txt", literal="fixture"),
+                expected_generation=owned_generation,
+                readiness_timeout_seconds=0.3,
+                readiness_poll_interval_seconds=0.1,
+                clock=clock,
+                sleep=sleep,
             )
+            if scenario == "never-ready-timeout":
+                raise SystemExit("never-ready-timeout: readiness unexpectedly passed")
             if readiness.launch_identity != identity:
                 raise SystemExit("installed keeper launch identity changed")
+            if readiness.expected_generation is not owned_generation:
+                raise SystemExit(
+                    f"{scenario}: readiness did not return owned generation evidence"
+                )
+            readiness_evidence = readiness.expected_generation
+            session = lease._session
+            if session is None:
+                raise SystemExit(f"{scenario}: held MCP session was absent")
+            search_response = session.request(
+                "tools/call",
+                {"name": "search", "arguments": {"query": "fixture"}},
+                stage="installed-wheel-smoke:search",
+                timeout_seconds=1.0,
+            )
+            if "error" in search_response:
+                raise SystemExit(f"{scenario}: post-readiness search failed")
+        except ExpectedSessionReadinessTimeoutError:
+            if scenario != "never-ready-timeout":
+                raise
+            timed_out = True
         finally:
-            lease.close()
-        if lease.state is not LeaseState.CLOSED:
-            raise SystemExit("installed keeper remained open after close")
-        keeper_pid = int((runtime / "keeper.pid").read_text(encoding="utf-8"))
-        _assert_process_gone(keeper_pid, "keeper-db-release")
-        _assert_database_unlocked(database)
+            close()
+        if close.call_count != 1:
+            raise SystemExit(f"{scenario}: keeper close count was {close.call_count}")
+
+    keeper_pid = int((runtime / "keeper.pid").read_text(encoding="utf-8"))
+    events = event_path.read_text(encoding="utf-8").splitlines()
+    if len(attestations) != 1 or attestations[0][1] != keeper_pid:
+        raise SystemExit(f"{scenario}: expected one MCP-bound attestation: {attestations!r}")
+    generation = attestations[0][0]
+    if generation.pid != keeper_pid:
+        raise SystemExit(f"{scenario}: generation was not the MCP proxy process")
+    if not isinstance(owned_generation, ExpectedGenerationEvidence):
+        raise SystemExit(f"{scenario}: owned evidence was not lease-bound")
+    if scenario == "initializing-then-ready":
+        if readiness_evidence is not owned_generation:
+            raise SystemExit(
+                f"{scenario}: readiness did not return owned generation evidence"
+            )
+    elif readiness_evidence is not None:
+        raise SystemExit(f"{scenario}: timeout unexpectedly returned readiness evidence")
+    if generation_observations[0] is not None:
+        raise SystemExit(f"{scenario}: generation existed before MCP child spawn")
+    live_observations = generation_observations[1:]
+    if not live_observations or set(live_observations) != {generation}:
+        raise SystemExit(
+            f"{scenario}: held generation was absent or changed: "
+            f"{generation_observations!r}"
+        )
+    if events.count(f"start:{keeper_pid}") != 1 or events.count("initialize") != 1:
+        raise SystemExit(f"{scenario}: expected exactly one MCP process/session")
+    if scenario == "initializing-then-ready":
+        expected_events = [
+            f"start:{keeper_pid}",
+            "initialize",
+            "status:initializing:false",
+            "status:initializing:false",
+            "status:ready:true",
+            "search",
+        ]
+        if events != expected_events or sleeps != [0.1, 0.1]:
+            raise SystemExit(
+                f"{scenario}: unexpected readiness trace {events!r}, sleeps={sleeps!r}"
+            )
+    else:
+        expected_events = [
+            f"start:{keeper_pid}",
+            "initialize",
+            "status:initializing:false",
+            "status:initializing:false",
+            "status:initializing:false",
+        ]
+        if not timed_out or events != expected_events or sleeps != [0.1, 0.1, 0.1]:
+            raise SystemExit(
+                f"{scenario}: timeout was not bounded and search-free: "
+                f"events={events!r}, sleeps={sleeps!r}"
+            )
+
+    if lease.state is not LeaseState.CLOSED:
+        raise SystemExit(f"{scenario}: installed keeper remained open after close")
+    _assert_process_gone(keeper_pid, scenario)
+    if probe_generation() is not None or generation_observations[-1] is not None:
+        raise SystemExit(f"{scenario}: generation remained after keeper release")
+    _assert_database_unlocked(database)
+
+
+def _run_lifecycle(cure_bin: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="cure-wheel-daemon-smoke-") as raw_root:
+        root = Path(raw_root)
+        for scenario in _READINESS_SCENARIOS:
+            _run_readiness_scenario(root, cure_bin, scenario)
         _run_owned_residue_matrix(root)
 
 

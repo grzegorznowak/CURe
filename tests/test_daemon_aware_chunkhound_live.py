@@ -21,9 +21,8 @@ from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     ExpectedGenerationEvidence,
     ExpectedSearchWitness,
-    ExpectedSessionReadiness,
-    ExpectedSessionReadinessError,
     ExpectedSessionReceiptV1,
+    NativeDaemonReadinessSignal,
     _require_healthy_native_status,
     _require_native_search_witness,
     build_launch_identity,
@@ -44,7 +43,9 @@ pytestmark = [
         os.environ.get("CURE_RUN_LIVE_CHUNKHOUND") != "1",
         reason="set CURE_RUN_LIVE_CHUNKHOUND=1 to run the installed-ChunkHound canary",
     ),
-    pytest.mark.skipif(sys.platform != "linux", reason="native daemon canary is Linux-only"),
+    pytest.mark.skipif(
+        sys.platform != "linux", reason="native daemon canary is Linux-only"
+    ),
 ]
 
 
@@ -162,7 +163,9 @@ print(json.dumps({
         timeout=30,
     )
     report = json.loads(result.stdout)
-    assert type(report) is dict and set(report) == {"ok", "excluded", "degraded"}, report
+    assert type(report) is dict and set(report) == {"ok", "excluded", "degraded"}, (
+        report
+    )
     assert report["ok"] is True
     assert type(report["excluded"]) is bool and type(report["degraded"]) is bool
     return report
@@ -195,7 +198,10 @@ def _ordinary_client(
         )
         assert payload.get("ok") is True, payload
         if witness is None:
-            _require_healthy_native_status(session)
+            assert (
+                _require_healthy_native_status(session)
+                is NativeDaemonReadinessSignal.READY
+            )
         else:
             _require_native_search_witness(session, witness)
     finally:
@@ -207,9 +213,7 @@ def _run_a22_receipt_client_concurrency(
     total_chunks: int,
     exercise_clients: bool,
     witness: ExpectedSearchWitness | None,
-    call_factory: Callable[
-        [ExpectedSearchWitness | None], Callable[[], None]
-    ],
+    call_factory: Callable[[ExpectedSearchWitness | None], Callable[[], None]],
 ) -> None:
     assert total_chunks >= 0
     assert (witness is None) is (total_chunks == 0)
@@ -224,28 +228,6 @@ def _run_a22_receipt_client_concurrency(
         futures = [pool.submit(call) for _ in range(8)]
         for future in futures:
             future.result(timeout=120)
-
-
-def _adjudicate_when_ready(
-    lease: ChunkHoundDaemonLease,
-    receipt: ExpectedSessionReceiptV1,
-    *,
-    witness: ExpectedSearchWitness | None = None,
-    expected_generation: ExpectedGenerationEvidence | None = None,
-    timeout: float = 30.0,
-) -> ExpectedSessionReadiness:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            return lease.adjudicate_expected_session(
-                receipt,
-                witness=witness,
-                expected_generation=expected_generation,
-            )
-        except ExpectedSessionReadinessError as exc:
-            if "not strictly query-ready" not in str(exc) or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.1)
 
 
 def _wait_for_release(
@@ -291,9 +273,7 @@ def _exercise_live_index(
     )
     materialized_config = json.loads(config.read_text(encoding="utf-8"))
     assert materialized_config["indexing"]["exclude"] == ["**/.chunkhound/**"]
-    assert materialized_config["indexing"]["exclude"].count(
-        "**/.chunkhound/**"
-    ) == 1
+    assert materialized_config["indexing"]["exclude"].count("**/.chunkhound/**") == 1
     environment = {
         "HOME": str(home),
         "LANG": "C.UTF-8",
@@ -400,7 +380,38 @@ def _exercise_live_index(
 
         assert_owned_generation_continuity("opened")
         assert daemon_log.is_file() and not daemon_log.is_symlink()
+
+        if total_chunks:
+            witness = select_git_tracked_source_witness(
+                repo_path=repo, config_path=config
+            )
+            assert witness.relative_path == "fixture.py"
+            assert witness.literal in before_source.decode("utf-8")
+            readiness = lease.adjudicate_expected_session(
+                receipt,
+                witness=witness,
+                expected_generation=owned_generation,
+                readiness_timeout_seconds=600.0,
+            )
+            assert readiness.launch_identity == identity
+            assert readiness.search_witness == witness
+            assert isinstance(readiness.expected_generation, ExpectedGenerationEvidence)
+            client_witness: ExpectedSearchWitness | None = witness
+        else:
+            readiness = lease.adjudicate_expected_session(
+                receipt,
+                expected_generation=owned_generation,
+                readiness_timeout_seconds=600.0,
+            )
+            assert readiness.launch_identity == identity
+            assert readiness.search_witness is None
+            assert readiness.expected_generation is owned_generation
+            client_witness = None
+        assert_owned_generation_continuity("readiness")
+
         marker = f"CURE_A22_DAEMON_LOG_{secrets.token_hex(24)}"
+        if client_witness is not None:
+            assert marker not in client_witness.literal
         with daemon_log.open("a", encoding="utf-8") as handle:
             handle.write(marker + "\n")
             handle.flush()
@@ -479,34 +490,6 @@ def _exercise_live_index(
                 sidecar = path.read_bytes()
                 assert all(value not in sidecar for value in forbidden_sidecar_bytes)
 
-        if total_chunks:
-            witness = select_git_tracked_source_witness(
-                repo_path=repo, config_path=config
-            )
-            assert witness.relative_path == "fixture.py"
-            assert witness.literal in before_source.decode("utf-8")
-            assert marker not in witness.literal
-            readiness = _adjudicate_when_ready(
-                lease,
-                receipt,
-                witness=witness,
-                expected_generation=owned_generation,
-            )
-            assert readiness.launch_identity == identity
-            assert readiness.search_witness == witness
-            assert isinstance(readiness.expected_generation, ExpectedGenerationEvidence)
-            client_witness: ExpectedSearchWitness | None = witness
-            assert_owned_generation_continuity("readiness")
-        else:
-            readiness = _adjudicate_when_ready(
-                lease, receipt, expected_generation=owned_generation
-            )
-            assert readiness.launch_identity == identity
-            assert readiness.search_witness is None
-            assert readiness.expected_generation is owned_generation
-            client_witness = None
-            assert_owned_generation_continuity("readiness")
-
         def call_factory(
             selected_witness: ExpectedSearchWitness | None,
         ) -> Callable[[], None]:
@@ -560,9 +543,7 @@ def _exercise_live_index(
         assert sibling.lstat().st_mode & 0o7777 == 0o640
     assert database.is_file()
 
-    safeguard = getattr(
-        cure_chunkhound, "probe_effective_daemon_log_exclusion", None
-    )
+    safeguard = getattr(cure_chunkhound, "probe_effective_daemon_log_exclusion", None)
     assert callable(safeguard), (
         "A22 RED: CURe lacks the production fail-closed installed-runtime "
         "daemon.log exclusion safeguard"
