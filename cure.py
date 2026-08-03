@@ -99,7 +99,10 @@ from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
     ExpectedSessionReadinessError,
+    ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
+    NativeSearchWitnessReadinessError,
+    NativeStatusReadinessError,
     PreNativeSpawnLeaseOpenError,
     assert_daemon_log_startup_precondition,
     build_launch_identity,
@@ -9483,6 +9486,29 @@ Return the final review in the same format as the draft. Integrate validated con
     return run_llm(reconcile_prompt)
 
 
+def _raise_chunkhound_readiness_failure(
+    *,
+    progress: SessionProgress,
+    stage: str,
+    exc: Exception,
+) -> None:
+    if isinstance(exc, NativeSearchWitnessReadinessError):
+        category = "witness_search"
+    elif isinstance(exc, ExpectedSessionReadinessTimeoutError):
+        category = "native_status_timeout"
+    elif isinstance(exc, NativeStatusReadinessError):
+        category = "native_status"
+    else:
+        category = stage
+    diagnostic = {"stage": stage, "category": category}
+    with progress.mutate() as meta:
+        meta["chunkhound_readiness_failure"] = diagnostic
+    raise ReviewflowError(
+        "ChunkHound daemon startup/readiness failed "
+        f"(stage={stage}; category={category})."
+    ) from None
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -10501,10 +10527,11 @@ def _pr_flow_impl(
                                 "a pre-existing same-root ChunkHound generation is active"
                             )
                     except Exception as exc:
-                        raise ReviewflowError(
-                            "ChunkHound daemon startup/readiness failed "
-                            f"({type(exc).__name__})."
-                        ) from None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="launch_validation",
+                            exc=exc,
+                        )
 
                     candidate_lease = ChunkHoundDaemonLease(
                         config_path=attempt_identity.resolved_config_path,
@@ -10530,10 +10557,11 @@ def _pr_flow_impl(
                             daemon_lease = None
                             if startup_attempt == 0:
                                 continue
-                        raise ReviewflowError(
-                            "ChunkHound daemon startup/readiness failed "
-                            f"({type(exc).__name__})."
-                        ) from None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="lease_open",
+                            exc=exc,
+                        )
                     except Exception as exc:
                         try:
                             candidate_lease.close()
@@ -10543,10 +10571,11 @@ def _pr_flow_impl(
                             pass
                         else:
                             daemon_lease = None
-                        raise ReviewflowError(
-                            "ChunkHound daemon startup/readiness failed "
-                            f"({type(exc).__name__})."
-                        ) from None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="lease_open",
+                            exc=exc,
+                        )
 
                     try:
                         opened_generation = _probe_expected_daemon_generation()
@@ -10566,12 +10595,14 @@ def _pr_flow_impl(
                             pass
                         else:
                             daemon_lease = None
-                        raise ReviewflowError(
-                            "ChunkHound daemon startup/readiness failed "
-                            f"({type(exc).__name__})."
-                        ) from None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="generation_attestation",
+                            exc=exc,
+                        )
 
                     expected_daemon_generation = opened_generation
+                    failure_stage = "expected_session"
                     try:
                         if final_index_receipt.total_chunks == 0:
                             candidate_lease.adjudicate_expected_session(
@@ -10579,10 +10610,12 @@ def _pr_flow_impl(
                                 expected_generation=candidate_lease.owned_generation,
                             )
                         else:
+                            failure_stage = "witness_selection"
                             witness = select_git_tracked_source_witness(
                                 repo_path=launch_identity.canonical_root,
                                 config_path=launch_identity.resolved_config_path,
                             )
+                            failure_stage = "expected_session"
                             candidate_lease.adjudicate_expected_session(
                                 final_index_receipt,
                                 witness=witness,
@@ -10597,10 +10630,11 @@ def _pr_flow_impl(
                         else:
                             daemon_lease = None
                         expected_daemon_generation = None
-                        raise ReviewflowError(
-                            "ChunkHound daemon startup/readiness failed "
-                            f"({type(exc).__name__})."
-                        ) from None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage=failure_stage,
+                            exc=exc,
+                        )
                     break
 
             with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):

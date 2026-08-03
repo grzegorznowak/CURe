@@ -1,13 +1,13 @@
 # Progress: cure-chunkhound-daemon-aware-research-calls
 
 ## Current Claim
-- Claimed at: 2026-08-03T03:47:51Z
-- Claimed by: pi PR #33 final proof reconciliation
+- Claimed at: 2026-08-03T06:02:28Z
+- Claimed by: pi PR #33 post-delivery incident reconciliation
 - Model: gpt-5.6-sol
-- Scope: Current HEAD and code/test files remain bound to the accepted pre-finalization TAP-05 proof snapshot; TAP-07, deterministic, broad, static, and independent-review evidence closes the daemon-aware research-call story. The only post-proof deltas are authorized final OpenSpec bookkeeping in `story.md`, `tasks.md`, `progress.md`, and `specs/chunkhound-daemon-aware-research/spec.md`. `/home/vscode/pedf064` is the accepted auditable five-case live proof; `/home/vscode/tap05-auditable-20260803T033533Z-71e1a19f5e01` preserves failed-closed runner evidence; `/home/vscode/tap07-audit-PK8ojJ` is the isolated installed-wheel proof. TAP-07 executes installed production lifecycle APIs outside checkout and separately verifies installed `cure --help`; it does not claim installed CLI `_pr_flow_impl` execution.
+- Scope: 🔄 IN PROGRESS. A post-delivery installed public `cure pr` run selected a Git-tracked witness beneath root-level `.claude/**` despite effective `**/.claude/**` exclusion; the installed ChunkHound corpus correctly omitted it, so exact witness adjudication failed. This invalidates the prior completion claim and its TAP-05/TAP-07/broad evidence as current closure while preserving those records as historical pre-incident evidence. Completion now requires recursive-root matcher proof, privacy-safe attributable stage/category diagnostics, fresh installed public-route proof, TAP-05/TAP-07 and broad re-proof, and independent final reconciliation.
 - Main-tree targets: CURe
 - Primary write surfaces: lifecycle/orchestration readiness implementation and tests, installed-runtime/wheel proof, openspec/changes/cure-chunkhound-daemon-aware-research-calls/
-- Status: ✅ DONE
+- Status: 🔄 IN PROGRESS
 
 ## Progress Timeline
 - 2026-07-30T14:10:32Z — **Step**: validated the blocked canary handoff and preserved repository staging/dirty-state invariants.
@@ -110,19 +110,18 @@
 
 ## Session Handoff
 
-- **Timestamp**: 2026-07-31T14:10:55Z
-- **Status**: ✅ DONE
+- **Timestamp**: 2026-08-03T06:02:28Z
+- **Status**: 🔄 IN PROGRESS
 - **Completed In This Session**:
-  - Closed the A22 creation-only daemon-log contract with exact installed-runtime filter, source-boundary, and generation-ownership proof.
-  - Passed the focused and full deterministic gates, independent pre-live review, and both enabled installed-ChunkHound non-empty/zero-chunk no-LLM canaries.
-  - Documented keeper eligibility, lifetime, failure behavior, cleanup, privacy, and exclusions; reconciled every task.
-  - Preserved all unrelated intentional dirty/untracked work and staged-only `openspec/config.yaml`.
-- **Remaining**: none for this story.
-- **Blockers**: none.
-- **Next Steps**: none; final OpenSpec, build, Twine, and installed-wheel validation is complete.
+  - Preserved and attributed the post-delivery installed-route failure to witness selection that did not honor a root-level recursive-subtree exclusion.
+  - Reopened the completion claim and required focused, TAP-05, TAP-07, broad-gate, installed-public-route, and final-reconciliation proof.
+  - Preserved all prior completion evidence as historical pre-incident evidence rather than deleting it.
+- **Remaining**: complete matcher and privacy-safe diagnostic remediation proof; run fresh installed public-route, TAP-05, TAP-07, broad gates, and independent final reconciliation.
+- **Blockers**: prior completion proof is invalid as current closure until the reopened rows pass.
+- **Next Steps**: finish RED/GREEN focused verification, reinstall the wheel, execute the public `cure pr` route, then rerun all reopened proof owners and reconcile completion.
 - **Worktrees**:
-  - CURe: /workspaces/cure_workspace/projects/CURe (intentional main-tree target)
-- **Proof Statement**: PASS — focused 74 tests plus 72 subtests; full 918 tests with 2 default-skipped live tests; Ruff; configured and scoped mypy; isolated build, Twine, and installed-wheel smoke; strict completed OpenSpec status; independent re-review; and enabled live non-empty/zero-chunk canaries (2 passed in 31.72s).
+  - CURe: /home/vscode/cure-pr33-readiness-fix
+- **Proof Statement**: PENDING — historical pre-incident proof remains recorded but is not current completion evidence.
 
 ## PR State
 - PR URL: https://github.com/grzegorznowak/CURe/pull/33
@@ -243,3 +242,15 @@
   - Broad/static gates: PASS — full pytest `958 passed, 5 skipped, 178 subtests`; focused daemon-aware owners `69 passed, 30 subtests`; source/release selection `28 passed, 13 deselected`; Ruff; configured mypy (9 files); scoped mypy (3 files); strict OpenSpec; detect-secrets; unstaged and cached diff checks.
   - Production semantics: exact typed Watchman fresh-instance reconciliation alone is waitable on the retained owned lease/generation; all near misses remain terminal; A22 startup/filter/generation and source-boundary contracts remain intact.
   - Review/reconciliation: fresh independent review returned GO with no product, test, live-proof, gate, or production-semantics blocker. Exactly the three remaining tasks were checked; A1/A2/A3/A10, all four A11 rows, A22, and A23 are final; zero unchecked tasks and zero current pending proof rows remain.
+
+- 2026-08-03T06:02:28Z — **Post-delivery incident invalidated completion and reopened proof**.
+  - Incident: an installed public `cure pr` run selected `.claude/skills/cure_release/SKILL.md` even though effective indexing config excluded `**/.claude/**`; installed ChunkHound correctly omitted that path, so the exact witness search could not prove the selected source.
+  - Root cause: CURe's witness-side matcher did not apply `**/<component>/**` to deep descendants of a matching root-level directory, diverging from the installed runtime filter.
+  - Diagnostics gap: public and persisted lifecycle failure evidence previously collapsed the cause to an exception class. Current closure requires privacy-safe allowlisted stage/category attribution without raw exception, path, payload, environment, authentication, or stderr content.
+  - Reopen: prior TAP-05, TAP-07, broad-gate, and independent-GO records are historical pre-incident evidence only. Focused matcher/diagnostic proof, fresh installed public-route proof, TAP-05, TAP-07, broad gates, and final reconciliation are pending; story status is `🔄 IN PROGRESS`.
+
+- 2026-08-03T07:04:58Z — **Post-delivery matcher/diagnostic remediation passed pre-commit review; installed-tip proof remains pending**.
+  - TDD evidence: the root/nested recursive exclusion correction first passed its focused cases; independent review then exposed terminal `foo/**` prefix-file mismatch and deep recursive evaluation. Added tests failed three matcher/selector cases while the new typed diagnostic taxonomy tests passed, then the iterative component-bounded matcher turned the focused set green (`6 passed`, `21 subtests`).
+  - Focused/broad evidence: daemon-aware owners `100 passed`, `138 subtests`; source/release selection `28 passed`, `13 deselected`; full pytest `965 passed`, `5 skipped`; Ruff; configured mypy (9 files); scoped lifecycle mypy (3 files); detect-secrets; unstaged/cached diff checks.
+  - OpenSpec checkpoint: story/progress remain `🔄 IN PROGRESS`, proof remains `PENDING`, strict schema/change validation passes, `blocked.md` is absent, and apply instructions report 27/33 complete with 6 remaining and state `ready`. OpenSpec 1.7.0 `status.isComplete:true` records artifact-file graph completeness only and is not implementation completion.
+  - Review: fresh independent pre-commit re-review returned GO with no remaining product, test, privacy, compatibility, documentation, or diff-scope finding. No reopened task is closed yet because exact committed-tip installation, the public `cure pr` route, TAP-05, TAP-07, packaging, and final reconciliation remain pending.

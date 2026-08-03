@@ -3761,7 +3761,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expect_error=(
                     r"ChunkHound daemon startup/readiness failed "
-                    r"\(ExpectedSessionReadinessError\)\."
+                    r"\(stage=expected_session; category=expected_session\)\."
                 ),
             )
             session_dir = next((root / "sandboxes").iterdir())
@@ -3771,6 +3771,10 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             seeded_secret,
             persisted_meta,
             "native lifecycle diagnostics persisted secret-bearing exception text",
+        )
+        self.assertEqual(
+            json.loads(persisted_meta)["chunkhound_readiness_failure"],
+            {"stage": "expected_session", "category": "expected_session"},
         )
         self.assertEqual(
             events,
@@ -4077,7 +4081,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expect_error=(
                     r"ChunkHound daemon startup/readiness failed "
-                    r"\(ExpectedSessionReadinessError\)\."
+                    r"\(stage=lease_open; category=lease_open\)\."
                 ),
             )
         self.assertEqual(len(open_calls), 1)
@@ -4448,7 +4452,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     flow_patch=flow_patch,
                     expect_error=(
                         r"ChunkHound daemon startup/readiness failed "
-                        r"\(PreNativeSpawnLeaseOpenError\)\."
+                        r"\(stage=lease_open; category=lease_open\)\."
                     ),
                 )
 
@@ -4464,6 +4468,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         statuses: tuple[dict[str, object], ...],
         expect_error: str | None = None,
         adjudication_kwargs: dict[str, object] | None = None,
+        search_text: str | None = None,
+        expect_search_on_error: bool = False,
     ) -> dict[str, object]:
         """Run `_pr_flow_impl` through one real retained lease lifecycle."""
         from _reviewflow_unittest_grounding_impl import (
@@ -4481,8 +4487,12 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             tools_payload=[{"name": tool} for tool in _REQUIRED_KEEPER_TOOLS],
             daemon_status_sequence=statuses,
             search_text=(
-                "## `source.py` L1 — witness\n\n```text\n"
-                "tool_proof_witness\n```\n\n---\nResults 1–1"
+                search_text
+                if search_text is not None
+                else (
+                    "## `source.py` L1 — witness\n\n```text\n"
+                    "tool_proof_witness\n```\n\n---\nResults 1–1"
+                )
             ),
             create_daemon_log=True,
         )
@@ -4758,8 +4768,20 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             self.assertEqual(tools, ["daemon_status"] * len(statuses) + ["search"])
         else:
             self.assertEqual(dispatches, [])
-            self.assertNotIn("search", tools)
-        return {"tools": tools, "rows": rows, "generation": generation}
+            if expect_search_on_error:
+                self.assertEqual(tools, ["daemon_status"] * len(statuses) + ["search"])
+            else:
+                self.assertNotIn("search", tools)
+        session_dir = next((root / "sandboxes").iterdir())
+        persisted_meta = json.loads(
+            (session_dir / "meta.json").read_text(encoding="utf-8")
+        )
+        return {
+            "tools": tools,
+            "rows": rows,
+            "generation": generation,
+            "meta": persisted_meta,
+        }
 
     def test_pr_flow_retains_first_real_lease_while_native_status_becomes_ready(
         self,
@@ -4870,6 +4892,68 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         for event in ("search", "helper", "model"):
             self.assertGreater(ordered.index(event), first_ready)
 
+    def test_readiness_stage_routing_persists_only_fixed_public_diagnostics(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        raw_detail = "private-native-detail-/secret/repo/token-value"
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            for stage in (
+                "launch_validation",
+                "generation_attestation",
+                "witness_selection",
+            ):
+                with self.subTest(stage=stage):
+                    meta_path = root / f"{stage}.json"
+                    progress = rf.SessionProgress(meta_path, quiet=True)
+                    with self.assertRaises(rf.ReviewflowError) as caught:
+                        rf._raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage=stage,
+                            exc=lifecycle.ExpectedSessionReadinessError(raw_detail),
+                        )
+                    public_text = (
+                        "ChunkHound daemon startup/readiness failed "
+                        f"(stage={stage}; category={stage})."
+                    )
+                    self.assertEqual(str(caught.exception), public_text)
+                    persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        persisted["chunkhound_readiness_failure"],
+                        {"stage": stage, "category": stage},
+                    )
+                    self.assertNotIn(raw_detail, str(caught.exception))
+                    self.assertNotIn(raw_detail, json.dumps(persisted))
+
+    def test_pr_flow_witness_no_hit_reports_safe_distinct_category(self) -> None:
+        """A real exact-witness no-hit is attributable without leaking payload data."""
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            result = self._run_real_readiness_route(
+                root=Path(raw_root) / "witness-no-hit-route",
+                statuses=(ready,),
+                search_text="No results found: /secret/repo/token-value",
+                expect_error=(
+                    r"ChunkHound daemon startup/readiness failed "
+                    r"\(stage=expected_session; category=witness_search\)\."
+                ),
+                expect_search_on_error=True,
+            )
+
+        self.assertEqual(
+            result["meta"]["chunkhound_readiness_failure"],
+            {"stage": "expected_session", "category": "witness_search"},
+        )
+        serialized = json.dumps(result["meta"])
+        self.assertNotIn("/secret/repo/token-value", serialized)
+        self.assertNotIn("No results found", serialized)
+
     def test_pr_flow_non_fresh_degraded_resync_is_terminal_without_dispatch(
         self,
     ) -> None:
@@ -4896,7 +4980,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 statuses=(non_benign,),
                 expect_error=(
                     r"ChunkHound daemon startup/readiness failed "
-                    r"\(ExpectedSessionReadinessError\)\."
+                    r"\(stage=expected_session; category=native_status\)\."
                 ),
                 adjudication_kwargs={
                     "readiness_timeout_seconds": 0.5,
@@ -4906,6 +4990,10 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 },
             )
         self.assertEqual(result["tools"], ["daemon_status"])
+        self.assertEqual(
+            result["meta"]["chunkhound_readiness_failure"],
+            {"stage": "expected_session", "category": "native_status"},
+        )
         self.assertEqual(sleeps, [])
 
 
@@ -4937,7 +5025,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 statuses=(initializing,),
                 expect_error=(
                     r"ChunkHound daemon startup/readiness failed "
-                    r"\(ExpectedSessionReadinessTimeoutError\)\."
+                    r"\(stage=expected_session; category=native_status_timeout\)\."
                 ),
                 adjudication_kwargs={
                     "readiness_timeout_seconds": 0.5,
@@ -4947,6 +5035,10 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 },
             )
         self.assertEqual(result["tools"], ["daemon_status"] * 3)
+        self.assertEqual(
+            result["meta"]["chunkhound_readiness_failure"],
+            {"stage": "expected_session", "category": "native_status_timeout"},
+        )
         self.assertEqual(sleeps, [0.2, 0.2, 0.1])
         self.assertEqual(now, 70.5)
         self.assertTrue(
@@ -7099,6 +7191,76 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             finally:
                 lease.close()
 
+    def test_native_response_failures_use_typed_errors_and_fixed_public_text(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        witness = lifecycle.ExpectedSearchWitness(
+            relative_path="src/fixture.py", literal="needle[1]"
+        )
+        raw_detail = "private-native-detail-/secret/repo/token-value"
+
+        def text_response(text: str) -> dict[str, object]:
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": False,
+                },
+            }
+
+        transport_response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": raw_detail},
+        }
+        cases = (
+            (
+                "status-malformed",
+                lifecycle._require_healthy_native_status,
+                text_response("{" + raw_detail),
+                lifecycle.NativeStatusReadinessError,
+                "native ChunkHound daemon_status returned malformed JSON",
+            ),
+            (
+                "status-transport",
+                lifecycle._require_healthy_native_status,
+                transport_response,
+                lifecycle.NativeStatusReadinessError,
+                "native ChunkHound daemon_status request failed",
+            ),
+            (
+                "search-malformed",
+                lambda session: lifecycle._require_native_search_witness(
+                    session, witness
+                ),
+                text_response(raw_detail),
+                lifecycle.NativeSearchWitnessReadinessError,
+                "native ChunkHound search did not prove the exact source witness",
+            ),
+            (
+                "search-transport",
+                lambda session: lifecycle._require_native_search_witness(
+                    session, witness
+                ),
+                transport_response,
+                lifecycle.NativeSearchWitnessReadinessError,
+                "native ChunkHound search request failed",
+            ),
+        )
+        for name, invoke, response, error_type, public_text in cases:
+            with self.subTest(name=name):
+                session = mock.Mock()
+                session.request.return_value = response
+                with self.assertRaises(error_type) as caught:
+                    invoke(session)
+                self.assertEqual(str(caught.exception), public_text)
+                self.assertNotIn(raw_detail, str(caught.exception))
+                self.assertTrue(
+                    issubclass(error_type, lifecycle.ExpectedSessionReadinessError)
+                )
+
     def test_strict_status_envelope_and_health_fail_closed_before_search(self) -> None:
         (
             identity_type,
@@ -7763,6 +7925,122 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 timeout=2.5,
                 env=env,
             )
+
+    def test_matches_index_pattern_honors_recursive_root_subtree_globs(self) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        cases = (
+            (".claude/skills/cure_release/SKILL.md", "**/.claude/**", True),
+            (".claude/SKILL.md", "**/.claude/**", True),
+            ("pkg/.claude/skills/review/SKILL.md", "**/.claude/**", True),
+            ("openspec/initiatives/example/story.md", "**/openspec/**", True),
+            ("src/__pycache__/nested/module.pyc", "**/__pycache__/**", True),
+            (".claude2/skills/SKILL.md", "**/.claude/**", False),
+            ("src/.claude2/SKILL.md", "**/.claude/**", False),
+            ("foo/x/bar/file.py", "**/foo*bar/**", False),
+            ("foo-bar/nested/file.py", "**/foo*bar/**", True),
+            ("src/selected.py", "**/.claude/**", False),
+            ("src/selected.py", "**/*.py", True),
+            ("foo", "foo/**", False),
+            ("foo/child.py", "foo/**", True),
+            ("foo/nested/child.py", "foo/**", True),
+        )
+        for relative_path, pattern, expected in cases:
+            with self.subTest(relative_path=relative_path, pattern=pattern):
+                self.assertIs(
+                    lifecycle._matches_index_pattern(relative_path, pattern),
+                    expected,
+                )
+
+    def test_matches_index_pattern_handles_deep_components_without_recursion(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        relative_path = "/".join(["component"] * 1100 + ["leaf.py"])
+        self.assertTrue(
+            lifecycle._matches_index_pattern(relative_path, "**/leaf.py")
+        )
+        self.assertFalse(
+            lifecycle._matches_index_pattern(relative_path, "**/other.py")
+        )
+
+    def test_selector_does_not_treat_terminal_globstar_as_prefix_file(self) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "foo").write_text("prefix_file_witness\n", encoding="utf-8")
+            (repo / "z.py").write_text("selected_witness = 1\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "foo", "z.py"], check=True
+            )
+            config = repo / "chunkhound.json"
+            config.write_text(
+                json.dumps(
+                    {"indexing": {"include": ["foo/**", "**/*.py"]}}
+                ),
+                encoding="utf-8",
+            )
+
+            witness = lifecycle.select_git_tracked_source_witness(
+                repo_path=repo,
+                config_path=config,
+                max_tracked_paths=8,
+                max_candidates=4,
+                max_file_bytes=1024,
+                max_tokens_per_file=8,
+            )
+
+        self.assertEqual(witness.relative_path, "z.py")
+        self.assertEqual(witness.literal, "selected_witness")
+
+    def test_selector_skips_lexically_first_excluded_recursive_root_subtree(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            excluded = repo / ".claude" / "skills" / "cure_release" / "SKILL.md"
+            excluded.parent.mkdir(parents=True)
+            excluded.write_text("excluded_witness\n", encoding="utf-8")
+            selected = repo / "src" / "selected.py"
+            selected.parent.mkdir()
+            selected.write_text("selected_witness = 1\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "add",
+                    ".claude/skills/cure_release/SKILL.md",
+                    "src/selected.py",
+                ],
+                check=True,
+            )
+            config = repo / "chunkhound.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "indexing": {
+                            "include": ["**/*.md", "**/*.py"],
+                            "exclude": ["**/.claude/**"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            witness = lifecycle.select_git_tracked_source_witness(
+                repo_path=repo,
+                config_path=config,
+                max_tracked_paths=8,
+                max_candidates=4,
+                max_file_bytes=1024,
+                max_tokens_per_file=8,
+            )
+
+        self.assertEqual(witness.relative_path, "src/selected.py")
+        self.assertEqual(witness.literal, "selected_witness")
 
     def test_select_git_tracked_source_witness_is_bounded_and_honors_policy(self) -> None:
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")

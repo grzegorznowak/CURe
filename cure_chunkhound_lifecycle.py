@@ -125,7 +125,15 @@ class ExpectedSessionReadinessError(RuntimeError):
     """Raised when a held daemon cannot prove expected-session readiness."""
 
 
-class ExpectedSessionReadinessTimeoutError(ExpectedSessionReadinessError):
+class NativeStatusReadinessError(ExpectedSessionReadinessError):
+    """Raised when native daemon status cannot prove readiness."""
+
+
+class NativeSearchWitnessReadinessError(ExpectedSessionReadinessError):
+    """Raised when native search cannot prove the selected source witness."""
+
+
+class ExpectedSessionReadinessTimeoutError(NativeStatusReadinessError):
     """Raised when an exact transient readiness state outlives its deadline."""
 
 
@@ -497,18 +505,36 @@ def _load_indexing_patterns(config_path: Path) -> tuple[tuple[str, ...], tuple[s
 
 
 def _matches_index_pattern(relative_path: str, pattern: str) -> bool:
-    # ChunkHound configurations conventionally use git-style ** globs. Cover
-    # root and nested forms explicitly rather than depending on host shell rules.
-    path = PurePosixPath(relative_path)
+    # Match each glob component independently so wildcards never consume '/'.
+    path_parts = PurePosixPath(relative_path).parts
+    pattern_parts = PurePosixPath(pattern).parts
+    matched_prefixes = [True, *([False] * len(path_parts))]
+    for pattern_index, pattern_part in enumerate(pattern_parts):
+        next_prefixes = [False] * (len(path_parts) + 1)
+        if pattern_part == "**":
+            # ChunkHound requires a terminal globstar to match a descendant,
+            # while an internal globstar may match zero path components.
+            if pattern_index != len(pattern_parts) - 1:
+                next_prefixes[0] = matched_prefixes[0]
+            for path_index in range(1, len(path_parts) + 1):
+                next_prefixes[path_index] = (
+                    matched_prefixes[path_index - 1]
+                    or next_prefixes[path_index - 1]
+                    or (
+                        pattern_index != len(pattern_parts) - 1
+                        and matched_prefixes[path_index]
+                    )
+                )
+        else:
+            for path_index, path_part in enumerate(path_parts, start=1):
+                next_prefixes[path_index] = matched_prefixes[
+                    path_index - 1
+                ] and fnmatch.fnmatchcase(path_part, pattern_part)
+        matched_prefixes = next_prefixes
+
     plain_directory = not any(character in pattern for character in "*?[")
-    return (
-        path.match(pattern)
-        or fnmatch.fnmatchcase(relative_path, pattern)
-        or (pattern.startswith("**/") and path.match(pattern[3:]))
-        or (
-            plain_directory
-            and relative_path.startswith(pattern.rstrip("/") + "/")
-        )
+    return matched_prefixes[-1] or (
+        plain_directory and relative_path.startswith(pattern.rstrip("/") + "/")
     )
 
 
@@ -940,20 +966,25 @@ def _require_healthy_native_status(
     *,
     timeout_seconds: float = _READINESS_STATUS_TIMEOUT_SECONDS,
 ) -> NativeDaemonReadinessSignal:
-    text = _strict_tool_text(
-        session,
-        tool="daemon_status",
-        arguments={},
-        timeout_seconds=timeout_seconds,
-    )
+    try:
+        text = _strict_tool_text(
+            session,
+            tool="daemon_status",
+            arguments={},
+            timeout_seconds=timeout_seconds,
+        )
+    except ExpectedSessionReadinessError as exc:
+        raise NativeStatusReadinessError(
+            "native ChunkHound daemon_status request failed"
+        ) from exc
     try:
         status = json.loads(text)
     except (TypeError, ValueError) as exc:
-        raise ExpectedSessionReadinessError(
+        raise NativeStatusReadinessError(
             "native ChunkHound daemon_status returned malformed JSON"
         ) from exc
     if not isinstance(status, dict) or set(status) != _STATUS_KEYS:
-        raise ExpectedSessionReadinessError(
+        raise NativeStatusReadinessError(
             "native ChunkHound daemon_status returned an invalid status object"
         )
     if (
@@ -962,7 +993,7 @@ def _require_healthy_native_status(
         or type(status["query_ready"]) is not bool
         or not isinstance(status["scan_progress"], dict)
     ):
-        raise ExpectedSessionReadinessError(
+        raise NativeStatusReadinessError(
             "native ChunkHound daemon_status returned invalid field types"
         )
     scan_progress = status["scan_progress"]
@@ -978,7 +1009,7 @@ def _require_healthy_native_status(
             return NativeDaemonReadinessSignal.READY
         if status["status"] == "initializing" and status["query_ready"] is False:
             return NativeDaemonReadinessSignal.INITIALIZING
-    raise ExpectedSessionReadinessError(
+    raise NativeStatusReadinessError(
         "native ChunkHound daemon is not strictly query-ready"
     )
 
@@ -1099,18 +1130,23 @@ def _require_native_search_witness(
     session: JsonRpcSession,
     witness: ExpectedSearchWitness,
 ) -> None:
-    text = _strict_tool_text(
-        session,
-        tool="search",
-        arguments={
-            "type": "regex",
-            "query": re.escape(witness.literal),
-            "path": witness.relative_path,
-        },
-        timeout_seconds=_READINESS_SEARCH_TIMEOUT_SECONDS,
-    )
+    try:
+        text = _strict_tool_text(
+            session,
+            tool="search",
+            arguments={
+                "type": "regex",
+                "query": re.escape(witness.literal),
+                "path": witness.relative_path,
+            },
+            timeout_seconds=_READINESS_SEARCH_TIMEOUT_SECONDS,
+        )
+    except ExpectedSessionReadinessError as exc:
+        raise NativeSearchWitnessReadinessError(
+            "native ChunkHound search request failed"
+        ) from exc
     if not _native_markdown_contains_witness(text, witness):
-        raise ExpectedSessionReadinessError(
+        raise NativeSearchWitnessReadinessError(
             "native ChunkHound search did not prove the exact source witness"
         )
 
