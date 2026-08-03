@@ -19,6 +19,7 @@ from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
     ExpectedGenerationEvidence,
+    ExpectedSessionReadinessError,
     ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
     LeaseState,
@@ -36,7 +37,12 @@ _A25_SCENARIOS = (
     "close-wins",
     "keeper-db-release",
 )
-_READINESS_SCENARIOS = ("initializing-then-ready", "never-ready-timeout")
+_READINESS_SCENARIOS = (
+    "initializing-then-ready",
+    "never-ready-timeout",
+    "fresh-resync-realtime-error",
+    "fresh-resync-then-ready",
+)
 
 
 def _write_fake_chunkhound(binary: Path) -> None:
@@ -85,15 +91,58 @@ with (runtime / "chunkhound.db").open("rb") as database:
             tool = params.get("name")
             if tool == "daemon_status":
                 status_calls += 1
-                ready = readiness_mode == "initializing-then-ready" and status_calls >= 3
-                status = "ready" if ready else "initializing"
+                ready = (
+                    readiness_mode in {
+                        "initializing-then-ready",
+                        "fresh-resync-then-ready",
+                    }
+                    and status_calls >= 3
+                )
+                fresh_resync = readiness_mode.startswith("fresh-resync") and not ready
+                query_ready = ready or (
+                    readiness_mode == "fresh-resync-then-ready" and status_calls == 2
+                )
+                status = (
+                    "ready" if ready else ("degraded" if fresh_resync else "initializing")
+                )
                 with event_path.open("a", encoding="utf-8") as events:
-                    events.write(f"status:{status}:{str(ready).lower()}\n")
+                    events.write(f"status:{status}:{str(query_ready).lower()}\n")
+                if fresh_resync:
+                    scan_progress = {
+                        "query_ready_at": "wheel-smoke" if query_ready else None,
+                        "scan_error": None,
+                        "unknown_scan_sibling": {"retained": True},
+                        "realtime": {
+                            "service_state": "running",
+                            "live_indexing_state": "degraded",
+                            "last_error": (
+                                "watchman transport failed"
+                                if readiness_mode == "fresh-resync-realtime-error"
+                                else None
+                            ),
+                            "resync": {
+                                "needs_resync": True,
+                                "last_reason": "realtime_loss_of_sync",
+                                "last_error": None,
+                                "last_details": {
+                                    "backend": "watchman",
+                                    "loss_of_sync_reason": "fresh_instance",
+                                    "subscription": "wheel-smoke",
+                                    "unknown_sibling": {"retained": True},
+                                },
+                                "unknown_sibling": ["retained"],
+                            },
+                        },
+                    }
+                else:
+                    scan_progress = {
+                        "query_ready_at": "wheel-smoke" if ready else None
+                    }
                 text = json.dumps({
                     "status": status,
                     "server_version": "wheel-smoke-1",
-                    "query_ready": ready,
-                    "scan_progress": {"query_ready_at": "wheel-smoke" if ready else None},
+                    "query_ready": query_ready,
+                    "scan_progress": scan_progress,
                 })
             else:
                 with event_path.open("a", encoding="utf-8") as events:
@@ -411,6 +460,7 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
         now += delay
 
     timed_out = False
+    terminal_degraded = False
     owned_generation: ExpectedGenerationEvidence | None = None
     readiness_evidence: ExpectedGenerationEvidence | None = None
     with mock.patch.object(lease, "close", wraps=lease.close) as close:
@@ -430,6 +480,10 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
             )
             if scenario == "never-ready-timeout":
                 raise SystemExit("never-ready-timeout: readiness unexpectedly passed")
+            if scenario == "fresh-resync-realtime-error":
+                raise SystemExit(
+                    "fresh-resync-realtime-error: terminal degraded status passed"
+                )
             if readiness.launch_identity != identity:
                 raise SystemExit("installed keeper launch identity changed")
             if readiness.expected_generation is not owned_generation:
@@ -452,6 +506,16 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
             if scenario != "never-ready-timeout":
                 raise
             timed_out = True
+        except ExpectedSessionReadinessError as exc:
+            if scenario == "fresh-resync-realtime-error":
+                terminal_degraded = True
+            elif scenario == "fresh-resync-then-ready":
+                raise AssertionError(
+                    "fresh-resync-then-ready: missing typed waitable degraded "
+                    "classification"
+                ) from exc
+            else:
+                raise
         finally:
             close()
         if close.call_count != 1:
@@ -466,13 +530,13 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
         raise SystemExit(f"{scenario}: generation was not the MCP proxy process")
     if not isinstance(owned_generation, ExpectedGenerationEvidence):
         raise SystemExit(f"{scenario}: owned evidence was not lease-bound")
-    if scenario == "initializing-then-ready":
+    if scenario in {"initializing-then-ready", "fresh-resync-then-ready"}:
         if readiness_evidence is not owned_generation:
             raise SystemExit(
                 f"{scenario}: readiness did not return owned generation evidence"
             )
     elif readiness_evidence is not None:
-        raise SystemExit(f"{scenario}: timeout unexpectedly returned readiness evidence")
+        raise SystemExit(f"{scenario}: failure unexpectedly returned readiness evidence")
     if generation_observations[0] is not None:
         raise SystemExit(f"{scenario}: generation existed before MCP child spawn")
     live_observations = generation_observations[1:]
@@ -483,12 +547,16 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
         )
     if events.count(f"start:{keeper_pid}") != 1 or events.count("initialize") != 1:
         raise SystemExit(f"{scenario}: expected exactly one MCP process/session")
-    if scenario == "initializing-then-ready":
+    if scenario in {"initializing-then-ready", "fresh-resync-then-ready"}:
+        waiting_events = (
+            ["status:initializing:false", "status:initializing:false"]
+            if scenario == "initializing-then-ready"
+            else ["status:degraded:false", "status:degraded:true"]
+        )
         expected_events = [
             f"start:{keeper_pid}",
             "initialize",
-            "status:initializing:false",
-            "status:initializing:false",
+            *waiting_events,
             "status:ready:true",
             "search",
         ]
@@ -496,7 +564,7 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
             raise SystemExit(
                 f"{scenario}: unexpected readiness trace {events!r}, sleeps={sleeps!r}"
             )
-    else:
+    elif scenario == "never-ready-timeout":
         expected_events = [
             f"start:{keeper_pid}",
             "initialize",
@@ -507,6 +575,17 @@ def _run_readiness_scenario(root: Path, cure_bin: Path, scenario: str) -> None:
         if not timed_out or events != expected_events or sleeps != [0.1, 0.1, 0.1]:
             raise SystemExit(
                 f"{scenario}: timeout was not bounded and search-free: "
+                f"events={events!r}, sleeps={sleeps!r}"
+            )
+    else:
+        expected_events = [
+            f"start:{keeper_pid}",
+            "initialize",
+            "status:degraded:false",
+        ]
+        if not terminal_degraded or events != expected_events or sleeps:
+            raise SystemExit(
+                f"{scenario}: terminal degraded status was not immediate/search-free: "
                 f"events={events!r}, sleeps={sleeps!r}"
             )
 

@@ -46,10 +46,30 @@ spawn chunkhound mcp
 ```
 
 Preflight closes immediately. Keeper acquisition retains the session. The
-keeper calls native `daemon_status` and requires `status == "ready"`,
-`query_ready == true`, the documented payload shape, and no scan/realtime
-degradation. This is generic health evidence only; it does not by itself prove
-which session index is attached.
+keeper calls native `daemon_status`. Exact `status == "ready"` plus
+`query_ready == true` is healthy, and exact `status == "initializing"` plus
+`query_ready == false` remains waitable. General degraded status remains
+terminal fail-closed except for exactly one typed waitable condition proven from
+the documented nested payload: `status == "degraded"`,
+`scan_progress.realtime.resync.needs_resync is true`,
+`resync.last_reason == "realtime_loss_of_sync"`,
+`resync.last_details.loss_of_sync_reason == "fresh_instance"`, and
+`resync.last_details.backend == "watchman"`, while
+`scan_progress.scan_error` is absent or exactly null, `realtime.last_error` and
+`resync.last_error` are present and exactly null, `realtime.service_state` is a
+present string other than `"degraded"`, and `realtime.live_indexing_state` is a
+present string other than `"stalled"`. All other named containers and fields
+must be present with exact types. The two state fields remain open vocabulary:
+only exact `service_state == "degraded"` and exact
+`live_indexing_state == "stalled"` are terminal state values, while any other
+string value is accepted. Unknown exact discriminator/fault values, missing or
+wrong-typed required fields, malformed containers, contradictory evidence, or
+alternative degraded evidence is terminal. Under ordinary ready/true or initializing/false status, a resync
+object's present `needs_resync` field is inactive only when it is exact boolean
+false; exact true or any non-boolean value is a terminal contradiction. Both
+waitable states retain the same owned lease/generation and use the existing
+600-second deadline and 0.5-second polling. This is generic health evidence only;
+it does not by itself prove which session index is attached.
 
 The final successful top-up invocation's sealed `FinalIndexRawCapture` plus exit
 code is the only index-summary authority for receipt construction. The final-index
@@ -99,9 +119,11 @@ receipt versions. Each startup attempt may proceed only with the CURe-owned
 generation newly opened under that attempt's probed exact config/runtime identity.
 
 Native `daemon_status` and `search` payloads are strict external shapes. Error
-envelopes, non-objects, missing or wrong-type required fields, degraded state,
+envelopes, non-objects, missing or wrong-type required fields, degraded state
+other than the exact typed active fresh-instance reconciliation condition,
 malformed result collections/hits, or wrong/empty witness data fail before model
-work. When the receipt reports one or more chunks, CURe deterministically selects
+work. Nested readiness evidence is interpreted only for that one condition; it
+must never become a broad degraded retry or a permissive backend-default path. When the receipt reports one or more chunks, CURe deterministically selects
 bounded Git-tracked regular-file/token candidates under the configured
 include/exclude policy and requires native `search`, constrained to the candidate
 path, to return the expected literal and path. If no candidate proves identity,
@@ -115,19 +137,22 @@ proves an expected non-empty index.
 ### Creation-only daemon-log boundary and generation-bound effective-filter gate
 
 Before each native daemon startup attempt, CURe records a canonical manifest of
-the indexed root and a strict manifest of the operator source checkout. The only
-permitted reviewed-root delta is creation by the native daemon lifecycle of the
-initially absent regular `<canonical-indexed-root>/.chunkhound/daemon.log`, with
-the `.chunkhound/` parent created as a directory only when that parent is absent.
-If the parent already exists as a real directory and the log is absent, only the
-regular log may be created; the parent's type, mode, content metadata, and every
-sibling remain identical. A pre-existing log is fully immutable, and a symlink
-or non-directory parent fails closed. Every other pre-existing entry remains
-identical in path, type, mode, symlink target, and content. No append, truncation,
-rewrite, chmod, replacement, deletion, or other child creation is permitted. The
-operator source checkout has no exception. No database, lock, config, rotated
-log, sibling, or other `.chunkhound` artifact is allowed by this creation-only
-rule.
+the indexed root and a strict manifest of the operator source checkout. Ordinarily,
+the only permitted reviewed-root delta is creation by the native daemon lifecycle
+of the initially absent regular `<canonical-indexed-root>/.chunkhound/daemon.log`,
+with the `.chunkhound/` parent created as a directory only when that parent is
+absent. If the parent already exists as a real directory and the log is absent,
+only the regular log may be created; the parent's type, mode, content metadata,
+and every sibling remain identical. In the dedicated clean-start Watchman case,
+the installed lifecycle may additionally materialize only regular files and
+directories beneath the initially absent `.chunkhound/watchman/` subtree. Every
+such addition must remain confined beneath that excluded subtree. A pre-existing
+log is fully immutable, and a symlink or non-directory parent fails closed. Every
+pre-existing entry remains identical in path, type, mode, symlink target, and
+content. No append, truncation, rewrite, chmod, replacement, deletion, or other
+child creation is permitted. The operator source checkout has no exception. No
+database, lock, config, rotated log, sibling, or other `.chunkhound` artifact is
+allowed outside the narrow Watchman exception.
 
 CURe's materialized indexing config injects the exact glob
 `**/.chunkhound/**` once, deduplicating any identical occurrence. Every daemon
@@ -183,11 +208,14 @@ no query mutex or broker.
 
 ### Failure policy
 
-One bounded retry is allowed only before any model dispatch. Missing
-capabilities, unhealthy/degraded `daemon_status`, receipt/projection mismatch,
-non-empty witness failure, and invalid empty-index adjudication are deterministic
-failures. Loss after dispatch may have occurred is an infrastructure failure
-with no replay.
+One bounded retry is allowed only before native spawn and any model dispatch for
+typed `PreNativeSpawnLeaseOpenError`. Missing capabilities, unhealthy
+`daemon_status`, every degraded status except the exact active fresh-instance
+reconciliation condition, receipt/projection mismatch, non-empty witness failure,
+and invalid empty-index adjudication are deterministic failures. The typed
+fresh-instance condition waits on the retained lease/generation; it does not
+retry or respawn. Loss after dispatch may have occurred is an infrastructure
+failure with no replay.
 
 ### Tagged provider/helper process ownership and cleanup
 
@@ -257,16 +285,17 @@ raw registry data, full config, or unredacted stderr.
 5. Add standard/big then multipass fault and concurrency coverage.
 6. Add narrowly tagged provider/helper process-group ownership across `cure.py`, `cure_llm.py`, `cure_output.py`, and `run.py`, with untagged-call controls.
 7. Add sealed lossless-capture/native-payload RED matrices parameterized over normal visible pumps, public `--quiet` silent pumps, and explicit `--no-stream` silent pumps. For each, cover valid and early malformed/conflicting recognized fields separated from later output by more than `capture_tail_chars`, write/pump/seal/read integrity and disposal, bounded memory, unchanged live/no-live and post-completion display behavior, then add deterministic Ctrl-C-at-publication and both spawn-versus-terminate lock-order RED matrices.
-8. Allocate seeded/pre-existing/unattested same-root rejection and post-open ownership mismatch to deterministic TAP-02/TAP-03, with TAP-06 retaining static/config/manifest proof. Add enabled installed-ChunkHound TAP-05 proof as four clean-start cases crossing non-empty/zero-chunk with absent/existing-real-parent-log-absent state. TAP-05 must not seed or manipulate a pre-existing native generation and does not prove A13. It records immediate pre-open and pre-spawn absence, exactly one pre-spawn validation, newly lease-owned `ExpectedGenerationEvidence`, continuity through marker/native session/readiness/ordinary-client concurrency/pre-close, and release to absence. In every case it proves exact `['**/.chunkhound/**']` once and effectively excluded, marker/sibling/path absence, and the exact creation-only source boundary. A22 is final because all four enabled cases passed `4 passed in 68.54s`.
-9. Add installed-wheel/release proof and documentation.
+8. Allocate seeded/pre-existing/unattested same-root rejection and post-open ownership mismatch to deterministic TAP-02/TAP-03, with TAP-06 retaining static/config/manifest proof. Preserve enabled installed-ChunkHound TAP-05 proof as four clean-start cases crossing non-empty/zero-chunk with absent/existing-real-parent-log-absent state. TAP-05 must not seed or manipulate a pre-existing native generation and does not prove A13. It records immediate pre-open and pre-spawn absence, exactly one pre-spawn validation, newly lease-owned `ExpectedGenerationEvidence`, continuity through marker/native session/readiness/ordinary-client concurrency/pre-close, and release to absence. In every case it proves exact `['**/.chunkhound/**']` once and effectively excluded, marker/sibling/path absence, and the exact ordinary creation-only source boundary. The ordinary A22 boundary remains preserved by the existing four enabled cases; amended A22 completion additionally requires the dedicated Watchman confinement proof in step 9.
+9. Add one proportionate installed Watchman-enabled fresh-state TAP-05 case through the production readiness primitive. It must prove typed degraded fresh reconciliation precedes first ready on one lease/generation without pre-ready search while permitting intervening benign initializing and non-stalled open-vocabulary live states; require at least one actual materialized regular Watchman file and prove every actual added runtime path excluded by the installed filter. From classification-ledger initialization onward, register private fsynced persistence for every success/failure path. Preserve four unique ordinary roots plus one unique Watchman root beneath a new never-reused artifact root. The runner uses private JUnit plus exact five-leaf `-vv` output and accepts only exactly five passes with zero skips/failures/unexpected nodes; separately record pytest and proof-validation exits, complete tracked/nonignored-untracked before/after manifests/digests and binary diffs, installed ChunkHound/Watchman path/version/digest identity, validation audit, invocation/output, and all live artifacts. Extend installed-wheel TAP-07 with fake fresh-resync degraded→ready and true-degraded terminal/cleanup evidence without claiming CLI `_pr_flow_impl` execution.
 
 ## Risks & Mitigations
 
-- **Version-specific lifecycle/filtering:** perform a non-degraded installed-runtime effective-filter probe on every startup attempt, keyed to the exact materialized-config and runtime identity. Deterministic TAP-02/TAP-03 rejects every pre-existing/unattested same-root generation and requires the newly opened CURe-owned generation to match that probed identity. The enabled four-case TAP-05 canary separately proves clean-start continuity, exclusion, source boundary, and release without manipulating a pre-existing native generation.
+- **Version-specific lifecycle/filtering:** perform a non-degraded installed-runtime effective-filter probe on every startup attempt, keyed to the exact materialized-config and runtime identity. Deterministic TAP-02/TAP-03 rejects every pre-existing/unattested same-root generation and requires the newly opened CURe-owned generation to match that probed identity. The enabled four-case TAP-05 canary separately preserves ordinary clean-start continuity, exclusion, source boundary, and release without manipulating a pre-existing native generation; the dedicated Watchman-enabled fresh-state case proves both the narrowly typed reconciliation wait and the amended A22 runtime-confinement exception.
+- **Degraded-state ambiguity:** fail closed by default. Only exact documented active Watchman fresh-instance resync evidence is waitable; the exact `watchman` backend discriminator, absent-or-exactly-null scan error, present exactly-null realtime/resync errors, and present non-degraded/non-stalled state fields are mandatory, and exhaustive missing/wrong/contradictory/non-fresh near misses remain terminal. A present non-boolean or true `needs_resync` also contradicts ordinary ready/initializing status; only exact false is inactive history.
 - **Root-only daemon identity:** CURe validates the full launch tuple, rejects every pre-existing or unattested same-root generation, and closes any newly opened generation that is not CURe-owned under the probed exact identity.
 - **Raw-tail truncation/display coupling:** final-index-only private lossless capture forces pump/spool transport independently of live display; normal, quiet, and explicit no-stream greater-than-bound valid/early-conflict tests prove tails cannot authorize receipts, silent modes emit no live lines, and no unbounded in-memory authority is introduced.
 - **Worker cleanup races:** one OPEN/CLOSING/CLOSED lock-and-condition protocol orders creation/publication against the terminal snapshot; pre-publication interrupts locally drain and close-first spawns fail before `Popen`; deterministic both-ordering tests plus real cooperative/ignoring descendants precede keeper close.
-- **Daemon-log source mutation/corpus contamination:** permit the exact directory-plus-log delta when both are absent or only the regular log when its parent already exists as a real directory; preserve the existing parent's type/mode/content metadata/siblings, every pre-existing reviewed-root entry, and every operator-checkout entry; reject invalid parents and preserve pre-existing logs fully; inject/dedupe exact `**/.chunkhound/**`. Across all four clean-start live cases, prove the unique marker, sibling, and daemon-log path are absent from corpus, search, research, readiness, witness, receipt, and identity evidence.
+- **Daemon-owned source mutation/corpus contamination:** permit the exact directory-plus-log delta when both are absent or only the regular log when its parent already exists as a real directory; in the dedicated clean-start Watchman case also permit only regular files/directories confined beneath the initially absent `.chunkhound/watchman/` subtree. Preserve the existing parent's type/mode/content metadata/siblings, every pre-existing reviewed-root entry, and every operator-checkout entry; reject invalid parents and preserve pre-existing logs fully; inject/dedupe exact `**/.chunkhound/**`. Across all four ordinary clean-start live cases, prove the unique marker, sibling, and daemon-log path are absent from corpus, search, research, readiness, witness, receipt, and identity evidence; the dedicated Watchman case additionally proves its runtime subtree is confined and excluded.
 - **DB release ambiguity:** bounded observation with typed teardown failure.
 - **Secret leakage:** allowlisted environment and recursive redaction tests.
 - **Packaging drift:** isolated-wheel smoke and release-workflow ownership.

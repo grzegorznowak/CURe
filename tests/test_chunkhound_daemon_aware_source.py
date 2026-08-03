@@ -25,7 +25,9 @@ from cure_chunkhound_lifecycle import (
 def _tree_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
     """Capture path, type, mode, and byte/target digest without following links."""
     rows: list[tuple[str, str, int, str]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
         relative = path.relative_to(root).as_posix()
         metadata = path.lstat()
         mode = metadata.st_mode & 0o7777
@@ -79,6 +81,38 @@ def _assert_exact_a22_source_delta(
     assert changed == expected
     assert parent in after_by_path and after_by_path[parent][1] == "directory"
     assert daemon_log in after_by_path and after_by_path[daemon_log][1] == "file"
+
+
+def _assert_exact_a22_watchman_source_delta(
+    before: tuple[tuple[str, str, int, str], ...],
+    after: tuple[tuple[str, str, int, str], ...],
+) -> None:
+    """Allow only daemon-owned Watchman artifacts under the excluded subtree."""
+    before_by_path = {row[0]: row for row in before}
+    after_by_path = {row[0]: row for row in after}
+    assert len(before_by_path) == len(before)
+    assert len(after_by_path) == len(after)
+    assert all(after_by_path.get(path) == row for path, row in before_by_path.items())
+
+    parent = ".chunkhound"
+    daemon_log = ".chunkhound/daemon.log"
+    watchman_root = ".chunkhound/watchman"
+    assert not any(
+        path == watchman_root or path.startswith(f"{watchman_root}/")
+        for path in before_by_path
+    )
+    additions = after_by_path.keys() - before_by_path.keys()
+    assert additions
+    assert all(
+        path in {parent, daemon_log}
+        or path == watchman_root
+        or path.startswith(f"{watchman_root}/")
+        for path in additions
+    )
+    assert all(after_by_path[path][1] in {"directory", "file"} for path in additions)
+    assert after_by_path.get(parent, (None, None))[1] == "directory"
+    assert after_by_path.get(daemon_log, (None, None))[1] == "file"
+    assert after_by_path.get(watchman_root, (None, None))[1] == "directory"
 
 
 _A22_LIVE_RECEIPT_CASES = ((1, True), (0, True))
@@ -136,7 +170,9 @@ def _write_a22_live_config(
 def _write_source_fixture(root: Path, *, witness: bool = False) -> None:
     root.mkdir(parents=True)
     source = root / ("fixture.txt" if witness else "source.py")
-    source.write_text("fixture\n" if witness else "immutable_source = True\n", encoding="utf-8")
+    source.write_text(
+        "fixture\n" if witness else "immutable_source = True\n", encoding="utf-8"
+    )
     source.chmod(0o640)
     executable = root / "tool.sh"
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -227,6 +263,47 @@ def test_exact_a22_manifest_keeps_preexisting_parent_and_log_immutable() -> None
         _assert_exact_a22_source_delta(before_parent, _tree_manifest(root))
         immutable = _tree_manifest(root)
         _assert_exact_a22_source_delta(immutable, _tree_manifest(root))
+
+
+def test_watchman_a22_manifest_allows_only_confined_runtime_creation() -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        root = Path(raw_root) / "reviewed"
+        _write_source_fixture(root)
+        before = _tree_manifest(root)
+        runtime = root / ".chunkhound" / "watchman" / "runtime" / "fixture"
+        runtime.mkdir(parents=True)
+        (root / ".chunkhound" / "daemon.log").write_bytes(b"native diagnostics\n")
+        (runtime / "watchman").write_bytes(b"packaged runtime\n")
+        _assert_exact_a22_watchman_source_delta(before, _tree_manifest(root))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["outside", "other-chunkhound-sibling", "source", "watchman-symlink"],
+)
+def test_watchman_a22_manifest_rejects_every_unconfined_delta(mutation: str) -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        root = Path(raw_root) / "reviewed"
+        _write_source_fixture(root)
+        before = _tree_manifest(root)
+        parent = root / ".chunkhound"
+        runtime = parent / "watchman" / "runtime"
+        runtime.mkdir(parents=True)
+        (parent / "daemon.log").write_bytes(b"native diagnostics\n")
+        (runtime / "watchman").write_bytes(b"packaged runtime\n")
+        if mutation == "outside":
+            (root / "unexpected.lock").write_bytes(b"residue")
+        elif mutation == "other-chunkhound-sibling":
+            (parent / "unexpected.lock").write_bytes(b"residue")
+        elif mutation == "source":
+            (root / "source.py").write_text("mutated\n", encoding="utf-8")
+        elif mutation == "watchman-symlink":
+            (runtime / "unsafe-link").symlink_to("../../../source.py")
+        else:  # pragma: no cover - the parametrization is exhaustive
+            raise AssertionError(mutation)
+
+        with pytest.raises(AssertionError):
+            _assert_exact_a22_watchman_source_delta(before, _tree_manifest(root))
 
 
 def test_keeper_lifecycle_preserves_reviewed_and_operator_source_boundaries() -> None:
@@ -415,7 +492,9 @@ def test_a22_live_receipt_cases_all_exercise_ordinary_client_concurrency() -> No
         and isinstance(nested.test, ast.Name)
         and nested.test.id == "total_chunks"
     )
-    try_body = next(statement for statement in exercise.body if isinstance(statement, ast.Try)).body
+    try_body = next(
+        statement for statement in exercise.body if isinstance(statement, ast.Try)
+    ).body
     shared_calls = [
         statement.value
         for statement in try_body[receipt_branch_index + 1 :]
@@ -467,6 +546,111 @@ def test_a22_live_receipt_cases_all_exercise_ordinary_client_concurrency() -> No
         assert selected_witnesses == [witness]
         assert ordinals == list(range(1, 11))
         assert len(worker_threads) == 8
+
+
+def test_tap05_ledger_accepts_open_vocabulary_fresh_then_initializing_then_ready() -> (
+    None
+):
+    from test_daemon_aware_chunkhound_live import (
+        _assert_tap05_classification_ledger,
+    )
+
+    ledger = [
+        {
+            "event": "daemon_status",
+            "classification": "fresh_instance_degraded",
+            "live_indexing_state": "not_stalled",
+        },
+        {
+            "event": "daemon_status",
+            "classification": "initializing",
+            "live_indexing_state": "not_stalled",
+        },
+        {
+            "event": "daemon_status",
+            "classification": "ready",
+            "live_indexing_state": "not_stalled",
+        },
+        {"event": "search_request", "search_ordinal": 3},
+        {
+            "event": "daemon_status",
+            "classification": "ready",
+            "live_indexing_state": "not_stalled",
+        },
+    ]
+
+    _assert_tap05_classification_ledger(ledger)
+
+
+@pytest.mark.parametrize("live_state", ["stalled", "missing"])
+def test_tap05_ledger_rejects_terminal_fresh_live_state(live_state: str) -> None:
+    from test_daemon_aware_chunkhound_live import (
+        _assert_tap05_classification_ledger,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_tap05_classification_ledger(
+            [
+                {
+                    "event": "daemon_status",
+                    "classification": "fresh_instance_degraded",
+                    "live_indexing_state": live_state,
+                },
+                {
+                    "event": "daemon_status",
+                    "classification": "ready",
+                    "live_indexing_state": "not_stalled",
+                },
+            ]
+        )
+
+
+def test_tap05_failure_finalizer_persists_private_sanitized_ledger(
+    tmp_path: Path,
+) -> None:
+    from test_daemon_aware_chunkhound_live import (
+        _register_tap05_ledger_persistence,
+    )
+
+    finalizers: list[Callable[[], None]] = []
+
+    class FakeRequest:
+        def addfinalizer(self, finalizer: Callable[[], None]) -> None:
+            finalizers.append(finalizer)
+
+    ledger: list[dict[str, object]] = []
+    path = tmp_path / "ledger.json"
+    persist = _register_tap05_ledger_persistence(FakeRequest(), path, ledger)  # type: ignore[arg-type]
+    ledger.append(
+        {
+            "event": "daemon_status",
+            "classification": "initializing",
+            "live_indexing_state": "not_stalled",
+        }
+    )
+
+    assert finalizers == [persist]
+    finalizers[0]()
+    persist()  # Idempotent explicit-success/finalizer overlap.
+    assert json.loads(path.read_text(encoding="utf-8")) == ledger
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_tap05_live_source_persists_every_case_and_regular_watchman_file() -> None:
+    source = (
+        Path(__file__)
+        .with_name("test_daemon_aware_chunkhound_live.py")
+        .read_text(encoding="utf-8")
+    )
+
+    for case_name in (
+        "ordinary-{case_kind}-{parent_kind}",
+        "watchman-fresh-instance",
+    ):
+        assert case_name in source
+    assert "_register_tap05_ledger_persistence(" in source
+    assert 'row[1] == "file"' in source
+    assert "assert materialized_watchman_files" in source
 
 
 def test_a22_nonempty_ordinary_client_rejects_literal_bearing_malformed_search(

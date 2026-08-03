@@ -138,6 +138,7 @@ class NativeDaemonReadinessSignal(Enum):
 
     READY = auto()
     INITIALIZING = auto()
+    FRESH_INSTANCE_RESYNC = auto()
 
 
 class LaunchIdentityConstructionError(RuntimeError):
@@ -884,6 +885,56 @@ def _strict_tool_text(
     return item["text"]
 
 
+def _has_active_native_status_fault(scan_progress: dict[str, Any]) -> bool:
+    """Recognize only named active markers that contradict ordinary readiness."""
+    if scan_progress.get("scan_error") is not None:
+        return True
+    realtime = scan_progress.get("realtime")
+    if not isinstance(realtime, dict):
+        return False
+    if (
+        realtime.get("last_error") is not None
+        or realtime.get("service_state") == "degraded"
+        or realtime.get("live_indexing_state") == "stalled"
+    ):
+        return True
+    resync = realtime.get("resync")
+    if not isinstance(resync, dict):
+        return False
+    needs_resync = resync.get("needs_resync")
+    return (
+        "needs_resync" in resync
+        and (type(needs_resync) is not bool or needs_resync is True)
+    ) or resync.get("last_error") is not None
+
+
+def _is_fresh_instance_resync(scan_progress: dict[str, Any]) -> bool:
+    """Match the exact named evidence for benign fresh-instance reconciliation."""
+    realtime = scan_progress.get("realtime")
+    if not isinstance(realtime, dict):
+        return False
+    resync = realtime.get("resync")
+    if not isinstance(resync, dict):
+        return False
+    details = resync.get("last_details")
+    return (
+        scan_progress.get("scan_error") is None
+        and "last_error" in realtime
+        and realtime["last_error"] is None
+        and isinstance(realtime.get("service_state"), str)
+        and realtime["service_state"] != "degraded"
+        and isinstance(realtime.get("live_indexing_state"), str)
+        and realtime["live_indexing_state"] != "stalled"
+        and resync.get("needs_resync") is True
+        and resync.get("last_reason") == "realtime_loss_of_sync"
+        and "last_error" in resync
+        and resync["last_error"] is None
+        and isinstance(details, dict)
+        and details.get("loss_of_sync_reason") == "fresh_instance"
+        and details.get("backend") == "watchman"
+    )
+
+
 def _require_healthy_native_status(
     session: JsonRpcSession,
     *,
@@ -914,12 +965,19 @@ def _require_healthy_native_status(
         raise ExpectedSessionReadinessError(
             "native ChunkHound daemon_status returned invalid field types"
         )
+    scan_progress = status["scan_progress"]
+    if status["status"] == "degraded" and _is_fresh_instance_resync(scan_progress):
+        return NativeDaemonReadinessSignal.FRESH_INSTANCE_RESYNC
+
     # Installed ChunkHound derives the authoritative top-level state from
-    # backend-specific scan_progress details; keep that nested payload opaque.
-    if status["status"] == "ready" and status["query_ready"] is True:
-        return NativeDaemonReadinessSignal.READY
-    if status["status"] == "initializing" and status["query_ready"] is False:
-        return NativeDaemonReadinessSignal.INITIALIZING
+    # backend-specific scan_progress details. Keep that nested payload opaque
+    # except for named active markers that contradict an ordinary top-level
+    # readiness state.
+    if not _has_active_native_status_fault(scan_progress):
+        if status["status"] == "ready" and status["query_ready"] is True:
+            return NativeDaemonReadinessSignal.READY
+        if status["status"] == "initializing" and status["query_ready"] is False:
+            return NativeDaemonReadinessSignal.INITIALIZING
     raise ExpectedSessionReadinessError(
         "native ChunkHound daemon is not strictly query-ready"
     )

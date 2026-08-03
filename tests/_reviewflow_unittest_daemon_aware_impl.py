@@ -2,6 +2,7 @@
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 import ast
+import copy
 import importlib
 import inspect
 import io
@@ -30,6 +31,37 @@ import run as run_module
 
 
 _REQUIRED_KEEPER_TOOLS = ("search", "code_research", "daemon_status")
+
+
+def _fresh_instance_resync_status() -> dict[str, object]:
+    """Return the installed Watchman fresh-instance degraded status shape."""
+    return {
+        "status": "degraded",
+        "server_version": "fixture-1",
+        "query_ready": False,
+        "scan_progress": {
+            "query_ready_at": None,
+            "unknown_scan_sibling": {"future": True},
+            "realtime": {
+                "service_state": "running",
+                "live_indexing_state": "degraded",
+                "last_error": None,
+                "unknown_realtime_sibling": ["opaque"],
+                "resync": {
+                    "needs_resync": True,
+                    "last_reason": "realtime_loss_of_sync",
+                    "last_error": None,
+                    "last_details": {
+                        "loss_of_sync_reason": "fresh_instance",
+                        "backend": "watchman",
+                        "subscription": "chunkhound-fixture",
+                        "unknown_detail_sibling": {"opaque": 1},
+                    },
+                    "unknown_resync_sibling": "opaque",
+                },
+            },
+        },
+    }
 
 
 def _write_fake_chunkhound(
@@ -4464,11 +4496,13 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         dispatches: list[str] = []
         ownership_attestations: list[tuple[Any, int]] = []
         released = False
+        adjudicating = False
         captured_lease: Any | None = None
         original_open = lifecycle.ChunkHoundDaemonLease.open
         original_close = lifecycle.ChunkHoundDaemonLease.close
         original_assert_alive = lifecycle.ChunkHoundDaemonLease.assert_alive
         original_adjudicate = lifecycle.ChunkHoundDaemonLease.adjudicate_expected_session
+        original_classifier = lifecycle._require_healthy_native_status
         original_precondition = rf.assert_daemon_log_startup_precondition
         real_owned_generation = inspect.getattr_static(
             lifecycle.ChunkHoundDaemonLease, "owned_generation"
@@ -4513,11 +4547,16 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         def generation_probe(*_args: object, **_kwargs: object) -> Any:
             if released:
                 return None
-            return (
+            observed = (
                 generation
                 if any(row.get("event") == "launch" for row in _read_ledger(ledger))
                 else None
             )
+            if adjudicating:
+                _append_ledger(
+                    ledger, "generation-check", matches=observed == generation
+                )
+            return observed
 
         def track_precondition(**kwargs: object) -> None:
             repo = Path(str(kwargs["repo_path"]))
@@ -4552,21 +4591,33 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             released = True
 
         def adjudicate_real(lease: Any, receipt: Any, **kwargs: Any) -> Any:
-            return original_adjudicate(
-                lease,
-                receipt,
-                **{**kwargs, **(adjudication_kwargs or {})},
-            )
+            nonlocal adjudicating
+            adjudicating = True
+            try:
+                return original_adjudicate(
+                    lease,
+                    receipt,
+                    **{**kwargs, **(adjudication_kwargs or {})},
+                )
+            finally:
+                adjudicating = False
 
         def attest_ownership(observed: Any, proxy_pid: int) -> None:
             ownership_attestations.append((observed, proxy_pid))
 
+        def classify_status(*args: Any, **kwargs: Any) -> object:
+            signal = original_classifier(*args, **kwargs)
+            _append_ledger(ledger, "status-classification", signal=signal.name)
+            return signal
+
         def helper(**_kwargs: Any) -> None:
+            _append_ledger(ledger, "helper")
             dispatches.append("helper")
             if expect_error is not None:
                 raise AssertionError("terminal readiness reached helper work")
 
         def model(output_path: Path, work_dir: Path) -> Any:
+            _append_ledger(ledger, "model")
             dispatches.append("model")
             if expect_error is not None:
                 raise AssertionError("terminal readiness reached model work")
@@ -4645,6 +4696,11 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     autospec=True,
                     side_effect=adjudicate_real,
                 ),
+                mock.patch.object(
+                    lifecycle,
+                    "_require_healthy_native_status",
+                    side_effect=classify_status,
+                ),
             )
             for patch in patches:
                 stack.enter_context(patch)
@@ -4677,6 +4733,11 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         )
         self.assertEqual(len(ownership_attestations), 1)
         self.assertEqual(ownership_attestations[0][0], generation)
+        generation_checks = [
+            row for row in rows if row.get("event") == "generation-check"
+        ]
+        self.assertTrue(generation_checks)
+        self.assertTrue(all(row.get("matches") is True for row in generation_checks))
         self.assertIsNotNone(captured_lease)
         assert captured_lease is not None
         self.assertEqual(_state_name(captured_lease.state), "CLOSED")
@@ -4698,7 +4759,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         else:
             self.assertEqual(dispatches, [])
             self.assertNotIn("search", tools)
-        return {"tools": tools, "rows": rows}
+        return {"tools": tools, "rows": rows, "generation": generation}
 
     def test_pr_flow_retains_first_real_lease_while_native_status_becomes_ready(
         self,
@@ -4721,6 +4782,132 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 root=Path(raw_root) / "retained-readiness-route",
                 statuses=(initializing, initializing, ready),
             )
+
+    def test_pr_flow_fresh_instance_resync_retains_real_lease_until_ready(
+        self,
+    ) -> None:
+        """TAP-03: fresh Watchman reconciliation stays on the original route."""
+        fresh_resync = _fresh_instance_resync_status()
+        fresh_resync_query_ready = copy.deepcopy(fresh_resync)
+        fresh_resync_query_ready["query_ready"] = True
+        scan_progress = fresh_resync_query_ready["scan_progress"]
+        assert isinstance(scan_progress, dict)
+        scan_progress["query_ready_at"] = "fixture"
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        now = 40.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            if len(sleeps) > 2:
+                raise AssertionError("fresh-resync route exceeded its finite retry guard")
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            result = self._run_real_readiness_route(
+                root=Path(raw_root) / "fresh-resync-readiness-route",
+                statuses=(fresh_resync, fresh_resync_query_ready, ready),
+                adjudication_kwargs={
+                    "readiness_timeout_seconds": 1.0,
+                    "readiness_poll_interval_seconds": 0.25,
+                    "clock": clock,
+                    "sleep": sleep,
+                },
+            )
+        self.assertEqual(
+            result["tools"],
+            ["daemon_status", "daemon_status", "daemon_status", "search"],
+        )
+        self.assertEqual(sleeps, [0.25, 0.25])
+        rows = result["rows"]
+        assert isinstance(rows, list)
+        ordered = [
+            (
+                f"status-response:{row['status']['status']}:"
+                f"{row['status']['query_ready']}"
+                if row.get("event") == "tool-response"
+                and row.get("tool") == "daemon_status"
+                else f"status-classification:{row.get('signal')}"
+                if row.get("event") == "status-classification"
+                else "search"
+                if row.get("event") == "request" and row.get("tool") == "search"
+                else str(row.get("event"))
+            )
+            for row in rows
+            if (
+                row.get("event") in {"status-classification", "helper", "model"}
+                or (
+                    row.get("event") == "tool-response"
+                    and row.get("tool") == "daemon_status"
+                )
+                or (row.get("event") == "request" and row.get("tool") == "search")
+            )
+        ]
+        self.assertEqual(
+            ordered,
+            [
+                "status-response:degraded:False",
+                "status-classification:FRESH_INSTANCE_RESYNC",
+                "status-response:degraded:True",
+                "status-classification:FRESH_INSTANCE_RESYNC",
+                "status-response:ready:True",
+                "status-classification:READY",
+                "search",
+                "helper",
+                "model",
+            ],
+        )
+        first_ready = ordered.index("status-classification:READY")
+        for event in ("search", "helper", "model"):
+            self.assertGreater(ordered.index(event), first_ready)
+
+    def test_pr_flow_non_fresh_degraded_resync_is_terminal_without_dispatch(
+        self,
+    ) -> None:
+        """TAP-03: a non-benign degraded route closes instead of retrying work."""
+        non_benign = _fresh_instance_resync_status()
+        scan_progress = non_benign["scan_progress"]
+        assert isinstance(scan_progress, dict)
+        realtime = scan_progress["realtime"]
+        assert isinstance(realtime, dict)
+        resync = realtime["resync"]
+        assert isinstance(resync, dict)
+        details = resync["last_details"]
+        assert isinstance(details, dict)
+        details["loss_of_sync_reason"] = "recrawl"
+        sleeps: list[float] = []
+
+        def reject_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            raise AssertionError("terminal degraded route retried")
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            result = self._run_real_readiness_route(
+                root=Path(raw_root) / "recrawl-readiness-route",
+                statuses=(non_benign,),
+                expect_error=(
+                    r"ChunkHound daemon startup/readiness failed "
+                    r"\(ExpectedSessionReadinessError\)\."
+                ),
+                adjudication_kwargs={
+                    "readiness_timeout_seconds": 0.5,
+                    "readiness_poll_interval_seconds": 0.25,
+                    "clock": lambda: 40.0,
+                    "sleep": reject_sleep,
+                },
+            )
+        self.assertEqual(result["tools"], ["daemon_status"])
+        self.assertEqual(sleeps, [])
+
 
     def test_pr_flow_initializing_timeout_uses_production_cleanup_once(
         self,
@@ -5976,6 +6163,420 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_fresh_instance_resync_then_ready_uses_typed_retained_polling(
+        self,
+    ) -> None:
+        """TAP-02: exact fresh resync is typed and polled on one generation."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            daemon_generation_type,
+            _,
+            readiness_type,
+            _,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        fresh_signal = getattr(
+            lifecycle.NativeDaemonReadinessSignal, "FRESH_INSTANCE_RESYNC", None
+        )
+        self.assertIsNotNone(
+            fresh_signal,
+            "fresh Watchman reconciliation requires a distinct typed readiness signal",
+        )
+        fresh_resync = _fresh_instance_resync_status()
+        fresh_resync_query_ready = copy.deepcopy(fresh_resync)
+        fresh_resync_query_ready["query_ready"] = True
+        fresh_scan = fresh_resync_query_ready["scan_progress"]
+        assert isinstance(fresh_scan, dict)
+        fresh_scan["query_ready_at"] = "fixture"
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        now = 20.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            ledger = root / "fresh-resync-ready.jsonl"
+            generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
+            track_readiness = False
+
+            def generation_probe() -> object | None:
+                observed = (
+                    generation
+                    if any(row.get("event") == "launch" for row in _read_ledger(ledger))
+                    else None
+                )
+                if track_readiness:
+                    _append_ledger(ledger, "generation", matches=observed == generation)
+                return observed
+
+            lease, identity, ledger = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="fresh-resync-ready",
+                daemon_status_sequence=(
+                    fresh_resync,
+                    fresh_resync_query_ready,
+                    initializing,
+                    ready,
+                ),
+                generation_probe=generation_probe,
+            )
+            track_readiness = True
+            classified: list[object] = []
+            original_classifier = lifecycle._require_healthy_native_status
+
+            def classify(*args: Any, **kwargs: Any) -> object:
+                signal = original_classifier(*args, **kwargs)
+                classified.append(signal)
+                return signal
+
+            def record_alive() -> None:
+                _append_ledger(ledger, "liveness")
+                lease_type.assert_alive(lease)
+
+            try:
+                with (
+                    mock.patch.object(
+                        lease, "assert_alive", side_effect=record_alive
+                    ) as alive,
+                    mock.patch.object(
+                        lifecycle,
+                        "_require_healthy_native_status",
+                        side_effect=classify,
+                    ),
+                ):
+                    readiness = lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=2.0,
+                        readiness_poll_interval_seconds=0.25,
+                        clock=clock,
+                        sleep=sleep,
+                    )
+                self.assertIsInstance(readiness, readiness_type)
+                self.assertEqual(
+                    classified,
+                    [
+                        fresh_signal,
+                        fresh_signal,
+                        lifecycle.NativeDaemonReadinessSignal.INITIALIZING,
+                        lifecycle.NativeDaemonReadinessSignal.READY,
+                    ],
+                )
+                self.assertEqual(alive.call_count, 4)
+                self.assertEqual(sleeps, [0.25, 0.25, 0.25])
+                rows = _read_ledger(ledger)
+                tools = [
+                    row.get("tool") for row in rows if row.get("method") == "tools/call"
+                ]
+                self.assertEqual(
+                    tools,
+                    ["daemon_status"] * 4 + ["search"],
+                )
+                continuity = [
+                    row.get("event")
+                    for row in rows
+                    if row.get("event") in {"liveness", "generation", "tool-response"}
+                ]
+                self.assertEqual(
+                    continuity[:12],
+                    ["liveness", "generation", "tool-response"] * 4,
+                )
+                self.assertTrue(
+                    all(
+                        row.get("matches") is True
+                        for row in rows
+                        if row.get("event") == "generation"
+                    )
+                )
+                self.assertEqual(
+                    len([row for row in rows if row.get("event") == "launch"]), 1
+                )
+                self.assertFalse(
+                    any(row.get("event") in {"closed", "signal"} for row in rows)
+                )
+                self.assertEqual(_state_name(lease.state), "HELD")
+            finally:
+                lease.close()
+            self.assertEqual(_state_name(lease.state), "CLOSED")
+
+
+    def test_status_semantic_consistency_matrix_rejects_only_active_faults(
+        self,
+    ) -> None:
+        """TAP-02: nested active faults contradict ordinary top-level states."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        classify = lifecycle._require_healthy_native_status
+        signal = lifecycle.NativeDaemonReadinessSignal
+        readiness_error = lifecycle.ExpectedSessionReadinessError
+
+        def classify_payload(payload: dict[str, object]) -> object:
+            response = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(payload)}],
+                    "isError": False,
+                },
+            }
+            session = mock.Mock()
+            session.request.return_value = response
+            return classify(session)
+
+        ordinary_pairs = (
+            ("ready", True, signal.READY),
+            ("initializing", False, signal.INITIALIZING),
+        )
+        active_faults: tuple[tuple[str, tuple[str, ...], object], ...] = (
+            ("needs-resync", ("realtime", "resync", "needs_resync"), True),
+            ("needs-resync-int", ("realtime", "resync", "needs_resync"), 1),
+            (
+                "needs-resync-string",
+                ("realtime", "resync", "needs_resync"),
+                "true",
+            ),
+            (
+                "needs-resync-container",
+                ("realtime", "resync", "needs_resync"),
+                {},
+            ),
+            ("scan-error", ("scan_error",), "scan failed"),
+            ("realtime-error", ("realtime", "last_error"), "observer failed"),
+            (
+                "resync-error",
+                ("realtime", "resync", "last_error"),
+                "resync failed",
+            ),
+            ("service-degraded", ("realtime", "service_state"), "degraded"),
+            ("live-indexing-stalled", ("realtime", "live_indexing_state"), "stalled"),
+        )
+
+        historical = _fresh_instance_resync_status()
+        historical_scan = historical["scan_progress"]
+        assert isinstance(historical_scan, dict)
+        historical_realtime = historical_scan["realtime"]
+        assert isinstance(historical_realtime, dict)
+        historical_resync = historical_realtime["resync"]
+        assert isinstance(historical_resync, dict)
+        historical_resync["needs_resync"] = False
+        historical_realtime["service_state"] = "running"
+        historical_realtime["live_indexing_state"] = "idle"
+
+        for top_status, query_ready, expected in ordinary_pairs:
+            with self.subTest(kind="inactive-history", status=top_status):
+                payload = copy.deepcopy(historical)
+                payload["status"] = top_status
+                payload["query_ready"] = query_ready
+                self.assertIs(classify_payload(payload), expected)
+
+            with self.subTest(kind="open-vocabulary-states", status=top_status):
+                payload = copy.deepcopy(historical)
+                payload["status"] = top_status
+                payload["query_ready"] = query_ready
+                scan = payload["scan_progress"]
+                assert isinstance(scan, dict)
+                realtime = scan["realtime"]
+                assert isinstance(realtime, dict)
+                realtime["service_state"] = "future-service-state"
+                realtime["live_indexing_state"] = "future-live-indexing-state"
+                self.assertIs(classify_payload(payload), expected)
+
+            for fault_name, path, value in active_faults:
+                with self.subTest(kind="active-fault", status=top_status, fault=fault_name):
+                    payload = copy.deepcopy(historical)
+                    payload["status"] = top_status
+                    payload["query_ready"] = query_ready
+                    target = payload["scan_progress"]
+                    assert isinstance(target, dict)
+                    for key in path[:-1]:
+                        target = target[key]
+                        assert isinstance(target, dict)
+                    target[path[-1]] = value
+                    with self.assertRaises(readiness_error):
+                        classify_payload(payload)
+
+        fresh_open_vocabulary = _fresh_instance_resync_status()
+        fresh_scan = fresh_open_vocabulary["scan_progress"]
+        assert isinstance(fresh_scan, dict)
+        fresh_realtime = fresh_scan["realtime"]
+        assert isinstance(fresh_realtime, dict)
+        fresh_realtime["service_state"] = "future-service-state"
+        fresh_realtime["live_indexing_state"] = "future-live-indexing-state"
+        self.assertIs(
+            classify_payload(fresh_open_vocabulary), signal.FRESH_INSTANCE_RESYNC
+        )
+
+    def test_fresh_instance_resync_terminal_near_neighbors_fail_closed(
+        self,
+    ) -> None:
+        """TAP-02: only the exact benign degraded discriminator may be polled."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            _,
+            readiness_error,
+        ) = self._api()
+        delete = object()
+        cases: tuple[tuple[str, tuple[str, ...], object], ...] = (
+            ("missing-needs-resync", ("realtime", "resync", "needs_resync"), delete),
+            ("needs-resync-false", ("realtime", "resync", "needs_resync"), False),
+            ("needs-resync-wrong-type", ("realtime", "resync", "needs_resync"), 1),
+            ("missing-realtime", ("realtime",), delete),
+            ("non-dict-realtime", ("realtime",), []),
+            ("missing-resync", ("realtime", "resync"), delete),
+            ("non-dict-resync", ("realtime", "resync"), []),
+            ("missing-details", ("realtime", "resync", "last_details"), delete),
+            ("non-dict-details", ("realtime", "resync", "last_details"), []),
+            (
+                "missing-backend",
+                ("realtime", "resync", "last_details", "backend"),
+                delete,
+            ),
+            (
+                "wrong-backend",
+                ("realtime", "resync", "last_details", "backend"),
+                "sdk",
+            ),
+            (
+                "wrong-type-backend",
+                ("realtime", "resync", "last_details", "backend"),
+                None,
+            ),
+            ("missing-last-reason", ("realtime", "resync", "last_reason"), delete),
+            ("wrong-last-reason", ("realtime", "resync", "last_reason"), "manual"),
+            ("wrong-type-last-reason", ("realtime", "resync", "last_reason"), None),
+            (
+                "missing-loss-reason",
+                ("realtime", "resync", "last_details", "loss_of_sync_reason"),
+                delete,
+            ),
+            (
+                "wrong-type-loss-reason",
+                ("realtime", "resync", "last_details", "loss_of_sync_reason"),
+                None,
+            ),
+            (
+                "recrawl",
+                ("realtime", "resync", "last_details", "loss_of_sync_reason"),
+                "recrawl",
+            ),
+            (
+                "disconnect",
+                ("realtime", "resync", "last_details", "loss_of_sync_reason"),
+                "disconnect",
+            ),
+            (
+                "overflow",
+                ("realtime", "resync", "last_details", "loss_of_sync_reason"),
+                "overflow",
+            ),
+            ("scan-error", ("scan_error",), "scan failed"),
+            ("wrong-type-scan-error", ("scan_error",), 0),
+            ("missing-realtime-error", ("realtime", "last_error"), delete),
+            ("realtime-error", ("realtime", "last_error"), "observer failed"),
+            ("wrong-type-realtime-error", ("realtime", "last_error"), False),
+            ("missing-resync-error", ("realtime", "resync", "last_error"), delete),
+            ("resync-error", ("realtime", "resync", "last_error"), "resync failed"),
+            ("wrong-type-resync-error", ("realtime", "resync", "last_error"), 0),
+            ("missing-service-state", ("realtime", "service_state"), delete),
+            ("service-degraded", ("realtime", "service_state"), "degraded"),
+            ("wrong-type-service-state", ("realtime", "service_state"), None),
+            ("missing-live-indexing-state", ("realtime", "live_indexing_state"), delete),
+            ("live-indexing-stalled", ("realtime", "live_indexing_state"), "stalled"),
+            ("wrong-type-live-indexing-state", ("realtime", "live_indexing_state"), 1),
+        )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            for index, (name, path, value) in enumerate(cases):
+                with self.subTest(name=name):
+                    status = _fresh_instance_resync_status()
+                    target = status["scan_progress"]
+                    assert isinstance(target, dict)
+                    for key in path[:-1]:
+                        target = target[key]
+                        assert isinstance(target, dict)
+                    if value is delete:
+                        del target[path[-1]]
+                    else:
+                        target[path[-1]] = value
+                    sleeps: list[float] = []
+
+                    def reject_sleep(delay: float) -> None:
+                        sleeps.append(delay)
+                        raise AssertionError(
+                            f"terminal fresh-resync neighbor slept for {delay}"
+                        )
+
+                    lease, identity, ledger = self._open_lease(
+                        root,
+                        lease_type,
+                        identity_type,
+                        name=f"fresh-resync-neighbor-{index}",
+                        daemon_status=status,
+                    )
+                    try:
+                        with self.assertRaises(readiness_error):
+                            lease.adjudicate_expected_session(
+                                self._receipt(receipt_type, identity, total_chunks=1),
+                                witness=witness_type(
+                                    relative_path="src/fixture.py", literal="needle[1]"
+                                ),
+                                readiness_timeout_seconds=1.0,
+                                readiness_poll_interval_seconds=0.25,
+                                clock=lambda: 30.0,
+                                sleep=reject_sleep,
+                            )
+                        self.assertEqual(sleeps, [])
+                        tools = [
+                            row.get("tool")
+                            for row in _read_ledger(ledger)
+                            if row.get("method") == "tools/call"
+                        ]
+                        self.assertEqual(tools, ["daemon_status"])
+                        self.assertNotIn("search", tools)
+                        self.assertEqual(_state_name(lease.state), "HELD")
+                    finally:
+                        lease.close()
+                    self.assertTrue(
+                        _wait_until(
+                            lambda: any(
+                                row.get("event") in {"closed", "signal"}
+                                for row in _read_ledger(ledger)
+                            )
+                        )
+                    )
+                    self.assertEqual(_state_name(lease.state), "CLOSED")
+
 
     def test_initializing_only_times_out_with_deterministic_budget_and_no_search(
         self,
