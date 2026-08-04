@@ -864,7 +864,12 @@ _NATIVE_RESULTS_FOOTER = re.compile(
     r"Results (?P<first>[1-9][0-9]*)–(?P<last>[1-9][0-9]*)"
     r"(?: \| next_offset=(?P<next_offset>[1-9][0-9]*))?"
 )
-_READINESS_STATUS_TIMEOUT_SECONDS = 10.0
+# Per-call budget for one native daemon_status request. Must stay well above
+# the daemon's fresh-instance resync directory scan, which blocks the daemon's
+# event loop (observed 3.3s on a fast machine, 12.6s on a slower one for a
+# 213-chunk repo). A 10s budget aborts a healthy daemon that is busy rescanning;
+# the 600s total readiness deadline still bounds a genuinely hung daemon.
+_READINESS_STATUS_TIMEOUT_SECONDS = 30.0
 _READINESS_SEARCH_TIMEOUT_SECONDS = 60.0
 _EXPECTED_SESSION_READINESS_TIMEOUT_SECONDS = 600.0
 _EXPECTED_SESSION_READINESS_POLL_INTERVAL_SECONDS = 0.5

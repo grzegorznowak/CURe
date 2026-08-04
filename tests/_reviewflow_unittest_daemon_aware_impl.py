@@ -8265,6 +8265,23 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                     issubclass(error_type, lifecycle.ExpectedSessionReadinessError)
                 )
 
+    def test_readiness_status_timeout_tolerates_fresh_instance_resync_scan(
+        self,
+    ) -> None:
+        """The per-call status budget must exceed real fresh-instance resync scans.
+
+        A fresh-instance reconciliation blocks the daemon's event loop on a
+        directory scan (observed 3.3s on a fast machine vs 12.6s on a slower
+        one for a 213-chunk repo). The per-call daemon_status timeout must
+        stay above that floor so readiness adjudication does not abort a
+        healthy daemon that is busy rescanning.
+        """
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        self.assertGreaterEqual(
+            lifecycle._READINESS_STATUS_TIMEOUT_SECONDS,
+            30.0,
+        )
+
     def test_native_status_failure_carries_raw_payload_and_last_status(self) -> None:
         """Failure evidence rides on the typed error: payload text + parsed status."""
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
