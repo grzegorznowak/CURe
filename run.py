@@ -649,7 +649,6 @@ class LosslessCommandCapture:
         with self._lock:
             if self._state is LosslessCommandCaptureState.DISPOSED:
                 return
-            self._state = LosslessCommandCaptureState.DISPOSED
             failures: list[BaseException] = []
             for file_handle in (self._stdout_file, self._stderr_file):
                 if file_handle is not None and not file_handle.closed:
@@ -667,6 +666,7 @@ class LosslessCommandCapture:
                 raise LosslessCommandCaptureIntegrityError(
                     "failed to dispose lossless command capture"
                 ) from failures[0]
+            self._state = LosslessCommandCaptureState.DISPOSED
 
 
 class _TailBuffer:

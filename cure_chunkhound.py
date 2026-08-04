@@ -14,6 +14,18 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from cure_subprocess_env import (
+    SESSION_LAUNCH_CONTEXT_ENV,
+    build_curated_chunkhound_env,
+    load_session_launch_context,
+)
+from cure_chunkhound_broker import (
+    ChunkHoundHelperBroker as ChunkHoundHelperBroker,
+    HelperLaunchAuthority as HelperLaunchAuthority,
+)
+
+_BROKER_ENDPOINT_ENV = "CURE_CHUNKHOUND_BROKER_ENDPOINT"
+
 _STDERR_TAIL_MAX = 16000
 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 _DEFAULT_PREFLIGHT_STAGE_TIMEOUTS: dict[str, float] = {
@@ -380,13 +392,22 @@ class JsonRpcSession:
         transport_mode: str = "json_line",
         heartbeat_provider: str = "claude",
         heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        executable_fd: int | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.repo_path = Path(repo_path)
-        self.cwd = Path(cwd).resolve(strict=False) if cwd is not None else self.repo_path.resolve(strict=False)
-        child_env = dict(os.environ if env is None else env)
-        child_env["PYTHONSAFEPATH"] = "1"
-        self._child_env: Mapping[str, str] = MappingProxyType(child_env)
+        self.cwd = (
+            Path(cwd).resolve(strict=False)
+            if cwd is not None
+            else self.repo_path.resolve(strict=False)
+        )
+        if env is None:
+            child_env: Mapping[str, str] = MappingProxyType(
+                {**os.environ, "PYTHONSAFEPATH": "1"}
+            )
+        else:
+            child_env = MappingProxyType(dict(env))
+        self._child_env = child_env
         requested_binary = str(binary or "chunkhound")
         if env is None or os.path.dirname(requested_binary):
             self.binary = requested_binary
@@ -411,6 +432,7 @@ class JsonRpcSession:
             stderr=subprocess.PIPE,
             text=False,
             env=self._child_env,
+            pass_fds=((executable_fd,) if executable_fd is not None else ()),
         )
         if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
             raise RuntimeError("chunkhound mcp stdio pipes are unavailable")
@@ -420,22 +442,41 @@ class JsonRpcSession:
         self._stderr_open = True
 
     def close(self) -> None:
+        first_failure: BaseException | None = None
+
+        def remember(exc: BaseException) -> None:
+            nonlocal first_failure
+            if first_failure is None:
+                first_failure = exc
+
         try:
             if self.proc.stdin is not None:
                 self.proc.stdin.close()
-        except Exception:
-            pass
+        except BaseException as exc:
+            remember(exc)
         try:
             self.proc.terminate()
-        except Exception:
-            pass
+        except BaseException as exc:
+            remember(exc)
+        reaped = False
         try:
             self.proc.wait(timeout=5)
-        except Exception:
+            reaped = True
+        except subprocess.TimeoutExpired:
+            pass
+        except BaseException as exc:
+            remember(exc)
+        if not reaped:
             try:
                 self.proc.kill()
-            except Exception:
-                pass
+            except BaseException as exc:
+                remember(exc)
+            try:
+                self.proc.wait(timeout=5)
+            except BaseException as exc:
+                remember(exc)
+        if first_failure is not None:
+            raise first_failure
 
     def _stderr_tail_text(self) -> str:
         if not self._stderr_buffer:
@@ -1175,6 +1216,26 @@ def _normalized_tool_timeouts(tool_timeouts: dict[str, float] | None, timeout: f
     return merged
 
 
+def _resolve_helper_launch(
+    *,
+    environment: Mapping[str, str] | None,
+    binary: str | Path,
+    expected_environment_digest: str | None = None,
+    expected_resolved_executable: str | Path | None = None,
+) -> tuple[Mapping[str, str], str]:
+    pointer = str(os.environ.get(SESSION_LAUNCH_CONTEXT_ENV) or "").strip()
+    if pointer:
+        context = load_session_launch_context(
+            pointer,
+            expected_environment_digest=expected_environment_digest,
+            expected_resolved_executable=expected_resolved_executable,
+        )
+        return context.environment, str(context.resolved_executable)
+    if environment is not None:
+        return MappingProxyType(dict(environment)), str(binary)
+    return build_curated_chunkhound_env(), str(binary)
+
+
 def run_chunkhound_mcp_preflight_payload(
     config_path: str | Path,
     repo_path: str | Path,
@@ -1187,33 +1248,65 @@ def run_chunkhound_mcp_preflight_payload(
     transport_modes: tuple[str, ...] | None = None,
     heartbeat_provider: str = "claude",
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    environment: Mapping[str, str] | None = None,
+    expected_environment_digest: str | None = None,
+    expected_resolved_executable: str | Path | None = None,
+    executable_fd: int | None = None,
+    _trusted_authority: object | None = None,
+    _session_factory: Any = None,
+    _session_opened: Any = None,
+    _session_closed: Any = None,
 ) -> dict[str, Any]:
+    if _trusted_authority is not None or (
+        environment is not None
+        or executable_fd is not None
+        or expected_environment_digest is not None
+        or expected_resolved_executable is not None
+        or str(os.environ.get(SESSION_LAUNCH_CONTEXT_ENV) or "").strip()
+        or str(os.environ.get(_BROKER_ENDPOINT_ENV) or "").strip()
+    ):
+        raise RuntimeError("caller-supplied ChunkHound launch authority is not accepted")
     active_timeouts = _normalized_stage_timeouts(stage_timeouts, timeout)
     active_transport_modes = transport_modes or _TRANSPORT_MODES
+    child_env, launch_binary = _resolve_helper_launch(
+        environment=environment,
+        binary=binary,
+        expected_environment_digest=expected_environment_digest,
+        expected_resolved_executable=expected_resolved_executable,
+    )
     last_payload: dict[str, Any] | None = None
     for idx, transport_mode in enumerate(active_transport_modes):
-        session = JsonRpcSession(
+        session_factory = _session_factory or JsonRpcSession
+        session = session_factory(
             config_path=config_path,
             repo_path=repo_path,
             cwd=cwd,
-            binary=binary,
+            binary=launch_binary,
+            env=child_env,
             transport_mode=transport_mode,
             heartbeat_provider=heartbeat_provider,
             heartbeat_interval=heartbeat_interval,
+            executable_fd=executable_fd,
         )
+        if callable(_session_opened):
+            _session_opened(session)
         try:
             payload = bootstrap_chunkhound_mcp_session(
                 session,
                 config_path=config_path,
                 repo_path=repo_path,
                 cwd=cwd,
-                binary=binary,
+                binary=launch_binary,
                 helper_path=helper_path,
                 stage_timeouts=active_timeouts,
                 required_tools=("search", "code_research") if helper_path is not None else _REQUIRED_KEEPER_TOOLS,
             )
         finally:
-            session.close()
+            try:
+                session.close()
+            finally:
+                if callable(_session_closed):
+                    _session_closed(session)
         payload["mcp_transport"] = transport_mode
         if payload.get("ok"):
             return payload
@@ -1254,7 +1347,24 @@ def run_chunkhound_tool_payload(
     heartbeat_provider: str = "claude",
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     skip_preflight: bool = False,
+    environment: Mapping[str, str] | None = None,
+    expected_environment_digest: str | None = None,
+    expected_resolved_executable: str | Path | None = None,
+    executable_fd: int | None = None,
+    _trusted_authority: object | None = None,
+    _session_factory: Any = None,
+    _session_opened: Any = None,
+    _session_closed: Any = None,
 ) -> dict[str, Any]:
+    if _trusted_authority is not None or (
+        environment is not None
+        or executable_fd is not None
+        or expected_environment_digest is not None
+        or expected_resolved_executable is not None
+        or str(os.environ.get(SESSION_LAUNCH_CONTEXT_ENV) or "").strip()
+        or str(os.environ.get(_BROKER_ENDPOINT_ENV) or "").strip()
+    ):
+        raise RuntimeError("caller-supplied ChunkHound launch authority is not accepted")
     active_stage_timeouts = _normalized_stage_timeouts(stage_timeouts, None)
     active_tool_timeouts = _normalized_tool_timeouts(tool_timeouts, timeout)
     active_transport_modes = transport_modes or _TRANSPORT_MODES
@@ -1262,18 +1372,30 @@ def run_chunkhound_tool_payload(
     command = "research" if requested_tool_name == "code_research" else "search"
     query = str(arguments.get("query") or "")
     path = str(arguments.get("path") or "").strip() or None
+    child_env, launch_binary = _resolve_helper_launch(
+        environment=environment,
+        binary=binary,
+        expected_environment_digest=expected_environment_digest,
+        expected_resolved_executable=expected_resolved_executable,
+    )
     last_payload: dict[str, Any] | None = None
     for idx, transport_mode in enumerate(active_transport_modes):
-        session = JsonRpcSession(
+        session_factory = _session_factory or JsonRpcSession
+        session = session_factory(
             config_path=config_path,
             repo_path=repo_path,
             cwd=cwd,
-            binary=binary,
+            binary=launch_binary,
+            env=child_env,
             transport_mode=transport_mode,
             heartbeat_provider=heartbeat_provider,
             heartbeat_interval=heartbeat_interval,
+            executable_fd=executable_fd,
         )
+        if callable(_session_opened):
+            _session_opened(session)
         try:
+            preflight: dict[str, Any]
             if skip_preflight:
                 try:
                     session.ensure_started(stage="spawn", timeout_seconds=active_stage_timeouts["spawn"])
@@ -1321,7 +1443,7 @@ def run_chunkhound_tool_payload(
                     config_path=config_path,
                     repo_path=repo_path,
                     cwd=cwd,
-                    binary=binary,
+                    binary=launch_binary,
                     helper_path=helper_path,
                     stage_timeouts=active_stage_timeouts,
                     required_tools=("search", "code_research") if helper_path is not None else _REQUIRED_KEEPER_TOOLS,
@@ -1424,7 +1546,11 @@ def run_chunkhound_tool_payload(
                         "execution_timeout_seconds": tool_timeout_seconds,
                     }
         finally:
-            session.close()
+            try:
+                session.close()
+            finally:
+                if callable(_session_closed):
+                    _session_closed(session)
         if payload.get("ok"):
             return payload
         last_payload = payload

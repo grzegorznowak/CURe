@@ -8598,10 +8598,12 @@ class CodexToolProofFlowTests(unittest.TestCase):
         expect_error: str | None = None,
         expect_error_type: type[BaseException] = rf.ReviewflowError,
         helper_preflight_side_effect: Any | None = None,
+        use_production_helper_preflight: bool = False,
         multipass_defaults_override: dict[str, object] | None = None,
         llm_resolved_override: dict[str, object] | None = None,
         llm_resolution_meta_override: dict[str, object] | None = None,
         runtime_policy_override: dict[str, object] | None = None,
+        use_production_runtime_policy: bool = False,
         extra_cli_args: list[str] | None = None,
         pr_context_result_override: dict[str, object] | None = None,
         synth_stage_side_effect: Any | None = None,
@@ -8668,17 +8670,17 @@ class CodexToolProofFlowTests(unittest.TestCase):
             else self._codex_helper_daemon_runtime_policy()
         )
 
-        def fake_final_index_receipt(**kwargs: object) -> object:
+        def fake_final_index_receipt(**kwargs: Any) -> object:
             lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-            identity = lifecycle.LaunchIdentity(
-                resolved_executable=Path("/usr/bin/chunkhound"),
-                canonical_root=Path(str(kwargs["repo_dir"])).resolve(),
-                resolved_config_path=Path(str(kwargs["chunkhound_cfg_path"])).resolve(),
-                config_digest="a" * 64,
-                resolved_database_path=Path(str(kwargs["chunkhound_db_path"])).resolve(),
-                cwd=Path(str(kwargs["chunkhound_work_dir"])).resolve(),
-                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                environment_equality_digest="b" * 64,
+            database_path = Path(str(kwargs["chunkhound_db_path"]))
+            database_path.touch(exist_ok=True)
+            identity = lifecycle.build_launch_identity(
+                repo_path=Path(str(kwargs["repo_dir"])),
+                config_path=Path(str(kwargs["chunkhound_cfg_path"])),
+                database_path=database_path,
+                cwd=Path(str(kwargs["chunkhound_work_dir"])),
+                binary="chunkhound",
+                environment=kwargs["env"],
             )
             return lifecycle.ExpectedSessionReceiptV1(
                 schema_version=1,
@@ -8800,25 +8802,29 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     return_value=(llm_resolved, llm_resolution_meta),
                 )
             )
-            stack.enter_context(
-                mock.patch.object(
-                    rf,
-                    "prepare_review_agent_runtime",
-                    return_value=runtime_policy,
-                )
-            )
-            if helper_preflight_side_effect is None:
-                stack.enter_context(
-                    mock.patch.object(rf, "_run_chunkhound_access_preflight", return_value=None)
-                )
-            else:
+            if not use_production_runtime_policy:
                 stack.enter_context(
                     mock.patch.object(
                         rf,
-                        "_run_chunkhound_access_preflight",
-                        side_effect=helper_preflight_side_effect,
+                        "prepare_review_agent_runtime",
+                        return_value=runtime_policy,
                     )
                 )
+            if not use_production_helper_preflight:
+                if helper_preflight_side_effect is None:
+                    stack.enter_context(
+                        mock.patch.object(
+                            rf, "_run_chunkhound_access_preflight", return_value=None
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        mock.patch.object(
+                            rf,
+                            "_run_chunkhound_access_preflight",
+                            side_effect=helper_preflight_side_effect,
+                        )
+                    )
             stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
             stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
             if synth_stage_side_effect is not None:
@@ -8856,17 +8862,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
             )
             default_generation_active = False
 
-            def default_build_launch_identity(**kwargs: object) -> object:
-                return lifecycle.LaunchIdentity(
-                    resolved_executable=Path(str(kwargs["binary"])).resolve(),
-                    canonical_root=Path(str(kwargs["repo_path"])).resolve(),
-                    resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
-                    config_digest="a" * 64,
-                    resolved_database_path=Path(str(kwargs["database_path"])).resolve(),
-                    cwd=Path(str(kwargs["cwd"])).resolve(),
-                    curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                    environment_equality_digest="b" * 64,
-                )
+            def default_build_launch_identity(**kwargs: Any) -> object:
+                return lifecycle.build_launch_identity(**kwargs)
 
             def default_generation_probe(**_kwargs: object) -> object:
                 return default_generation if default_generation_active else None

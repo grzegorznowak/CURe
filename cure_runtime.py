@@ -23,6 +23,11 @@ from cure_chunkhound import (
 from _doctor_chunkhound_fixture import index_fixture_for_health_check
 from cure_errors import ReviewflowError
 from cure_sessions import PullRequestRef, parse_pr_url
+from cure_subprocess_env import (
+    CURATED_ENV_INHERIT_KEYS,
+    NATIVE_CHUNKHOUND_ENV_KEYS,
+    build_curated_subprocess_env,
+)
 from meta import json_fingerprint
 from paths import (
     ReviewflowPaths,
@@ -50,29 +55,6 @@ BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "openai-responses",
     "openrouter-responses",
-)
-CURATED_ENV_INHERIT_KEYS = (
-    "CHUNKHOUND_EMBEDDING__API_KEY",
-    "CHUNKHOUND_LLM_API_KEY",
-    "COLORTERM",
-    "FORCE_COLOR",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "NO_COLOR",
-    "OPENAI_API_KEY",
-    "PATH",
-    "SHELL",
-    "SSH_AUTH_SOCK",
-    "SYSTEMROOT",
-    "TEMP",
-    "TERM",
-    "TMP",
-    "TMPDIR",
-    "USER",
-    "VOYAGE_API_KEY",
 )
 CLI_PROVIDER_SESSION_ENV_PREFIXES = {
     "codex": ("CODEX_",),
@@ -815,25 +797,8 @@ def _reviewflow_defaults_meta(resolution_meta: dict[str, Any]) -> dict[str, Any]
 def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict[str, str]:
     env = dict(base_env)
     env.update(_string_dict(resolved.get("env")))
-    return env
-
-
-def build_curated_subprocess_env(
-    *,
-    inherited_env: dict[str, str] | None = None,
-    extra_env: dict[str, str] | None = None,
-    home_override: Path | None = None,
-) -> dict[str, str]:
-    source = inherited_env if inherited_env is not None else os.environ
-    env: dict[str, str] = {}
-    for key in CURATED_ENV_INHERIT_KEYS:
-        value = str(source.get(key) or "").strip()
-        if value:
-            env[key] = value
-    if home_override is not None:
-        env["HOME"] = str(home_override)
-    if extra_env:
-        env.update({str(k): str(v) for k, v in extra_env.items() if str(v)})
+    for key in NATIVE_CHUNKHOUND_ENV_KEYS:
+        env.pop(key, None)
     return env
 
 

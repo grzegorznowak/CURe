@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -809,6 +810,12 @@ def validate_chunkhound_tool_proof(
         required_tools.append("code_research")
 
     meta = adapter_meta if isinstance(adapter_meta, dict) else {}
+    broker_required = bool(meta.get("chunkhound_broker_required"))
+    broker_records = {
+        str(record.get("record_id") or ""): record
+        for record in (meta.get("chunkhound_broker_records") or [])
+        if isinstance(record, dict) and str(record.get("record_id") or "")
+    }
     raw_events_path = str(meta.get("codex_events_path") or "").strip()
     raw_start = meta.get("codex_events_start_offset")
     raw_end = meta.get("codex_events_end_offset")
@@ -873,6 +880,8 @@ def validate_chunkhound_tool_proof(
                 continue
             if normalized_tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
                 continue
+            if broker_required:
+                continue
             if _extract_tool_status(event_type, item) is True:
                 if normalized_tool_name not in observed_successful_calls:
                     observed_successful_calls.append(normalized_tool_name)
@@ -903,6 +912,27 @@ def validate_chunkhound_tool_proof(
             ):
                 continue
             tool_name = _chunkhound_helper_tool_name(payload)
+            if broker_required:
+                record_id = str(payload.get("broker_record_id") or "")
+                record = broker_records.get(record_id)
+                bound_payload = dict(payload)
+                bound_payload.pop("broker_record_id", None)
+                bound_payload.pop("helper_path", None)
+                result_digest = hashlib.sha256(
+                    json.dumps(bound_payload, sort_keys=True, default=str).encode()
+                ).hexdigest()
+                record_operation = str((record or {}).get("operation") or "")
+                normalized_operation = (
+                    "code_research"
+                    if record_operation in {"research", "code_research"}
+                    else record_operation
+                )
+                if (
+                    record is None
+                    or normalized_operation != tool_name
+                    or str(record.get("result_digest") or "") != result_digest
+                ):
+                    continue
             if tool_name not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:
                 declared_tool = _chunkhound_helper_declared_tool_name(payload)
                 if declared_tool not in _CHUNKHOUND_PROOF_REQUIRED_TOOLS:

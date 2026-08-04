@@ -1,14 +1,17 @@
 # ruff: noqa: F403, F405
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
+import argparse
 import ast
 import copy
+import hashlib
 import importlib
 import inspect
 import io
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -476,6 +479,51 @@ class LosslessCommandCaptureTransportTests(unittest.TestCase):
                 with self.subTest(action=action):
                     with self.assertRaises(disposed_error):
                         action()
+
+    def test_failed_disposal_remains_retryable_until_all_spools_are_removed(
+        self,
+    ) -> None:
+        capture_type, disposed_error, _ = self._capture_api()
+        integrity_error = run_module.LosslessCommandCaptureIntegrityError
+        with tempfile.TemporaryDirectory() as raw_root:
+            capture = capture_type(spool_dir=Path(raw_root))
+            capture.write_stdout("complete stdout")
+            capture.write_stderr("complete stderr")
+            capture.seal()
+            stdout_path = capture.stdout_path
+            stderr_path = capture.stderr_path
+            real_unlink = Path.unlink
+            stdout_unlink_attempts = 0
+
+            def fail_first_stdout_unlink(
+                path: Path, *, missing_ok: bool = False
+            ) -> None:
+                nonlocal stdout_unlink_attempts
+                if path == stdout_path:
+                    stdout_unlink_attempts += 1
+                    if stdout_unlink_attempts == 1:
+                        raise OSError("injected first stdout unlink failure")
+                real_unlink(path, missing_ok=missing_ok)
+
+            with mock.patch.object(Path, "unlink", new=fail_first_stdout_unlink):
+                with self.assertRaisesRegex(
+                    integrity_error, "failed to dispose lossless command capture"
+                ):
+                    capture.dispose()
+
+                self.assertTrue(stdout_path.exists())
+                self.assertFalse(stderr_path.exists())
+
+                capture.dispose()
+                self.assertEqual(stdout_unlink_attempts, 2)
+                self.assertFalse(stdout_path.exists())
+                self.assertFalse(stderr_path.exists())
+
+            capture.dispose()
+            with self.assertRaises(disposed_error):
+                _ = capture.stdout_path
+            with self.assertRaises(disposed_error):
+                next(iter(capture.iter_stdout_chunks(chunk_chars=3)))
 
     def test_reviewflow_output_forwards_and_replays_silent_capture_in_chunks(
         self,
@@ -1611,6 +1659,7 @@ class ExpectedSessionReceiptProjectionTests(unittest.TestCase):
     def _identity(launch_identity_type: Any, root: Path) -> Any:
         return launch_identity_type(
             resolved_executable=root / "bin" / "chunkhound",
+            executable_digest="d" * 64,
             canonical_root=root / "repo",
             resolved_config_path=root / "chunkhound.json",
             config_digest="a" * 64,
@@ -1649,6 +1698,7 @@ class ExpectedSessionReceiptProjectionTests(unittest.TestCase):
             tuple(field.name for field in fields(launch_identity_type)),
             (
                 "resolved_executable",
+                "executable_digest",
                 "canonical_root",
                 "resolved_config_path",
                 "config_digest",
@@ -2360,8 +2410,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(calls, [])
 
-    def test_http_non_helper_and_no_index_routes_remain_keeper_free(self) -> None:
-        """TAP-03 A9: bypass routes retain model behavior without keeper authority."""
+    def test_http_no_review_and_no_index_routes_remain_keeper_free(self) -> None:
+        """TAP-03 A9: real bypass owners retain receipt-less route wiring."""
         from _reviewflow_unittest_grounding_impl import (
             CodexToolProofFlowTests,
             _sectioned_review_markdown,
@@ -2417,6 +2467,12 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     [],
                 ),
                 (
+                    "no-review",
+                    {"provider": "codex", "preset": "test-codex", "transport": "cli"},
+                    no_index_policy,
+                    ["--no-review"],
+                ),
+                (
                     "no-index",
                     {"provider": "codex", "preset": "test-codex", "transport": "cli"},
                     no_index_policy,
@@ -2424,7 +2480,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 ),
             ):
                 with self.subTest(name=name):
-                    expects_index = name == "http-non-helper"
+                    expects_index = name != "no-index"
+                    index_attempts: list[tuple[str, object]] = []
 
                     def flow_patch(
                         stack: Any, *, expects_index: bool = expects_index
@@ -2433,10 +2490,15 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
                         def bypass_index(**kwargs: Any) -> None:
                             if not expects_index:
-                                raise AssertionError("--no-index route attempted top-up indexing")
+                                raise AssertionError(
+                                    "--no-index route attempted top-up indexing"
+                                )
+                            index_attempts.append(
+                                (str(kwargs.get("scope")), kwargs.get("reviewed_head"))
+                            )
                             self.assertIsNone(
                                 kwargs.get("reviewed_head"),
-                                "non-helper route requested keeper receipt authority",
+                                "bypass route requested keeper receipt authority",
                             )
                             return None
 
@@ -2475,7 +2537,171 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                         extra_cli_args=extra_args,
                         flow_patch=flow_patch,
                     )
-                    self.assertEqual(calls, ["review.md"])
+                    self.assertEqual(
+                        calls, [] if name == "no-review" else ["review.md"]
+                    )
+                    self.assertEqual(
+                        index_attempts,
+                        [("topup", None)] if expects_index else [],
+                        "bypass routes must retain their existing receipt-less top-up/no-index behavior",
+                    )
+
+    def test_followup_owner_indexes_receiptless_without_keeper_or_capture(self) -> None:
+        """Receipt-less follow-up composition cannot acquire keeper authority."""
+        from _reviewflow_unittest_grounding_impl import (
+            _review_intelligence_cfg,
+            _review_intelligence_meta,
+        )
+
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+
+        class IndexObserved(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            session_dir = root / "session-1"
+            repo_dir = session_dir / "repo"
+            work_dir = session_dir / "work"
+            repo_dir.mkdir(parents=True)
+            review_md = session_dir / "review.md"
+            review_md.write_text("review\n", encoding="utf-8")
+            meta = {
+                "session_id": "session-1",
+                "status": "done",
+                "pr_url": "https://github.com/acme/repo/pull/9",
+                "base_ref": "main",
+                "base_ref_for_review": "cure_base__main",
+                "paths": {
+                    "repo_dir": str(repo_dir),
+                    "work_dir": str(work_dir),
+                    "review_md": str(review_md),
+                },
+            }
+            (session_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            config = root / "reviewflow.toml"
+            config.write_text("", encoding="utf-8")
+            base_config = root / "chunkhound.json"
+            base_config.write_text("{}\n", encoding="utf-8")
+            args = rf.build_parser().parse_args(
+                ["followup", "session-1", "--no-update", "--ui", "off", "--quiet"]
+            )
+            paths = rf.ReviewflowPaths(sandbox_root=root, cache_root=root / "cache")
+            index_calls: list[dict[str, object]] = []
+
+            def observe_index(**kwargs: object) -> None:
+                index_calls.append(dict(kwargs))
+                raise IndexObserved
+
+            review_cfg = _review_intelligence_cfg()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
+                stack.enter_context(
+                    mock.patch.object(rf, "restore_session_chunkhound_db_from_baseline")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_chunkhound_runtime_config",
+                        return_value=(
+                            rf.ReviewflowChunkHoundConfig(base_config_path=base_config),
+                            {"chunkhound": {}},
+                            {"indexing": {"exclude": []}},
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "materialize_chunkhound_env_config")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "load_review_intelligence_config",
+                        return_value=(
+                            review_cfg,
+                            _review_intelligence_meta(review_cfg),
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "require_builtin_review_intelligence")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "resolve_llm_config_from_args",
+                        return_value=({"provider": "openai", "preset": "test"}, {}),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "prepare_review_agent_runtime",
+                        return_value={"env": {}, "metadata": {}, "codex_flags": []},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf, "_review_intelligence_runtime_capabilities", return_value={}
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "_apply_review_intelligence_runtime_meta")
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "_run_review_intelligence_preflight")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "run_cmd",
+                        return_value=run_module.CommandResult(
+                            cmd=["git"],
+                            cwd=repo_dir,
+                            exit_code=0,
+                            duration_seconds=0.0,
+                            stdout="1" * 40 + "\n",
+                            stderr="",
+                        ),
+                    )
+                )
+                index_helper = stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_run_session_chunkhound_index_with_rebuild_fallback",
+                        side_effect=observe_index,
+                    )
+                )
+                keeper_open = stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "open",
+                        autospec=True,
+                        side_effect=AssertionError("follow-up opened a keeper"),
+                    )
+                )
+                capture_constructor = stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "LosslessCommandCapture",
+                        side_effect=AssertionError("follow-up constructed a capture"),
+                    )
+                )
+
+                with self.assertRaises(IndexObserved):
+                    rf._followup_flow_impl(
+                        args,
+                        paths=paths,
+                        config_path=config,
+                        codex_base_config_path=config,
+                    )
+
+            index_helper.assert_called_once()
+            self.assertEqual(len(index_calls), 1)
+            self.assertEqual(index_calls[0].get("scope"), "followup")
+            self.assertIsNone(index_calls[0].get("reviewed_head"))
+            keeper_open.assert_not_called()
+            capture_constructor.assert_not_called()
 
     def test_supported_fresh_route_threads_one_registry_and_closes_it_before_keeper(self) -> None:
         """A13: helper and every fresh provider launch share command ownership."""
@@ -3524,6 +3750,649 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             ],
         )
 
+    def test_supported_receipt_route_shares_one_curated_immutable_child_env(
+        self,
+    ) -> None:
+        """B1: final index, real receipt identity, and keeper share one base."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
+        import cure_runtime
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        index_envs: list[Any] = []
+        index_snapshots: list[dict[str, str]] = []
+        lease_envs: list[Any] = []
+        lease_snapshots: list[dict[str, str]] = []
+        receipt_identities: list[Any] = []
+        changed_safepath_identities: list[Any] = []
+        removed_safepath_identities: list[Any] = []
+        ambient_unrelated_key = "CURE_UNRELATED_AMBIENT"
+        provider_session_key = "CODEX_SESSION_TEST_MARKER"
+
+        def final_index_receipt(**kwargs: Any) -> Any:
+            environment = kwargs["env"]
+            index_envs.append(environment)
+            index_snapshots.append(dict(environment))
+            database_path = Path(kwargs["chunkhound_db_path"])
+            database_path.touch(exist_ok=True)
+            inputs = {
+                "repo_path": kwargs["repo_dir"],
+                "config_path": kwargs["chunkhound_cfg_path"],
+                "database_path": database_path,
+                "cwd": kwargs["chunkhound_work_dir"],
+                "binary": "chunkhound",
+                "environment": environment,
+            }
+            identity = lifecycle.build_launch_identity(**inputs)
+            receipt_identities.append(identity)
+            changed_inputs = dict(inputs)
+            changed_environment = dict(environment)
+            changed_environment["PYTHONSAFEPATH"] = "changed"
+            changed_inputs["environment"] = changed_environment
+            changed_safepath_identities.append(
+                lifecycle.build_launch_identity(**changed_inputs)
+            )
+            removed_inputs = dict(inputs)
+            removed_environment = dict(environment)
+            removed_environment.pop("PYTHONSAFEPATH", None)
+            removed_inputs["environment"] = removed_environment
+            removed_safepath_identities.append(
+                lifecycle.build_launch_identity(**removed_inputs)
+            )
+            return lifecycle.ExpectedSessionReceiptV1(
+                schema_version=1,
+                canonical_root=identity.canonical_root,
+                reviewed_head="1" * 40,
+                resolved_config_path=identity.resolved_config_path,
+                config_digest=identity.config_digest,
+                resolved_database_path=identity.resolved_database_path,
+                total_chunks=1,
+                launch_identity_projection=identity,
+            )
+
+        class RecordingLease(lifecycle.ChunkHoundDaemonLease):
+            def __init__(self, **kwargs: Any) -> None:
+                lease_envs.append(kwargs["env"])
+                lease_snapshots.append(dict(kwargs["env"]))
+                super().__init__(**kwargs)
+
+        def complete_review(output_path: Path, work_dir: Path) -> Any:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        ambient = {
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+            "HOME": os.environ.get("HOME", "/home/test"),
+            "VOYAGE_API_KEY": "voyage-session-value",
+            provider_session_key: "provider-session-value",
+            ambient_unrelated_key: "must-not-reach-child",
+        }
+        with mock.patch.dict(os.environ, ambient, clear=True):
+            expected_child_env = cure_runtime.build_curated_subprocess_env(
+                extra_env=rf.chunkhound_env(source_config_path=None)
+            )
+            expected_child_env["PYTHONSAFEPATH"] = "1"
+
+            def flow_patch(stack: Any) -> None:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "_run_session_chunkhound_index_with_rebuild_fallback",
+                        side_effect=final_index_receipt,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "build_launch_identity",
+                        side_effect=lifecycle.build_launch_identity,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(rf, "ChunkHoundDaemonLease", RecordingLease)
+                )
+
+            with tempfile.TemporaryDirectory() as raw_root:
+                proof._run_pr_flow_for_tool_proof(
+                    root=Path(raw_root) / "curated-env-route",
+                    profile_resolved="normal",
+                    multipass_enabled=False,
+                    llm_side_effect=complete_review,
+                    runtime_policy_override=proof._codex_helper_daemon_runtime_policy(),
+                    flow_patch=flow_patch,
+                )
+
+            self.assertEqual(len(index_envs), 1)
+            self.assertEqual(len(lease_envs), 1)
+            index_env = index_envs[0]
+            lease_env = lease_envs[0]
+            with self.subTest("unrelated ambient is excluded from final index"):
+                self.assertNotIn(ambient_unrelated_key, index_env)
+            with self.subTest("provider-only CODEX extras are excluded from final index"):
+                self.assertNotIn(provider_session_key, index_env)
+            with self.subTest("final index receives the exact allowlisted base"):
+                self.assertEqual(dict(index_env), expected_child_env)
+            with self.subTest("keeper receives the same exact allowlisted base"):
+                self.assertEqual(dict(lease_env), expected_child_env)
+            with self.subTest("equal immutable semantic snapshots are retained"):
+                self.assertEqual(index_snapshots, lease_snapshots)
+                self.assertEqual(dict(index_env), index_snapshots[0])
+                self.assertEqual(dict(lease_env), lease_snapshots[0])
+
+            identity = receipt_identities[0]
+            with self.subTest("real receipt digest includes PYTHONSAFEPATH"):
+                self.assertIn("PYTHONSAFEPATH", identity.curated_environment_keys)
+            with self.subTest("changing PYTHONSAFEPATH changes the real digest"):
+                self.assertNotEqual(
+                    changed_safepath_identities[0].environment_equality_digest,
+                    identity.environment_equality_digest,
+                )
+            with self.subTest("removing PYTHONSAFEPATH changes the real digest"):
+                self.assertNotEqual(
+                    removed_safepath_identities[0].environment_equality_digest,
+                    identity.environment_equality_digest,
+                )
+            with self.subTest("final-index child env rejects mutation"):
+                with self.assertRaises(TypeError):
+                    index_env["CURE_MUTATION_PROBE"] = "forbidden"
+            with self.subTest("keeper child env rejects mutation"):
+                with self.assertRaises(TypeError):
+                    lease_env["CURE_MUTATION_PROBE"] = "forbidden"
+
+    def test_supported_route_broker_accepts_only_live_coordinator_scopes(self) -> None:
+        """B1 RED: broker scopes are issued, live, owner-bound capabilities."""
+        from cure_chunkhound_broker import request_helper_broker
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            repo.mkdir()
+            config = repo / "chunkhound.json"
+            database = repo / ".chunkhound.db"
+            executable = root / "chunkhound"
+            config.write_text("{}\n", encoding="utf-8")
+            database.touch()
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            environment = {"HOME": str(root), "PATH": str(root), "PYTHONSAFEPATH": "1"}
+            digest = hashlib.sha256(
+                json.dumps(environment, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+
+            def make_broker() -> Any:
+                authority = cure_chunkhound.HelperLaunchAuthority(
+                    environment=environment,
+                    resolved_executable=executable,
+                    expected_executable_digest=hashlib.sha256(
+                        executable.read_bytes()
+                    ).hexdigest(),
+                    expected_config_digest=hashlib.sha256(b"{}").hexdigest(),
+                    environment_digest=digest,
+                    cwd=repo,
+                    config_path=config,
+                    database_path=database,
+                )
+                return cure_chunkhound.ChunkHoundHelperBroker(authority=authority)
+
+            broker = make_broker()
+            foreign_broker = make_broker()
+            endpoint = broker.start()
+            scope = broker.begin_scope()
+            foreign_scope = foreign_broker.begin_scope()
+            request = {"operation": "search", "arguments": {"query": "scope-red"}}
+            try:
+                with mock.patch.object(
+                    cure_chunkhound,
+                    "run_chunkhound_tool_payload",
+                    return_value={"ok": True, "result": {"results": []}},
+                ):
+                    accepted = request_helper_broker(
+                        endpoint, {**request, "scope": scope}
+                    )
+                    self.assertTrue(accepted["ok"])
+                    self.assertEqual(len(broker.records_for_scope(scope)), 1)
+                    for label, rejected_scope in (
+                        ("absent", None),
+                        ("arbitrary", "a" * 32),
+                        ("cross-run", foreign_scope),
+                    ):
+                        with self.subTest(scope=label):
+                            candidate = dict(request)
+                            if rejected_scope is not None:
+                                candidate["scope"] = rejected_scope
+                            with self.assertRaises(Exception):
+                                request_helper_broker(endpoint, candidate, timeout=1.0)
+
+                    with self.subTest(scope="ended-or-expired"):
+                        end_scope = getattr(broker, "end_scope", None)
+                        self.assertTrue(
+                            callable(end_scope), "broker must expose scope revocation"
+                        )
+                        if callable(end_scope):
+                            end_scope(scope)
+                            with self.assertRaises(Exception):
+                                request_helper_broker(
+                                    endpoint, {**request, "scope": scope}, timeout=1.0
+                                )
+            finally:
+                broker.close()
+                foreign_broker.close()
+
+    def test_supported_flow_collects_parent_broker_record_from_generated_helper(
+        self,
+    ) -> None:
+        """B1 RED: supported flow composes helper, broker, scope, and proof record."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+        from cure_chunkhound_broker import request_helper_broker
+
+        proof = CodexToolProofFlowTests()
+        native_secret_keys = (
+            "CHUNKHOUND_EMBEDDING__API_KEY",
+            "CHUNKHOUND_LLM_API_KEY",
+            "VOYAGE_API_KEY",
+        )
+        forged_record_id = "f" * 64
+        provider_envs: list[dict[str, str]] = []
+        native_envs: list[dict[str, str]] = []
+        helper_payloads: list[dict[str, Any]] = []
+        adapter_meta: list[dict[str, Any]] = []
+        post_run_scope_accepted: list[bool] = []
+
+        class NativeJsonRpcBoundary:
+            def __init__(self, **kwargs: Any) -> None:
+                self._child_env = kwargs["env"]
+                native_envs.append(dict(self._child_env))
+
+            def ensure_started(self, **_kwargs: Any) -> None:
+                return None
+
+            def notify(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def request(
+                self, method: str, *_args: Any, **_kwargs: Any
+            ) -> dict[str, Any]:
+                if method == "initialize":
+                    return {"result": {}}
+                if method == "tools/list":
+                    return {
+                        "result": {
+                            "tools": [
+                                {"name": "search"},
+                                {"name": "code_research"},
+                                {"name": "daemon_status"},
+                            ]
+                        }
+                    }
+                if method == "tools/call":
+                    return {
+                        "result": {
+                            "content": [
+                                {"type": "text", "text": "controlled-native-result"}
+                            ],
+                            "isError": False,
+                        }
+                    }
+                raise AssertionError(f"unexpected native JSON-RPC method: {method}")
+
+            def _stderr_tail_text(self) -> str:
+                return ""
+
+            def close(self) -> None:
+                return None
+
+        def run_provider(**kwargs: Any) -> cure_llm.CodexRunResult:
+            provider_env = dict(kwargs["env"])
+            provider_envs.append(provider_env)
+            helper = Path(provider_env["CURE_CHUNKHOUND_HELPER"])
+            payloads: dict[str, dict[str, Any]] = {}
+            raw_outputs: dict[str, str] = {}
+            for command, query in (
+                ("search", "composition-proof"),
+                ("research", "composition-proof"),
+            ):
+                completed = subprocess.run(
+                    [str(helper), command, query],
+                    cwd=kwargs["repo_dir"],
+                    env=provider_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10.0,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                output_lines = [
+                    line for line in completed.stdout.splitlines() if line.strip()
+                ]
+                self.assertGreaterEqual(len(output_lines), 2, completed.stdout)
+                self.assertTrue(
+                    output_lines[0].startswith("cure-chunkhound: tools/call "),
+                    completed.stdout,
+                )
+                raw_outputs[command] = completed.stdout
+                payloads[command] = json.loads(output_lines[-1])
+                helper_payloads.append(payloads[command])
+            Path(kwargs["output_path"]).write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            event_meta = proof._write_helper_command_events(
+                work_dir=Path(kwargs["repo_dir"]).parent / "work",
+                commands=["search", "research"],
+                raw_outputs=raw_outputs,
+            )
+            forged_payload = {
+                **payloads["search"],
+                "broker_record_id": forged_record_id,
+            }
+            forged_meta = proof._write_helper_command_events(
+                work_dir=Path(kwargs["repo_dir"]).parent / "work",
+                commands=["search"],
+                raw_outputs={"search": forged_payload},
+            )
+            return cure_llm.CodexRunResult(
+                events_log_path=Path(str(event_meta["codex_events_path"])),
+                events_start_offset=int(event_meta["codex_events_start_offset"]),
+                events_end_offset=int(forged_meta["codex_events_end_offset"]),
+            )
+
+        def production_llm(
+            _output_path: Path, _work_dir: Path, kwargs: dict[str, Any]
+        ) -> Any:
+            result = cure_llm.run_llm_exec(**kwargs)
+            adapter_meta.append(dict(result.adapter_meta))
+            provider_env = provider_envs[-1]
+            request = {
+                "operation": "search",
+                "arguments": {"query": "revoked-scope-probe"},
+                "scope": provider_env["CURE_CHUNKHOUND_BROKER_SCOPE"],
+            }
+            try:
+                request_helper_broker(
+                    provider_env["CURE_CHUNKHOUND_BROKER_ENDPOINT"],
+                    request,
+                    timeout=1.0,
+                )
+            except Exception:
+                post_run_scope_accepted.append(False)
+            else:
+                post_run_scope_accepted.append(True)
+            return result
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    cure_chunkhound, "JsonRpcSession", NativeJsonRpcBoundary
+                )
+            )
+            stack.enter_context(mock.patch.object(rf, "run_codex_exec", run_provider))
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for executable_name in ("chunkhound", "codex"):
+                executable = bin_dir / executable_name
+                executable.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+                executable.chmod(0o755)
+            ambient = {
+                "HOME": str(root),
+                "PATH": f"{bin_dir}:/usr/bin",
+                native_secret_keys[0]: "embedding-native-secret",
+                native_secret_keys[1]: "llm-native-secret",
+                native_secret_keys[2]: "voyage-native-secret",
+            }
+            with mock.patch.dict(os.environ, ambient, clear=True):
+                proof._run_pr_flow_for_tool_proof(
+                    root=root / "flow",
+                    profile_resolved="normal",
+                    multipass_enabled=False,
+                    llm_side_effect=production_llm,
+                    llm_resolved_override={
+                        "provider": "codex",
+                        "transport": "cli",
+                        "command": "codex",
+                        "preset": "test-codex",
+                    },
+                    use_production_runtime_policy=True,
+                    use_production_helper_preflight=True,
+                    flow_patch=flow_patch,
+                )
+
+        self.assertEqual(len(provider_envs), 1)
+        self.assertTrue(
+            native_envs, "broker never reached the native JSON-RPC boundary"
+        )
+        for key in native_secret_keys:
+            self.assertNotIn(key, provider_envs[0])
+            self.assertEqual(native_envs[0][key], ambient[key])
+        self.assertEqual(len(helper_payloads), 2)
+        genuine_record_ids = [
+            payload.get("broker_record_id") for payload in helper_payloads
+        ]
+        self.assertTrue(
+            all(isinstance(record_id, str) for record_id in genuine_record_ids)
+        )
+        self.assertNotIn(forged_record_id, genuine_record_ids)
+        records = adapter_meta[0]["chunkhound_broker_records"]
+        self.assertEqual(
+            [record["record_id"] for record in records], genuine_record_ids
+        )
+        self.assertNotIn(forged_record_id, {record["record_id"] for record in records})
+        self.assertEqual(
+            post_run_scope_accepted,
+            [False],
+            "completed provider scope remained usable before flow cleanup",
+        )
+
+    def test_public_payload_routes_cannot_import_or_ambiently_forge_broker_authority(
+        self,
+    ) -> None:
+        """B1 RED: only broker-owned code may launch native helper sessions."""
+
+        class ReachedJsonRpcSession(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            repo.mkdir()
+            config = repo / "chunkhound.json"
+            config.write_text("{}\n", encoding="utf-8")
+            executable = root / "chunkhound"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            forged_environment = {
+                "HOME": str(root),
+                "PATH": str(root),
+                "PYTHONSAFEPATH": "1",
+            }
+            calls = (
+                (
+                    "imported-constant",
+                    lambda: cure_chunkhound.run_chunkhound_tool_payload(
+                        config,
+                        repo,
+                        "search",
+                        {"query": "forged"},
+                        cwd=repo,
+                        binary=str(executable),
+                        environment=forged_environment,
+                        _trusted_authority=cure_chunkhound._BROKER_AUTHORITY_TOKEN,
+                        skip_preflight=True,
+                    ),
+                    {},
+                ),
+                (
+                    "ambient-launch-fields",
+                    lambda: cure_chunkhound.run_chunkhound_tool_payload(
+                        config,
+                        repo,
+                        "search",
+                        {"query": "forged"},
+                        cwd=repo,
+                        binary=str(executable),
+                        skip_preflight=True,
+                    ),
+                    {
+                        "PATH": str(root),
+                        "HOME": str(root),
+                        "CURE_CHUNKHOUND_BROKER_ENDPOINT": "forged-endpoint",
+                        "CURE_CHUNKHOUND_BROKER_SCOPE": "f" * 32,
+                    },
+                ),
+            )
+            for label, invoke, ambient in calls:
+                with self.subTest(route=label):
+                    with (
+                        mock.patch.dict(os.environ, ambient, clear=True),
+                        mock.patch.object(
+                            cure_chunkhound,
+                            "JsonRpcSession",
+                            side_effect=ReachedJsonRpcSession,
+                        ) as session_type,
+                        self.assertRaises(Exception),
+                    ):
+                        invoke()
+                    session_type.assert_not_called()
+
+    def test_helper_mcp_child_constructor_receives_the_shared_curated_base(self) -> None:
+        """B1: helper MCP transport must never inherit provider or ambient extras."""
+        import cure_runtime
+
+        ambient_unrelated_key = "CURE_UNRELATED_AMBIENT"
+        provider_session_key = "CODEX_SESSION_TEST_MARKER"
+        ambient = {
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+            "HOME": os.environ.get("HOME", "/home/test"),
+            "VOYAGE_API_KEY": "voyage-session-value",
+            provider_session_key: "provider-session-value",
+            ambient_unrelated_key: "must-not-reach-child",
+        }
+
+        def invoke_preflight() -> dict[str, Any]:
+            return cure_chunkhound.run_chunkhound_mcp_preflight_payload(
+                "chunkhound.json",
+                ".",
+                transport_modes=("json_line",),
+            )
+
+        def invoke_tool() -> dict[str, Any]:
+            return cure_chunkhound.run_chunkhound_tool_payload(
+                "chunkhound.json",
+                ".",
+                "search",
+                {"query": "constructor boundary"},
+                transport_modes=("json_line",),
+                skip_preflight=True,
+            )
+
+        with mock.patch.dict(os.environ, ambient, clear=True):
+            expected_child_env = cure_runtime.build_curated_subprocess_env(
+                extra_env=rf.chunkhound_env(source_config_path=None)
+            )
+            expected_child_env["PYTHONSAFEPATH"] = "1"
+            for route, invoke in (
+                ("preflight", invoke_preflight),
+                ("tool-search-research", invoke_tool),
+            ):
+                with self.subTest(route=route):
+                    session = mock.Mock()
+                    session.request.return_value = {"result": {"content": []}}
+                    with (
+                        mock.patch.object(
+                            cure_chunkhound, "JsonRpcSession", return_value=session
+                        ) as session_constructor,
+                        mock.patch.object(
+                            cure_chunkhound,
+                            "bootstrap_chunkhound_mcp_session",
+                            return_value={"ok": True},
+                        ),
+                    ):
+                        payload = invoke()
+
+                    self.assertTrue(payload["ok"])
+                    session_constructor.assert_called_once()
+                    explicit_env = session_constructor.call_args.kwargs.get("env")
+                    self.assertIsNotNone(
+                        explicit_env, "helper MCP child requires an explicit env"
+                    )
+                    self.assertEqual(dict(explicit_env), expected_child_env)
+                    self.assertNotIn(ambient_unrelated_key, explicit_env)
+                    self.assertNotIn(provider_session_key, explicit_env)
+                    with self.assertRaises(TypeError):
+                        explicit_env["CURE_MUTATION_PROBE"] = "forbidden"
+
+    def test_provider_runtime_retains_codex_session_extras_outside_child_base(
+        self,
+    ) -> None:
+        """B1 control: real provider runtime preparation retains CODEX_* extras."""
+        provider_session_key = "CODEX_SESSION_TEST_MARKER"
+        ambient = {
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+            "HOME": os.environ.get("HOME", "/home/test"),
+            provider_session_key: "provider-session-value",
+            "CURE_UNRELATED_AMBIENT": "must-not-reach-child",
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            session_dir = root / "session"
+            work_dir = session_dir / "work"
+            repo.mkdir()
+            work_dir.mkdir(parents=True)
+            with (
+                mock.patch.dict(os.environ, ambient, clear=True),
+                mock.patch.object(shutil, "which", return_value="/usr/bin/codex"),
+                mock.patch.object(
+                    rf,
+                    "_stage_review_auth_support",
+                    side_effect=lambda *, work_dir, repo_dir, env: (dict(env), {}),
+                ),
+            ):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=argparse.Namespace(
+                        agent_runtime_profile="permissive",
+                        dry_run_chunkhound=False,
+                    ),
+                    resolved={
+                        "provider": "codex",
+                        "transport": "cli",
+                        "command": "codex",
+                        "env": {},
+                    },
+                    resolution_meta={},
+                    reviewflow_config_path=root / "reviewflow.toml",
+                    config_enabled=False,
+                    repo_dir=repo,
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    base_env={"PATH": ambient["PATH"]},
+                    chunkhound_config_path=work_dir / "chunkhound.json",
+                    chunkhound_db_path=work_dir / ".chunkhound.db",
+                    chunkhound_cwd=work_dir,
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+
+        self.assertEqual(
+            runtime["env"][provider_session_key], "provider-session-value"
+        )
+        self.assertIn("CURE_CHUNKHOUND_HELPER", runtime["env"])
+
     def test_fresh_indexed_codex_helper_route_is_ready_before_orientation(
         self,
     ) -> None:
@@ -3542,15 +4411,15 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         ]
 
         def final_index_receipt_boundary(**kwargs: Any) -> Any:
-            identity = lifecycle.LaunchIdentity(
-                resolved_executable=Path("/usr/bin/chunkhound"),
-                canonical_root=Path(kwargs["repo_dir"]).resolve(),
-                resolved_config_path=Path(kwargs["chunkhound_cfg_path"]).resolve(),
-                config_digest="a" * 64,
-                resolved_database_path=Path(kwargs["chunkhound_db_path"]).resolve(),
-                cwd=Path(kwargs["chunkhound_work_dir"]).resolve(),
-                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                environment_equality_digest="b" * 64,
+            database_path = Path(kwargs["chunkhound_db_path"])
+            database_path.touch(exist_ok=True)
+            identity = lifecycle.build_launch_identity(
+                repo_path=kwargs["repo_dir"],
+                config_path=kwargs["chunkhound_cfg_path"],
+                database_path=database_path,
+                cwd=kwargs["chunkhound_work_dir"],
+                binary="chunkhound",
+                environment=kwargs["env"],
             )
             receipt = lifecycle.ExpectedSessionReceiptV1(
                 schema_version=1,
@@ -3667,15 +4536,15 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         )
 
         def final_index_receipt_boundary(**kwargs: Any) -> Any:
-            identity = lifecycle.LaunchIdentity(
-                resolved_executable=Path("/usr/bin/chunkhound"),
-                canonical_root=Path(kwargs["repo_dir"]).resolve(),
-                resolved_config_path=Path(kwargs["chunkhound_cfg_path"]).resolve(),
-                config_digest="a" * 64,
-                resolved_database_path=Path(kwargs["chunkhound_db_path"]).resolve(),
-                cwd=Path(kwargs["chunkhound_work_dir"]).resolve(),
-                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                environment_equality_digest="b" * 64,
+            database_path = Path(kwargs["chunkhound_db_path"])
+            database_path.touch(exist_ok=True)
+            identity = lifecycle.build_launch_identity(
+                repo_path=kwargs["repo_dir"],
+                config_path=kwargs["chunkhound_cfg_path"],
+                database_path=database_path,
+                cwd=kwargs["chunkhound_work_dir"],
+                binary="chunkhound",
+                environment=kwargs["env"],
             )
             events.append("final-index/receipt-ready")
             return lifecycle.ExpectedSessionReceiptV1(
@@ -4286,16 +5155,10 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             nonlocal rehash_count
             rehash_count += 1
             events.append("rehash")
-            return lifecycle.LaunchIdentity(
-                resolved_executable=Path(str(kwargs["binary"])).resolve(),
-                canonical_root=Path(str(kwargs["repo_path"])).resolve(),
-                resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
-                config_digest=("a" if rehash_count == 1 else "c") * 64,
-                resolved_database_path=Path(str(kwargs["database_path"])).resolve(),
-                cwd=Path(str(kwargs["cwd"])).resolve(),
-                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                environment_equality_digest="b" * 64,
-            )
+            identity = lifecycle.build_launch_identity(**kwargs)
+            if rehash_count == 1:
+                return identity
+            return replace(identity, config_digest="c" * 64)
 
         def probe(**_kwargs: Any) -> dict[str, bool]:
             events.append("probe")
@@ -4358,18 +5221,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 created_log: Path | None = None
 
                 def build_identity(**kwargs: Any) -> Any:
-                    identity = lifecycle.LaunchIdentity(
-                        resolved_executable=Path(str(kwargs["binary"])).resolve(),
-                        canonical_root=Path(str(kwargs["repo_path"])).resolve(),
-                        resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
-                        config_digest="a" * 64,
-                        resolved_database_path=Path(
-                            str(kwargs["database_path"])
-                        ).resolve(),
-                        cwd=Path(str(kwargs["cwd"])).resolve(),
-                        curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                        environment_equality_digest="b" * 64,
-                    )
+                    identity = lifecycle.build_launch_identity(**kwargs)
                     if not barrier_crossed or mutation == "daemon-log":
                         return identity
                     changed = {
@@ -4479,7 +5331,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         proof = CodexToolProofFlowTests()
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        binary = root.parent / "bin" / f"{root.name}-chunkhound"
+        binary = root.parent / "bin" / "chunkhound"
         ledger = root.parent / f"{root.name}.jsonl"
         _write_fake_chunkhound(
             binary,
@@ -4524,24 +5376,25 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     return self
                 return real_owned_generation.__get__(obj, obj_type)
 
-        def identity_for(**kwargs: object) -> Any:
-            return lifecycle.LaunchIdentity(
-                resolved_executable=binary.resolve(),
-                canonical_root=Path(str(kwargs["repo_path"])).resolve(),
-                resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
-                config_digest="a" * 64,
-                resolved_database_path=Path(str(kwargs["database_path"])).resolve(),
-                cwd=Path(str(kwargs["cwd"])).resolve(),
-                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
-                environment_equality_digest="b" * 64,
+        def identity_for(**kwargs: Any) -> Any:
+            return lifecycle.build_launch_identity(
+                repo_path=kwargs["repo_path"],
+                config_path=kwargs["config_path"],
+                database_path=kwargs["database_path"],
+                cwd=kwargs["cwd"],
+                binary=binary,
+                environment=kwargs["environment"],
             )
 
-        def final_index_receipt(**kwargs: object) -> Any:
+        def final_index_receipt(**kwargs: Any) -> Any:
+            database_path = Path(kwargs["chunkhound_db_path"])
+            database_path.touch(exist_ok=True)
             identity = identity_for(
                 repo_path=kwargs["repo_dir"],
                 config_path=kwargs["chunkhound_cfg_path"],
-                database_path=kwargs["chunkhound_db_path"],
+                database_path=database_path,
                 cwd=kwargs["chunkhound_work_dir"],
+                environment=kwargs["env"],
             )
             return lifecycle.ExpectedSessionReceiptV1(
                 schema_version=1,
@@ -4715,15 +5568,19 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             for patch in patches:
                 stack.enter_context(patch)
 
-        result = proof._run_pr_flow_for_tool_proof(
-            root=root,
-            profile_resolved="normal",
-            multipass_enabled=False,
-            llm_side_effect=model,
-            helper_preflight_side_effect=helper,
-            flow_patch=flow_patch,
-            expect_error=expect_error,
-        )
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": str(binary.parent) + os.pathsep + os.environ.get("PATH", "")},
+        ):
+            result = proof._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=model,
+                helper_preflight_side_effect=helper,
+                flow_patch=flow_patch,
+                expect_error=expect_error,
+            )
 
         rows = _read_ledger(ledger)
         tools = [
@@ -5765,6 +6622,54 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
         self.assertEqual(_state_name(lease.state), "CLOSED")
 
 
+    def test_open_rejects_preexisting_generation_before_it_can_mint_evidence(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        generation = lifecycle.DaemonGenerationIdentity(
+            pid=321, process_started_at=98765.0
+        )
+        session = mock.Mock(binary="chunkhound")
+        session.proc.pid = 700
+        session.proc.poll.return_value = None
+        attestor = mock.Mock()
+        lease = lifecycle.ChunkHoundDaemonLease(
+            config_path="chunkhound.json",
+            repo_path=".",
+            generation_probe=mock.Mock(return_value=generation),
+            generation_attestor=attestor,
+        )
+
+        self.addCleanup(lease.close)
+        caught: BaseException | None = None
+        with (
+            mock.patch.object(
+                lifecycle, "JsonRpcSession", return_value=session
+            ) as session_constructor,
+            mock.patch.object(
+                lifecycle,
+                "bootstrap_chunkhound_mcp_session",
+                return_value={"ok": True},
+            ),
+        ):
+            try:
+                lease.open()
+            except (
+                lifecycle.PreNativeSpawnLeaseOpenError,
+                lifecycle.ExpectedSessionReadinessError,
+            ) as exc:
+                caught = exc
+
+        self.assertEqual(_state_name(lease.state), "CLOSED")
+        self.assertIsNone(lease.owned_generation)
+        attestor.assert_not_called()
+        if session_constructor.called:
+            session_constructor.assert_called_once()
+            session.close.assert_called_once()
+        else:
+            session.close.assert_not_called()
+        self.assertIsNotNone(caught)
+
 class ExpectedSessionReadinessTests(unittest.TestCase):
     """Native status and expected-index adjudication contract."""
 
@@ -5791,6 +6696,7 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
         database = root / "chunkhound.db"
         return identity_type(
             resolved_executable=binary.resolve(),
+            executable_digest=hashlib.sha256(binary.read_bytes()).hexdigest(),
             canonical_root=repo.resolve(),
             resolved_config_path=config.resolve(),
             config_digest="config-digest",
@@ -6416,6 +7322,7 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             finally:
                 lease.close()
             self.assertEqual(_state_name(lease.state), "CLOSED")
+
 
 
     def test_status_semantic_consistency_matrix_rejects_only_active_faults(
@@ -7492,7 +8399,6 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             readiness_error,
         ) = self._api()
         generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
-        foreign_generation = daemon_generation_type(pid=4343, process_started_at=1234.5)
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             owned_observations: list[object | None] = []
@@ -7529,39 +8435,15 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             stale_lease.close()
 
             foreign_lease, _, _ = self._open_lease(
-                root,
-                lease_type,
-                identity_type,
-                name="foreign",
-                generation_probe=lambda: foreign_generation,
+                root, lease_type, identity_type, name="foreign"
             )
-            self.assertIsNone(
-                foreign_lease.owned_generation,
-                "a preexisting daemon generation is not owned by a newly opened MCP proxy",
-            )
+            foreign = foreign_lease.owned_generation
+            self.assertIsInstance(foreign, evidence_type)
 
-            preexisting_observations: list[object | None] = []
-
-            def preexisting_probe() -> object:
-                preexisting_observations.append(generation)
-                return generation
-
-            preexisting_lease, identity, ledger = self._open_lease(
-                root,
-                lease_type,
-                identity_type,
-                name="preexisting",
-                generation_probe=preexisting_probe,
-            )
             try:
-                self.assertEqual(preexisting_observations[:2], [generation, generation])
-                self.assertIsNone(
-                    preexisting_lease.owned_generation,
-                    "unchanged preexisting generation must await content adjudication",
+                zero_receipt = self._receipt(
+                    receipt_type, owned_identity, total_chunks=0
                 )
-                zero_receipt = self._receipt(receipt_type, identity, total_chunks=0)
-                with self.assertRaises(readiness_error):
-                    preexisting_lease.adjudicate_expected_session(zero_receipt)
 
                 class ForgedEvidence(evidence_type):
                     def __new__(cls) -> object:
@@ -7574,23 +8456,23 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                         return True
 
                 with self.assertRaises(readiness_error):
-                    preexisting_lease.adjudicate_expected_session(
+                    owned_lease.adjudicate_expected_session(
                         zero_receipt,
                         expected_generation=ForgedEvidence(),
                     )
 
                 for name, evidence in (
-                    ("foreign", owned),
+                    ("foreign", foreign),
                     ("stale", stale),
                 ):
                     with self.subTest(name=name):
                         with self.assertRaises(readiness_error):
-                            preexisting_lease.adjudicate_expected_session(
+                            owned_lease.adjudicate_expected_session(
                                 zero_receipt, expected_generation=evidence
                             )
 
                 owned_readiness = owned_lease.adjudicate_expected_session(
-                    self._receipt(receipt_type, owned_identity, total_chunks=0),
+                    zero_receipt,
                     expected_generation=owned,
                 )
                 self.assertIsInstance(owned_readiness, readiness_type)
@@ -7606,48 +8488,7 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                     ],
                     "owned zero receipt must never issue search",
                 )
-                self.assertNotIn(
-                    "search",
-                    [
-                        row.get("tool")
-                        for row in _read_ledger(ledger)
-                        if row.get("method") == "tools/call"
-                    ],
-                    "unexplained preexisting zero receipts must never issue search",
-                )
-
-                nonempty = preexisting_lease.adjudicate_expected_session(
-                    self._receipt(receipt_type, identity, total_chunks=1),
-                    witness=witness_type(
-                        relative_path="src/fixture.py", literal="needle[1]"
-                    ),
-                )
-                adjudicated = nonempty.expected_generation
-                self.assertIsInstance(adjudicated, evidence_type)
-                search_count = len(
-                    [
-                        row
-                        for row in _read_ledger(ledger)
-                        if row.get("method") == "tools/call"
-                        and row.get("tool") == "search"
-                    ]
-                )
-                preexisting_lease.adjudicate_expected_session(
-                    zero_receipt, expected_generation=adjudicated
-                )
-                final_tools = [
-                    row.get("tool")
-                    for row in _read_ledger(ledger)
-                    if row.get("method") == "tools/call"
-                ]
-                self.assertEqual(
-                    final_tools.count("search"),
-                    search_count,
-                    "adjudicated preexisting evidence authorizes zero without another search",
-                )
-                self.assertGreaterEqual(final_tools.count("daemon_status"), 1)
             finally:
-                preexisting_lease.close()
                 foreign_lease.close()
                 owned_lease.close()
 
@@ -7805,6 +8646,92 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                     equivalent,
                 )
 
+    def test_receiptless_final_index_never_constructs_or_passes_lossless_capture(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            work = root / "work"
+            repo.mkdir()
+            work.mkdir()
+            config = work / "chunkhound.json"
+            database = work / ".chunkhound.db"
+            base_config = root / "base.json"
+            config.write_text("{}\n", encoding="utf-8")
+            base_config.write_text("{}\n", encoding="utf-8")
+
+            class ChunkHoundConfig:
+                base_config_path = base_config
+
+            def successful_index(
+                cmd: list[str], **kwargs: Any
+            ) -> run_module.CommandResult:
+                self.assertNotIn(
+                    "lossless_capture",
+                    kwargs,
+                    "receipt-less indexing must omit the lossless_capture keyword",
+                )
+                return run_module.CommandResult(
+                    cmd=cmd,
+                    cwd=kwargs["cwd"],
+                    exit_code=0,
+                    duration_seconds=0.1,
+                    stdout="Total chunks: 7\n",
+                    stderr="Errors: 0 files\n",
+                )
+
+            for transport in ("run_cmd", "active_output"):
+                with self.subTest(transport=transport):
+                    progress = mock.MagicMock()
+                    progress.meta = {}
+                    reporter = mock.MagicMock()
+                    output = mock.MagicMock()
+                    output.run_logged_cmd.side_effect = successful_index
+                    active = output if transport == "active_output" else None
+                    with (
+                        mock.patch.object(rf, "active_output", return_value=active),
+                        mock.patch.object(
+                            rf, "run_cmd", side_effect=successful_index
+                        ) as run_cmd,
+                        mock.patch.object(
+                            rf, "ChunkhoundLiveProgressReporter", return_value=reporter
+                        ),
+                        mock.patch.object(
+                            rf,
+                            "LosslessCommandCapture",
+                            side_effect=AssertionError(
+                                "receipt-less indexing constructed a lossless capture"
+                            ),
+                        ) as capture_constructor,
+                    ):
+                        receipt = (
+                            rf._run_session_chunkhound_index_with_rebuild_fallback(
+                                progress=progress,
+                                scope="receiptless",
+                                quiet=True,
+                                stream=False,
+                                chunkhound_cfg=ChunkHoundConfig(),
+                                chunkhound_cfg_path=config,
+                                chunkhound_db_path=database,
+                                chunkhound_work_dir=work,
+                                repo_dir=repo,
+                                reuse_source_kind="test",
+                                reviewed_head=None,
+                                env={"PATH": os.environ.get("PATH", "")},
+                            )
+                        )
+
+                    self.assertIsNone(receipt)
+                    capture_constructor.assert_not_called()
+                    reporter.finish.assert_called_once_with(status="done")
+                    if transport == "active_output":
+                        output.run_logged_cmd.assert_called_once()
+                        run_cmd.assert_not_called()
+                    else:
+                        run_cmd.assert_called_once()
+                        output.run_logged_cmd.assert_not_called()
+
     def test_final_index_returns_strict_receipt_from_lossless_capture(self) -> None:
         lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
         with tempfile.TemporaryDirectory() as tmp:
@@ -7823,7 +8750,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
             base_config = root / "base.json"
             config.write_text("{}\n", encoding="utf-8")
             base_config.write_text("{}\n", encoding="utf-8")
-            environment = {"PATH": str(bindir), "PYTHONSAFEPATH": "1"}
+            environment = MappingProxyType({"PATH": str(bindir), "PYTHONSAFEPATH": "1"})
             observed_capture: list[Any] = []
 
             class ChunkHoundConfig:
@@ -7832,6 +8759,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
             def successful_index(
                 cmd: list[str], **kwargs: Any
             ) -> run_module.CommandResult:
+                self.assertEqual(kwargs["env"], dict(environment))
                 capture = kwargs["lossless_capture"]
                 observed_capture.append(capture)
                 database.write_bytes(b"indexed")
@@ -7850,10 +8778,12 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
             progress = mock.MagicMock()
             progress.meta = {}
             reporter = mock.MagicMock()
-            with mock.patch.object(rf, "active_output", return_value=None), mock.patch.object(
-                rf, "run_cmd", side_effect=successful_index
-            ), mock.patch.object(
+            with (
+                mock.patch.object(rf, "active_output", return_value=None),
+                mock.patch.object(rf, "run_cmd", side_effect=successful_index),
+                mock.patch.object(
                 rf, "ChunkhoundLiveProgressReporter", return_value=reporter
+                ),
             ):
                 receipt = rf._run_session_chunkhound_index_with_rebuild_fallback(
                     progress=progress,

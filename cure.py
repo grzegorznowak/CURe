@@ -46,6 +46,17 @@ from cure_citations import (
     trailing_sources_suffix,
 )
 from cure_errors import ReviewflowError, StepGroundingValidationError
+from cure_subprocess_env import (
+    CURATED_ENV_INHERIT_KEYS,
+    NATIVE_CHUNKHOUND_ENV_KEYS,
+    SESSION_LAUNCH_CONTEXT_ENV,
+    SessionLaunchContextPublication,
+    build_curated_chunkhound_env,
+    build_curated_provider_env,
+    build_curated_subprocess_env,
+    cleanup_session_launch_context,
+    write_session_launch_context,
+)
 from cure_output import (
     ChunkhoundLiveProgressReporter,
     ReviewflowOutput,
@@ -95,6 +106,7 @@ from run import (
     run_cmd,
 )
 from cure_chunkhound import probe_effective_daemon_log_exclusion
+from cure_chunkhound_broker import ChunkHoundHelperBroker, HelperLaunchAuthority
 from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
@@ -224,29 +236,6 @@ BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "openai-responses",
     "openrouter-responses",
-)
-CURATED_ENV_INHERIT_KEYS = (
-    "CHUNKHOUND_EMBEDDING__API_KEY",
-    "CHUNKHOUND_LLM_API_KEY",
-    "COLORTERM",
-    "FORCE_COLOR",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "NO_COLOR",
-    "OPENAI_API_KEY",
-    "PATH",
-    "SHELL",
-    "SSH_AUTH_SOCK",
-    "SYSTEMROOT",
-    "TEMP",
-    "TERM",
-    "TMP",
-    "TMPDIR",
-    "USER",
-    "VOYAGE_API_KEY",
 )
 DEFAULT_MULTIPASS_ENABLED = True
 DEFAULT_MULTIPASS_MAX_STEPS = 20
@@ -926,25 +915,8 @@ def _resolve_latest_session_review_point(*, session_dir: Path, meta: dict[str, A
 def apply_llm_env(base_env: dict[str, str], *, resolved: dict[str, Any]) -> dict[str, str]:
     env = dict(base_env)
     env.update(_string_dict(resolved.get("env")))
-    return env
-
-
-def build_curated_subprocess_env(
-    *,
-    inherited_env: dict[str, str] | None = None,
-    extra_env: dict[str, str] | None = None,
-    home_override: Path | None = None,
-) -> dict[str, str]:
-    source = inherited_env if inherited_env is not None else os.environ
-    env: dict[str, str] = {}
-    for key in CURATED_ENV_INHERIT_KEYS:
-        value = str(source.get(key) or "").strip()
-        if value:
-            env[key] = value
-    if home_override is not None:
-        env["HOME"] = str(home_override)
-    if extra_env:
-        env.update({str(k): str(v) for k, v in extra_env.items() if str(v)})
+    for key in NATIVE_CHUNKHOUND_ENV_KEYS:
+        env.pop(key, None)
     return env
 
 
@@ -2461,7 +2433,7 @@ def prepare_review_agent_runtime(
         config_path=reviewflow_config_path,
         config_enabled=config_enabled,
     )
-    env = build_curated_subprocess_env(extra_env=base_env)
+    env = build_curated_provider_env(extra_env=base_env)
     env.update(_string_dict(resolved.get("env")))
     env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
 
@@ -7681,10 +7653,10 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
     reuse_source_kind: str,
     reviewed_head: str | None = None,
     seed_source_db_path: Path | None = None,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ExpectedSessionReceiptV1 | None:
     child_env = (
-        dict(env)
+        env
         if env is not None
         else merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
     )
@@ -7715,7 +7687,11 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
         capture: LosslessCommandCapture | None = None
         index_ok = False
         try:
-            capture = LosslessCommandCapture(spool_dir=chunkhound_work_dir)
+            if reviewed_head is not None:
+                capture = LosslessCommandCapture(spool_dir=chunkhound_work_dir)
+            capture_kwargs: dict[str, Any] = (
+                {"lossless_capture": capture} if capture is not None else {}
+            )
             progress.record_cmd(index_cmd)
             reporter.mark_running()
             if out is not None:
@@ -7727,7 +7703,7 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
                     check=True,
                     stream_requested=stream,
                     stream_text_callback=reporter.consume_text,
-                    lossless_capture=capture,
+                    **capture_kwargs,
                 )
             else:
                 result = run_cmd(
@@ -7737,12 +7713,13 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
                     check=True,
                     stream=stream,
                     stream_label="chunkhound",
-                    lossless_capture=capture,
+                    **capture_kwargs,
                 )
                 reporter.consume_text(result.stdout)
                 reporter.consume_text(result.stderr)
             receipt: ExpectedSessionReceiptV1 | None = None
             if reviewed_head is not None:
+                assert capture is not None
                 launch_identity = build_launch_identity(
                     repo_path=repo_dir,
                     config_path=chunkhound_cfg_path,
@@ -9163,6 +9140,75 @@ def _enforce_chunkhound_tool_proof(
         prompt_template_name=template_name,
         adapter_meta=adapter_meta,
     )
+    if (
+        report is not None
+        and adapter_meta is not None
+        and bool(adapter_meta.get("chunkhound_broker_required"))
+    ):
+        broker_records = list(adapter_meta.get("chunkhound_broker_records") or [])
+        event_slice = b""
+        try:
+            events_path = Path(str(adapter_meta.get("codex_events_path") or ""))
+            start = int(adapter_meta.get("codex_events_start_offset") or 0)
+            end = int(adapter_meta.get("codex_events_end_offset") or 0)
+            if events_path.is_file() and end > start >= 0:
+                with events_path.open("rb") as events_file:
+                    events_file.seek(start)
+                    event_slice = events_file.read(end - start)
+        except (OSError, TypeError, ValueError):
+            event_slice = b""
+        event_payloads: list[dict[str, Any]] = []
+        for raw_line in event_slice.splitlines():
+            try:
+                event = json.loads(raw_line)
+                item = event.get("item") if isinstance(event, dict) else None
+                output = item.get("aggregated_output") if isinstance(item, dict) else None
+                payload = (
+                    _parse_chunkhound_helper_output(output)
+                    if isinstance(output, str)
+                    else None
+                )
+                if isinstance(payload, dict):
+                    event_payloads.append(payload)
+            except (TypeError, ValueError):
+                continue
+        matched_record = False
+        for record in broker_records:
+            if not isinstance(record, dict):
+                continue
+            record_id = str(record.get("record_id") or "")
+            operation = str(record.get("operation") or "")
+            expected_digest = str(record.get("result_digest") or "")
+            for payload in event_payloads:
+                if payload.get("broker_record_id") != record_id:
+                    continue
+                payload_operation = str(
+                    payload.get("command") or payload.get("tool_name") or ""
+                )
+                if payload_operation == "code_research":
+                    payload_operation = "research"
+                if operation == "code_research":
+                    operation = "research"
+                digest_payload = dict(payload)
+                digest_payload.pop("broker_record_id", None)
+                digest_payload.pop("helper_path", None)
+                actual_digest = hashlib.sha256(
+                    json.dumps(
+                        digest_payload, sort_keys=True, default=str
+                    ).encode()
+                ).hexdigest()
+                if payload_operation == operation and secrets.compare_digest(
+                    actual_digest, expected_digest
+                ):
+                    matched_record = True
+                    break
+            if matched_record:
+                break
+        if not matched_record:
+            report["valid"] = False
+            report["failure_reason"] = (
+                "helper output lacked a matching coordinator broker result record"
+            )
     if report is None or bool(report.get("valid")):
         return report
     label = review_stage.replace("_", " ")
@@ -9720,7 +9766,10 @@ def _pr_flow_impl(
     close_owned_processes_once: Callable[[], None] | None = None
     owned_processes_teardown_failure: BaseException | None = None
     final_index_receipt: ExpectedSessionReceiptV1 | None = None
-    session_chunkhound_env: dict[str, str] | None = None
+    session_chunkhound_env: Mapping[str, str] | None = None
+    session_launch_context_path: Path | None = None
+    session_launch_context_publication: SessionLaunchContextPublication | None = None
+    chunkhound_helper_broker: ChunkHoundHelperBroker | None = None
     llm_resolved: dict[str, Any] | None = None
     llm_resolution_meta: dict[str, Any] | None = None
     picker_completed = bool(args.no_review)
@@ -10036,7 +10085,7 @@ def _pr_flow_impl(
                 runtime_root.mkdir(parents=True, exist_ok=False)
                 raw_orientation_path = runtime_root / "pr_context_orientation.raw.md"
                 orientation_env = apply_llm_env(
-                    build_curated_subprocess_env(), resolved=llm_resolved
+                    build_curated_provider_env(), resolved=llm_resolved
                 )
                 orientation_progress = SessionProgress(
                     runtime_root / "meta.json", quiet=True
@@ -10286,36 +10335,42 @@ def _pr_flow_impl(
                     f"ChunkHound top-up index: seed={seed_kind} db={chunkhound_db_path}",
                     quiet=quiet,
                 )
-                session_chunkhound_env = merged_env(
-                    chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
+                final_index_reviewed_head = (
+                    review_head_sha
+                    if (
+                        not bool(args.no_review)
+                        and llm_resolved is not None
+                        and str(llm_resolved.get("provider") or "").strip().lower()
+                        == "codex"
+                        and str(llm_resolved.get("transport") or "cli").strip().lower()
+                        == "cli"
+                    )
+                    else None
                 )
-                final_index_receipt = _run_session_chunkhound_index_with_rebuild_fallback(
-                    progress=progress,
-                    scope="topup",
-                    quiet=quiet,
-                    stream=stream,
-                    chunkhound_cfg=chunkhound_cfg,
-                    chunkhound_cfg_path=chunkhound_cfg_path,
-                    chunkhound_db_path=chunkhound_db_path,
-                    chunkhound_work_dir=chunkhound_work_dir,
-                    repo_dir=repo_dir,
-                    reuse_source_kind=seed_kind,
-                    reviewed_head=(
-                        review_head_sha
-                        if (
-                            not bool(args.no_review)
-                            and llm_resolved is not None
-                            and str(llm_resolved.get("provider") or "").strip().lower()
-                            == "codex"
-                            and str(llm_resolved.get("transport") or "cli")
-                            .strip()
-                            .lower()
-                            == "cli"
-                        )
-                        else None
-                    ),
-                    seed_source_db_path=seed_source_db_path,
-                    env=session_chunkhound_env,
+                chunkhound_environment = chunkhound_env(
+                    source_config_path=chunkhound_cfg.base_config_path
+                )
+                session_chunkhound_env = (
+                    build_curated_chunkhound_env(extra_env=chunkhound_environment)
+                    if final_index_reviewed_head is not None
+                    else merged_env(chunkhound_environment)
+                )
+                final_index_receipt = (
+                    _run_session_chunkhound_index_with_rebuild_fallback(
+                        progress=progress,
+                        scope="topup",
+                        quiet=quiet,
+                        stream=stream,
+                        chunkhound_cfg=chunkhound_cfg,
+                        chunkhound_cfg_path=chunkhound_cfg_path,
+                        chunkhound_db_path=chunkhound_db_path,
+                        chunkhound_work_dir=chunkhound_work_dir,
+                        repo_dir=repo_dir,
+                        reuse_source_kind=seed_kind,
+                        reviewed_head=final_index_reviewed_head,
+                        seed_source_db_path=seed_source_db_path,
+                        env=session_chunkhound_env,
+                    )
                 )
 
         if bool(args.no_review):
@@ -10350,6 +10405,16 @@ def _pr_flow_impl(
                 enable_mcp=(not bool(getattr(args, "no_index", False))),
                 interactive=False,
                 paths=paths,
+                expected_environment_digest=(
+                    final_index_receipt.launch_identity_projection.environment_equality_digest
+                    if final_index_receipt is not None
+                    else None
+                ),
+                expected_resolved_executable=(
+                    final_index_receipt.launch_identity_projection.resolved_executable
+                    if final_index_receipt is not None
+                    else None
+                ),
             )
             env = dict(runtime_policy["env"])
             adapter_meta: dict[str, Any] = {
@@ -10637,17 +10702,66 @@ def _pr_flow_impl(
                         )
                     break
 
-            with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
-                _assert_daemon_continuity()
-                _run_chunkhound_access_preflight(
-                    repo_dir=repo_dir,
-                    env=env,
-                    runtime_policy=runtime_policy,
-                    stream=stream,
-                    meta=progress.meta,
-                    progress=progress,
-                    owned_processes=owned_processes,
+            if daemon_route is _ChunkHoundDaemonRoute.SUPPORTED:
+                if final_index_receipt is None or session_chunkhound_env is None:
+                    raise ReviewflowError(
+                        "ChunkHound helper broker requires the final index receipt."
+                    )
+                launch_identity = final_index_receipt.launch_identity_projection
+                chunkhound_helper_broker = ChunkHoundHelperBroker(
+                    authority=HelperLaunchAuthority(
+                        environment=session_chunkhound_env,
+                        resolved_executable=launch_identity.resolved_executable,
+                        expected_executable_digest=launch_identity.executable_digest,
+                        expected_config_digest=launch_identity.config_digest,
+                        environment_digest=launch_identity.environment_equality_digest,
+                        cwd=launch_identity.cwd,
+                        config_path=launch_identity.resolved_config_path,
+                        database_path=launch_identity.resolved_database_path,
+                        repo_path=launch_identity.canonical_root,
+                    )
                 )
+                broker_endpoint = chunkhound_helper_broker.start()
+                env["CURE_CHUNKHOUND_BROKER_ENDPOINT"] = broker_endpoint
+                runtime_policy["env"]["CURE_CHUNKHOUND_BROKER_ENDPOINT"] = (
+                    broker_endpoint
+                )
+                runtime_policy["_chunkhound_helper_broker"] = chunkhound_helper_broker
+                runtime_policy["metadata"]["env_keys"] = sorted(env)
+
+            with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
+                preflight_env = dict(env)
+                preflight_scope: str | None = None
+                preflight_failure: BaseException | None = None
+                try:
+                    _assert_daemon_continuity()
+                    if chunkhound_helper_broker is not None:
+                        preflight_scope = chunkhound_helper_broker.begin_scope()
+                        preflight_env["CURE_CHUNKHOUND_BROKER_SCOPE"] = (
+                            preflight_scope
+                        )
+                    _run_chunkhound_access_preflight(
+                        repo_dir=repo_dir,
+                        env=preflight_env,
+                        runtime_policy=runtime_policy,
+                        stream=stream,
+                        meta=progress.meta,
+                        progress=progress,
+                        owned_processes=owned_processes,
+                    )
+                except BaseException as exc:
+                    preflight_failure = exc
+                    raise
+                finally:
+                    if (
+                        chunkhound_helper_broker is not None
+                        and preflight_scope is not None
+                    ):
+                        try:
+                            chunkhound_helper_broker.end_scope(preflight_scope)
+                        except BaseException:
+                            if preflight_failure is None:
+                                raise
 
             with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
                 _run_review_intelligence_preflight(
@@ -11290,7 +11404,7 @@ def _pr_flow_impl(
         if (not use_multipass) and context_bearing_singlepass:
             with phase("reconcile_prior_context", progress=progress, quiet=quiet):
                 draft = singlepass_output_path.read_text(encoding="utf-8")
-                reconcile_env = apply_llm_env(build_curated_subprocess_env(), resolved=llm_resolved)
+                reconcile_env = apply_llm_env(build_curated_provider_env(), resolved=llm_resolved)
 
                 reconciled_output_path = work_dir / "pr_context_reconciled.md"
                 reconciled_output_path.unlink(missing_ok=True)
@@ -11463,6 +11577,11 @@ def _pr_flow_impl(
                 pass
 
         try:
+            if chunkhound_helper_broker is not None:
+                try:
+                    chunkhound_helper_broker.close()
+                except BaseException as exc:
+                    _record_teardown_failure("helper_broker", exc)
             if close_owned_processes_once is not None:
                 close_owned_processes_once()
             if owned_processes_teardown_failure is not None:
@@ -11474,6 +11593,15 @@ def _pr_flow_impl(
                     daemon_lease.close()
             except BaseException as exc:
                 _record_teardown_failure("keeper_close", exc)
+            if session_launch_context_path is not None:
+                try:
+                    if session_launch_context_publication is not None:
+                        session_launch_context_publication.cleanup()
+                    else:
+                        cleanup_session_launch_context(session_launch_context_path)
+                    session_launch_context_path.parent.rmdir()
+                except BaseException as exc:
+                    _record_teardown_failure("session_launch_context", exc)
         finally:
             cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
             clear_active_output(out)
@@ -15776,6 +15904,7 @@ from cure_pr_context.runtime import (
     read_persisted_context,
 )
 from cure_flows import (
+    _parse_chunkhound_helper_output,
     build_abort_review_markdown,
     chunkhound_prompt_contract_for_template,
     cod_hypothesis_ledger_prompt_vars,

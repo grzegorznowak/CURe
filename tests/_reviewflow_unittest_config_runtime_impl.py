@@ -2402,10 +2402,10 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 self.assertEqual(runtime["env"]["PYTHONSAFEPATH"], "1")
                 self.assertEqual(runtime["metadata"]["chunkhound_access_mode"], "cli_helper_daemon")
                 helper_text = helper_path.read_text(encoding="utf-8")
-                self.assertIn("chunkhound mcp", helper_text)
+                self.assertIn("request_helper_broker", helper_text)
+                self.assertIn("CURE_CHUNKHOUND_BROKER_ENDPOINT", helper_text)
                 self.assertIn("code_research", helper_text)
-                self.assertIn("DaemonDiscovery", helper_text)
-                self.assertIn("chunkhound_runtime_python", helper_text)
+                self.assertNotIn("DaemonDiscovery", helper_text)
                 self.assertFalse(
                     any(
                         entry.startswith("mcp_servers.chunkhound.")

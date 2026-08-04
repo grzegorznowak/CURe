@@ -1,6 +1,152 @@
 # ruff: noqa: F403, F405
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
+import hashlib
+
+import cure_chunkhound
+from cure_chunkhound_broker import ChunkHoundHelperBroker, HelperLaunchAuthority
+
+
+@contextlib.contextmanager
+def _generated_chunkhound_helper_broker(
+    *,
+    repo_dir: Path,
+    helper_cwd: Path,
+    fake_chunkhound: Path,
+    stage_timeouts: dict[str, float] | None = None,
+    tool_timeouts: dict[str, float] | None = None,
+    transport_modes: tuple[str, ...] | None = None,
+    heartbeat_interval: float | None = None,
+    broker_stdout: StringIO | None = None,
+):
+    config_path = helper_cwd / "chunkhound.json"
+    database_path = helper_cwd / ".chunkhound.db"
+    config_path.write_text("{}\n", encoding="utf-8")
+    database_path.touch()
+    environment = os.environ.copy()
+    environment_digest = hashlib.sha256(
+        json.dumps(
+            environment,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    authority = HelperLaunchAuthority(
+        environment=environment,
+        resolved_executable=fake_chunkhound,
+        expected_executable_digest=hashlib.sha256(fake_chunkhound.read_bytes()).hexdigest(),
+        expected_config_digest=hashlib.sha256(b"{}").hexdigest(),
+        environment_digest=environment_digest,
+        cwd=helper_cwd,
+        config_path=config_path,
+        database_path=database_path,
+        repo_path=repo_dir,
+    )
+    broker = ChunkHoundHelperBroker(authority=authority)
+    scope = broker.begin_scope()
+    original_tool_payload = cure_chunkhound.run_chunkhound_tool_payload
+
+    def run_tool_payload(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        if heartbeat_interval is not None:
+            kwargs["heartbeat_provider"] = "codex"
+            kwargs["heartbeat_interval"] = heartbeat_interval
+        return original_tool_payload(*args, **kwargs)
+
+    try:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch(
+                    "cure_chunkhound._resolve_helper_launch",
+                    return_value=(authority.environment, str(fake_chunkhound)),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    cure_chunkhound,
+                    "_REQUIRED_KEEPER_TOOLS",
+                    ("search", "code_research"),
+                )
+            )
+            if stage_timeouts is not None:
+                stack.enter_context(
+                    mock.patch.dict(
+                        cure_chunkhound._DEFAULT_PREFLIGHT_STAGE_TIMEOUTS,
+                        stage_timeouts,
+                    )
+                )
+            if tool_timeouts is not None:
+                stack.enter_context(
+                    mock.patch.dict(
+                        cure_chunkhound._DEFAULT_TOOL_CALL_TIMEOUTS,
+                        tool_timeouts,
+                    )
+                )
+            if transport_modes is not None:
+                stack.enter_context(
+                    mock.patch.object(
+                        cure_chunkhound, "_TRANSPORT_MODES", transport_modes
+                    )
+                )
+            if heartbeat_interval is not None:
+                stack.enter_context(
+                    mock.patch.object(
+                        cure_chunkhound,
+                        "run_chunkhound_tool_payload",
+                        run_tool_payload,
+                    )
+                )
+            if broker_stdout is not None:
+                stack.enter_context(contextlib.redirect_stdout(broker_stdout))
+            endpoint = broker.start()
+            helper_environment = os.environ.copy()
+            helper_environment["CURE_CHUNKHOUND_BROKER_ENDPOINT"] = endpoint
+            helper_environment["CURE_CHUNKHOUND_BROKER_SCOPE"] = scope
+            yield helper_environment
+    finally:
+        broker.end_scope(scope)
+        broker.close()
+        authority.close()
+
+
+def _run_generated_chunkhound_helper(
+    *,
+    helper_path: Path,
+    command: list[str],
+    repo_dir: Path,
+    helper_cwd: Path,
+    fake_chunkhound: Path,
+    stage_timeouts: dict[str, float] | None = None,
+    tool_timeouts: dict[str, float] | None = None,
+    transport_modes: tuple[str, ...] | None = None,
+    heartbeat_interval: float | None = None,
+    broker_stdout: StringIO | None = None,
+) -> subprocess.CompletedProcess[str]:
+    with _generated_chunkhound_helper_broker(
+        repo_dir=repo_dir,
+        helper_cwd=helper_cwd,
+        fake_chunkhound=fake_chunkhound,
+        stage_timeouts=stage_timeouts,
+        tool_timeouts=tool_timeouts,
+        transport_modes=transport_modes,
+        heartbeat_interval=heartbeat_interval,
+        broker_stdout=broker_stdout,
+    ) as environment:
+        return subprocess.run(
+            [str(helper_path), *command],
+            cwd=repo_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+
+
+class _BrokenHeartbeatStream(StringIO):
+    def write(self, value: str) -> int:
+        raise OSError("heartbeat pipe closed")
+
 
 class _FakeTty(StringIO):
     def isatty(self) -> bool:  # pragma: no cover
@@ -133,7 +279,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    sys.stderr.write('ChunkHound daemon did not start within 30.0s while waiting for IPC readiness\\n')",
                         "    raise SystemExit(1)",
                         "raise SystemExit(2)",
@@ -153,16 +299,13 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
             )
 
             self.assertEqual(result.returncode, 1)
@@ -232,7 +375,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    time.sleep(60)",
                         "    raise SystemExit(0)",
                         "raise SystemExit(2)",
@@ -252,19 +395,14 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 120.0', '"initialize": 0.2')
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                stage_timeouts={"initialize": 0.2},
             )
 
             self.assertEqual(result.returncode, 1)
@@ -331,7 +469,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -357,17 +495,13 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "search", "needle"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["search", "needle"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
             )
 
             self.assertEqual(result.returncode, 0)
@@ -428,7 +562,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -455,17 +589,13 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "search", "needle"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["search", "needle"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
             )
 
             self.assertEqual(result.returncode, 0)
@@ -529,7 +659,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                                 "    raise SystemExit(0)",
                                 "",
                                 "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                                "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                                "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                                 "    init_msg = read_message()",
                                 "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                                 "    _ = read_message()",
@@ -557,76 +687,41 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         chunkhound_cwd=helper_cwd,
                         provider=provider,
                     )
-                    helper_text = (
-                        helper_path.read_text(encoding="utf-8")
-                        .replace("_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05")
-                        .replace('"code_research": 1200.0', '"code_research": 0.6')
-                    )
-                    helper_path.write_text(helper_text, encoding="utf-8")
-                    env = os.environ.copy()
-                    env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-                    result = subprocess.run(
-                        [str(helper_path), "research", "cross-file question"],
-                        cwd=repo_dir,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=5,
+                    broker_output = StringIO()
+                    result = _run_generated_chunkhound_helper(
+                        helper_path=helper_path,
+                        command=["research", "cross-file question"],
+                        repo_dir=repo_dir,
+                        helper_cwd=helper_cwd,
+                        fake_chunkhound=fake_chunkhound,
+                        tool_timeouts={"code_research": 0.6},
+                        heartbeat_interval=0.05,
+                        broker_stdout=broker_output,
                     )
 
                     self.assertEqual(result.returncode, 0)
-                    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-                    stderr_lines = [line for line in result.stderr.splitlines() if line.strip()]
-                    if provider == "codex":
-                        self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
-                            result.stdout,
-                        )
-                    else:
-                        self.assertEqual(len(stdout_lines), 1, result.stdout)
-                        self.assertFalse(
-                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stdout_lines),
-                            result.stdout,
-                        )
-                        self.assertTrue(
-                            any(line.startswith("cure-chunkhound: tools/call code_research ") for line in stderr_lines),
-                            result.stderr,
-                        )
-                        # Part D: completion sentinel must be the last stderr line
-                        self.assertTrue(
-                            stderr_lines[-1].startswith("cure-chunkhound: research completed ("),
-                            f"Expected sentinel as last stderr line, got: {stderr_lines[-1]!r}",
-                        )
-                        # Part D: verify combined output ordering (JSON before sentinel)
-                        # Re-run with merged stdout+stderr to verify combined output ordering
-                        merged_result = subprocess.run(
-                            [str(helper_path), "research", "cross-file question"],
-                            cwd=repo_dir,
-                            env=env,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            check=False,
-                            timeout=5,
-                        )
-                        merged_lines = [line for line in merged_result.stdout.splitlines() if line.strip()]
-                        json_idx = next(
-                            (i for i, line in enumerate(merged_lines) if line.startswith("{")),
-                            None,
-                        )
-                        sentinel_idx = next(
-                            (i for i, line in enumerate(merged_lines) if line.startswith("cure-chunkhound: research completed (")),
-                            None,
-                        )
-                        self.assertIsNotNone(json_idx, f"No JSON line in merged output: {merged_lines}")
-                        self.assertIsNotNone(sentinel_idx, f"No sentinel in merged output: {merged_lines}")
-                        self.assertGreater(
-                            sentinel_idx,
-                            json_idx,
-                            f"Sentinel (line {sentinel_idx}) must appear after JSON (line {json_idx}) in combined output",
-                        )
+                    stdout_lines = [
+                        line for line in result.stdout.splitlines() if line.strip()
+                    ]
+                    heartbeat_lines = [
+                        line for line in broker_output.getvalue().splitlines() if line.strip()
+                    ]
+                    self.assertEqual(len(stdout_lines), 2, result.stdout)
+                    self.assertEqual(
+                        stdout_lines[0],
+                        "cure-chunkhound: tools/call code_research waiting "
+                        "(0.0s / 1200s)",
+                    )
+                    self.assertTrue(
+                        any(
+                            line.startswith(
+                                "cure-chunkhound: tools/call code_research "
+                            )
+                            for line in heartbeat_lines
+                        ),
+                        broker_output.getvalue(),
+                    )
                     payload = json.loads(stdout_lines[-1])
                     self.assertTrue(payload["ok"])
                     self.assertEqual(payload["tool_name"], "code_research")
@@ -683,7 +778,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -710,28 +805,36 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace(
-                "_HEARTBEAT_INTERVAL_SECONDS = 5.0",
-                "_HEARTBEAT_INTERVAL_SECONDS = 0.2",
-            )
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "search", "needle"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            broker_output = StringIO()
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["search", "needle"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                heartbeat_interval=0.2,
+                broker_stdout=broker_output,
             )
 
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
-            self.assertTrue(any(line.startswith("cure-chunkhound: tools/call search ") for line in stdout_lines), result.stdout)
-            payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
+            heartbeat_lines = [
+                line for line in broker_output.getvalue().splitlines() if line.strip()
+            ]
+            self.assertEqual(len(stdout_lines), 2, result.stdout)
+            self.assertEqual(
+                stdout_lines[0],
+                "cure-chunkhound: tools/call search waiting (0.0s / 60s)",
+            )
+            self.assertTrue(
+                any(
+                    line.startswith("cure-chunkhound: tools/call search ")
+                    for line in heartbeat_lines
+                ),
+                broker_output.getvalue(),
+            )
+            payload = json.loads(stdout_lines[-1])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["tool_name"], "search")
         finally:
@@ -786,7 +889,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -810,29 +913,25 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace(
-                "_HEARTBEAT_INTERVAL_SECONDS = 5.0",
-                "_HEARTBEAT_INTERVAL_SECONDS = 0.01",
-            )
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            broker_output = StringIO()
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                broker_stdout=broker_output,
             )
 
             self.assertEqual(result.returncode, 0)
             stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
             self.assertEqual(len(stdout_lines), 1, result.stdout)
             self.assertFalse(stdout_lines[0].startswith("cure-chunkhound: tools/call "))
-            payload = json.loads([line for line in stdout_lines if line.startswith("{")][-1])
+            self.assertNotIn(
+                "cure-chunkhound: tools/call ", broker_output.getvalue()
+            )
+            payload = json.loads(stdout_lines[0])
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["command"], "preflight")
         finally:
@@ -970,7 +1069,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                                 "    raise SystemExit(0)",
                                 "",
                                 "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                                "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                                "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                                 "    init_msg = read_message()",
                                 "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                                 "    _ = read_message()",
@@ -998,26 +1097,15 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         chunkhound_cwd=helper_cwd,
                         provider=provider,
                     )
-                    helper_text = helper_path.read_text(encoding="utf-8").replace(
-                        "_HEARTBEAT_INTERVAL_SECONDS = 5.0", "_HEARTBEAT_INTERVAL_SECONDS = 0.05"
-                    )
-                    helper_text = helper_text.replace(
-                        'sys.stdout.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\\n")',
-                        '(_ for _ in ()).throw(BrokenPipeError("heartbeat pipe closed"))',
-                    )
-                    self.assertIn("BrokenPipeError", helper_text)
-                    helper_path.write_text(helper_text, encoding="utf-8")
-                    env = os.environ.copy()
-                    env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-                    result = subprocess.run(
-                        [str(helper_path), "research", "cross-file question"],
-                        cwd=repo_dir,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=5,
+                    result = _run_generated_chunkhound_helper(
+                        helper_path=helper_path,
+                        command=["research", "cross-file question"],
+                        repo_dir=repo_dir,
+                        helper_cwd=helper_cwd,
+                        fake_chunkhound=fake_chunkhound,
+                        heartbeat_interval=0.05,
+                        broker_stdout=_BrokenHeartbeatStream(),
                     )
 
                     self.assertEqual(result.returncode, 0)
@@ -1076,7 +1164,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -1108,32 +1196,22 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = (
-                helper_path.read_text(encoding="utf-8")
-                .replace('"search": 60.0', '"search": 0.4')
-                .replace('"code_research": 1200.0', '"code_research": 0.2')
-            )
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            search_result = subprocess.run(
-                [str(helper_path), "search", "needle"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            search_result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["search", "needle"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                tool_timeouts={"search": 0.4, "code_research": 0.2},
             )
-            research_result = subprocess.run(
-                [str(helper_path), "research", "cross-file question"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            research_result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["research", "cross-file question"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                tool_timeouts={"search": 0.4, "code_research": 0.2},
             )
 
             self.assertEqual(search_result.returncode, 0)
@@ -1216,7 +1294,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'protocolVersion': '2024-11-05', 'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {'tools': {}}}})",
                         "    _ = read_message()",
@@ -1240,19 +1318,15 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace('"initialize": 120.0', '"initialize": 0.2')
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                stage_timeouts={"initialize": 0.2},
+                transport_modes=("mcp_framed",),
             )
 
             self.assertEqual(result.returncode, 0)
@@ -1320,7 +1394,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {}}})",
                         "    _ = read_message()",
@@ -1344,21 +1418,15 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8")
-            helper_text = helper_text.replace('_TRANSPORT_MODES = ("json_line", "mcp_framed")', '_TRANSPORT_MODES = ("mcp_framed",)')
-            helper_text = helper_text.replace('"tools/list": 10.0', '"tools/list": 0.2')
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                stage_timeouts={"tools/list": 0.2},
+                transport_modes=("mcp_framed",),
             )
 
             self.assertEqual(result.returncode, 1)
@@ -1431,7 +1499,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    init_msg = read_message()",
                         "    write_message({'jsonrpc': '2.0', 'id': init_msg.get('id'), 'result': {'serverInfo': {'name': 'fake', 'version': '1'}, 'capabilities': {}}})",
                         "    _ = read_message()",
@@ -1458,21 +1526,15 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8")
-            helper_text = helper_text.replace('_TRANSPORT_MODES = ("json_line", "mcp_framed")', '_TRANSPORT_MODES = ("mcp_framed",)')
-            helper_text = helper_text.replace('"tools/list": 10.0', '"tools/list": 0.2')
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                stage_timeouts={"tools/list": 0.2},
+                transport_modes=("mcp_framed",),
             )
 
             self.assertEqual(result.returncode, 1)
@@ -1544,7 +1606,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "    raise SystemExit(0)",
                         "",
                         "script_name = Path(sys.argv[1]).name if len(sys.argv) > 1 else ''",
-                        "if script_name == 'chunkhound' and len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
+                        "if len(sys.argv) > 2 and sys.argv[2] == 'mcp':",
                         "    sys.stderr.write('NOISY-' * 20000)",
                         "    sys.stderr.flush()",
                         "    init_msg = read_message()",
@@ -1570,22 +1632,14 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 chunkhound_db_path=helper_cwd / ".chunkhound.db",
                 chunkhound_cwd=helper_cwd,
             )
-            helper_text = helper_path.read_text(encoding="utf-8").replace(
-                '_TRANSPORT_MODES = ("json_line", "mcp_framed")',
-                '_TRANSPORT_MODES = ("mcp_framed",)',
-            )
-            helper_path.write_text(helper_text, encoding="utf-8")
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_chunkhound_dir}:{env.get('PATH', '')}"
 
-            result = subprocess.run(
-                [str(helper_path), "preflight"],
-                cwd=repo_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            result = _run_generated_chunkhound_helper(
+                helper_path=helper_path,
+                command=["preflight"],
+                repo_dir=repo_dir,
+                helper_cwd=helper_cwd,
+                fake_chunkhound=fake_chunkhound,
+                transport_modes=("mcp_framed",),
             )
 
             self.assertEqual(result.returncode, 0)

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
 import json
-from pathlib import Path
 import shlex
 import shutil
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cure_errors import ReviewflowError
@@ -25,10 +25,15 @@ from cure_runtime import (
     _raise_removed_gemini_support,
     _string_dict,
     augment_cli_provider_session_env,
-    build_curated_subprocess_env,
     build_http_response_request,
     resolve_agent_runtime_profile,
     toml_string,
+)
+from cure_subprocess_env import (
+    NATIVE_CHUNKHOUND_ENV_KEYS,
+    SESSION_LAUNCH_CONTEXT_ENV,
+    build_curated_provider_env,
+    cleanup_session_launch_context,
 )
 from meta import write_json
 from paths import (
@@ -759,45 +764,72 @@ def run_llm_exec(
         )
         policy = runtime_policy if isinstance(runtime_policy, dict) else {}
         codex_flags = list(policy.get("codex_flags") or codex_flags)
-        codex_config_overrides = list(policy.get("codex_config_overrides") or codex_config_overrides or [])
-        result = rf.run_codex_exec(
-            repo_dir=repo_dir,
-            codex_flags=codex_flags,
-            codex_config_overrides=codex_config_overrides,
-            output_path=output_path,
-            prompt=prompt,
-            env=env,
-            stream=stream,
-            progress=progress,
-            add_dirs=list(policy.get("add_dirs") or add_dirs or []),
-            approval_policy=str(policy.get("approval_policy") or "never"),
-            dangerously_bypass_approvals_and_sandbox=bool(policy.get("dangerously_bypass_approvals_and_sandbox", True)),
-            include_shell_environment_inherit_all=bool(policy.get("include_shell_environment_inherit_all", False)),
-            owned_processes=owned_processes,
+        codex_config_overrides = list(
+            policy.get("codex_config_overrides") or codex_config_overrides or []
         )
-        resume = None
-        if result.resume is not None:
-            resume = LlmResumeInfo(
-                provider="codex",
-                session_id=result.resume.session_id,
-                cwd=result.resume.cwd,
-                command=result.resume.command,
+        broker = policy.get("_chunkhound_helper_broker")
+        broker_scope: str | None = None
+        provider_env = dict(env)
+        if broker is not None:
+            broker_scope = str(broker.begin_scope())
+            provider_env["CURE_CHUNKHOUND_BROKER_SCOPE"] = broker_scope
+        primary_failure: BaseException | None = None
+        try:
+            result = rf.run_codex_exec(
+                repo_dir=repo_dir,
+                codex_flags=codex_flags,
+                codex_config_overrides=codex_config_overrides,
+                output_path=output_path,
+                prompt=prompt,
+                env=provider_env,
+                stream=stream,
+                progress=progress,
+                add_dirs=list(policy.get("add_dirs") or add_dirs or []),
+                approval_policy=str(policy.get("approval_policy") or "never"),
+                dangerously_bypass_approvals_and_sandbox=bool(policy.get("dangerously_bypass_approvals_and_sandbox", True)),
+                include_shell_environment_inherit_all=bool(policy.get("include_shell_environment_inherit_all", False)),
+                owned_processes=owned_processes,
             )
-        return LlmRunResult(
-            resume=resume,
-            adapter_meta={
-                "transport": "cli-codex",
-                "flags": codex_flags,
-                "codex_events_path": str(result.events_log_path) if result.events_log_path is not None else None,
-                "codex_events_start_offset": result.events_start_offset,
-                "codex_events_end_offset": result.events_end_offset,
-                "usage": _extract_codex_usage_from_event_slice(
-                    events_path=result.events_log_path,
-                    start_offset=result.events_start_offset,
-                    end_offset=result.events_end_offset,
-                ),
-            },
-        )
+            resume = None
+            if result.resume is not None:
+                resume = LlmResumeInfo(
+                    provider="codex",
+                    session_id=result.resume.session_id,
+                    cwd=result.resume.cwd,
+                    command=result.resume.command,
+                )
+            broker_records = (
+                broker.records_for_scope(broker_scope)
+                if broker is not None and broker_scope is not None
+                else []
+            )
+            return LlmRunResult(
+                resume=resume,
+                adapter_meta={
+                    "transport": "cli-codex",
+                    "flags": codex_flags,
+                    "codex_events_path": str(result.events_log_path) if result.events_log_path is not None else None,
+                    "codex_events_start_offset": result.events_start_offset,
+                    "codex_events_end_offset": result.events_end_offset,
+                    "usage": _extract_codex_usage_from_event_slice(
+                        events_path=result.events_log_path,
+                        start_offset=result.events_start_offset,
+                        end_offset=result.events_end_offset,
+                    ),
+                    "chunkhound_broker_required": broker is not None,
+                    "chunkhound_broker_records": broker_records,
+                },
+            )
+        except BaseException as exc:
+            primary_failure = exc
+            raise
+        finally:
+            if broker is not None and broker_scope is not None:
+                try:
+                    broker.end_scope(broker_scope)
+                except BaseException:
+                    if primary_failure is None:
+                        raise
     if provider == "gemini":
         _raise_removed_gemini_support(context="Gemini CLI execution is no longer available.")
     if provider in HTTP_LLM_PROVIDERS:
@@ -869,6 +901,8 @@ def write_chunkhound_helper(
     chunkhound_db_path: Path | None,
     chunkhound_cwd: Path | None,
     provider: str = "codex",
+    expected_environment_digest: str | None = None,
+    expected_resolved_executable: str | Path | None = None,
 ) -> Path:
     repo_root = repo_dir.resolve(strict=False)
     helper_cwd = (chunkhound_cwd or repo_root).resolve(strict=False)
@@ -882,7 +916,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -891,39 +924,14 @@ MODULE_DIR = Path(__MODULE_DIR_JSON__)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
-from cure_chunkhound import (  # noqa: E402
-    daemon_metadata_payload,
-    run_chunkhound_mcp_preflight_payload,
-    run_chunkhound_tool_payload,
-)
+from cure_chunkhound_broker import request_helper_broker  # noqa: E402
 
-REPO_DIR = Path(__REPO_DIR_JSON__)
-CHUNKHOUND_CWD = Path(__CHUNKHOUND_CWD_JSON__)
-CHUNKHOUND_CONFIG = Path(__CHUNKHOUND_CONFIG_JSON__)
-CHUNKHOUND_DB = Path(__CHUNKHOUND_DB_JSON__)
 HELPER_PATH = Path(__file__).resolve()
-CHUNKHOUND_BIN = shutil.which("chunkhound") or "chunkhound"
-# The extracted implementation still launches: chunkhound mcp --config <config> <repo>
-# DaemonDiscovery metadata probing now lives in cure_chunkhound.daemon_metadata_payload().
-_HEARTBEAT_INTERVAL_SECONDS = 5.0
+_BROKER_ENDPOINT_ENV = "CURE_CHUNKHOUND_BROKER_ENDPOINT"
 _REVIEW_PROVIDER = __PROVIDER_JSON__
-_PREFLIGHT_STAGE_TIMEOUTS = {
-    "spawn": 3.0,
-    "initialize": 120.0,
-    "notifications/initialized": 5.0,
-    "tools/list": 10.0,
-    "daemon_metadata": 5.0,
-}
-_TOOL_CALL_TIMEOUTS = {
-    "search": 60.0,
-    "code_research": 1200.0,
-}
-_TRANSPORT_MODES = ("json_line", "mcp_framed")
 
 
 def _legacy_heartbeat_patch_anchor(elapsed: float) -> None:
-    # Kept so legacy tests that monkeypatch generated heartbeat lines can still
-    # exercise the generated helper without reaching into cure_chunkhound.py.
     if False:  # pragma: no cover
                             sys.stdout.write(f"cure-chunkhound: tools/call search waiting ({elapsed:.1f}s / 60s)\n")
                             sys.stdout.flush()
@@ -937,222 +945,130 @@ def _emit(payload: dict[str, Any], *, exit_code: int) -> int:
     return exit_code
 
 
-def _emit_sentinel(args: argparse.Namespace, payload: dict[str, Any]) -> None:
-    if _REVIEW_PROVIDER == "codex":
-        return
-    command = getattr(args, "command", "unknown")
-    ok = payload.get("ok", False)
-    stage_trace = payload.get("stage_trace") or []
-    tools_call_entry = next(
-        (e for e in stage_trace if e.get("stage") == "tools/call"), {},
-    )
-    elapsed = tools_call_entry.get("elapsed_seconds", 0.0)
-    if ok:
-        line = f"cure-chunkhound: {command} completed ({elapsed:.1f}s)"
-    else:
-        detail = payload.get("execution_stage_status", "error")
-        line = f"cure-chunkhound: {command} failed ({elapsed:.1f}s, {detail})"
-    try:
-        sys.stderr.write(line + "\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
+def _heartbeat_callback(command: str):
+    tool_name = "code_research" if command == "research" else "search"
+    timeout = 1200 if command == "research" else 60
+
+    def emit(elapsed: float) -> None:
+        sys.stdout.write(
+            f"cure-chunkhound: tools/call {tool_name} waiting "
+            f"({elapsed:.1f}s / {timeout}s)\n"
+        )
+        sys.stdout.flush()
+
+    return emit
 
 
 def _dry_run_enabled() -> bool:
     return str(os.environ.get("CURE_CHUNKHOUND_DRY_RUN") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _tool_arguments(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=str(HELPER_PATH), description="CURe-managed ChunkHound helper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("preflight")
+    search = subparsers.add_parser("search")
+    search.add_argument("query")
+    search.add_argument("--type", choices=["regex", "semantic"], default="semantic")
+    search.add_argument("--path")
+    search.add_argument("--page-size", type=int, default=10)
+    search.add_argument("--offset", type=int, default=0)
+    research = subparsers.add_parser("research")
+    research.add_argument("query")
+    research.add_argument("--path")
+    return parser
+
+
+def _request(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command == "preflight":
+        request: dict[str, Any] = {"operation": "preflight", "arguments": {}}
+        scope = str(os.environ.get("CURE_CHUNKHOUND_BROKER_SCOPE") or "").strip()
+        if scope:
+            request["scope"] = scope
+        return request
     if args.command == "search":
-        payload: dict[str, Any] = {
+        arguments: dict[str, Any] = {
             "query": args.query,
             "type": args.type,
             "page_size": args.page_size,
             "offset": args.offset,
         }
         if args.path:
-            payload["path"] = args.path
-        return "search", payload
-    payload = {"query": args.query}
+            arguments["path"] = args.path
+        request = {"operation": "search", "arguments": arguments}
+        scope = str(os.environ.get("CURE_CHUNKHOUND_BROKER_SCOPE") or "").strip()
+        if scope:
+            request["scope"] = scope
+        return request
+    arguments = {"query": args.query}
     if args.path:
-        payload["path"] = args.path
-    return "code_research", payload
-
-
-def _dry_run_stage_trace(*, command: str) -> list[dict[str, Any]]:
-    trace: list[dict[str, Any]] = [
-        {"stage": "initialize", "status": "ok", "elapsed_seconds": 0.0},
-        {"stage": "notifications/initialized", "status": "ok", "elapsed_seconds": 0.0},
-        {"stage": "tools/list", "status": "ok", "elapsed_seconds": 0.0},
-    ]
-    if command != "preflight":
-        trace.append({"stage": "tools/call", "status": "ok", "elapsed_seconds": 0.0})
-    return trace
+        arguments["path"] = args.path
+    request = {"operation": "research", "arguments": arguments}
+    scope = str(os.environ.get("CURE_CHUNKHOUND_BROKER_SCOPE") or "").strip()
+    if scope:
+        request["scope"] = scope
+    return request
 
 
 def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
-    command = str(args.command or "").strip()
-    helper_path = str(HELPER_PATH)
+    command = str(args.command)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "command": command,
+        "helper_path": str(HELPER_PATH),
+        "mcp_transport": "dry_run",
+        "dry_run": True,
+        "stage_trace": [{"stage": "initialize", "status": "ok", "elapsed_seconds": 0.0}],
+    }
     if command == "preflight":
-        return {
-            "ok": True,
-            "command": "preflight",
-            "helper_path": helper_path,
+        payload.update({
             "available_tools": ["search", "code_research"],
             "preflight_stage": "tools/list",
             "preflight_stage_status": "ok",
-            "stage_trace": _dry_run_stage_trace(command="preflight"),
-            "elapsed_seconds": 0.0,
-            "helper_exit_code": 0,
-            "mcp_transport": "dry_run",
-            "dry_run": True,
+        })
+    else:
+        result: dict[str, Any] = {
+            "results": [],
+            "pagination": {
+                "offset": getattr(args, "offset", 0),
+                "page_size": getattr(args, "page_size", 10),
+                "total_results": 0,
+            },
         }
-    if command == "search":
-        return {
-            "ok": True,
-            "command": "search",
-            "tool_name": "search",
+        if command == "research":
+            result["summary"] = "dry-run ChunkHound research stub"
+        payload.update({
+            "tool_name": "code_research" if command == "research" else "search",
             "query": getattr(args, "query", None),
             "path": getattr(args, "path", None),
-            "helper_path": helper_path,
-            "result": {
-                "results": [],
-                "pagination": {
-                    "offset": int(getattr(args, "offset", 0) or 0),
-                    "page_size": int(getattr(args, "page_size", 10) or 10),
-                    "total_results": 0,
-                },
-            },
+            "result": result,
             "execution_stage": "tools/call",
             "execution_stage_status": "ok",
-            "stage_trace": _dry_run_stage_trace(command=command),
-            "mcp_transport": "dry_run",
-            "dry_run": True,
-        }
-    return {
-        "ok": True,
-        "command": "research",
-        "tool_name": "code_research",
-        "query": getattr(args, "query", None),
-        "path": getattr(args, "path", None),
-        "helper_path": helper_path,
-        "result": {
-            "summary": "dry-run ChunkHound research stub; no real ChunkHound call was made.",
-        },
-        "execution_stage": "tools/call",
-        "execution_stage_status": "ok",
-        "stage_trace": _dry_run_stage_trace(command=command),
-        "mcp_transport": "dry_run",
-        "dry_run": True,
-    }
-
-
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=str(HELPER_PATH), description="CURe-managed ChunkHound helper")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("preflight")
-
-    search_parser = subparsers.add_parser("search")
-    search_parser.add_argument("query")
-    search_parser.add_argument("--type", choices=["regex", "semantic"], default="semantic")
-    search_parser.add_argument("--path")
-    search_parser.add_argument("--page-size", type=int, default=10)
-    search_parser.add_argument("--offset", type=int, default=0)
-
-    research_parser = subparsers.add_parser("research")
-    research_parser.add_argument("query")
-    research_parser.add_argument("--path")
-    return parser
-
-
-def _daemon_meta() -> dict[str, Any]:
-    return daemon_metadata_payload(
-        REPO_DIR,
-        chunkhound_cwd=CHUNKHOUND_CWD,
-        binary=CHUNKHOUND_BIN,
-        timeout=_PREFLIGHT_STAGE_TIMEOUTS["daemon_metadata"],
-    )
+        })
+    return payload
 
 
 def main() -> int:
     args = build_parser().parse_args()
     if _dry_run_enabled():
         return _emit(_dry_run_payload(args), exit_code=0)
-    if args.command == "preflight":
-        try:
-            payload = run_chunkhound_mcp_preflight_payload(
-                CHUNKHOUND_CONFIG,
-                REPO_DIR,
-                cwd=CHUNKHOUND_CWD,
-                binary=CHUNKHOUND_BIN,
-                helper_path=HELPER_PATH,
-                stage_timeouts=_PREFLIGHT_STAGE_TIMEOUTS,
-                transport_modes=_TRANSPORT_MODES,
-                heartbeat_provider=_REVIEW_PROVIDER,
-                heartbeat_interval=_HEARTBEAT_INTERVAL_SECONDS,
-            )
-        except Exception as exc:
-            daemon_meta = _daemon_meta()
-            return _emit({
-                "ok": False,
-                "command": "preflight",
-                "error": str(exc),
-                "helper_path": str(HELPER_PATH),
-                "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
-                "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
-                "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
-                "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
-                "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
-                "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
-                "daemon_pid": daemon_meta.get("daemon_pid"),
-                "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
-                "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
-                "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
-            }, exit_code=1)
-        return _emit(payload, exit_code=0 if payload.get("ok") else 1)
+    endpoint = str(os.environ.get(_BROKER_ENDPOINT_ENV) or "").strip()
+    if not endpoint:
+        return _emit({"ok": False, "command": args.command, "error": "coordinator helper broker is unavailable"}, exit_code=1)
     try:
-        tool_name, arguments = _tool_arguments(args)
-        payload = run_chunkhound_tool_payload(
-            CHUNKHOUND_CONFIG,
-            REPO_DIR,
-            tool_name,
-            arguments,
-            cwd=CHUNKHOUND_CWD,
-            binary=CHUNKHOUND_BIN,
-            helper_path=HELPER_PATH,
-            stage_timeouts=_PREFLIGHT_STAGE_TIMEOUTS,
-            tool_timeouts=_TOOL_CALL_TIMEOUTS,
-            transport_modes=_TRANSPORT_MODES,
-            heartbeat_provider=_REVIEW_PROVIDER,
-            heartbeat_interval=_HEARTBEAT_INTERVAL_SECONDS,
+        payload = request_helper_broker(
+            endpoint,
+            _request(args),
+            heartbeat_callback=(
+                _heartbeat_callback(args.command)
+                if args.command in {"search", "research"}
+                else None
+            ),
         )
-    except Exception as exc:
-        daemon_meta = _daemon_meta()
-        payload = {
-            "ok": False,
-            "command": args.command,
-            "tool_name": "code_research" if args.command == "research" else "search",
-            "query": getattr(args, "query", None),
-            "path": getattr(args, "path", None),
-            "error": str(exc),
-            "helper_path": str(HELPER_PATH),
-            "chunkhound_path": str(daemon_meta.get("chunkhound_path") or ""),
-            "chunkhound_runtime_python": str(daemon_meta.get("chunkhound_runtime_python") or ""),
-            "chunkhound_module_path": str(daemon_meta.get("chunkhound_module_path") or ""),
-            "daemon_lock_path": str(daemon_meta.get("daemon_lock_path") or ""),
-            "daemon_socket_path": str(daemon_meta.get("daemon_socket_path") or ""),
-            "daemon_log_path": str(daemon_meta.get("daemon_log_path") or ""),
-            "daemon_pid": daemon_meta.get("daemon_pid"),
-            "daemon_runtime_dir": str(daemon_meta.get("daemon_runtime_dir") or ""),
-            "daemon_registry_entry_path": str(daemon_meta.get("daemon_registry_entry_path") or ""),
-            "daemon_metadata_error": str(daemon_meta.get("daemon_metadata_error") or ""),
-        }
-    exit_code = _emit(payload, exit_code=0 if payload.get("ok") else 1)
-    return exit_code
+    except BaseException as exc:
+        payload = {"ok": False, "command": args.command, "error": exc.__class__.__name__}
+    payload["helper_path"] = str(HELPER_PATH)
+    return _emit(payload, exit_code=0 if payload.get("ok") else 1)
 
 
 if __name__ == "__main__":
@@ -1165,13 +1081,30 @@ if __name__ == "__main__":
         .replace("__CHUNKHOUND_CONFIG_JSON__", json.dumps(str(helper_cfg)))
         .replace("__CHUNKHOUND_DB_JSON__", json.dumps(str(helper_db)))
         .replace("__PROVIDER_JSON__", json.dumps(provider))
+        .replace(
+            "__EXPECTED_ENVIRONMENT_DIGEST_JSON__",
+            repr(expected_environment_digest),
+        )
+        .replace(
+            "__EXPECTED_RESOLVED_EXECUTABLE_JSON__",
+            repr(
+                str(expected_resolved_executable)
+                if expected_resolved_executable is not None
+                else None
+            ),
+        )
     )
     helper_path.write_text(script, encoding="utf-8")
     helper_path.chmod(0o755)
     return helper_path
 
 
-SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
+SENSITIVE_STAGED_PATH_KEYS = (
+    "gh_config_dir",
+    "jira_config_file",
+    "netrc",
+    "chunkhound_session_launch_context",
+)
 
 
 def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
@@ -1185,7 +1118,10 @@ def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
         if key in {"jira_config_file", "netrc"}:
             target = target.parent
         try:
-            if target.is_dir():
+            if key == "chunkhound_session_launch_context":
+                cleanup_session_launch_context(target)
+                target.parent.rmdir()
+            elif target.is_dir():
                 shutil.rmtree(target, ignore_errors=True)
             elif target.exists():
                 target.unlink(missing_ok=True)
@@ -1236,6 +1172,9 @@ def prepare_review_agent_runtime(
     enable_mcp: bool,
     interactive: bool,
     paths: ReviewflowPaths,
+    session_launch_context_path: Path | None = None,
+    expected_environment_digest: str | None = None,
+    expected_resolved_executable: str | Path | None = None,
 ) -> dict[str, Any]:
     transport = str(resolved.get("transport") or "").strip().lower()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -1246,10 +1185,25 @@ def prepare_review_agent_runtime(
         config_path=reviewflow_config_path,
         config_enabled=config_enabled,
     )
-    env = build_curated_subprocess_env(extra_env=base_env)
+    env = build_curated_provider_env(extra_env=base_env)
     env = augment_cli_provider_session_env(env=env, provider=provider)
-    env.update(_string_dict(resolved.get("env")))
-    env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
+    resolved_env = _string_dict(resolved.get("env"))
+    if SESSION_LAUNCH_CONTEXT_ENV in resolved_env:
+        raise ReviewflowError(
+            "The reserved ChunkHound session launch-context environment key cannot be set by a provider preset."
+        )
+    env.update(resolved_env)
+    for key in NATIVE_CHUNKHOUND_ENV_KEYS:
+        env.pop(key, None)
+    if session_launch_context_path is not None:
+        env[SESSION_LAUNCH_CONTEXT_ENV] = str(session_launch_context_path)
+    env, staged_paths = _stage_review_auth_support(
+        work_dir=work_dir, repo_dir=repo_dir, env=env
+    )
+    if session_launch_context_path is not None:
+        staged_paths["chunkhound_session_launch_context"] = str(
+            session_launch_context_path
+        )
     chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     if chunkhound_dry_run:
         env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
@@ -1307,6 +1261,8 @@ def prepare_review_agent_runtime(
                 chunkhound_db_path=chunkhound_db_path,
                 chunkhound_cwd=chunkhound_cwd,
                 provider="codex",
+                expected_environment_digest=expected_environment_digest,
+                expected_resolved_executable=expected_resolved_executable,
             )
             env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
             runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
