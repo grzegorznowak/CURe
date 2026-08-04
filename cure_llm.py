@@ -10,6 +10,7 @@ import shutil
 import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from cure_errors import ReviewflowError
 from cure_output import (
@@ -141,14 +142,24 @@ def _flush_progress(progress: Any) -> None:
         except Exception:
             pass
 
-def _resolve_codex_events_log_path(*, progress: Any, repo_dir: Path) -> Path:
+def _resolve_codex_events_log_path(
+    *, progress: Any, repo_dir: Path, run_token: str | None = None
+) -> Path:
     meta = _progress_meta_dict(progress)
     logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
     raw_path = str(logs.get("codex_events") or "").strip()
     if raw_path:
-        path = Path(raw_path)
-        return ((repo_dir.parent / path).resolve() if not path.is_absolute() else path.resolve())
-    path = (repo_dir.parent / "work" / "logs" / "codex.events.jsonl").resolve()
+        configured_path = Path(raw_path)
+        configured_path = (
+            (repo_dir.parent / configured_path).resolve()
+            if not configured_path.is_absolute()
+            else configured_path.resolve()
+        )
+        logs_dir = configured_path.parent
+    else:
+        logs_dir = (repo_dir.parent / "work" / "logs").resolve()
+    token = str(run_token or uuid4().hex).strip()
+    path = (logs_dir / f"codex.events.{token}.jsonl").resolve()
     if isinstance(meta, dict):
         meta.setdefault("logs", {})["codex_events"] = str(path)
         _flush_progress(progress)
@@ -415,10 +426,15 @@ def run_codex_exec(
     )
     started_at = datetime.now(timezone.utc)
     out = active_output()
-    codex_events_log_path = _resolve_codex_events_log_path(progress=progress, repo_dir=repo_dir)
+    codex_run_token = uuid4().hex
+    codex_events_log_path = _resolve_codex_events_log_path(
+        progress=progress,
+        repo_dir=repo_dir,
+        run_token=codex_run_token,
+    )
     codex_display_log_path = _resolve_codex_display_log_path(progress=progress, repo_dir=repo_dir)
     codex_root = Path(env.get("CODEX_HOME") or (real_user_home_dir() / ".codex")).resolve()
-    events_start_offset = _path_size(codex_events_log_path)
+    events_start_offset = _path_size(codex_events_log_path) or 0
     artifact_override: dict[str, str | None] = {"text": None}
     _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
 

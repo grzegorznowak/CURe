@@ -150,8 +150,11 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
             review_calls.append(output_path.name)
             session_dir = Path(str(kwargs["repo_dir"])).parent
             assert not list(session_dir.glob(".pr-context-orientation-runtime-*"))
+            events_logs = list(
+                (session_dir / "work" / "logs").glob("codex.events*.jsonl")
+            )
             for path in (
-                session_dir / "work" / "logs" / "codex.events.jsonl",
+                *events_logs,
                 session_dir / "work" / "logs" / "codex.log",
                 session_dir / "meta.json",
                 inherited_seed,
