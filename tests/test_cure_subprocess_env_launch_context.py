@@ -163,7 +163,7 @@ def test_writer_rejects_accessible_parent_without_disclosing_environment(
     launch_fixture: LaunchFixture,
     parent_mode: int,
 ) -> None:
-    secret = "writer-parent-secret"
+    secret = "writer-parent-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     launch_fixture.parent.chmod(parent_mode)
     _api("write_session_launch_context")
@@ -181,7 +181,7 @@ def test_writer_fails_closed_when_fresh_parent_is_swapped_after_real_mkdir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A1: successful fresh-parent creation must stay bound through acquisition."""
-    secret = "post-mkdir-parent-swap-secret"
+    secret = "post-mkdir-parent-swap-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     fresh_parent = tmp_path / "fresh-session-owned"
     fixture = LaunchFixture(
@@ -256,7 +256,7 @@ def test_writer_remains_anchored_when_parent_is_swapped_at_final_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The validated parent capability, not its replaceable pathname, owns output."""
-    secret = "writer-parent-swap-secret"
+    secret = "writer-parent-swap-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     fixture = LaunchFixture(
         parent=launch_fixture.parent,
@@ -309,7 +309,7 @@ def test_writer_rejects_symlink_parent_without_following_it(
     launch_fixture: LaunchFixture,
     tmp_path: Path,
 ) -> None:
-    secret = "writer-symlink-parent-secret"
+    secret = "writer-symlink-parent-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     linked_parent = tmp_path / "linked-session"
     linked_parent.symlink_to(launch_fixture.parent, target_is_directory=True)
@@ -329,7 +329,7 @@ def test_writer_never_overwrites_preexisting_destination(
     tmp_path: Path,
     destination_kind: str,
 ) -> None:
-    environment_secret = "preexisting-writer-environment-secret"
+    environment_secret = "preexisting-writer-environment-secret"  # pragma: allowlist secret
     sentinel = "preexisting-destination-must-remain-byte-exact"
     launch_fixture.environment["OPENAI_API_KEY"] = environment_secret
     external = tmp_path / "external-target"
@@ -358,7 +358,7 @@ def test_loader_fails_closed_without_disclosing_payload_or_exception_chain(
     launch_fixture: LaunchFixture,
     payload_kind: str,
 ) -> None:
-    secret = "malformed-loader-payload-secret"
+    secret = "malformed-loader-payload-secret"  # pragma: allowlist secret
     if payload_kind == "malformed":
         launch_fixture.path.write_text("not-json:" + secret, encoding="utf-8")
     else:
@@ -381,7 +381,7 @@ def test_loader_rejects_unsafe_file_and_parent_metadata(
     tmp_path: Path,
     unsafe_metadata: str,
 ) -> None:
-    secret = "loader-metadata-environment-secret"
+    secret = "loader-metadata-environment-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     fixture = LaunchFixture(
         parent=launch_fixture.parent,
@@ -416,8 +416,8 @@ def test_loader_rejects_unsafe_file_and_parent_metadata(
 def test_loader_recomputes_environment_digest_and_rejects_tampered_envelope(
     launch_fixture: LaunchFixture,
 ) -> None:
-    original_secret = "digest-original-secret-AA"
-    tampered_secret = "digest-tampered-secret-BB"
+    original_secret = "digest-original-secret-AA"  # pragma: allowlist secret
+    tampered_secret = "digest-tampered-secret-BB"  # pragma: allowlist secret
     assert len(original_secret) == len(tampered_secret)
     launch_fixture.environment["OPENAI_API_KEY"] = original_secret
     fixture = LaunchFixture(
@@ -451,7 +451,7 @@ def test_loader_rejects_wrong_trusted_digest_and_executable(
     launch_fixture: LaunchFixture,
     tmp_path: Path,
 ) -> None:
-    secret = "trusted-binding-loader-secret"
+    secret = "trusted-binding-loader-secret"  # pragma: allowlist secret
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     fixture = LaunchFixture(
         parent=launch_fixture.parent,
@@ -496,7 +496,7 @@ def test_publication_capability_cleans_original_inode_after_parent_rename(
     tmp_path: Path,
 ) -> None:
     """A2: use publication-time cleanup authority; path fallback only exposes RED."""
-    secret = "cleanup-original-parent-inode-secret"
+    secret = "cleanup-original-parent-inode-secret"  # pragma: allowlist secret
     replacement_sentinel = "replacement-basename-must-survive-byte-exact"
     launch_fixture.environment["OPENAI_API_KEY"] = secret
     fixture = LaunchFixture(
@@ -568,7 +568,7 @@ def test_coordinator_broker_owns_launch_authority_against_substituted_client(
     """B: an untrusted client may request work, never provide launch authority."""
     import cure_chunkhound
 
-    foreign_secret = "self-consistent-foreign-broker-secret"
+    foreign_secret = "self-consistent-foreign-broker-secret"  # pragma: allowlist secret
     trusted_repo = tmp_path / "trusted-repo"
     trusted_repo.mkdir()
     trusted_config = trusted_repo / "chunkhound.json"
@@ -1346,17 +1346,17 @@ def test_codex_provider_env_preserves_provider_auth_and_strips_only_native_secre
     ambient = {
         "HOME": str(tmp_path),
         "PATH": "/usr/bin",
-        "OPENAI_API_KEY": "codex-provider-auth",
-        "CHUNKHOUND_EMBEDDING__API_KEY": "embedding-secret",
-        "CHUNKHOUND_LLM_API_KEY": "llm-secret",
-        "VOYAGE_API_KEY": "voyage-native-secret",
+        "OPENAI_API_KEY": "codex-provider-auth",  # pragma: allowlist secret
+        "CHUNKHOUND_EMBEDDING__API_KEY": "embedding-secret",  # pragma: allowlist secret
+        "CHUNKHOUND_LLM_API_KEY": "llm-secret",  # pragma: allowlist secret
+        "VOYAGE_API_KEY": "voyage-native-secret",  # pragma: allowlist secret
     }
     provider_extras = {
         "CODEX_HOME": str(tmp_path / "codex-home"),
         "CURE_PROVIDER_TRACE": "provider-extra",
-        "CHUNKHOUND_EMBEDDING__API_KEY": "preset-embedding-secret",
-        "CHUNKHOUND_LLM_API_KEY": "preset-llm-secret",
-        "VOYAGE_API_KEY": "preset-voyage-secret",
+        "CHUNKHOUND_EMBEDDING__API_KEY": "preset-embedding-secret",  # pragma: allowlist secret
+        "CHUNKHOUND_LLM_API_KEY": "preset-llm-secret",  # pragma: allowlist secret
+        "VOYAGE_API_KEY": "preset-voyage-secret",  # pragma: allowlist secret
     }
     import cure_llm
 
@@ -1512,7 +1512,7 @@ def test_cleanup_propagates_non_enoent_as_sanitized_failure(
     launch_fixture: LaunchFixture,
 ) -> None:
     cleanup = _api("cleanup_session_launch_context")
-    secret = "cleanup-directory-name-secret"
+    secret = "cleanup-directory-name-secret"  # pragma: allowlist secret
     non_unlinkable = launch_fixture.parent / secret
     non_unlinkable.mkdir(mode=0o700)
 

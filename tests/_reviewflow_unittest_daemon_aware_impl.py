@@ -3835,7 +3835,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         ambient = {
             "PATH": os.environ.get("PATH", "/usr/bin"),
             "HOME": os.environ.get("HOME", "/home/test"),
-            "VOYAGE_API_KEY": "voyage-session-value",
+            "VOYAGE_API_KEY": "voyage-session-value",  # pragma: allowlist secret
             provider_session_key: "provider-session-value",
             ambient_unrelated_key: "must-not-reach-child",
         }
@@ -4277,7 +4277,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         ambient = {
             "PATH": os.environ.get("PATH", "/usr/bin"),
             "HOME": os.environ.get("HOME", "/home/test"),
-            "VOYAGE_API_KEY": "voyage-session-value",
+            "VOYAGE_API_KEY": "voyage-session-value",  # pragma: allowlist secret
             provider_session_key: "provider-session-value",
             ambient_unrelated_key: "must-not-reach-child",
         }
@@ -5972,7 +5972,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 "query_ready": False,
                 "scan_progress": {
                     "backend": "watchman",
-                    "api_key": "REDACTED",
+                    "api_key": "REDACTED",  # pragma: allowlist secret
                 },
             },
         )

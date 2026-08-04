@@ -757,12 +757,12 @@ def test_provider_overrides_cannot_restore_native_chunkhound_credentials(
     inherited = {
         "HOME": str(tmp_path),
         "PATH": "/usr/bin",
-        "OPENAI_API_KEY": "provider-auth",
+        "OPENAI_API_KEY": "provider-auth",  # pragma: allowlist secret
         **dict.fromkeys(native_keys, "ambient-native"),
     }
     extras = {
         "CURE_PROVIDER_EXTRA": "kept",
-        "OPENAI_API_KEY": "preset-provider-auth",
+        "OPENAI_API_KEY": "preset-provider-auth",  # pragma: allowlist secret
         **dict.fromkeys(native_keys, "preset-native"),
     }
     env = build_curated_provider_env(inherited_env=inherited, extra_env=extras)
@@ -770,7 +770,7 @@ def test_provider_overrides_cannot_restore_native_chunkhound_credentials(
     assert env["HOME"] == str(tmp_path)
     assert env["PATH"] == "/usr/bin"
     assert env["CURE_PROVIDER_EXTRA"] == "kept"
-    assert env["OPENAI_API_KEY"] == "preset-provider-auth"
+    assert env["OPENAI_API_KEY"] == "preset-provider-auth"  # pragma: allowlist secret
     assert not set(native_keys) & set(env)
 
 
@@ -788,7 +788,7 @@ def test_auxiliary_provider_routes_cannot_restore_native_chunkhound_credentials(
         inherited_env={
             "HOME": str(tmp_path),
             "PATH": "/usr/bin",
-            "OPENAI_API_KEY": "provider-auth",
+            "OPENAI_API_KEY": "provider-auth",  # pragma: allowlist secret
         }
     )
     env = reviewflow.apply_llm_env(
@@ -803,7 +803,7 @@ def test_auxiliary_provider_routes_cannot_restore_native_chunkhound_credentials(
     )
 
     assert env["CURE_AUXILIARY_ROUTE"] == route
-    assert env["OPENAI_API_KEY"] == "provider-auth"
+    assert env["OPENAI_API_KEY"] == "provider-auth"  # pragma: allowlist secret
     assert not set(native_keys) & set(env)
 
 
