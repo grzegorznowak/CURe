@@ -9143,6 +9143,20 @@ def _run_review_intelligence_preflight(
         )
 
 
+def _chunkhound_proof_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact, secret-free fingerprint of one helper output payload."""
+    bound = dict(payload)
+    bound.pop("broker_record_id", None)
+    bound.pop("helper_path", None)
+    return {
+        "broker_record_id": str(payload.get("broker_record_id") or ""),
+        "operation": str(payload.get("command") or payload.get("tool_name") or ""),
+        "digest": hashlib.sha256(
+            json.dumps(bound, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+    }
+
+
 def _enforce_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
@@ -9165,6 +9179,8 @@ def _enforce_chunkhound_tool_proof(
         prompt_template_name=template_name,
         adapter_meta=adapter_meta,
     )
+AD
+(fix: whole-file broker proof fallback and proof failure diagnostics)
     if report is None or bool(report.get("valid")):
         return report
     label = review_stage.replace("_", " ")
@@ -9489,6 +9505,7 @@ Return the final review in the same format as the draft. Integrate validated con
 
 
 _CHUNKHOUND_READINESS_EVIDENCE_FILENAME = "chunkhound_readiness_failure.json"
+_CHUNKHOUND_PROOF_DIAGNOSTICS_FILENAME = "chunkhound_proof_failure.json"
 _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES = (
     NativeStatusReadinessError,
     ExpectedSessionReadinessTimeoutError,
