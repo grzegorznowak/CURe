@@ -113,9 +113,11 @@ from cure_chunkhound_lifecycle import (
     ExpectedSessionReadinessError,
     ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
+    LaunchIdentity,
     NativeSearchWitnessReadinessError,
     NativeStatusReadinessError,
     PreNativeSpawnLeaseOpenError,
+    _STATUS_KEYS,
     assert_daemon_log_startup_precondition,
     build_launch_identity,
     observe_native_daemon_generation,
@@ -9532,11 +9534,174 @@ Return the final review in the same format as the draft. Integrate validated con
     return run_llm(reconcile_prompt)
 
 
+_CHUNKHOUND_READINESS_EVIDENCE_FILENAME = "chunkhound_readiness_failure.json"
+_CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES = (
+    NativeStatusReadinessError,
+    ExpectedSessionReadinessTimeoutError,
+    NativeSearchWitnessReadinessError,
+)
+
+
+def _iter_exception_causes(exc: BaseException) -> list[BaseException]:
+    """Walk the raise-cause chain, bounded and cycle-safe, without messages."""
+    causes: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc.__cause__ or exc.__context__
+    while current is not None and len(causes) < 4:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        causes.append(current)
+        current = current.__cause__ or current.__context__
+    return causes
+
+
+def _probe_chunkhound_environment(
+    *,
+    identity: LaunchIdentity | None,
+    env: Mapping[str, str] | None,
+    sandbox_dir: Path,
+) -> dict[str, Any]:
+    """Best-effort, side-effect-free probes that explain readiness failure causes."""
+
+    def run_version_probe(command: list[str]) -> dict[str, object]:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        output = (completed.stdout or completed.stderr or "").strip()
+        if output:
+            return {"version": output[:300]}
+        return {"error": f"exit status {completed.returncode}, no output"}
+
+    probes: dict[str, Any] = {}
+    resolved_binary: str | None = None
+    if identity is not None:
+        resolved = getattr(identity, "resolved_executable", None)
+        if isinstance(resolved, Path):
+            resolved_binary = str(resolved)
+    probes["chunkhound"] = {
+        "binary": resolved_binary,
+        "on_path": shutil.which("chunkhound") is not None,
+    }
+    if resolved_binary is not None:
+        probes["chunkhound"]["exists"] = os.path.isfile(resolved_binary)
+        probes["chunkhound"]["version"] = run_version_probe(
+            [resolved_binary, "--version"]
+        )
+    watchman = shutil.which("watchman")
+    probes["watchman"] = {"on_path": watchman is not None}
+    if watchman is not None:
+        probes["watchman"]["version"] = run_version_probe([watchman, "--version"])
+    relevant_keys = sorted(
+        key
+        for key in (env or {})
+        if "CHUNKHOUND" in key.upper() or "VOYAGE" in key.upper()
+    )
+    probes["env_keys"] = [
+        {"name": key, "set": bool((env or {}).get(key))} for key in relevant_keys
+    ]
+    probes["tmp_writable"] = os.access("/tmp", os.W_OK)
+    probes["socket_dir_parent_exists"] = Path(
+        "/tmp/chunkhound-daemon-sockets"
+    ).is_dir()
+    if identity is not None:
+        root = getattr(identity, "canonical_root", None)
+        if isinstance(root, Path):
+            probes["daemon_log_exists"] = (root / ".chunkhound" / "daemon.log").exists()
+    try:
+        probes["sandbox_disk_free_bytes"] = shutil.disk_usage(sandbox_dir).free
+    except OSError:
+        pass
+    return probes
+
+
+def _collect_chunkhound_readiness_evidence(
+    *,
+    stage: str,
+    category: str,
+    exc: Exception,
+    identity: LaunchIdentity | None,
+    receipt: ExpectedSessionReceiptV1 | None,
+    env: Mapping[str, str] | None,
+    sandbox_dir: Path,
+) -> dict[str, Any]:
+    """Serialize everything a user needs to reason about a readiness failure."""
+    message = str(exc)[:500]
+    if isinstance(exc, _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES):
+        exception_section: dict[str, Any] = {
+            "type": type(exc).__name__,
+            "message": message,
+        }
+    else:
+        # Only the typed readiness family is guaranteed fixed public text by
+        # construction; other exceptions could carry dynamic detail, so their
+        # message is never persisted (same guarantee the meta diagnostic keeps).
+        exception_section = {
+            "type": type(exc).__name__,
+            "message_chars": len(message),
+            "message": "<not persisted: not fixed public text>",
+        }
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "raised_at": _utc_now_iso(),
+        "stage": stage,
+        "category": category,
+        "exception": exception_section,
+        "causes": [
+            {"type": type(cause).__name__}
+            for cause in _iter_exception_causes(exc)
+        ],
+    }
+    native_status: dict[str, Any] = {}
+    status = getattr(exc, "status", None)
+    if isinstance(status, dict):
+        native_status["last_status"] = status
+    else:
+        payload = getattr(exc, "status_payload", None)
+        if isinstance(payload, str):
+            # Raw text is persisted only when no parsed status exists (e.g. a
+            # malformed response); parsed statuses are key-redacted on write.
+            native_status["last_status_payload"] = payload[:4096]
+    poll_evidence = getattr(exc, "poll_evidence", None)
+    if isinstance(poll_evidence, dict):
+        native_status["poll"] = poll_evidence
+    if native_status:
+        evidence["native_status"] = native_status
+    if identity is not None:
+        evidence["identity"] = {
+            "resolved_executable": str(identity.resolved_executable),
+            "canonical_root": str(identity.canonical_root),
+            "resolved_config_path": str(identity.resolved_config_path),
+            "resolved_database_path": str(identity.resolved_database_path),
+            "cwd": str(identity.cwd),
+        }
+    if receipt is not None:
+        evidence["receipt"] = {
+            "schema_version": receipt.schema_version,
+            "total_chunks": receipt.total_chunks,
+        }
+    evidence["environment"] = _probe_chunkhound_environment(
+        identity=identity, env=env, sandbox_dir=sandbox_dir
+    )
+    evidence["expected_status_schema"] = sorted(_STATUS_KEYS)
+    return evidence
+
+
 def _raise_chunkhound_readiness_failure(
     *,
     progress: SessionProgress,
     stage: str,
     exc: Exception,
+    identity: LaunchIdentity | None = None,
+    receipt: ExpectedSessionReceiptV1 | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     if isinstance(exc, NativeSearchWitnessReadinessError):
         category = "witness_search"
@@ -9549,9 +9714,38 @@ def _raise_chunkhound_readiness_failure(
     diagnostic = {"stage": stage, "category": category}
     with progress.mutate() as meta:
         meta["chunkhound_readiness_failure"] = diagnostic
+    evidence = _collect_chunkhound_readiness_evidence(
+        stage=stage,
+        category=category,
+        exc=exc,
+        identity=identity,
+        receipt=receipt,
+        env=env,
+        sandbox_dir=progress.meta_path.parent,
+    )
+    evidence_path = progress.meta_path.with_name(
+        _CHUNKHOUND_READINESS_EVIDENCE_FILENAME
+    )
+    try:
+        write_redacted_json(evidence_path, evidence)
+    except (OSError, UnicodeError) as write_exc:
+        log(
+            f"ChunkHound readiness evidence could not be written: {write_exc}",
+            quiet=progress.quiet,
+        )
+        evidence_path = None
+    location = (
+        f"Evidence written to {evidence_path}" if evidence_path is not None else ""
+    )
+    log(
+        f"ChunkHound daemon startup/readiness failed "
+        f"(stage={stage}; category={category}). {location}".rstrip(),
+        quiet=progress.quiet,
+    )
+    suffix = f" {location}" if evidence_path is not None else ""
     raise ReviewflowError(
         "ChunkHound daemon startup/readiness failed "
-        f"(stage={stage}; category={category})."
+        f"(stage={stage}; category={category}).{suffix}"
     ) from None
 
 
@@ -10596,6 +10790,9 @@ def _pr_flow_impl(
                             progress=progress,
                             stage="launch_validation",
                             exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
                         )
 
                     candidate_lease = ChunkHoundDaemonLease(
@@ -10626,6 +10823,9 @@ def _pr_flow_impl(
                             progress=progress,
                             stage="lease_open",
                             exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
                         )
                     except Exception as exc:
                         try:
@@ -10640,6 +10840,9 @@ def _pr_flow_impl(
                             progress=progress,
                             stage="lease_open",
                             exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
                         )
 
                     try:
@@ -10664,6 +10867,9 @@ def _pr_flow_impl(
                             progress=progress,
                             stage="generation_attestation",
                             exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
                         )
 
                     expected_daemon_generation = opened_generation
@@ -10699,6 +10905,9 @@ def _pr_flow_impl(
                             progress=progress,
                             stage=failure_stage,
                             exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
                         )
                     break
 
