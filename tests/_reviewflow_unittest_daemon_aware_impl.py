@@ -4915,7 +4915,9 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                         )
                     public_text = (
                         "ChunkHound daemon startup/readiness failed "
-                        f"(stage={stage}; category={stage})."
+                        f"(stage={stage}; category={stage}). "
+                        "Evidence written to "
+                        f"{meta_path.with_name('chunkhound_readiness_failure.json')}"
                     )
                     self.assertEqual(str(caught.exception), public_text)
                     persisted = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -4925,6 +4927,21 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     )
                     self.assertNotIn(raw_detail, str(caught.exception))
                     self.assertNotIn(raw_detail, json.dumps(persisted))
+                    evidence_path = meta_path.with_name(
+                        "chunkhound_readiness_failure.json"
+                    )
+                    self.assertTrue(evidence_path.is_file())
+                    evidence_text = evidence_path.read_text(encoding="utf-8")
+                    self.assertNotIn(raw_detail, evidence_text)
+                    evidence = json.loads(evidence_text)
+                    self.assertEqual(
+                        evidence["exception"],
+                        {
+                            "type": "ExpectedSessionReadinessError",
+                            "message_chars": len(raw_detail),
+                            "message": "<not persisted: not fixed public text>",
+                        },
+                    )
 
     def test_pr_flow_witness_no_hit_reports_safe_distinct_category(self) -> None:
         """A real exact-witness no-hit is attributable without leaking payload data."""
@@ -5047,6 +5064,86 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 lifecycle.ExpectedSessionReadinessError,
             )
         )
+
+    def test_keeper_readiness_failure_writes_evidence_file_without_secrets(
+        self,
+    ) -> None:
+        """Terminal native readiness failures persist actionable evidence locally."""
+        degraded = {
+            "status": "degraded",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {
+                "backend": "watchman",
+                "api_key": "evidence-secret-TOKEN-value",  # pragma: allowlist secret
+            },
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root) / "degraded-evidence-route"
+            result = self._run_real_readiness_route(
+                root=root,
+                statuses=(degraded,),
+                expect_error=(
+                    r"ChunkHound daemon startup/readiness failed "
+                    r"\(stage=expected_session; category=native_status\)\. "
+                    r"Evidence written to .*chunkhound_readiness_failure\.json"
+                ),
+            )
+            session_dir = next((root / "sandboxes").iterdir())
+            evidence_path = session_dir / "chunkhound_readiness_failure.json"
+            self.assertTrue(evidence_path.is_file())
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence_text = evidence_path.read_text(encoding="utf-8")
+
+        self.assertEqual(evidence["schema_version"], 1)
+        self.assertEqual(evidence["stage"], "expected_session")
+        self.assertEqual(evidence["category"], "native_status")
+        self.assertEqual(
+            evidence["exception"],
+            {
+                "type": "NativeStatusReadinessError",
+                "message": "native ChunkHound daemon is not strictly query-ready",
+            },
+        )
+        self.assertEqual(evidence["causes"], [])
+        native_status = evidence["native_status"]
+        self.assertEqual(
+            native_status["last_status"],
+            {
+                "status": "degraded",
+                "server_version": "fixture-1",
+                "query_ready": False,
+                "scan_progress": {
+                    "backend": "watchman",
+                    "api_key": "REDACTED",
+                },
+            },
+        )
+        self.assertNotIn("last_status_payload", native_status)
+        poll = native_status["poll"]
+        self.assertEqual(poll["polls"], 0)
+        self.assertEqual(poll["observations"], [])
+        self.assertEqual(poll["timeout_seconds"], 600.0)
+        self.assertIsInstance(poll["elapsed_seconds"], float)
+        identity = evidence["identity"]
+        self.assertTrue(identity["resolved_executable"].endswith("chunkhound"))
+        self.assertTrue(identity["canonical_root"])
+        self.assertEqual(evidence["receipt"], {"schema_version": 1, "total_chunks": 1})
+        self.assertEqual(
+            evidence["expected_status_schema"],
+            sorted({"status", "server_version", "query_ready", "scan_progress"}),
+        )
+        environment = evidence["environment"]
+        self.assertTrue(environment["chunkhound"]["binary"].endswith("chunkhound"))
+        self.assertIn("env_keys", environment)
+        self.assertIn("tmp_writable", environment)
+        self.assertIn("sandbox_disk_free_bytes", environment)
+        self.assertEqual(
+            result["meta"]["chunkhound_readiness_failure"],
+            {"stage": "expected_session", "category": "native_status"},
+        )
+        self.assertNotIn("evidence-secret-TOKEN-value", evidence_text)
+        self.assertNotIn("evidence-secret-TOKEN-value", json.dumps(result["meta"]))
 
     def test_route_synthetic_typed_open_failure_retries_once_before_model_work(
         self,
@@ -7260,6 +7357,223 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                 self.assertTrue(
                     issubclass(error_type, lifecycle.ExpectedSessionReadinessError)
                 )
+
+    def test_native_status_failure_carries_raw_payload_and_last_status(self) -> None:
+        """Failure evidence rides on the typed error: payload text + parsed status."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+
+        def text_response(text: str) -> dict[str, object]:
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": False,
+                },
+            }
+
+        malformed = "{" + "not-json"
+        wrong_keys = {"status": "ready", "server_version": "fixture-1"}
+        degraded = {
+            "status": "degraded",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"backend": "watchman"},
+        }
+        cases = (
+            ("malformed", text_response(malformed), malformed, None),
+            (
+                "wrong-keys",
+                text_response(json.dumps(wrong_keys)),
+                json.dumps(wrong_keys),
+                wrong_keys,
+            ),
+            (
+                "degraded",
+                text_response(json.dumps(degraded)),
+                json.dumps(degraded),
+                degraded,
+            ),
+        )
+        for name, response, payload, status in cases:
+            with self.subTest(name=name):
+                session = mock.Mock()
+                session.request.return_value = response
+                with self.assertRaises(
+                    lifecycle.NativeStatusReadinessError
+                ) as caught:
+                    lifecycle._require_healthy_native_status(session)
+                self.assertEqual(caught.exception.status_payload, payload)
+                self.assertEqual(caught.exception.status, status)
+
+        transport = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "transport"},
+        }
+        session = mock.Mock()
+        session.request.return_value = transport
+        with self.assertRaises(lifecycle.NativeStatusReadinessError) as caught:
+            lifecycle._require_healthy_native_status(session)
+        self.assertIsNone(caught.exception.status_payload)
+        self.assertIsNone(caught.exception.status)
+
+        ready = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": True,
+            "scan_progress": {"query_ready_at": "fixture"},
+        }
+        observations: list[dict[str, object]] = []
+        session = mock.Mock()
+        session.request.return_value = text_response(json.dumps(ready))
+        signal = lifecycle._require_healthy_native_status(
+            session, observations=observations
+        )
+        self.assertIs(signal, lifecycle.NativeDaemonReadinessSignal.READY)
+        self.assertEqual(
+            observations,
+            [
+                {
+                    "signal": "READY",
+                    "status": "ready",
+                    "query_ready": True,
+                    "server_version": "fixture-1",
+                }
+            ],
+        )
+
+    def test_readiness_timeout_attaches_poll_evidence(self) -> None:
+        """Deadline exhaustion carries the full observation timeline on the error."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            _,
+            _,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        initializing = {
+            "status": "initializing",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        now = 20.0
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        def sleep(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            lease, identity, _ = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="poll-evidence-timeout",
+                daemon_status_sequence=(initializing,),
+            )
+            try:
+                with self.assertRaises(
+                    lifecycle.ExpectedSessionReadinessTimeoutError
+                ) as caught:
+                    lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=0.5,
+                        readiness_poll_interval_seconds=0.2,
+                        clock=clock,
+                        sleep=sleep,
+                    )
+                self.assertEqual(
+                    caught.exception.poll_evidence,
+                    {
+                        "polls": 3,
+                        "observations": [
+                            {
+                                "signal": "INITIALIZING",
+                                "status": "initializing",
+                                "query_ready": False,
+                                "server_version": "fixture-1",
+                            }
+                        ]
+                        * 3,
+                        "timeout_seconds": 0.5,
+                        "elapsed_seconds": 0.5,
+                    },
+                )
+            finally:
+                lease.close()
+
+    def test_terminal_status_failure_attaches_payload_and_poll_evidence(self) -> None:
+        """An immediate non-transient status failure keeps its raw payload."""
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            witness_type,
+            _,
+            _,
+            _,
+            _,
+        ) = self._api()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        contradictory = {
+            "status": "ready",
+            "server_version": "fixture-1",
+            "query_ready": False,
+            "scan_progress": {"query_ready_at": None},
+        }
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            lease, identity, _ = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="terminal-payload-evidence",
+                daemon_status=contradictory,
+            )
+            try:
+                with self.assertRaises(
+                    lifecycle.NativeStatusReadinessError
+                ) as caught:
+                    lease.adjudicate_expected_session(
+                        self._receipt(receipt_type, identity, total_chunks=1),
+                        witness=witness_type(
+                            relative_path="src/fixture.py", literal="needle[1]"
+                        ),
+                        readiness_timeout_seconds=1.0,
+                        readiness_poll_interval_seconds=0.2,
+                        clock=lambda: 10.0,
+                        sleep=lambda delay: None,
+                    )
+                self.assertEqual(caught.exception.status, contradictory)
+                self.assertEqual(
+                    json.loads(caught.exception.status_payload or "{}"),
+                    contradictory,
+                )
+                self.assertEqual(
+                    caught.exception.poll_evidence,
+                    {
+                        "polls": 0,
+                        "observations": [],
+                        "timeout_seconds": 1.0,
+                        "elapsed_seconds": 0.0,
+                    },
+                )
+            finally:
+                lease.close()
 
     def test_strict_status_envelope_and_health_fail_closed_before_search(self) -> None:
         (
