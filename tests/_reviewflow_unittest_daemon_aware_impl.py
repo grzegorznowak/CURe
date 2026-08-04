@@ -6002,6 +6002,162 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertNotIn("evidence-secret-TOKEN-value", evidence_text)
         self.assertNotIn("evidence-secret-TOKEN-value", json.dumps(result["meta"]))
 
+    def _broker_proof_events_file(
+        self, events_path: Path, payloads: list[dict[str, object]]
+    ) -> None:
+        lines = []
+        for payload in payloads:
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "command": (
+                                "/bin/bash -lc '\"$CURE_CHUNKHOUND_HELPER\" "
+                                f"{payload.get('command')} probe'"
+                            ),
+                            "aggregated_output": json.dumps(
+                                payload, sort_keys=True
+                            ),
+                        },
+                    },
+                    sort_keys=True,
+                )
+            )
+        events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _broker_search_payload(
+        self, *, record_id: str, query: str
+    ) -> dict[str, object]:
+        return {
+            "broker_record_id": record_id,
+            "helper_path": "/work/bin/cure-chunkhound",
+            "chunkhound_path": "/usr/local/bin/chunkhound",
+            "command": "search",
+            "tool_name": "search",
+            "ok": True,
+            "query": query,
+            "path": None,
+            "result": {
+                "results": [{"path": "src/fixture.py", "snippet": query}],
+                "pagination": {"offset": 0, "page_size": 10, "total_results": 1},
+            },
+            "execution_stage": "tools/call",
+            "execution_stage_status": "ok",
+        }
+
+    def _broker_payload_digest(self, payload: dict[str, object]) -> str:
+        bound = dict(payload)
+        bound.pop("broker_record_id", None)
+        bound.pop("helper_path", None)
+        return hashlib.sha256(
+            json.dumps(bound, sort_keys=True, default=str).encode()
+        ).hexdigest()
+
+    def test_broker_proof_falls_back_to_whole_file_when_slice_misses_payload(
+        self,
+    ) -> None:
+        """Parallel workers share one events log; a step slice can miss its own
+        helper payload. A strict whole-file scan must still prove the record."""
+        own_id = "owner-1111" + "0" * 44
+        foreign_id = "owner-2222" + "0" * 44
+        own = self._broker_search_payload(record_id=own_id, query="own")
+        foreign = self._broker_search_payload(record_id=foreign_id, query="foreign")
+        own_digest = self._broker_payload_digest(own)
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            events_path = root / "codex.events.jsonl"
+            self._broker_proof_events_file(events_path, [own, foreign])
+            own_line_len = len(
+                events_path.read_text(encoding="utf-8").splitlines()[0]
+            ) + 1
+            adapter_meta = {
+                "transport": "cli-codex",
+                "codex_events_path": str(events_path),
+                "codex_events_start_offset": own_line_len,
+                "codex_events_end_offset": events_path.stat().st_size,
+                "chunkhound_broker_required": True,
+                "chunkhound_broker_records": [
+                    {
+                        "record_id": own_id,
+                        "operation": "search",
+                        "result_digest": own_digest,
+                    }
+                ],
+            }
+            report = rf._enforce_chunkhound_tool_proof(
+                meta={},
+                work_dir=work_dir,
+                provider="codex",
+                review_stage="multipass_step",
+                prompt_template_name="mrereview_gh_local_big_step.md",
+                adapter_meta=adapter_meta,
+            )
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report["valid"])
+        self.assertIsNone(report["failure_reason"])
+        self.assertIn("search", report["observed_successful_calls"])
+
+    def test_broker_proof_failure_writes_diagnostics_file(self) -> None:
+        """A real no-match abort persists expected records vs observed payloads."""
+        own_id = "owner-1111" + "0" * 44
+        foreign_id = "owner-2222" + "0" * 44
+        own = self._broker_search_payload(record_id=own_id, query="own")
+        foreign = self._broker_search_payload(record_id=foreign_id, query="foreign")
+        own_digest = self._broker_payload_digest(own)
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            events_path = root / "codex.events.jsonl"
+            self._broker_proof_events_file(events_path, [foreign])
+            adapter_meta = {
+                "transport": "cli-codex",
+                "codex_events_path": str(events_path),
+                "codex_events_start_offset": 0,
+                "codex_events_end_offset": events_path.stat().st_size,
+                "chunkhound_broker_required": True,
+                "chunkhound_broker_records": [
+                    {
+                        "record_id": own_id,
+                        "operation": "search",
+                        "result_digest": own_digest,
+                    }
+                ],
+            }
+            with self.assertRaises(rf.ReviewflowError) as caught:
+                rf._enforce_chunkhound_tool_proof(
+                    meta={},
+                    work_dir=work_dir,
+                    provider="codex",
+                    review_stage="multipass_step",
+                    prompt_template_name="mrereview_gh_local_big_step.md",
+                    adapter_meta=adapter_meta,
+                )
+            diagnostics_path = work_dir / "chunkhound_proof_failure.json"
+            self.assertTrue(diagnostics_path.is_file())
+            diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                diagnostics["broker_records"],
+                [
+                    {
+                        "record_id": own_id,
+                        "operation": "search",
+                        "result_digest": own_digest,
+                    }
+                ],
+            )
+            self.assertEqual(diagnostics["slice"]["start_offset"], 0)
+            self.assertIn(
+                "helper output lacked a matching coordinator broker result record",
+                str(caught.exception),
+            )
+            self.assertIn("Diagnostics written to", str(caught.exception))
+
     def test_route_synthetic_typed_open_failure_retries_once_before_model_work(
         self,
     ) -> None:

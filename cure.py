@@ -9120,6 +9120,69 @@ def _run_review_intelligence_preflight(
         )
 
 
+def _chunkhound_proof_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact, secret-free fingerprint of one helper output payload."""
+    bound = dict(payload)
+    bound.pop("broker_record_id", None)
+    bound.pop("helper_path", None)
+    return {
+        "broker_record_id": str(payload.get("broker_record_id") or ""),
+        "operation": str(payload.get("command") or payload.get("tool_name") or ""),
+        "digest": hashlib.sha256(
+            json.dumps(bound, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+    }
+
+
+def _chunkhound_proof_record_reason(
+    record: dict[str, Any], whole_payloads: list[dict[str, Any]]
+) -> dict[str, str]:
+    """Why one coordinator record found no matching helper output payload."""
+    record_id = str(record.get("record_id") or "")
+    operation = str(record.get("operation") or "")
+    matching_id = [
+        payload for payload in whole_payloads if payload.get("broker_record_id") == record_id
+    ]
+    if not matching_id:
+        return {
+            "record_id": record_id,
+            "reason": "no helper output payload with this record id",
+        }
+    payload_operation = str(
+        matching_id[0].get("command") or matching_id[0].get("tool_name") or ""
+    )
+    if payload_operation == "code_research":
+        payload_operation = "research"
+    if operation == "code_research":
+        operation = "research"
+    if payload_operation != operation:
+        return {
+            "record_id": record_id,
+            "reason": f"operation mismatch (record={operation}, payload={payload_operation})",
+        }
+    return {
+        "record_id": record_id,
+        "reason": "digest mismatch (echoed payload differs from the broker record)",
+    }
+
+
+def _replace_last_chunkhound_validation_run(
+    work_dir: Path, report: dict[str, Any]
+) -> None:
+    """Keep the persisted validation artifact in sync with a whole-file report."""
+    report_path = (work_dir / "chunkhound_tool_validation.json").resolve()
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return
+        runs = payload.get("runs")
+        if isinstance(runs, list) and runs:
+            runs[-1] = report
+            write_redacted_json(report_path, payload)
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def _enforce_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
@@ -9148,69 +9211,176 @@ def _enforce_chunkhound_tool_proof(
         and bool(adapter_meta.get("chunkhound_broker_required"))
     ):
         broker_records = list(adapter_meta.get("chunkhound_broker_records") or [])
-        event_slice = b""
+        events_path: Path | None = None
+        start = 0
+        end = 0
         try:
             events_path = Path(str(adapter_meta.get("codex_events_path") or ""))
             start = int(adapter_meta.get("codex_events_start_offset") or 0)
             end = int(adapter_meta.get("codex_events_end_offset") or 0)
-            if events_path.is_file() and end > start >= 0:
-                with events_path.open("rb") as events_file:
-                    events_file.seek(start)
-                    event_slice = events_file.read(end - start)
-        except (OSError, TypeError, ValueError):
-            event_slice = b""
-        event_payloads: list[dict[str, Any]] = []
-        for raw_line in event_slice.splitlines():
-            try:
-                event = json.loads(raw_line)
-                item = event.get("item") if isinstance(event, dict) else None
-                output = item.get("aggregated_output") if isinstance(item, dict) else None
-                payload = (
-                    _parse_chunkhound_helper_output(output)
-                    if isinstance(output, str)
-                    else None
-                )
-                if isinstance(payload, dict):
-                    event_payloads.append(payload)
-            except (TypeError, ValueError):
-                continue
-        matched_record = False
-        for record in broker_records:
-            if not isinstance(record, dict):
-                continue
+        except (TypeError, ValueError):
+            events_path = None
+
+        def _event_payloads_from_bytes(raw: bytes) -> list[dict[str, Any]]:
+            payloads: list[dict[str, Any]] = []
+            for raw_line in raw.splitlines():
+                try:
+                    event = json.loads(raw_line)
+                    item = event.get("item") if isinstance(event, dict) else None
+                    output = (
+                        item.get("aggregated_output")
+                        if isinstance(item, dict)
+                        else None
+                    )
+                    payload = (
+                        _parse_chunkhound_helper_output(output)
+                        if isinstance(output, str)
+                        else None
+                    )
+                    if isinstance(payload, dict):
+                        payloads.append(payload)
+                except (TypeError, ValueError):
+                    continue
+            return payloads
+
+        def _read_slice() -> bytes:
+            if (
+                events_path is None
+                or not events_path.is_file()
+                or not end > start >= 0
+            ):
+                return b""
+            with events_path.open("rb") as events_file:
+                events_file.seek(start)
+                return events_file.read(end - start)
+
+        def _matches_record(
+            record: dict[str, Any], payload: dict[str, Any]
+        ) -> bool:
             record_id = str(record.get("record_id") or "")
             operation = str(record.get("operation") or "")
             expected_digest = str(record.get("result_digest") or "")
-            for payload in event_payloads:
-                if payload.get("broker_record_id") != record_id:
+            if payload.get("broker_record_id") != record_id:
+                return False
+            payload_operation = str(
+                payload.get("command") or payload.get("tool_name") or ""
+            )
+            if payload_operation == "code_research":
+                payload_operation = "research"
+            if operation == "code_research":
+                operation = "research"
+            digest_payload = dict(payload)
+            digest_payload.pop("broker_record_id", None)
+            digest_payload.pop("helper_path", None)
+            actual_digest = hashlib.sha256(
+                json.dumps(digest_payload, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            return payload_operation == operation and secrets.compare_digest(
+                actual_digest, expected_digest
+            )
+
+        slice_payloads: list[dict[str, Any]] = []
+        whole_payloads: list[dict[str, Any]] = []
+        matched_in_slice = False
+        matched_in_whole = False
+        try:
+            slice_payloads = _event_payloads_from_bytes(_read_slice())
+            for record in broker_records:
+                if not isinstance(record, dict):
                     continue
-                payload_operation = str(
-                    payload.get("command") or payload.get("tool_name") or ""
-                )
-                if payload_operation == "code_research":
-                    payload_operation = "research"
-                if operation == "code_research":
-                    operation = "research"
-                digest_payload = dict(payload)
-                digest_payload.pop("broker_record_id", None)
-                digest_payload.pop("helper_path", None)
-                actual_digest = hashlib.sha256(
-                    json.dumps(
-                        digest_payload, sort_keys=True, default=str
-                    ).encode()
-                ).hexdigest()
-                if payload_operation == operation and secrets.compare_digest(
-                    actual_digest, expected_digest
-                ):
-                    matched_record = True
+                if any(_matches_record(record, payload) for payload in slice_payloads):
+                    matched_in_slice = True
                     break
-            if matched_record:
-                break
-        if not matched_record:
+            if not matched_in_slice and broker_records:
+                # Parallel workers share one codex events log; per-run byte
+                # slices can miss a step's own helper output (interleaved
+                # appends or flush lag) while the payload exists intact in the
+                # file. A whole-file scan is safe here: broker record ids are
+                # per-instance random secrets and the result digest binds the
+                # payload to the coordinator record cryptographically.
+                whole_payloads = _event_payloads_from_bytes(
+                    events_path.read_bytes()
+                    if events_path is not None and events_path.is_file()
+                    else b""
+                )
+                for record in broker_records:
+                    if not isinstance(record, dict):
+                        continue
+                    if any(_matches_record(record, payload) for payload in whole_payloads):
+                        matched_in_whole = True
+                        break
+        except (OSError, TypeError, ValueError):
+            matched_in_whole = False
+        if matched_in_whole:
+            # Re-adjudicate over the whole file so contract requirements (e.g.
+            # an unbrokered required tool) are evaluated against the evidence
+            # the step actually produced, not just the racy slice.
+            whole_report = validate_chunkhound_tool_proof(
+                provider=provider,
+                review_stage=review_stage,
+                prompt_template_name=template_name,
+                adapter_meta={
+                    **adapter_meta,
+                    "codex_events_start_offset": None,
+                    "codex_events_end_offset": None,
+                },
+            )
+            if whole_report is not None and whole_report.get("valid") is True:
+                report = whole_report
+                _replace_last_chunkhound_validation_run(work_dir, whole_report)
+        if report is None or bool(report.get("valid")):
+            return report
+        if not matched_in_slice:
+            # The step's own broker record had no matching helper output in the
+            # slice or the whole file: persist expected-vs-actual diagnostics.
             report["valid"] = False
-            report["failure_reason"] = (
+            reason = (
                 "helper output lacked a matching coordinator broker result record"
             )
+            diagnostics = {
+                "schema_version": 1,
+                "raised_at": _utc_now_iso(),
+                "review_stage": review_stage,
+                "prompt_template_name": template_name,
+                "broker_records": [
+                    {
+                        "record_id": str(record.get("record_id") or ""),
+                        "operation": str(record.get("operation") or ""),
+                        "result_digest": str(record.get("result_digest") or ""),
+                    }
+                    for record in broker_records
+                    if isinstance(record, dict)
+                ],
+                "slice": {
+                    "events_path": (
+                        str(events_path) if events_path is not None else None
+                    ),
+                    "start_offset": start,
+                    "end_offset": end,
+                },
+                "slice_payloads": [
+                    _chunkhound_proof_payload_summary(payload)
+                    for payload in slice_payloads
+                ],
+                "whole_file_payloads": [
+                    _chunkhound_proof_payload_summary(payload)
+                    for payload in whole_payloads
+                ],
+                "per_record_reasons": [
+                    _chunkhound_proof_record_reason(record, whole_payloads)
+                    for record in broker_records
+                    if isinstance(record, dict)
+                ],
+            }
+            try:
+                diagnostics_path = (
+                    work_dir / _CHUNKHOUND_PROOF_DIAGNOSTICS_FILENAME
+                ).resolve()
+                write_redacted_json(diagnostics_path, diagnostics)
+                reason += f" Diagnostics written to {diagnostics_path}"
+            except (OSError, UnicodeError):
+                pass
+            report["failure_reason"] = reason
     if report is None or bool(report.get("valid")):
         return report
     label = review_stage.replace("_", " ")
@@ -9535,6 +9705,7 @@ Return the final review in the same format as the draft. Integrate validated con
 
 
 _CHUNKHOUND_READINESS_EVIDENCE_FILENAME = "chunkhound_readiness_failure.json"
+_CHUNKHOUND_PROOF_DIAGNOSTICS_FILENAME = "chunkhound_proof_failure.json"
 _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES = (
     NativeStatusReadinessError,
     ExpectedSessionReadinessTimeoutError,
