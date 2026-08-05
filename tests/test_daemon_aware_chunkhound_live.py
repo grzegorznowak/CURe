@@ -390,7 +390,7 @@ def _exercise_live_index(
     existing_parent: bool,
 ) -> None:
     binary = shutil.which("chunkhound")
-    if binary is None:
+    if binary is None or os.environ.get("CURE_CHUNKHOUND_FAKE_BIN"):
         pytest.skip("installed chunkhound executable is unavailable")
     binary = str(Path(binary).resolve())
 
@@ -752,7 +752,7 @@ def test_tap05_watchman_fresh_instance_degraded_then_ready_live(
         tmp_path.mkdir(mode=0o700, parents=False, exist_ok=False)
         tmp_path.chmod(0o700)
     binary = shutil.which("chunkhound")
-    if binary is None:
+    if binary is None or os.environ.get("CURE_CHUNKHOUND_FAKE_BIN"):
         pytest.skip("installed chunkhound executable is unavailable")
     binary = str(Path(binary).resolve())
 
