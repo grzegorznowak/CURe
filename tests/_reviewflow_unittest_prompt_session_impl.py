@@ -116,6 +116,51 @@ class StagedAuthCleanupTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_cleanup_sensitive_staged_paths_removes_staged_rf_jira(self) -> None:
+        """FIX 3: the staged rf-jira helper script (rf_jira key) is cleaned."""
+        root = ROOT / ".tmp_test_staged_rf_jira_cleanup"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo_dir = root / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            rf_jira = repo_dir / "rf-jira"
+            rf_jira.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            rf.cleanup_sensitive_staged_paths({"rf_jira": str(rf_jira)})
+
+            self.assertFalse(rf_jira.exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_cleanup_sensitive_staged_paths_records_failures(self) -> None:
+        """FIX 3: cleanup failures are logged and reported via record_failure."""
+        root = ROOT / ".tmp_test_staged_auth_cleanup_failure"
+        failures: list[tuple[str, BaseException]] = []
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            (root / "gh_config").mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(
+                rf.shutil,
+                "rmtree",
+                side_effect=OSError("simulated cleanup failure"),
+            ):
+                rf.cleanup_sensitive_staged_paths(
+                    {
+                        "gh_config_dir": str(root / "gh_config"),
+                        "jira_config_file": str(root / "missing" / "cfg.yml"),
+                        "netrc": str(root / "missing" / ".netrc"),
+                    },
+                    record_failure=lambda stage, exc: failures.append((stage, exc)),
+                )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual(
+            [stage for stage, _ in failures],
+            ["sensitive_staged_paths:gh_config_dir"],
+        )
+        for _stage, exc in failures:
+            self.assertIn("simulated cleanup failure", str(exc))
+
 
 class PromptTemplateTests(unittest.TestCase):
     def test_templates_do_not_require_tmp_writes(self) -> None:

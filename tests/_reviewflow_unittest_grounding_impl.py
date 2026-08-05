@@ -8980,6 +8980,26 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         default_generation_active = False
 
                 close_mock.side_effect = tracked_close
+            # Teardown now verifies daemon release after close via
+            # wait_for_daemon_release; flow tests stub close (lease state stays
+            # OPEN) so the real method would raise RuntimeError. Default to a
+            # verified release; tests targeting the verification wiring patch
+            # the method themselves in flow_patch.
+            release_callable = lifecycle.ChunkHoundDaemonLease.wait_for_daemon_release
+            release_mock = (
+                release_callable
+                if isinstance(release_callable, mock.Mock)
+                else getattr(release_callable, "mock", None)
+            )
+            if release_mock is None:
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "wait_for_daemon_release",
+                        autospec=True,
+                        return_value=True,
+                    )
+                )
             if not (
                 isinstance(lifecycle.ChunkHoundDaemonLease.assert_alive, mock.Mock)
                 or hasattr(lifecycle.ChunkHoundDaemonLease.assert_alive, "mock")
