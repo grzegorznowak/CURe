@@ -745,6 +745,139 @@ def test_concurrent_close_callers_wait_and_share_cleanup_failure() -> None:
     )
 
 
+def test_broker_default_timeout_covers_research_plus_preflight_retry_budget() -> None:
+    """B1 RED: the outer broker deadline covers inner budgets with retries."""
+    default = inspect.signature(request_helper_broker).parameters["timeout"].default
+    preflight = sum(cure_chunkhound._DEFAULT_PREFLIGHT_STAGE_TIMEOUTS.values())
+    research = cure_chunkhound._DEFAULT_TOOL_CALL_TIMEOUTS["code_research"]
+    assert default == broker_module._DEFAULT_HELPER_BROKER_TIMEOUT_SECONDS
+    assert (
+        default
+        >= research
+        + preflight * (1 + broker_module._HELPER_BROKER_MAX_TRANSPORT_RETRIES)
+    ), "default broker timeout must cover research plus every preflight stage"
+    assert default > 1220.0, "the old default could cut research short"
+
+
+def test_stuck_worker_close_is_failed_and_second_close_recovers_after_unblock(
+    authority: HelperLaunchAuthority,
+) -> None:
+    """B1 RED: a stuck worker forbids a clean close; a later close retries and succeeds."""
+    release = threading.Event()
+    started = threading.Event()
+    close_errors: list[BaseException] = []
+    client_errors: list[BaseException] = []
+    session: object | None = None
+
+    class StuckSession:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal session
+            self.binary = kwargs["binary"]
+            self._child_env = kwargs["env"]
+            session = self
+
+        def ensure_started(self, **kwargs: object) -> None:
+            return None
+
+        def notify(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def request(
+            self, method: str, *args: object, **kwargs: object
+        ) -> dict[str, object]:
+            if method == "initialize":
+                return {"result": {}}
+            if method == "tools/list":
+                return {
+                    "result": {
+                        "tools": [
+                            {"name": "search"},
+                            {"name": "code_research"},
+                            {"name": "daemon_status"},
+                        ]
+                    }
+                }
+            assert method == "tools/call"
+            started.set()
+            assert release.wait(timeout=15)
+            return {"result": {"content": [{"type": "text", "text": "late"}]}}
+
+        def _stderr_tail_text(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            return None
+
+    broker = ChunkHoundHelperBroker(authority=authority)
+    endpoint = broker.start()
+    scope = broker.begin_scope()
+    client_thread: threading.Thread | None = None
+    close_thread: threading.Thread | None = None
+
+    def client() -> None:
+        try:
+            request_helper_broker(
+                endpoint,
+                {
+                    "operation": "search",
+                    "arguments": {"query": "stuck-worker"},
+                    "scope": scope,
+                },
+                timeout=10,
+            )
+        except BaseException as exc:
+            client_errors.append(exc)
+
+    def close() -> None:
+        try:
+            broker.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    try:
+        with (
+            mock.patch.object(cure_chunkhound, "JsonRpcSession", StuckSession),
+            mock.patch.object(broker_module, "_EXECUTOR_DRAIN_SECONDS", 0.2),
+            mock.patch.object(
+                broker_module, "_EXECUTOR_DRAIN_ESCALATION_SECONDS", 0.3
+            ),
+        ):
+            client_thread = threading.Thread(target=client, name="b1-stuck-client")
+            close_thread = threading.Thread(target=close, name="b1-stuck-close")
+            client_thread.start()
+            assert started.wait(timeout=5), "stuck worker never reached tools/call"
+            assert session is not None
+            close_thread.start()
+            close_thread.join(timeout=10)
+            assert not close_thread.is_alive()
+            assert len(close_errors) == 1
+            assert isinstance(close_errors[0], HelperBrokerError)
+            # The worker was still alive: close must not have reported cleanly.
+            assert broker._close_failure is not None
+
+            release.set()
+            client_thread.join(timeout=10)
+            assert not client_thread.is_alive()
+            assert len(client_errors) == 1
+
+            # Second close retries instead of replaying the old failure: the
+            # worker is gone now, so cleanup completes cleanly.
+            broker.close()
+            assert broker._close_failure is None
+    finally:
+        release.set()
+        try:
+            broker.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+        if client_thread is not None:
+            client_thread.join(timeout=10)
+            assert not client_thread.is_alive()
+        if close_thread is not None:
+            close_thread.join(timeout=10)
+            assert not close_thread.is_alive()
+
+
 def test_provider_overrides_cannot_restore_native_chunkhound_credentials(
     tmp_path: Path,
 ) -> None:
@@ -1370,7 +1503,9 @@ def test_close_keyboardinterrupt_at_accept_join_still_cleans_every_resource(
             second = exc
 
         assert isinstance(first, HelperBrokerError) and first.__cause__ is sentinel
-        assert isinstance(second, HelperBrokerError) and second.__cause__ is sentinel
+        # The second close retries cleanup instead of replaying the old failure;
+        # with the accept join no longer failing it completes cleanly.
+        assert second is None
         assert session_closed.is_set()
         assert broker._executor._shutdown
         with pytest.raises(OSError):

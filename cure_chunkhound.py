@@ -27,6 +27,14 @@ from cure_chunkhound_broker import (
 _BROKER_ENDPOINT_ENV = "CURE_CHUNKHOUND_BROKER_ENDPOINT"
 
 _STDERR_TAIL_MAX = 16000
+# Read-time caps for the MCP stdout framing (guards against pathological daemon
+# output; legitimate traffic stays far below these): headers before the blank
+# line, the declared Content-Length body, a single JSON-RPC line, and the total
+# buffered stdout bytes.
+_MAX_MCP_HEADER_BYTES = 16 * 1024
+_MAX_MCP_CONTENT_LENGTH_BYTES = 32 * 1024 * 1024
+_MAX_MCP_JSON_LINE_BYTES = 8 * 1024 * 1024
+_MAX_MCP_STDOUT_BUFFER_BYTES = 64 * 1024 * 1024
 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 _DEFAULT_PREFLIGHT_STAGE_TIMEOUTS: dict[str, float] = {
     "spawn": 3.0,
@@ -512,6 +520,11 @@ class JsonRpcSession:
                 if chunk:
                     self._stdout_buffer.extend(chunk)
                     saw_data = True
+                    if len(self._stdout_buffer) > _MAX_MCP_STDOUT_BUFFER_BYTES:
+                        raise RuntimeError(
+                            "chunkhound mcp stdout exceeded the maximum buffered byte"
+                            f" cap ({_MAX_MCP_STDOUT_BUFFER_BYTES} bytes)"
+                        )
                 else:
                     self._stdout_open = False
             else:
@@ -531,6 +544,11 @@ class JsonRpcSession:
             header_end = self._stdout_buffer.find(b"\n\n")
             delimiter_len = 2
         if header_end < 0:
+            if len(self._stdout_buffer) > _MAX_MCP_HEADER_BYTES:
+                raise RuntimeError(
+                    "chunkhound mcp headers exceeded the maximum byte cap"
+                    f" ({_MAX_MCP_HEADER_BYTES} bytes) without a terminator"
+                )
             return None
         headers_blob = bytes(self._stdout_buffer[:header_end]).decode("utf-8", errors="replace")
         headers: dict[str, str] = {}
@@ -543,6 +561,11 @@ class JsonRpcSession:
             length = int(headers["content-length"])
         except Exception as exc:
             raise RuntimeError("invalid MCP content-length header") from exc
+        if length < 0 or length > _MAX_MCP_CONTENT_LENGTH_BYTES:
+            raise RuntimeError(
+                "chunkhound MCP content-length exceeds the maximum byte cap"
+                f" ({_MAX_MCP_CONTENT_LENGTH_BYTES} bytes)"
+            )
         body_start = header_end + delimiter_len
         body_end = body_start + length
         if len(self._stdout_buffer) < body_end:
@@ -559,6 +582,11 @@ class JsonRpcSession:
             return None
         newline_idx = self._stdout_buffer.find(b"\n")
         if newline_idx < 0:
+            if len(self._stdout_buffer) > _MAX_MCP_JSON_LINE_BYTES:
+                raise RuntimeError(
+                    "chunkhound mcp JSON line exceeded the maximum byte cap"
+                    f" ({_MAX_MCP_JSON_LINE_BYTES} bytes) without a newline"
+                )
             return None
         raw_line = bytes(self._stdout_buffer[: newline_idx + 1])
         del self._stdout_buffer[: newline_idx + 1]

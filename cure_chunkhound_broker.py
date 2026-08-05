@@ -18,6 +18,26 @@ _MAX_REQUEST_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 32 * 1024
 _MAX_PATH_CHARS = 4096
 _EXECUTOR_DRAIN_SECONDS = 10.0
+_EXECUTOR_DRAIN_ESCALATION_SECONDS = 20.0
+_SESSION_CLOSE_DRAIN_SECONDS = 15.0
+# Outer helper-broker round-trip deadline. The single monotonic deadline must
+# cover the inner research allowance plus every preflight stage budget once per
+# transport attempt (2 transport modes => 1 alternate-transport retry) plus
+# response slack. Values mirror cure_chunkhound._DEFAULT_PREFLIGHT_STAGE_TIMEOUTS
+# (3.0 + 120.0 + 5.0 + 10.0 + 5.0 = 143.0) and
+# cure_chunkhound._DEFAULT_TOOL_CALL_TIMEOUTS["code_research"] (1200.0); they
+# are mirrored here because the broker cannot import from cure_chunkhound at
+# module level (cure_chunkhound imports the broker; an import cycle).
+_HELPER_BROKER_PREFLIGHT_STAGE_BUDGET_SECONDS = 143.0
+_HELPER_BROKER_RESEARCH_ALLOWANCE_SECONDS = 1200.0
+_HELPER_BROKER_MAX_TRANSPORT_RETRIES = 1
+_HELPER_BROKER_RESPONSE_SLACK_SECONDS = 60.0
+_DEFAULT_HELPER_BROKER_TIMEOUT_SECONDS = (
+    _HELPER_BROKER_RESEARCH_ALLOWANCE_SECONDS
+    + _HELPER_BROKER_PREFLIGHT_STAGE_BUDGET_SECONDS
+    * (1 + _HELPER_BROKER_MAX_TRANSPORT_RETRIES)
+    + _HELPER_BROKER_RESPONSE_SLACK_SECONDS
+)
 _ALLOWED_ARGUMENTS = {
     "preflight": frozenset(),
     "search": frozenset({"query", "type", "path", "page_size", "offset"}),
@@ -197,6 +217,7 @@ class ChunkHoundHelperBroker:
         self._closed = False
         self._close_done = threading.Event()
         self._close_failure: BaseException | None = None
+        self._drain_thread: threading.Thread | None = None
         self.endpoint = "cure-chunkhound-" + secrets.token_hex(16)
 
     @staticmethod
@@ -529,22 +550,44 @@ class ChunkHoundHelperBroker:
     def close(self) -> None:
         with self._lock:
             if self._closed:
-                wait_for_close = True
+                if self._close_done.is_set() and self._close_failure is None:
+                    # Idempotent: previously closed and drained cleanly.
+                    return
+                wait_for_first = not self._close_done.is_set()
+                if wait_for_first:
+                    # Snapshot happens after the in-progress close finishes.
+                    listener = None
+                    records = []
+                    sessions = []
+                    clients = []
+                else:
+                    # Previously failed close: re-attempt cleanup from the
+                    # current state instead of replaying the old failure.
+                    listener, self._listener = self._listener, None
+                    records = list(self._records.values())
+                    sessions = list(self._active_sessions)
+                    clients = list(self._active_clients | self._reading_clients)
             else:
-                wait_for_close = False
+                wait_for_first = False
                 self._closed = True
                 self._live_scopes.clear()
                 listener, self._listener = self._listener, None
                 records = list(self._records.values())
                 sessions = list(self._active_sessions)
                 clients = list(self._active_clients | self._reading_clients)
-        if wait_for_close:
+        if wait_for_first:
+            # A close is already in progress: wait for its outcome. A previously
+            # failed close is not replayed: cleanup is re-attempted below.
             self._close_done.wait()
-            if self._close_failure is not None:
-                raise HelperBrokerError(
-                    "trusted helper broker cleanup failed"
-                ) from self._close_failure
-            return
+            with self._lock:
+                if self._close_failure is None:
+                    return
+                # Re-snapshot after the earlier attempt finished so nothing it
+                # left behind is missed by this retry.
+                listener = None
+                records = list(self._records.values())
+                sessions = list(self._active_sessions)
+                clients = list(self._active_clients | self._reading_clients)
 
         failures: list[BaseException] = []
 
@@ -567,10 +610,48 @@ class ChunkHoundHelperBroker:
             except BaseException as exc:
                 failures.append(exc)
             attempt(client.close)
-        for session in sessions + [record.get("session") for record in records]:
-            close = getattr(session, "close", None)
-            if callable(close):
-                attempt(close)
+
+        # Close every session concurrently with one bounded shared budget. Each
+        # session.close() terminates its daemon process (with kill escalation),
+        # which also unblocks any executor worker still inside a request on it.
+        all_sessions = list(
+            dict.fromkeys(
+                session
+                for session in sessions + [record.get("session") for record in records]
+                if callable(getattr(session, "close", None))
+            )
+        )
+        session_failures: list[BaseException] = []
+        session_threads: list[threading.Thread] = []
+        for session in all_sessions:
+            close = getattr(session, "close")
+
+            def close_session(session: object = session, close: Any = close) -> None:
+                try:
+                    close()
+                except BaseException as exc:
+                    session_failures.append(exc)
+
+            thread = threading.Thread(
+                target=close_session,
+                name="cure-helper-broker-session-close",
+                daemon=True,
+            )
+            thread.start()
+            session_threads.append(thread)
+        if session_threads:
+            session_deadline = time.monotonic() + _SESSION_CLOSE_DRAIN_SECONDS
+            for thread in session_threads:
+                thread.join(max(0.0, session_deadline - time.monotonic()))
+            if any(thread.is_alive() for thread in session_threads):
+                failures.append(
+                    TimeoutError(
+                        "helper broker session close timed out; daemon processes "
+                        "may still be terminating"
+                    )
+                )
+        failures.extend(session_failures)
+
         drain_failures: list[BaseException] = []
 
         def drain_executor() -> None:
@@ -579,22 +660,35 @@ class ChunkHoundHelperBroker:
             except BaseException as exc:
                 drain_failures.append(exc)
 
-        drain_thread = threading.Thread(
-            target=drain_executor,
-            name="cure-helper-broker-drain",
-            daemon=True,
-        )
-        attempt(drain_thread.start)
+        with self._lock:
+            drain_thread = self._drain_thread
+        if drain_thread is None:
+            drain_thread = threading.Thread(
+                target=drain_executor,
+                name="cure-helper-broker-drain",
+                daemon=True,
+            )
+            attempt(drain_thread.start)
+            with self._lock:
+                self._drain_thread = drain_thread
         if drain_thread.ident is not None:
-            attempt(lambda: drain_thread.join(timeout=_EXECUTOR_DRAIN_SECONDS))
+            drain_thread.join(timeout=_EXECUTOR_DRAIN_SECONDS)
             if drain_thread.is_alive():
-                failures.append(TimeoutError("helper broker worker drain timed out"))
+                # Escalation: workers were unblocked by the session termination
+                # above; give the drain one further bounded re-attempt before
+                # close is allowed to complete (with a recorded failure).
+                drain_thread.join(timeout=_EXECUTOR_DRAIN_ESCALATION_SECONDS)
+                if drain_thread.is_alive():
+                    failures.append(
+                        TimeoutError("helper broker worker drain timed out")
+                    )
         failures.extend(drain_failures)
         with self._lock:
             failures.extend(self._worker_failures)
         attempt(self.authority.close)
-        self._close_failure = failures[0] if failures else None
-        self._close_done.set()
+        with self._lock:
+            self._close_failure = failures[0] if failures else None
+            self._close_done.set()
         if self._close_failure is not None:
             raise HelperBrokerError(
                 "trusted helper broker cleanup failed"
@@ -605,7 +699,7 @@ def request_helper_broker(
     endpoint: str,
     request: Mapping[str, Any],
     *,
-    timeout: float = 1220.0,
+    timeout: float = _DEFAULT_HELPER_BROKER_TIMEOUT_SECONDS,
     heartbeat_callback: Callable[[float], None] | None = None,
     heartbeat_interval: float = 5.0,
 ) -> dict[str, Any]:

@@ -8,6 +8,7 @@ from _reviewflow_unittest_daemon_aware_impl import (
     DaemonLifecycleProductionUtilityTests,
     ExpectedSessionReadinessTests,
     ExpectedSessionReceiptProjectionTests,
+    JsonRpcSessionReadCapTests,
     LosslessCommandCaptureTransportTests,
 )
 from _reviewflow_unittest_grounding_impl import (
@@ -63,6 +64,7 @@ __all__ = [
     "DaemonLogEffectiveFilterAdapterTests",
     "ExpectedSessionReadinessTests",
     "ExpectedSessionReceiptProjectionTests",
+    "JsonRpcSessionReadCapTests",
     "CodexCommandTests",
     "CodexJsonProgressTests",
     "CodexResumeOutputTests",
