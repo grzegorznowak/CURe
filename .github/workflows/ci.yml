@@ -53,7 +53,9 @@ jobs:
         # Pin lint versions to the project's verified baseline (ruff 0.15.7 /
         # mypy 1.20.0, matching the local gate); unpinned "latest" ruff flags
         # pre-existing import-style violations in files this PR does not touch.
-        run: python -m pip install --upgrade build twine pytest ruff==0.15.7 mypy==1.20.0
+        # setuptools is required by tests that build a wheel with
+        # --no-build-isolation (ambient build backend).
+        run: python -m pip install --upgrade build twine pytest ruff==0.15.7 mypy==1.20.0 setuptools
 
       - name: Ruff
         run: python -m ruff check .
