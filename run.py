@@ -34,6 +34,35 @@ class ReviewflowSubprocessError(RuntimeError):
         self.stderr = stderr
 
 
+class ReviewflowCommandDrainError(ReviewflowSubprocessError):
+    """Raised when a command exits but its stdout/stderr pipes stay open past the
+    bounded post-exit drain deadline (a descendant inherited the write ends)."""
+
+    def __init__(
+        self,
+        *,
+        cmd: list[str],
+        cwd: Path | None,
+        stdout: str,
+        stderr: str,
+        deadline_seconds: float,
+    ) -> None:
+        self.cmd = cmd
+        self.cwd = cwd
+        # exit_code -1 is a sentinel: the process group was terminated, so no
+        # ordinary exit status exists.
+        self.exit_code = -1
+        self.stdout = stdout
+        self.stderr = stderr
+        self.deadline_seconds = deadline_seconds
+        RuntimeError.__init__(
+            self,
+            "Command stdout/stderr pipes did not reach EOF within "
+            f"{deadline_seconds:g}s of exit (a descendant holds them open); "
+            f"process group terminated: {' '.join(cmd)}",
+        )
+
+
 @dataclass(frozen=True)
 class CommandResult:
     cmd: list[str]
@@ -46,6 +75,12 @@ class CommandResult:
 
 OwnedProcessRole = Literal["review-provider", "chunkhound-helper"]
 _ALLOWED_OWNED_PROCESS_ROLES = frozenset({"review-provider", "chunkhound-helper"})
+
+# Bounded post-exit drain for stdout/stderr pipes: once the command itself has
+# exited, readers wait at most this long for EOF. A descendant which inherited
+# the pipe write ends keeps EOF from arriving; the process group is then
+# terminated (SIGTERM then SIGKILL) and the run is reported as a failure.
+_PIPE_EOF_DRAIN_SECONDS = 12.0
 
 
 class OwnedProcessRegistryState(Enum):
@@ -701,6 +736,32 @@ class _TailBuffer:
         return "".join(self._chunks)
 
 
+def _terminate_pipe_holder_group(process: subprocess.Popen[Any]) -> None:
+    """Terminate the process group keeping a command's pipes open (SIGTERM then SIGKILL).
+
+    Spawns use start_new_session=True, so the direct child is its own group
+    leader and any descendant which inherited the pipe write ends dies with it.
+    """
+    group = process.pid
+    OwnedProcessRegistry._signal_group(group, signal.SIGTERM)
+    OwnedProcessRegistry._wait_for_groups((group,), 5.0, (process,))
+    if OwnedProcessRegistry._group_exists(group):
+        OwnedProcessRegistry._signal_group(group, signal.SIGKILL)
+        OwnedProcessRegistry._wait_for_groups((group,), 2.0, (process,))
+
+
+def _drain_readers_bounded(
+    readers: tuple[Thread, ...],
+    *,
+    deadline_seconds: float,
+) -> bool:
+    """Wait for pipe reader threads to reach EOF within one shared deadline."""
+    deadline = time.monotonic() + max(0.0, float(deadline_seconds))
+    for reader in readers:
+        reader.join(max(0.0, deadline - time.monotonic()))
+    return not any(reader.is_alive() for reader in readers)
+
+
 def run_cmd(
     cmd: list[str],
     *,
@@ -720,7 +781,7 @@ def run_cmd(
     tagged = owned_processes is not None
     started = time.perf_counter()
     if not tagged and not stream and lossless_capture is None:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd) if cwd else None,
             env=env,
@@ -728,16 +789,63 @@ def run_cmd(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def read_until_eof(stream: TextIO, chunks: list[str]) -> None:
+            try:
+                while chunk := stream.read(8192):
+                    chunks.append(chunk)
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        readers: list[Thread] = []
+        for pipe_stream, chunks in (
+            (proc.stdout, stdout_chunks),
+            (proc.stderr, stderr_chunks),
+        ):
+            reader = Thread(
+                target=read_until_eof, args=(pipe_stream, chunks), daemon=True
+            )
+            reader.start()
+            readers.append(reader)
+        try:
+            # Unbounded: a command which never exits keeps today's semantics
+            # (callers already handle that case). Only the post-exit pipe drain
+            # below is bounded.
+            exit_code = int(proc.wait())
+        except BaseException:
+            # Best-effort group termination so interrupted children do not linger.
+            _terminate_pipe_holder_group(proc)
+            raise
+        if not _drain_readers_bounded(
+            tuple(readers), deadline_seconds=_PIPE_EOF_DRAIN_SECONDS
+        ):
+            _terminate_pipe_holder_group(proc)
+            _drain_readers_bounded(tuple(readers), deadline_seconds=2.0)
+            raise ReviewflowCommandDrainError(
+                cmd=cmd,
+                cwd=cwd,
+                stdout="".join(stdout_chunks),
+                stderr="".join(stderr_chunks),
+                deadline_seconds=_PIPE_EOF_DRAIN_SECONDS,
+            )
         duration = time.perf_counter() - started
 
         result = CommandResult(
             cmd=cmd,
             cwd=cwd,
-            exit_code=int(completed.returncode),
+            exit_code=exit_code,
             duration_seconds=float(duration),
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
         )
     else:
         out = stream_to or sys.stderr
@@ -761,6 +869,10 @@ def run_cmd(
             "stderr": subprocess.PIPE,
             "bufsize": 1,
         }
+        if not tagged:
+            # Untagged groups need a leader of their own so a pipe-holding
+            # descendant can be terminated with the group (killpg machinery).
+            popen_options["start_new_session"] = True
         pipe_coordinator = OwnedProcessPipeCoordinator() if tagged else None
         if tagged:
             assert owned_processes is not None
@@ -859,9 +971,37 @@ def run_cmd(
             t_err.start()
 
         try:
+            # Unbounded wait: a command which never exits keeps today's semantics
+            # (callers already handle that case). Only the post-exit pipe drain
+            # below is bounded.
             exit_code = int(proc.wait())
-            t_out.join()
-            t_err.join()
+            if not _drain_readers_bounded(
+                (t_out, t_err), deadline_seconds=_PIPE_EOF_DRAIN_SECONDS
+            ):
+                # A descendant inherited stdout/stderr and keeps the pipes open
+                # past the post-exit drain deadline: terminate the whole group
+                # so EOF arrives, then report a failure instead of blocking.
+                if pipe_coordinator is not None:
+                    OwnedProcessRegistry._terminate_snapshot(
+                        (proc,),
+                        term_timeout_seconds=5.0,
+                        kill_timeout_seconds=2.0,
+                        drain_timeout_seconds=2.0,
+                        pipe_coordinators={id(proc): pipe_coordinator},
+                    )
+                    pipe_coordinator.complete(proc)
+                    assert owned_processes is not None
+                    owned_processes.unregister(proc)
+                else:
+                    _terminate_pipe_holder_group(proc)
+                    _drain_readers_bounded((t_out, t_err), deadline_seconds=2.0)
+                raise ReviewflowCommandDrainError(
+                    cmd=cmd,
+                    cwd=cwd,
+                    stdout=stdout_tail.get(),
+                    stderr=stderr_tail.get(),
+                    deadline_seconds=_PIPE_EOF_DRAIN_SECONDS,
+                )
             if pipe_coordinator is not None:
                 pipe_coordinator.complete(proc)
                 assert owned_processes is not None
