@@ -608,18 +608,23 @@ class A13TransportOwnershipTests(unittest.TestCase):
     def test_run_cmd_requires_pair_and_uses_registry_only_for_tagged_launches(self) -> None:
         registry = mock.Mock(spec=run_module.OwnedProcessRegistry)
         with self.assertRaises(ValueError), mock.patch.object(
-            run_module.subprocess, "run"
-        ) as subprocess_run:
+            run_module.subprocess, "Popen"
+        ) as popen:
             run_module.run_cmd(["fixture"], owned_processes=registry)
-        subprocess_run.assert_not_called()
+        popen.assert_not_called()
 
-        completed = subprocess.CompletedProcess(["fixture"], 0, "out", "err")
+        process = mock.Mock()
+        process.stdout = io.StringIO("out")
+        process.stderr = io.StringIO("err")
+        process.wait.return_value = 0
         with mock.patch.object(
-            run_module.subprocess, "run", return_value=completed
-        ) as subprocess_run:
+            run_module.subprocess, "Popen", return_value=process
+        ) as popen:
             result = run_module.run_cmd(["fixture"], check=False)
         self.assertEqual((result.stdout, result.stderr), ("out", "err"))
-        subprocess_run.assert_called_once()
+        self.assertEqual(result.exit_code, 0)
+        popen.assert_called_once()
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
         registry.spawn.assert_not_called()
 
         process = mock.Mock()
@@ -637,6 +642,77 @@ class A13TransportOwnershipTests(unittest.TestCase):
         spawn_kwargs = registry.spawn.call_args.kwargs
         self.assertEqual(spawn_kwargs["role"], "review-provider")
         self.assertNotIn("start_new_session", spawn_kwargs)
+
+    def test_run_cmd_untagged_hung_pipe_returns_bounded_and_reaps_descendant(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            pid_path = Path(raw_root) / "pid"
+            code = (
+                "import subprocess, sys\n"
+                "child = subprocess.Popen("
+                "[sys.executable, '-c', 'import time; time.sleep(60)'],"
+                " stdout=sys.stdout.fileno())\n"
+                f"open({str(pid_path)!r}, 'w').write(str(child.pid))\n"
+                "sys.stdout.write('parent-done\\n'); sys.stdout.flush()\n"
+            )
+            started = time.monotonic()
+            with mock.patch.object(
+                run_module, "_PIPE_EOF_DRAIN_SECONDS", 0.5
+            ), self.assertRaises(
+                run_module.ReviewflowCommandDrainError
+            ) as raised:
+                run_module.run_cmd([sys.executable, "-c", code], check=False)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10.0)
+            self.assertEqual(raised.exception.exit_code, -1)
+            self.assertIn("parent-done", raised.exception.stdout)
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                _wait_until(lambda: _process_is_gone(child_pid)),
+                f"pipe-holding descendant {child_pid} was not reaped",
+            )
+
+    def test_run_cmd_tagged_hung_pipe_is_terminated_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            pid_path = Path(raw_root) / "pid"
+            code = (
+                "import subprocess, sys\n"
+                "child = subprocess.Popen("
+                "[sys.executable, '-c', 'import time; time.sleep(60)'],"
+                " stdout=sys.stdout.fileno())\n"
+                f"open({str(pid_path)!r}, 'w').write(str(child.pid))\n"
+                "sys.stdout.write('parent-done\\n'); sys.stdout.flush()\n"
+            )
+            registry = run_module.OwnedProcessRegistry()
+            started = time.monotonic()
+            with mock.patch.object(
+                run_module, "_PIPE_EOF_DRAIN_SECONDS", 0.5
+            ), self.assertRaises(
+                run_module.ReviewflowCommandDrainError
+            ) as raised:
+                run_module.run_cmd(
+                    [sys.executable, "-c", code],
+                    check=False,
+                    owned_processes=registry,
+                    owned_role="review-provider",
+                )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10.0)
+            self.assertIn("parent-done", raised.exception.stdout)
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                _wait_until(lambda: _process_is_gone(child_pid)),
+                f"pipe-holding descendant {child_pid} was not reaped",
+            )
+            # The killed process was unregistered, so registry teardown is empty.
+            registry.terminate_and_drain(
+                term_timeout_seconds=1.0,
+                kill_timeout_seconds=1.0,
+                drain_timeout_seconds=1.0,
+            )
+            self.assertIs(registry.state, run_module.OwnedProcessRegistryState.CLOSED)
+            self.assertEqual(registry._processes, [])
 
     def _assert_attach_start_interrupt_cleanup(self, *, interrupted_start: int) -> None:
         registry = run_module.OwnedProcessRegistry()
@@ -1622,6 +1698,76 @@ class A13TransportOwnershipTests(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertIn("term-out", result[0].stdout)
             self.assertIn("term-err", result[0].stderr)
+
+
+class JsonRpcSessionReadCapTests(unittest.TestCase):
+    """RED contract for bounded MCP stdout framing (read-time caps)."""
+
+    @staticmethod
+    def _bare_session() -> Any:
+        session = cure_chunkhound.JsonRpcSession.__new__(
+            cure_chunkhound.JsonRpcSession
+        )
+        session._stdout_buffer = bytearray()
+        return session
+
+    def test_framed_header_cap_rejects_terminatorless_headers(self) -> None:
+        session = self._bare_session()
+        session._stdout_buffer.extend(b"X" * (16 * 1024 + 1))
+        with self.assertRaises(RuntimeError) as raised:
+            session._try_extract_framed_message()
+        self.assertIn("headers exceeded", str(raised.exception))
+
+    def test_framed_content_length_cap_rejects_huge_declared_bodies(self) -> None:
+        session = self._bare_session()
+        session._stdout_buffer.extend(b"Content-Length: 999999999\r\n\r\n")
+        with self.assertRaises(RuntimeError) as raised:
+            session._try_extract_framed_message()
+        self.assertIn("content-length exceeds", str(raised.exception))
+
+    def test_framed_negative_content_length_is_rejected(self) -> None:
+        session = self._bare_session()
+        session._stdout_buffer.extend(b"Content-Length: -5\r\n\r\n")
+        with self.assertRaises(RuntimeError):
+            session._try_extract_framed_message()
+
+    def test_json_line_cap_rejects_newline_less_gigantic_line(self) -> None:
+        session = self._bare_session()
+        session._stdout_buffer.extend(b"{" + b"x" * (8 * 1024 * 1024))
+        with self.assertRaises(RuntimeError) as raised:
+            session._try_extract_json_line_message()
+        self.assertIn("JSON line exceeded", str(raised.exception))
+
+    def test_stdout_buffer_cap_terminates_on_unbounded_growth(self) -> None:
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            proc = mock.Mock()
+            proc.stdout = stream
+            proc.stderr = None
+            session = self._bare_session()
+            session.proc = proc
+            session._stdout_open = True
+            session._stderr_open = False
+            os.write(write_fd, b"y" * 8192)
+            with mock.patch.object(
+                cure_chunkhound, "_MAX_MCP_STDOUT_BUFFER_BYTES", 4096
+            ), self.assertRaises(RuntimeError) as raised:
+                session._drain_ready_io(timeout_seconds=1.0)
+            self.assertIn("maximum buffered byte cap", str(raised.exception))
+        finally:
+            os.close(write_fd)
+            stream.close()
+
+    def test_well_formed_framed_message_still_parses_within_caps(self) -> None:
+        session = self._bare_session()
+        body = b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+        session._stdout_buffer.extend(
+            f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        payload = session._try_extract_framed_message()
+        self.assertEqual(payload, {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+        self.assertEqual(session._stdout_buffer, bytearray())
 
 
 class ExpectedSessionReceiptProjectionTests(unittest.TestCase):
@@ -3182,7 +3328,13 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
 
         def assert_lost(_lease: Any) -> None:
-            boundaries = ("before-helper", "before-plan", "before-step")
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+            )
             boundary = boundaries[len(continuity_checks)]
             continuity_checks.append(boundary)
             if boundary == "before-step":
@@ -3223,7 +3375,13 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["review.plan.md"])
         self.assertEqual(
             continuity_checks,
-            ["before-helper", "before-plan", "before-step"],
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+            ],
         )
 
     def test_multipass_keeper_loss_after_steps_stops_synth_without_replay(self) -> None:
@@ -3265,7 +3423,15 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
 
         def assert_continuity(_lease: Any) -> None:
-            boundaries = ("before-helper", "before-plan", "before-step", "before-synth")
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+                "before-synth",
+            )
             boundary = boundaries[len(continuity_checks)]
             continuity_checks.append(boundary)
             if boundary == "before-synth":
@@ -3298,7 +3464,182 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
         self.assertEqual(
             continuity_checks,
-            ["before-helper", "before-plan", "before-step", "before-synth"],
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+                "before-synth",
+            ],
+        )
+
+    def test_multipass_keeper_loss_after_step_llm_aborts_acceptance_without_replay(
+        self,
+    ) -> None:
+        """TAP-03 A12: a daemon dying mid-step is detected post-LLM; the step
+        result is never accepted and synthesis is never dispatched."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during step LLM call")
+        continuity_checks: list[str] = []
+
+        def llm(output_path: Path, work_dir: Path) -> Any:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "```json\n"
+                    + json.dumps(
+                        {
+                            "abort": False,
+                            "abort_reason": None,
+                            "jira_keys": [],
+                            "steps": [
+                                {"id": "01", "title": "Completed once", "focus": "loss"}
+                            ],
+                        }
+                    )
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "# Step\n\nCompleted evidence.\n", encoding="utf-8"
+                )
+            else:
+                raise AssertionError(
+                    f"model work replayed or synthesis dispatched: {output_path.name}"
+                )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-step":
+                raise continuity_failure
+
+        def forbidden_synth(**_kwargs: Any) -> None:
+            raise AssertionError("synthesis dispatched after mid-step keeper loss")
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "mid-step-keeper-loss",
+                profile_resolved="big",
+                multipass_enabled=True,
+                step_workers=1,
+                llm_side_effect=llm,
+                synth_stage_side_effect=forbidden_synth,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+            ],
+        )
+
+    def test_singlepass_keeper_loss_after_draft_aborts_before_reconcile(self) -> None:
+        """TAP-03 A12: a daemon dying during the singlepass draft is detected
+        post-LLM; the draft is not accepted and reconcile is never dispatched."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during draft LLM call")
+        continuity_checks: list[str] = []
+
+        def draft(output_path: Path, work_dir: Path) -> Any:
+            self.assertEqual(output_path.name, "pr_context_draft.md")
+            output_path.write_text("blind draft\n", encoding="utf-8")
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-draft",
+                "after-draft",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-draft":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "mid-draft-keeper-loss",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=draft,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={
+                    "orientation_brief": "singlepass context",
+                    "meta": {},
+                },
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(calls, ["pr_context_draft.md"])
+        self.assertEqual(
+            continuity_checks,
+            ["before-helper", "after-helper", "before-draft", "after-draft"],
         )
 
     def test_singlepass_keeper_loss_before_reconcile_does_not_replay_draft(self) -> None:
@@ -3322,7 +3663,13 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
 
         def assert_continuity(_lease: Any) -> None:
-            boundaries = ("before-helper", "before-draft", "before-reconcile")
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-draft",
+                "after-draft",
+                "before-reconcile",
+            )
             boundary = boundaries[len(continuity_checks)]
             continuity_checks.append(boundary)
             if boundary == "before-reconcile":
@@ -3359,8 +3706,112 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["pr_context_draft.md"])
         self.assertEqual(
             continuity_checks,
-            ["before-helper", "before-draft", "before-reconcile"],
+            [
+                "before-helper",
+                "after-helper",
+                "before-draft",
+                "after-draft",
+                "before-reconcile",
+            ],
         )
+
+    def test_teardown_reports_unverified_daemon_release(self) -> None:
+        """FIX 5: an otherwise-successful run whose daemon lease closed but was
+        not verified released within the bounded deadline surfaces as a
+        teardown failure."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+
+        def model(output_path: Path, work_dir: Path) -> Any:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "wait_for_daemon_release",
+                    autospec=True,
+                    return_value=False,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "unverified-daemon-release",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=model,
+                flow_patch=flow_patch,
+                expect_error_type=RuntimeError,
+                expect_error=(
+                    r"ChunkHound daemon release was not verified within the "
+                    r"bounded deadline after lease close"
+                ),
+            )
+
+        self.assertEqual(calls, ["review.md"])
+
+    def test_teardown_reports_daemon_release_verification_error(self) -> None:
+        """FIX 5: a RuntimeError from the release verification itself (e.g. a
+        lease without a generation probe) is recorded as a teardown failure."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+
+        def model(output_path: Path, work_dir: Path) -> Any:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "wait_for_daemon_release",
+                    autospec=True,
+                    side_effect=RuntimeError("no generation probe attached"),
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "daemon-release-verify-error",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=model,
+                flow_patch=flow_patch,
+                expect_error_type=RuntimeError,
+                expect_error=r"no generation probe attached",
+            )
+
+        self.assertEqual(calls, ["review.md"])
 
     def test_fresh_multipass_interrupt_tears_down_workers_before_executor_join(self) -> None:
         """A15: terminal interruption releases owned workers before pool shutdown."""
@@ -3561,7 +4012,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("keeper-close")
             raise close_failure
 
-        def sensitive_cleanup(staged_paths: Any) -> None:
+        def sensitive_cleanup(staged_paths: Any, **_kwargs: Any) -> None:
             events.append("sensitive-cleanup")
             original_sensitive_cleanup(staged_paths)
 
@@ -3701,7 +4152,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("keeper-close")
             raise keeper_failure
 
-        def sensitive_cleanup(staged_paths: Any) -> None:
+        def sensitive_cleanup(staged_paths: Any, **_kwargs: Any) -> None:
             events.append("sensitive-cleanup")
             original_sensitive_cleanup(staged_paths)
 
@@ -5952,7 +6403,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             evidence_text = evidence_path.read_text(encoding="utf-8")
 
-        self.assertEqual(evidence["schema_version"], 1)
+        self.assertEqual(evidence["schema_version"], 2)
         self.assertEqual(evidence["stage"], "expected_session")
         self.assertEqual(evidence["category"], "native_status")
         self.assertEqual(
@@ -5963,19 +6414,27 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             },
         )
         self.assertEqual(evidence["causes"], [])
-        native_status = evidence["native_status"]
+        # Strict allowlist: the evidence FILE persists no raw status payloads
+        # (no parsed last_status, no raw status_payload), no daemon server
+        # version value, and no sandbox paths.
         self.assertEqual(
-            native_status["last_status"],
+            set(evidence),
             {
-                "status": "degraded",
-                "server_version": "fixture-1",
-                "query_ready": False,
-                "scan_progress": {
-                    "backend": "watchman",
-                    "api_key": "REDACTED",  # pragma: allowlist secret
-                },
+                "schema_version",
+                "raised_at",
+                "stage",
+                "category",
+                "exception",
+                "causes",
+                "native_status",
+                "identity",
+                "receipt",
+                "environment",
+                "expected_status_schema",
             },
         )
+        native_status = evidence["native_status"]
+        self.assertNotIn("last_status", native_status)
         self.assertNotIn("last_status_payload", native_status)
         poll = native_status["poll"]
         self.assertEqual(poll["polls"], 0)
@@ -5983,15 +6442,24 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertEqual(poll["timeout_seconds"], 600.0)
         self.assertIsInstance(poll["elapsed_seconds"], float)
         identity = evidence["identity"]
-        self.assertTrue(identity["resolved_executable"].endswith("chunkhound"))
-        self.assertTrue(identity["canonical_root"])
-        self.assertEqual(evidence["receipt"], {"schema_version": 1, "total_chunks": 1})
+        # Path-bearing fields must not persist; only presence booleans.
+        self.assertIs(identity["resolved_executable_found"], True)
+        self.assertIs(identity["canonical_root_present"], True)
+        self.assertNotIn("resolved_executable", identity)
+        self.assertNotIn("canonical_root", identity)
+        self.assertNotIn("cwd", identity)
+        self.assertEqual(
+            set(evidence["receipt"]),
+            {"schema_version", "config_digest", "total_chunks"},
+        )
+        self.assertIsInstance(evidence["receipt"]["config_digest"], str)
         self.assertEqual(
             evidence["expected_status_schema"],
             sorted({"status", "server_version", "query_ready", "scan_progress"}),
         )
         environment = evidence["environment"]
-        self.assertTrue(environment["chunkhound"]["binary"].endswith("chunkhound"))
+        self.assertIs(environment["chunkhound"]["resolved_executable_found"], True)
+        self.assertNotIn("binary", environment["chunkhound"])
         self.assertIn("env_keys", environment)
         self.assertIn("tmp_writable", environment)
         self.assertIn("sandbox_disk_free_bytes", environment)
@@ -6001,6 +6469,12 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         )
         self.assertNotIn("evidence-secret-TOKEN-value", evidence_text)
         self.assertNotIn("evidence-secret-TOKEN-value", json.dumps(result["meta"]))
+        # No status payload, no daemon server version value, no absolute
+        # sandbox paths anywhere in the evidence file text.
+        self.assertNotIn("status_payload", evidence_text)
+        self.assertNotIn("fixture-1", evidence_text)
+        for needle in (str(root), str(root.parent / "bin" / "chunkhound")):
+            self.assertNotIn(needle, evidence_text)
 
     def _broker_proof_events_file(
         self, events_path: Path, payloads: list[dict[str, object]]
@@ -6101,6 +6575,58 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertIsNone(report["failure_reason"])
         self.assertIn("search", report["observed_successful_calls"])
+
+    def test_broker_proof_per_run_events_file_rejects_post_end_events(
+        self,
+    ) -> None:
+        """Per-run events files (codex.events.<32-hex>.jsonl) are sealed: a
+        matching payload beyond the run-end offset must NOT be accepted via
+        the whole-file fallback (which only rescues legacy shared files)."""
+        own_id = "owner-1111" + "0" * 44
+        foreign_id = "owner-2222" + "0" * 44
+        own = self._broker_search_payload(record_id=own_id, query="own")
+        foreign = self._broker_search_payload(record_id=foreign_id, query="foreign")
+        own_digest = self._broker_payload_digest(own)
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            events_path = root / f"codex.events.{'a' * 32}.jsonl"
+            self._broker_proof_events_file(events_path, [foreign, own])
+            foreign_line_len = len(
+                events_path.read_text(encoding="utf-8").splitlines()[0]
+            ) + 1
+            adapter_meta = {
+                "transport": "cli-codex",
+                "codex_events_path": str(events_path),
+                "codex_events_start_offset": 0,
+                "codex_events_end_offset": foreign_line_len,
+                "chunkhound_broker_required": True,
+                "chunkhound_broker_records": [
+                    {
+                        "record_id": own_id,
+                        "operation": "search",
+                        "result_digest": own_digest,
+                    }
+                ],
+            }
+            with self.assertRaises(rf.ReviewflowError) as caught:
+                rf._enforce_chunkhound_tool_proof(
+                    meta={},
+                    work_dir=work_dir,
+                    provider="codex",
+                    review_stage="multipass_step",
+                    prompt_template_name="mrereview_gh_local_big_step.md",
+                    adapter_meta=adapter_meta,
+                )
+            diagnostics_path = work_dir / "chunkhound_proof_failure.json"
+            self.assertTrue(diagnostics_path.is_file())
+            diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["whole_file_payloads"], [])
+        self.assertIn(
+            "helper output lacked a matching coordinator broker result record",
+            str(caught.exception),
+        )
 
     def test_broker_proof_failure_writes_diagnostics_file(self) -> None:
         """A real no-match abort persists expected records vs observed payloads."""
@@ -6922,6 +7448,141 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
         else:
             session.close.assert_not_called()
         self.assertIsNotNone(caught)
+
+    def test_wait_for_daemon_release_requires_close_before_verification(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        lease = lifecycle.ChunkHoundDaemonLease(
+            config_path="chunkhound.json",
+            repo_path=".",
+            generation_probe=lambda: None,
+        )
+        with self.assertRaises(RuntimeError):
+            lease.wait_for_daemon_release(timeout_seconds=1.0)
+
+    def test_wait_for_daemon_release_requires_a_generation_probe(self) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        lease = lifecycle.ChunkHoundDaemonLease(
+            config_path="chunkhound.json",
+            repo_path=".",
+        )
+        lease.close()
+        with self.assertRaises(RuntimeError):
+            lease.wait_for_daemon_release(timeout_seconds=1.0)
+
+    def test_wait_for_daemon_release_polls_until_generation_is_absent(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        identity = lifecycle.DaemonGenerationIdentity(
+            pid=123, process_started_at=98765.0
+        )
+        calls: list[int] = []
+
+        def probe() -> lifecycle.DaemonGenerationIdentity | None:
+            calls.append(len(calls))
+            return identity if len(calls) < 3 else None
+
+        lease = lifecycle.ChunkHoundDaemonLease(
+            config_path="chunkhound.json",
+            repo_path=".",
+            generation_probe=probe,
+        )
+        lease.close()
+        clock_state = {"now": 0.0}
+        slept: list[float] = []
+
+        def clock() -> float:
+            return clock_state["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock_state["now"] += seconds
+
+        self.assertTrue(
+            lease.wait_for_daemon_release(
+                timeout_seconds=5.0,
+                poll_interval_seconds=0.25,
+                clock=clock,
+                sleep=fake_sleep,
+            )
+        )
+        self.assertEqual(calls, [0, 1, 2])
+        self.assertEqual(len(slept), 2)
+
+    def test_wait_for_daemon_release_times_out_when_daemon_never_releases(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        identity = lifecycle.DaemonGenerationIdentity(
+            pid=123, process_started_at=98765.0
+        )
+        lease = lifecycle.ChunkHoundDaemonLease(
+            config_path="chunkhound.json",
+            repo_path=".",
+            generation_probe=lambda: identity,
+        )
+        lease.close()
+        clock_state = {"now": 0.0}
+
+        def clock() -> float:
+            return clock_state["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock_state["now"] += seconds
+
+        self.assertFalse(
+            lease.wait_for_daemon_release(
+                timeout_seconds=1.0,
+                poll_interval_seconds=0.25,
+                clock=clock,
+                sleep=fake_sleep,
+            )
+        )
+        self.assertEqual(clock_state["now"], 1.0)
+
+    def test_wait_for_daemon_generation_absence_treats_probe_errors_as_unreleased(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        attempts = {"n": 0}
+
+        def probe() -> lifecycle.DaemonGenerationIdentity | None:
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise lifecycle.ExpectedSessionReadinessError(
+                    "transient probe failure"
+                )
+            return None
+
+        clock_state = {"now": 0.0}
+
+        def clock() -> float:
+            return clock_state["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock_state["now"] += seconds
+
+        self.assertTrue(
+            lifecycle.wait_for_daemon_generation_absence(
+                probe,
+                timeout_seconds=5.0,
+                poll_interval_seconds=0.25,
+                clock=clock,
+                sleep=fake_sleep,
+            )
+        )
+        self.assertEqual(attempts["n"], 3)
+
+        with self.assertRaises(ValueError):
+            lifecycle.wait_for_daemon_generation_absence(
+                probe,
+                timeout_seconds=0.0,
+                poll_interval_seconds=0.25,
+                clock=clock,
+                sleep=fake_sleep,
+            )
 
 class ExpectedSessionReadinessTests(unittest.TestCase):
     """Native status and expected-index adjudication contract."""
@@ -9515,3 +10176,67 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                     max_file_bytes=1024,
                     max_tokens_per_file=8,
                 )
+
+    def test_select_git_tracked_source_witness_honors_gitignore_only_exclude_mode(
+        self,
+    ) -> None:
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            # a_ignored.txt sorts first, is tracked, and is matched by an
+            # UNTRACKED working-tree .gitignore (gitignore rules apply to the
+            # working tree whether or not the .gitignore itself is tracked;
+            # leaving it untracked keeps it out of the candidate listing).
+            (repo / "a_ignored.txt").write_text(
+                "ignored_witness = 1\n", encoding="utf-8"
+            )
+            (repo / "kept.py").write_text(
+                "selected_witness = 2\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "a_ignored.txt", "kept.py"],
+                check=True,
+            )
+            # Ignore rules written AFTER tracking: tracked files stay in the
+            # index even when .gitignore later matches them (the exact
+            # production failure mode). The .gitignore itself stays untracked
+            # to keep it out of the candidate listing.
+            (repo / ".gitignore").write_text(
+                "a_ignored.txt\n", encoding="utf-8"
+            )
+
+            def select(exclude_mode: str | None) -> "object":
+                config = repo / "chunkhound.json"
+                indexing: dict[str, object] = {
+                    "include": ["**/*.txt", "**/*.py"],
+                }
+                if exclude_mode is not None:
+                    indexing["exclude_mode"] = exclude_mode
+                config.write_text(
+                    json.dumps({"indexing": indexing}), encoding="utf-8"
+                )
+                return lifecycle.select_git_tracked_source_witness(
+                    repo_path=repo,
+                    config_path=config,
+                    max_tracked_paths=16,
+                    max_candidates=4,
+                    max_file_bytes=1024,
+                    max_tokens_per_file=8,
+                )
+
+            # (a) gitignore_only: the tracked-but-ignored candidate is skipped.
+            witness = select("gitignore_only")
+            self.assertEqual(witness.relative_path, "kept.py")
+            self.assertEqual(witness.literal, "selected_witness")
+
+            # (b) default mode: the ignored candidate remains selectable,
+            # because the daemon indexes tracked files regardless of gitignore.
+            witness = select(None)
+            self.assertEqual(witness.relative_path, "a_ignored.txt")
+            self.assertEqual(witness.literal, "ignored_witness")
+
+            # (c) all candidates gitignored -> clear selection failure.
+            (repo / ".gitignore").write_text("*\n", encoding="utf-8")
+            with self.assertRaises(lifecycle.SourceWitnessSelectionError):
+                select("gitignore_only")
