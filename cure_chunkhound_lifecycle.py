@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 import fnmatch
@@ -215,6 +215,10 @@ _DEFAULT_MAX_LISTING_BYTES = 4 * 1024 * 1024
 _DEFAULT_MAX_SOURCE_CANDIDATES = 128
 _DEFAULT_MAX_SOURCE_FILE_BYTES = 256 * 1024
 _DEFAULT_MAX_TOKENS_PER_FILE = 128
+
+# Bounded daemon/DB-lock release verification after lease close().
+_LEASE_RELEASE_VERIFY_SECONDS = 8.0
+_LEASE_RELEASE_VERIFY_POLL_INTERVAL_SECONDS = 0.25
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -484,7 +488,9 @@ def observe_native_daemon_generation(
     )
 
 
-def _load_indexing_patterns(config_path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _load_indexing_patterns(
+    config_path: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -505,8 +511,18 @@ def _load_indexing_patterns(config_path: Path) -> tuple[tuple[str, ...], tuple[s
             )
         return tuple(value)
 
+    # exclude_mode mirrors the daemon's effective ignore source selection: the
+    # materialized session config (materialize_chunkhound_env_config) converts
+    # the ".gitignore" exclude sentinel into exclude_mode="gitignore_only",
+    # which is the same field the daemon reads to index with gitignore rules
+    # only (chunkhound core/config/indexing_config.py resolve_ignore_sources).
+    exclude_mode = indexing.get("exclude_mode")
+    if exclude_mode is not None and (type(exclude_mode) is not str or not exclude_mode):
+        raise SourceWitnessSelectionError(
+            "ChunkHound indexing exclude_mode must be a nonempty string"
+        )
     include_name = "include" if "include" in indexing else "_include"
-    return patterns(include_name), patterns("exclude")
+    return patterns(include_name), patterns("exclude"), exclude_mode
 
 
 def _matches_index_pattern(relative_path: str, pattern: str) -> bool:
@@ -606,6 +622,120 @@ def _git_tracked_paths(
     return decoded
 
 
+def _git_ignored_paths(
+    repo: Path,
+    candidates: Sequence[str],
+    *,
+    max_tracked_paths: int,
+    max_listing_bytes: int,
+    timeout: float,
+) -> frozenset[str]:
+    """Return the candidates excluded by gitignore rules, tracked or not.
+
+    ``git check-ignore --no-index`` evaluates the working tree's ignore rules
+    WITHOUT the index's tracked-file exemption, which is exactly how the
+    daemon's repo-aware ignore engine treats paths during indexing: a tracked
+    file that matches .gitignore is skipped under exclude_mode=gitignore_only.
+    Runs one batched subprocess for all candidates (NUL-separated stdin);
+    never shells out per file. Bounds mirror ``_git_tracked_paths``.
+    """
+    if max_tracked_paths <= 0 or max_listing_bytes <= 0 or timeout <= 0:
+        raise SourceWitnessSelectionError("tracked-source ignore bounds are invalid")
+    try:
+        payload = b"".join(path.encode("utf-8") + b"\x00" for path in candidates)
+    except UnicodeEncodeError as exc:
+        raise SourceWitnessSelectionError(
+            "tracked source path is not UTF-8"
+        ) from exc
+    if len(payload) > max_listing_bytes:
+        raise SourceWitnessSelectionError(
+            "tracked-source ignore input exceeded its byte bound"
+        )
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "check-ignore", "-z", "--no-index", "--stdin"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise SourceWitnessSelectionError("git ignore-check failed") from exc
+    assert process.stdin is not None and process.stdout is not None
+    listing = bytearray()
+    listed_paths = 0
+    input_view = memoryview(payload)
+    input_offset = 0
+    try:
+        deadline = time.monotonic() + float(timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SourceWitnessSelectionError("git ignore-check timed out")
+            # Pump stdin and stdout together: with large candidate sets the
+            # child can fill the stdout pipe while it still needs to read
+            # stdin, so a write-then-read sequence could deadlock.
+            readable, writable, _ = select.select(
+                [process.stdout],
+                [process.stdin] if input_offset < len(input_view) else [],
+                [],
+                remaining,
+            )
+            if not readable and not writable:
+                raise SourceWitnessSelectionError("git ignore-check timed out")
+            if process.stdout in readable:
+                chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                if not chunk:
+                    break
+                listing.extend(chunk)
+                listed_paths += chunk.count(b"\x00")
+                if len(listing) > max_listing_bytes:
+                    raise SourceWitnessSelectionError(
+                        "git ignore-check listing exceeded its byte bound"
+                    )
+                if listed_paths > max_tracked_paths:
+                    raise SourceWitnessSelectionError(
+                        "git ignore-check listing exceeded its path bound"
+                    )
+            if input_offset < len(input_view) and process.stdin in writable:
+                written = os.write(
+                    process.stdin.fileno(),
+                    input_view[input_offset : input_offset + 64 * 1024],
+                )
+                input_offset += written
+                if input_offset >= len(input_view):
+                    process.stdin.close()
+        remaining = max(0.0, deadline - time.monotonic())
+        return_code = process.wait(timeout=remaining)
+        # 0 = at least one path ignored, 1 = none ignored; anything else is a
+        # git failure and must not be interpreted as an empty ignore set.
+        if return_code not in (0, 1):
+            raise SourceWitnessSelectionError("git ignore-check failed")
+    except (BrokenPipeError, OSError) as exc:
+        raise SourceWitnessSelectionError("git ignore-check failed") from exc
+    except (subprocess.TimeoutExpired, SourceWitnessSelectionError):
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        try:
+            process.stdin.close()
+        finally:
+            process.stdout.close()
+    raw_paths = bytes(listing).split(b"\x00")
+    if raw_paths and raw_paths[-1] == b"":
+        raw_paths.pop()
+    if len(raw_paths) > max_tracked_paths:
+        raise SourceWitnessSelectionError(
+            "git ignore-check listing exceeded its path bound"
+        )
+    try:
+        return frozenset(raw.decode("utf-8") for raw in raw_paths)
+    except UnicodeDecodeError as exc:
+        raise SourceWitnessSelectionError(
+            "git ignore-check path is not UTF-8"
+        ) from exc
+
+
 def select_git_tracked_source_witness(
     *,
     repo_path: str | Path,
@@ -617,7 +747,19 @@ def select_git_tracked_source_witness(
     max_tokens_per_file: int = _DEFAULT_MAX_TOKENS_PER_FILE,
     git_timeout: float = 10.0,
 ) -> ExpectedSearchWitness:
-    """Select the first bounded deterministic indexed Git-tracked text token."""
+    """Select the first bounded deterministic indexed Git-tracked text token.
+
+    The witness mirrors the daemon's effective indexing ignore rules: config
+    include/exclude globs are always applied, and when the indexing config
+    selects ``exclude_mode == "gitignore_only"`` (the materialized form of the
+    ".gitignore" exclude sentinel) tracked-but-ignored candidates are skipped,
+    because the daemon's gitignore-only engine does not index them. In any
+    other mode the daemon indexes tracked files regardless of gitignore, so
+    they remain valid witnesses and behavior is unchanged. Note: chunkhound's
+    ignore engine additionally overlays safe default excludes and the user's
+    global gitignore (core.excludesFile); those are not mirrored here, and
+    size/binary/token caps are enforced by the bounds below.
+    """
 
     bounds = (max_candidates, max_file_bytes, max_tokens_per_file)
     if any(type(value) is not int or value <= 0 for value in bounds):
@@ -629,20 +771,35 @@ def select_git_tracked_source_witness(
         raise SourceWitnessSelectionError("source witness paths cannot be resolved") from exc
     if not repo.is_dir():
         raise SourceWitnessSelectionError("source witness repository is not a directory")
-    includes, excludes = _load_indexing_patterns(config)
+    includes, excludes, exclude_mode = _load_indexing_patterns(config)
     tracked = _git_tracked_paths(
         repo,
         max_tracked_paths=max_tracked_paths,
         max_listing_bytes=max_listing_bytes,
         timeout=git_timeout,
     )
+    ignored: frozenset[str] = frozenset()
+    if exclude_mode == "gitignore_only":
+        # The daemon indexes with gitignore rules only, so a tracked-but-ignored
+        # file is NOT indexed and cannot prove a search witness.
+        ignored = _git_ignored_paths(
+            repo,
+            tracked,
+            max_tracked_paths=max_tracked_paths,
+            max_listing_bytes=max_listing_bytes,
+            timeout=git_timeout,
+        )
     candidate_count = 0
+    skipped_ignored = 0
     for relative_path in tracked:
         placeholder = ExpectedSearchWitness(relative_path=relative_path, literal="x")
         try:
             _require_safe_witness(placeholder)
         except ExpectedSessionReadinessError as exc:
             raise SourceWitnessSelectionError("git returned an unsafe tracked path") from exc
+        if relative_path in ignored:
+            skipped_ignored += 1
+            continue
         if includes and not any(_matches_index_pattern(relative_path, item) for item in includes):
             continue
         if any(_matches_index_pattern(relative_path, item) for item in excludes):
@@ -689,6 +846,12 @@ def select_git_tracked_source_witness(
             witness = ExpectedSearchWitness(relative_path=relative_path, literal=match.group(0))
             _require_safe_witness(witness)
             return witness
+    if skipped_ignored:
+        raise SourceWitnessSelectionError(
+            "bounded tracked-source selection found no indexed text witness: "
+            f"all {skipped_ignored} candidate(s) are gitignored under "
+            "exclude_mode='gitignore_only' and are not indexed by the daemon"
+        )
     raise SourceWitnessSelectionError(
         "bounded tracked-source selection found no indexed text witness"
     )
@@ -1175,6 +1338,51 @@ def _require_native_search_witness(
         )
 
 
+def wait_for_daemon_generation_absence(
+    probe: Callable[[], DaemonGenerationIdentity | None],
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Poll a generation probe until it reports no live daemon.
+
+    Returns True once ``probe()`` returns None (no live daemon published),
+    False when the deadline expires first. Probe exceptions count as "not yet
+    released" and polling continues, so a transiently failing probe (e.g. a
+    half-removed lock file mid-shutdown) cannot false-positive a release; a
+    persistently failing probe yields False. Raises ValueError when the wait
+    configuration is invalid. Never kills anything; it only observes.
+    """
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0.0
+        or isinstance(poll_interval_seconds, bool)
+        or not isinstance(poll_interval_seconds, (int, float))
+        or not math.isfinite(float(poll_interval_seconds))
+        or poll_interval_seconds <= 0.0
+        or not callable(probe)
+        or not callable(clock)
+        or not callable(sleep)
+    ):
+        raise ValueError("daemon release verification configuration is invalid")
+    deadline = float(clock()) + float(timeout_seconds)
+    while True:
+        try:
+            if probe() is None:
+                return True
+        except Exception:
+            # An unusable probe right now must not count as "released".
+            pass
+        remaining = deadline - float(clock())
+        if remaining <= 0.0:
+            return False
+        sleep(min(float(poll_interval_seconds), remaining))
+
+
 class LeaseState(Enum):
     """Lifecycle states for one command-scoped ChunkHound daemon lease."""
 
@@ -1545,6 +1753,48 @@ class ChunkHoundDaemonLease:
                 session.close()
         finally:
             self.state = LeaseState.CLOSED
+
+    def wait_for_daemon_release(
+        self,
+        timeout_seconds: float = _LEASE_RELEASE_VERIFY_SECONDS,
+        *,
+        poll_interval_seconds: float = _LEASE_RELEASE_VERIFY_POLL_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> bool:
+        """Boundedly verify the native daemon released its lock after close().
+
+        Call after ``close()`` (raises RuntimeError otherwise). The native
+        daemon is a SEPARATE process from the MCP proxy that ``close()`` reaps:
+        it writes its lock file when it publishes (chunkhound
+        daemon/server.py ``write_lock``) and removes it only during graceful
+        shutdown (``_graceful_shutdown`` → ``remove_lock``, guarded by the
+        ``_lock_written`` flag). CURe daemons are per-session — open() rejects
+        a pre-existing generation — and closing the proxy disconnects the
+        daemon's only client, so the daemon shuts down and removes its lock.
+        "Released" therefore means the generation probe reports no live
+        daemon: the lock file is gone OR its recorded pid is no longer alive
+        (stale locks count as released, matching the daemon's own lock
+        validation in chunkhound daemon/discovery.py). This method never
+        kills anything; it only verifies, so a reusable daemon is untouched.
+        Returns True on verified release, False on deadline expiry.
+        """
+        if self.state is not LeaseState.CLOSED:
+            raise RuntimeError(
+                "ChunkHound daemon release verification requires close() first"
+            )
+        if self._generation_probe is None:
+            raise RuntimeError(
+                "ChunkHound daemon lease cannot verify release without a "
+                "generation probe"
+            )
+        return wait_for_daemon_generation_absence(
+            self._observe_generation,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            clock=clock,
+            sleep=sleep,
+        )
 
     def __enter__(self) -> ChunkHoundDaemonLease:
         return self.open()
