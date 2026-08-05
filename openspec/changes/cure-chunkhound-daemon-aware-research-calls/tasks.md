@@ -36,6 +36,8 @@
 - [x] Add release-workflow ownership tests.
 - [ ] Prove the post-delivery remediation end to end: recursive-root `**/<component>/**` exclusions skip root-level and nested deep witness candidates; lifecycle failures expose and persist only privacy-safe stage/category diagnostics; and a fresh installed-wheel public `cure pr` route succeeds with an eligible witness while preserving exact exclusion behavior.
 - [ ] After the fresh-instance readiness correction, rerun focused TAP-02/TAP-03/TAP-07 tests, execute TAP-05 only through `python tests/tap05_live_proof_runner.py NEW_UNIQUE_PROOF_ROOT`, then run full pytest, Ruff, configured mypy, scoped mypy, isolated build, Twine, and wheel smoke. Prior passes predate the current proof remediations and do not close this row.
+- [ ] Add the PR CI test gate (`test` job in `.github/workflows/ci.yml`: ruff, mypy, pytest, build, twine check, installed-wheel smoke) and verify it is green on the PR run; GitHub-side branch protection with required status checks remains outside the repository.
+- [ ] Verify the post-review follow-up fixes on the current branch tip (continuity re-check, bounded pipe drain, gitignore-aware witness selection, allowlisted readiness diagnostics, daemon release verification, sealed-range evidence, transport caps, broker deadlines/close) via the full gate suite; do not mark the story done until the current-commit proof rows above are also closed.
 
 ## Integration & Cleanup
 
