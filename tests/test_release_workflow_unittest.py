@@ -42,7 +42,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 
         workflow_lines = workflow.splitlines()
-        self.assertIn("        run: python -m pip install --upgrade build twine pytest", workflow_lines)
+        self.assertIn("        run: python -m pip install --upgrade build twine pytest setuptools", workflow_lines)
         self.assertIn("        run: python -m pytest", workflow_lines)
 
     def test_publish_workflow_runs_checkout_isolated_daemon_aware_wheel_smoke(self) -> None:
