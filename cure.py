@@ -2350,10 +2350,21 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     return env, staged_paths
 
 
-SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
+SENSITIVE_STAGED_PATH_KEYS = (
+    "gh_config_dir",
+    "jira_config_file",
+    "netrc",
+    "rf_jira",
+    "chunkhound_session_launch_context",
+)
 
 
-def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
+def cleanup_sensitive_staged_paths(
+    staged_paths: dict[str, Any] | None,
+    *,
+    record_failure: Callable[[str, BaseException], None] | None = None,
+    quiet: bool = True,
+) -> None:
     if not isinstance(staged_paths, dict):
         return
     for key in SENSITIVE_STAGED_PATH_KEYS:
@@ -2364,12 +2375,21 @@ def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
         if key in {"jira_config_file", "netrc"}:
             target = target.parent
         try:
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+            if key == "chunkhound_session_launch_context":
+                cleanup_session_launch_context(target)
+                target.parent.rmdir()
+            elif target.is_dir():
+                shutil.rmtree(target)
             elif target.exists():
                 target.unlink(missing_ok=True)
-        except Exception:
-            continue
+        except Exception as exc:
+            message = (
+                f"Failed to clean sensitive staged path for {key}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            log(message, quiet=quiet)
+            if record_failure is not None:
+                record_failure(f"sensitive_staged_paths:{key}", exc)
 
 
 def _reviewflow_chunkhound_mcp_entry(
@@ -5352,6 +5372,10 @@ def _execute_multipass_synth_stage(
             )
         except ReviewflowSubprocessError as exc:
             raise _PrContextSynthesisExecutionFailure(exc) from exc
+        if daemon_continuity_check is not None:
+            # Post-LLM continuity re-check: a daemon that died mid-call must
+            # abort before the synthesized artifact is accepted.
+            daemon_continuity_check()
         record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
         _record_multipass_stage_llm(
             meta=progress.meta,
@@ -6550,6 +6574,10 @@ def _run_multipass_step_llm(
             runtime_policy=runtime_policy,
             owned_processes=owned_processes,
         )
+        if daemon_continuity_check is not None:
+            # Re-verify after the LLM call too: a daemon that died mid-call is
+            # detected before the step result is accepted and replayed.
+            daemon_continuity_check()
         duration_seconds = time.perf_counter() - started_perf
         with progress.mutate():
             _set_multipass_step_state(
@@ -9283,6 +9311,18 @@ def _enforce_chunkhound_tool_proof(
         whole_payloads: list[dict[str, Any]] = []
         matched_in_slice = False
         matched_in_whole = False
+        # Per-run events files (codex.events.<32-hex>.jsonl) are created fresh
+        # for this run and their slice is [0, size-at-run-end]: nothing beyond
+        # `end` is admissible, so the whole-file fallback must NOT apply.
+        # Legacy shared files (codex.events.jsonl in old sandboxes) keep the
+        # whole-file rescue below.
+        per_run_events_file = (
+            events_path is not None
+            and re.fullmatch(
+                r"codex\.events\.[0-9a-f]{32}\.jsonl", events_path.name
+            )
+            is not None
+        )
         try:
             slice_payloads = _event_payloads_from_bytes(_read_slice())
             for record in broker_records:
@@ -9292,23 +9332,26 @@ def _enforce_chunkhound_tool_proof(
                     matched_in_slice = True
                     break
             if not matched_in_slice and broker_records:
-                # Parallel workers share one codex events log; per-run byte
-                # slices can miss a step's own helper output (interleaved
-                # appends or flush lag) while the payload exists intact in the
-                # file. A whole-file scan is safe here: broker record ids are
-                # per-instance random secrets and the result digest binds the
-                # payload to the coordinator record cryptographically.
-                whole_payloads = _event_payloads_from_bytes(
-                    events_path.read_bytes()
-                    if events_path is not None and events_path.is_file()
-                    else b""
-                )
-                for record in broker_records:
-                    if not isinstance(record, dict):
-                        continue
-                    if any(_matches_record(record, payload) for payload in whole_payloads):
-                        matched_in_whole = True
-                        break
+                # Legacy shared files: parallel workers share one codex events
+                # log; per-run byte slices can miss a step's own helper output
+                # (interleaved appends or flush lag) while the payload exists
+                # intact in the file. A whole-file scan is safe here: broker
+                # record ids are per-instance random secrets and the result
+                # digest binds the payload to the coordinator record
+                # cryptographically. Per-run files are excluded: their sealed
+                # range is the whole file as of run end.
+                if not per_run_events_file:
+                    whole_payloads = _event_payloads_from_bytes(
+                        events_path.read_bytes()
+                        if events_path is not None and events_path.is_file()
+                        else b""
+                    )
+                    for record in broker_records:
+                        if not isinstance(record, dict):
+                            continue
+                        if any(_matches_record(record, payload) for payload in whole_payloads):
+                            matched_in_whole = True
+                            break
         except (OSError, TypeError, ValueError):
             matched_in_whole = False
         if matched_in_whole:
@@ -9758,11 +9801,11 @@ def _probe_chunkhound_environment(
         if isinstance(resolved, Path):
             resolved_binary = str(resolved)
     probes["chunkhound"] = {
-        "binary": resolved_binary,
+        "resolved_executable_found": bool(resolved_binary)
+        and os.path.isfile(resolved_binary),
         "on_path": shutil.which("chunkhound") is not None,
     }
-    if resolved_binary is not None:
-        probes["chunkhound"]["exists"] = os.path.isfile(resolved_binary)
+    if resolved_binary is not None and os.path.isfile(resolved_binary):
         probes["chunkhound"]["version"] = run_version_probe(
             [resolved_binary, "--version"]
         )
@@ -9793,6 +9836,28 @@ def _probe_chunkhound_environment(
     return probes
 
 
+def _sanitize_readiness_evidence_value(
+    value: Any, *, redacted: tuple[str, ...]
+) -> Any:
+    """Recursively scrub known path needles from persisted evidence values."""
+    if isinstance(value, str):
+        text = value
+        for needle in redacted:
+            text = text.replace(needle, "<redacted>")
+        return text
+    if isinstance(value, list):
+        return [
+            _sanitize_readiness_evidence_value(item, redacted=redacted)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_readiness_evidence_value(item, redacted=redacted)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _collect_chunkhound_readiness_evidence(
     *,
     stage: str,
@@ -9803,7 +9868,14 @@ def _collect_chunkhound_readiness_evidence(
     env: Mapping[str, str] | None,
     sandbox_dir: Path,
 ) -> dict[str, Any]:
-    """Serialize everything a user needs to reason about a readiness failure."""
+    """Serialize a strict allowlist of safe facts about a readiness failure.
+
+    The evidence FILE must never persist sandbox paths (canonical root,
+    executable, config/database locations, cwd), raw daemon status payloads,
+    or the daemon server version: those are runtime secrets of the sandbox.
+    Only fixed public exception text, opaque ids, and boolean/summary probe
+    results are kept. write_redacted_json stays as defense-in-depth.
+    """
     message = str(exc)[:500]
     if isinstance(exc, _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES):
         exception_section: dict[str, Any] = {
@@ -9820,7 +9892,7 @@ def _collect_chunkhound_readiness_evidence(
             "message": "<not persisted: not fixed public text>",
         }
     evidence: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "raised_at": _utc_now_iso(),
         "stage": stage,
         "category": category,
@@ -9830,39 +9902,64 @@ def _collect_chunkhound_readiness_evidence(
             for cause in _iter_exception_causes(exc)
         ],
     }
-    native_status: dict[str, Any] = {}
-    status = getattr(exc, "status", None)
-    if isinstance(status, dict):
-        native_status["last_status"] = status
-    else:
-        payload = getattr(exc, "status_payload", None)
-        if isinstance(payload, str):
-            # Raw text is persisted only when no parsed status exists (e.g. a
-            # malformed response); parsed statuses are key-redacted on write.
-            native_status["last_status_payload"] = payload[:4096]
     poll_evidence = getattr(exc, "poll_evidence", None)
     if isinstance(poll_evidence, dict):
-        native_status["poll"] = poll_evidence
-    if native_status:
-        evidence["native_status"] = native_status
+        # Poll summary only; observations are filtered to named, path-free
+        # fields (server_version is a runtime detail and is never persisted).
+        filtered_observations: list[dict[str, Any]] = []
+        for observation in poll_evidence.get("observations") or []:
+            if not isinstance(observation, dict):
+                continue
+            filtered_observations.append(
+                {
+                    key: observation[key]
+                    for key in ("signal", "status", "query_ready")
+                    if key in observation
+                }
+            )
+        evidence["native_status"] = {
+            "poll": {
+                "polls": poll_evidence.get("polls"),
+                "observations": filtered_observations,
+                "timeout_seconds": poll_evidence.get("timeout_seconds"),
+                "elapsed_seconds": poll_evidence.get("elapsed_seconds"),
+            }
+        }
     if identity is not None:
+        resolved_executable = getattr(identity, "resolved_executable", None)
+        canonical_root = getattr(identity, "canonical_root", None)
         evidence["identity"] = {
-            "resolved_executable": str(identity.resolved_executable),
-            "canonical_root": str(identity.canonical_root),
-            "resolved_config_path": str(identity.resolved_config_path),
-            "resolved_database_path": str(identity.resolved_database_path),
-            "cwd": str(identity.cwd),
+            "resolved_executable_found": bool(resolved_executable)
+            and os.path.isfile(str(resolved_executable)),
+            "canonical_root_present": bool(canonical_root)
+            and os.path.isdir(str(canonical_root)),
         }
     if receipt is not None:
+        # config_digest is an opaque digest (safe id); no receipt path fields.
         evidence["receipt"] = {
             "schema_version": receipt.schema_version,
+            "config_digest": str(getattr(receipt, "config_digest", "") or ""),
             "total_chunks": receipt.total_chunks,
         }
     evidence["environment"] = _probe_chunkhound_environment(
         identity=identity, env=env, sandbox_dir=sandbox_dir
     )
     evidence["expected_status_schema"] = sorted(_STATUS_KEYS)
-    return evidence
+    redacted: list[str] = [str(sandbox_dir)]
+    if identity is not None:
+        for attr in (
+            "resolved_executable",
+            "canonical_root",
+            "resolved_config_path",
+            "resolved_database_path",
+            "cwd",
+        ):
+            candidate = getattr(identity, attr, None)
+            if candidate is not None:
+                redacted.append(str(candidate))
+    return _sanitize_readiness_evidence_value(
+        evidence, redacted=tuple(sorted({item for item in redacted if item}))
+    )
 
 
 def _raise_chunkhound_readiness_failure(
@@ -10500,6 +10597,7 @@ def _pr_flow_impl(
                         )
                     except ReviewflowSubprocessError as exc:
                         raise OrientationProviderExecutionFailure(exc) from exc
+                    _assert_daemon_continuity()
                     orientation_usage = _normalize_llm_usage(
                         orientation_result.adapter_meta.get("usage")
                     )
@@ -11129,6 +11227,7 @@ def _pr_flow_impl(
                         progress=progress,
                         owned_processes=owned_processes,
                     )
+                    _assert_daemon_continuity()
                 except BaseException as exc:
                     preflight_failure = exc
                     raise
@@ -11265,6 +11364,7 @@ def _pr_flow_impl(
                         runtime_policy=plan_runtime_policy,
                         owned_processes=owned_processes,
                     )
+                    _assert_daemon_continuity()
                     record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
                     _record_multipass_stage_llm(
                         meta=progress.meta,
@@ -11716,6 +11816,7 @@ def _pr_flow_impl(
                         runtime_policy=runtime_policy,
                         owned_processes=owned_processes,
                     )
+                    _assert_daemon_continuity()
                     record_llm_usage(progress.meta.setdefault("llm", {}), review_result.adapter_meta)
                     success_resume_command = record_llm_resume(
                         progress.meta.setdefault("llm", {}), review_result.resume
@@ -11811,6 +11912,7 @@ def _pr_flow_impl(
                         )
                     except ReviewflowSubprocessError as exc:
                         raise _PrContextReconciliationExecutionFailure(exc) from exc
+                    _assert_daemon_continuity()
                     reconciliation_usage = _normalize_llm_usage(
                         reconcile_result.adapter_meta.get("usage")
                     )
@@ -11973,6 +12075,24 @@ def _pr_flow_impl(
                     daemon_lease.close()
             except BaseException as exc:
                 _record_teardown_failure("keeper_close", exc)
+            else:
+                # Boundedly verify the native daemon actually released its lock
+                # after close (lock gone or holder pid dead). A failed close
+                # already records keeper_close; verification is meaningless
+                # then (the daemon may still be up), so it only runs on the
+                # successful-close path.
+                if daemon_lease is not None:
+                    try:
+                        if not daemon_lease.wait_for_daemon_release():
+                            _record_teardown_failure(
+                                "daemon_release_verify",
+                                RuntimeError(
+                                    "ChunkHound daemon release was not verified "
+                                    "within the bounded deadline after lease close"
+                                ),
+                            )
+                    except BaseException as exc:
+                        _record_teardown_failure("daemon_release_verify", exc)
             if session_launch_context_path is not None:
                 try:
                     if session_launch_context_publication is not None:
@@ -11983,7 +12103,11 @@ def _pr_flow_impl(
                 except BaseException as exc:
                     _record_teardown_failure("session_launch_context", exc)
         finally:
-            cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
+            cleanup_sensitive_staged_paths(
+                (runtime_policy or {}).get("staged_paths"),
+                record_failure=_record_teardown_failure,
+                quiet=quiet,
+            )
             clear_active_output(out)
             out.stop()
             maybe_print_markdown_after_tui(
@@ -16315,7 +16439,6 @@ from cure_llm import (
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
-    cleanup_sensitive_staged_paths,
     codex_mcp_overrides_for_reviewflow,
     codex_resume_meta_dict,
     find_codex_resume_info,
