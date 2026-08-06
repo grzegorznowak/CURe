@@ -5395,6 +5395,11 @@ def _execute_multipass_synth_stage(
                 owned_processes=owned_processes,
             )
         except ReviewflowSubprocessError as exc:
+            if daemon_continuity_check is not None:
+                # A12/A18: a daemon generation lost while the provider was
+                # failing must surface as an infrastructure failure instead of
+                # a retryable/degraded provider failure.
+                daemon_continuity_check()
             raise _PrContextSynthesisExecutionFailure(exc) from exc
         if daemon_continuity_check is not None:
             # Post-LLM continuity re-check: a daemon that died mid-call must
@@ -6619,6 +6624,12 @@ def _run_multipass_step_llm(
             duration_seconds=duration_seconds,
         )
     except Exception as exc:
+        if daemon_continuity_check is not None and not isinstance(exc, ReviewflowError):
+            # A12/A18: keeper loss concurrent with a provider failure must
+            # surface as an infrastructure failure instead of a step error.
+            # (A continuity error already raised by the pre/post checks is
+            # propagated unchanged.)
+            daemon_continuity_check()
         with progress.mutate():
             _set_multipass_step_state(
                 progress.meta,
@@ -11757,6 +11768,10 @@ def _pr_flow_impl(
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
+        # A12/A18: a provider or daemon-dependent subprocess failure with a
+        # concurrently lost keeper/generation must surface as an infrastructure
+        # failure rather than an ordinary subprocess error.
+        _assert_daemon_continuity()
         progress.error(
             {
                 "type": "subprocess",

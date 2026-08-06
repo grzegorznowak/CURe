@@ -3510,6 +3510,356 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             ],
         )
 
+    def test_singlepass_review_failure_with_keeper_loss_surfaces_continuity_error(
+        self,
+    ) -> None:
+        """A12/A18: a provider failure during the standard review with a
+        concurrently lost keeper must surface the infrastructure failure
+        instead of the provider error."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during review dispatch")
+        continuity_checks: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> Any:
+            if output_path.name == "review.md":
+                raise rf.ReviewflowSubprocessError(
+                    cmd=["provider", "review provider failed"],
+                    cwd=None,
+                    exit_code=1,
+                    stdout="",
+                    stderr="review provider failed",
+                )
+            raise AssertionError(f"unexpected output path: {output_path.name}")
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-review",
+                "after-review-failure",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-review-failure":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "review-keeper-loss",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(calls, ["review.md"])
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-review",
+                "after-review-failure",
+            ],
+        )
+
+    def test_multipass_plan_failure_with_keeper_loss_surfaces_continuity_error(
+        self,
+    ) -> None:
+        """A12/A18: a multipass plan provider failure with a concurrently lost
+        keeper must surface the infrastructure failure instead of the provider
+        error or a singlepass fallback."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during plan dispatch")
+        continuity_checks: list[str] = []
+
+        def planner(output_path: Path, work_dir: Path) -> Any:
+            self.assertEqual(output_path.name, "review.plan.md")
+            raise rf.ReviewflowSubprocessError(
+                cmd=["provider", "plan provider failed"],
+                cwd=None,
+                exit_code=1,
+                stdout="",
+                stderr="plan provider failed",
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan-failure",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-plan-failure":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "plan-keeper-loss",
+                profile_resolved="big",
+                multipass_enabled=True,
+                llm_side_effect=planner,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(calls, ["review.plan.md"])
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan-failure",
+            ],
+        )
+
+    def test_multipass_step_failure_with_keeper_loss_surfaces_continuity_error(
+        self,
+    ) -> None:
+        """A12/A18: a multipass step provider failure with a concurrently lost
+        keeper must surface the infrastructure failure instead of the step
+        error, and must not dispatch synthesis."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during step dispatch")
+        continuity_checks: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> Any:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "```json\n"
+                    + json.dumps(
+                        {
+                            "abort": False,
+                            "abort_reason": None,
+                            "jira_keys": [],
+                            "steps": [
+                                {"id": "01", "title": "Fails once", "focus": "loss"}
+                            ],
+                        }
+                    )
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+            elif output_path.name == "review.step-01.md":
+                raise rf.ReviewflowSubprocessError(
+                    cmd=["provider", "step provider failed"],
+                    cwd=None,
+                    exit_code=1,
+                    stdout="",
+                    stderr="step provider failed",
+                )
+            else:
+                raise AssertionError(
+                    f"model work replayed or synthesis dispatched: {output_path.name}"
+                )
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step-failure",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-step-failure":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "step-keeper-loss",
+                profile_resolved="big",
+                multipass_enabled=True,
+                step_workers=1,
+                llm_side_effect=llm_side_effect,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(calls, ["review.plan.md", "review.step-01.md"])
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step-failure",
+            ],
+        )
+
+    def test_multipass_synth_failure_with_keeper_loss_surfaces_continuity_error(
+        self,
+    ) -> None:
+        """A12/A18: a multipass synth provider failure with a concurrently lost
+        keeper must surface the infrastructure failure instead of the retryable
+        synthesis failure."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError("keeper continuity lost during synth dispatch")
+        continuity_checks: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> Any:
+            if output_path.name == "review.plan.md":
+                output_path.write_text(
+                    "```json\n"
+                    + json.dumps(
+                        {
+                            "abort": False,
+                            "abort_reason": None,
+                            "jira_keys": [],
+                            "steps": [
+                                {"id": "01", "title": "Completed once", "focus": "loss"}
+                            ],
+                        }
+                    )
+                    + "\n```\n",
+                    encoding="utf-8",
+                )
+            elif output_path.name == "review.step-01.md":
+                output_path.write_text(
+                    "# Step\n\nCompleted evidence.\n", encoding="utf-8"
+                )
+            elif output_path.name == "review.md":
+                raise rf.ReviewflowSubprocessError(
+                    cmd=["provider", "synth provider failed"],
+                    cwd=None,
+                    exit_code=1,
+                    stdout="",
+                    stderr="synth provider failed",
+                )
+            else:
+                raise AssertionError(f"unexpected output path: {output_path.name}")
+            return rf.LlmRunResult(
+                resume=None,
+                adapter_meta=proof._write_helper_command_events(
+                    work_dir=work_dir,
+                    commands=["search", "research"],
+                ),
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+                "before-synth",
+                "after-synth-failure",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-synth-failure":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "synth-keeper-loss",
+                profile_resolved="big",
+                multipass_enabled=True,
+                step_workers=1,
+                llm_side_effect=llm_side_effect,
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(
+            calls,
+            ["review.plan.md", "review.step-01.md", "review.md"],
+        )
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-plan",
+                "after-plan",
+                "before-step",
+                "after-step",
+                "before-synth",
+                "after-synth-failure",
+            ],
+        )
+
     def test_singlepass_keeper_loss_before_reconcile_does_not_replay_draft(self) -> None:
         """TAP-03 A12: a completed draft is not replayed after keeper loss."""
         from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
