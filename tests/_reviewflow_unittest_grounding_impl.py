@@ -8672,6 +8672,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
             identity = lifecycle.LaunchIdentity(
                 resolved_executable=Path("/usr/bin/chunkhound"),
+                executable_digest="a" * 64,
                 canonical_root=Path(str(kwargs["repo_dir"])).resolve(),
                 resolved_config_path=Path(str(kwargs["chunkhound_cfg_path"])).resolve(),
                 config_digest="a" * 64,
@@ -8859,6 +8860,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             def default_build_launch_identity(**kwargs: object) -> object:
                 return lifecycle.LaunchIdentity(
                     resolved_executable=Path(str(kwargs["binary"])).resolve(),
+                executable_digest="a" * 64,
                     canonical_root=Path(str(kwargs["repo_path"])).resolve(),
                     resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
                     config_digest="a" * 64,

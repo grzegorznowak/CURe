@@ -32,6 +32,7 @@ class LaunchIdentity:
     """Canonical inputs shared by the final index and its retained daemon."""
 
     resolved_executable: Path
+    executable_digest: str
     canonical_root: Path
     resolved_config_path: Path
     config_digest: str
@@ -319,10 +320,17 @@ def build_launch_identity(
     resolved_executable = _resolve_executable(
         binary=binary, cwd=resolved_cwd, environment=curated
     )
+    try:
+        executable_digest = hashlib.sha256(resolved_executable.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise LaunchIdentityConstructionError(
+            "resolved ChunkHound executable cannot be read"
+        ) from exc
     config_digest = hashlib.sha256(_canonical_json_bytes(config_value)).hexdigest()
     environment_digest = hashlib.sha256(_canonical_json_bytes(curated)).hexdigest()
     return LaunchIdentity(
         resolved_executable=resolved_executable,
+        executable_digest=executable_digest,
         canonical_root=canonical_root,
         resolved_config_path=resolved_config,
         config_digest=config_digest,
@@ -1513,6 +1521,10 @@ class ChunkHoundDaemonLease:
         try:
             try:
                 generation_before = self._observe_generation()
+                if generation_before is not None:
+                    raise ExpectedSessionReadinessError(
+                        "native ChunkHound daemon generation already exists"
+                    )
                 if self._pre_spawn_validation is not None:
                     self._pre_spawn_validation()
             except Exception as exc:

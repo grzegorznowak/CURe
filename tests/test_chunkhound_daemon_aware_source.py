@@ -11,7 +11,10 @@ import threading
 
 import pytest
 
-from _reviewflow_unittest_daemon_aware_impl import _write_fake_chunkhound
+from _reviewflow_unittest_daemon_aware_impl import (
+    _read_ledger,
+    _write_fake_chunkhound,
+)
 from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
@@ -360,6 +363,15 @@ def test_keeper_lifecycle_preserves_reviewed_and_operator_source_boundaries() ->
             operator_checkout: _tree_manifest(operator_checkout),
         }
 
+        def generation_probe() -> DaemonGenerationIdentity | None:
+            return (
+                generation
+                if any(
+                    row.get("event") == "launch" for row in _read_ledger(ledger)
+                )
+                else None
+            )
+
         lease = ChunkHoundDaemonLease(
             config_path=config,
             repo_path=reviewed,
@@ -367,7 +379,8 @@ def test_keeper_lifecycle_preserves_reviewed_and_operator_source_boundaries() ->
             binary=str(binary),
             env=environment,
             launch_identity=identity,
-            generation_probe=lambda: generation,
+            generation_probe=generation_probe,
+            generation_attestor=lambda _generation, _process: None,
         )
         try:
             lease.open()

@@ -1757,6 +1757,7 @@ class ExpectedSessionReceiptProjectionTests(unittest.TestCase):
     def _identity(launch_identity_type: Any, root: Path) -> Any:
         return launch_identity_type(
             resolved_executable=root / "bin" / "chunkhound",
+            executable_digest="a" * 64,
             canonical_root=root / "repo",
             resolved_config_path=root / "chunkhound.json",
             config_digest="a" * 64,
@@ -1795,6 +1796,7 @@ class ExpectedSessionReceiptProjectionTests(unittest.TestCase):
             tuple(field.name for field in fields(launch_identity_type)),
             (
                 "resolved_executable",
+                "executable_digest",
                 "canonical_root",
                 "resolved_config_path",
                 "config_digest",
@@ -3995,6 +3997,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         def final_index_receipt_boundary(**kwargs: Any) -> Any:
             identity = lifecycle.LaunchIdentity(
                 resolved_executable=Path("/usr/bin/chunkhound"),
+                executable_digest="a" * 64,
                 canonical_root=Path(kwargs["repo_dir"]).resolve(),
                 resolved_config_path=Path(kwargs["chunkhound_cfg_path"]).resolve(),
                 config_digest="a" * 64,
@@ -4120,6 +4123,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         def final_index_receipt_boundary(**kwargs: Any) -> Any:
             identity = lifecycle.LaunchIdentity(
                 resolved_executable=Path("/usr/bin/chunkhound"),
+                executable_digest="a" * 64,
                 canonical_root=Path(kwargs["repo_dir"]).resolve(),
                 resolved_config_path=Path(kwargs["chunkhound_cfg_path"]).resolve(),
                 config_digest="a" * 64,
@@ -4739,6 +4743,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("rehash")
             return lifecycle.LaunchIdentity(
                 resolved_executable=Path(str(kwargs["binary"])).resolve(),
+                executable_digest="a" * 64,
                 canonical_root=Path(str(kwargs["repo_path"])).resolve(),
                 resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
                 config_digest=("a" if rehash_count == 1 else "c") * 64,
@@ -4811,6 +4816,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 def build_identity(**kwargs: Any) -> Any:
                     identity = lifecycle.LaunchIdentity(
                         resolved_executable=Path(str(kwargs["binary"])).resolve(),
+                executable_digest="a" * 64,
                         canonical_root=Path(str(kwargs["repo_path"])).resolve(),
                         resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
                         config_digest="a" * 64,
@@ -4978,6 +4984,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         def identity_for(**kwargs: object) -> Any:
             return lifecycle.LaunchIdentity(
                 resolved_executable=binary.resolve(),
+                executable_digest="a" * 64,
                 canonical_root=Path(str(kwargs["repo_path"])).resolve(),
                 resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
                 config_digest="a" * 64,
@@ -6547,6 +6554,7 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
         database = root / "chunkhound.db"
         return identity_type(
             resolved_executable=binary.resolve(),
+            executable_digest="executable-digest",
             canonical_root=repo.resolve(),
             resolved_config_path=config.resolve(),
             config_digest="config-digest",
@@ -8482,7 +8490,6 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             readiness_error,
         ) = self._api()
         generation = daemon_generation_type(pid=4242, process_started_at=1234.5)
-        foreign_generation = daemon_generation_type(pid=4343, process_started_at=1234.5)
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             owned_observations: list[object | None] = []
@@ -8519,39 +8526,15 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
             stale_lease.close()
 
             foreign_lease, _, _ = self._open_lease(
-                root,
-                lease_type,
-                identity_type,
-                name="foreign",
-                generation_probe=lambda: foreign_generation,
+                root, lease_type, identity_type, name="foreign"
             )
-            self.assertIsNone(
-                foreign_lease.owned_generation,
-                "a preexisting daemon generation is not owned by a newly opened MCP proxy",
-            )
+            foreign = foreign_lease.owned_generation
+            self.assertIsInstance(foreign, evidence_type)
 
-            preexisting_observations: list[object | None] = []
-
-            def preexisting_probe() -> object:
-                preexisting_observations.append(generation)
-                return generation
-
-            preexisting_lease, identity, ledger = self._open_lease(
-                root,
-                lease_type,
-                identity_type,
-                name="preexisting",
-                generation_probe=preexisting_probe,
-            )
             try:
-                self.assertEqual(preexisting_observations[:2], [generation, generation])
-                self.assertIsNone(
-                    preexisting_lease.owned_generation,
-                    "unchanged preexisting generation must await content adjudication",
+                zero_receipt = self._receipt(
+                    receipt_type, owned_identity, total_chunks=0
                 )
-                zero_receipt = self._receipt(receipt_type, identity, total_chunks=0)
-                with self.assertRaises(readiness_error):
-                    preexisting_lease.adjudicate_expected_session(zero_receipt)
 
                 class ForgedEvidence(evidence_type):
                     def __new__(cls) -> object:
@@ -8564,23 +8547,23 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                         return True
 
                 with self.assertRaises(readiness_error):
-                    preexisting_lease.adjudicate_expected_session(
+                    owned_lease.adjudicate_expected_session(
                         zero_receipt,
                         expected_generation=ForgedEvidence(),
                     )
 
                 for name, evidence in (
-                    ("foreign", owned),
+                    ("foreign", foreign),
                     ("stale", stale),
                 ):
                     with self.subTest(name=name):
                         with self.assertRaises(readiness_error):
-                            preexisting_lease.adjudicate_expected_session(
+                            owned_lease.adjudicate_expected_session(
                                 zero_receipt, expected_generation=evidence
                             )
 
                 owned_readiness = owned_lease.adjudicate_expected_session(
-                    self._receipt(receipt_type, owned_identity, total_chunks=0),
+                    zero_receipt,
                     expected_generation=owned,
                 )
                 self.assertIsInstance(owned_readiness, readiness_type)
@@ -8596,48 +8579,7 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                     ],
                     "owned zero receipt must never issue search",
                 )
-                self.assertNotIn(
-                    "search",
-                    [
-                        row.get("tool")
-                        for row in _read_ledger(ledger)
-                        if row.get("method") == "tools/call"
-                    ],
-                    "unexplained preexisting zero receipts must never issue search",
-                )
-
-                nonempty = preexisting_lease.adjudicate_expected_session(
-                    self._receipt(receipt_type, identity, total_chunks=1),
-                    witness=witness_type(
-                        relative_path="src/fixture.py", literal="needle[1]"
-                    ),
-                )
-                adjudicated = nonempty.expected_generation
-                self.assertIsInstance(adjudicated, evidence_type)
-                search_count = len(
-                    [
-                        row
-                        for row in _read_ledger(ledger)
-                        if row.get("method") == "tools/call"
-                        and row.get("tool") == "search"
-                    ]
-                )
-                preexisting_lease.adjudicate_expected_session(
-                    zero_receipt, expected_generation=adjudicated
-                )
-                final_tools = [
-                    row.get("tool")
-                    for row in _read_ledger(ledger)
-                    if row.get("method") == "tools/call"
-                ]
-                self.assertEqual(
-                    final_tools.count("search"),
-                    search_count,
-                    "adjudicated preexisting evidence authorizes zero without another search",
-                )
-                self.assertGreaterEqual(final_tools.count("daemon_status"), 1)
             finally:
-                preexisting_lease.close()
                 foreign_lease.close()
                 owned_lease.close()
 
