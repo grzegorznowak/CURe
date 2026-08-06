@@ -3418,6 +3418,98 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             ["before-helper", "after-helper", "before-draft", "after-draft"],
         )
 
+    def test_singlepass_reconcile_failure_with_keeper_loss_aborts_instead_of_degrading(
+        self,
+    ) -> None:
+        """B3/A12: provider failure during reconciliation must not degrade to
+        a blind-draft success when the keeper died mid-dispatch."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        proof = CodexToolProofFlowTests()
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        continuity_failure = RuntimeError(
+            "keeper continuity lost during reconciliation dispatch"
+        )
+        continuity_checks: list[str] = []
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> Any:
+            if output_path.name == "pr_context_draft.md":
+                output_path.write_text("blind draft\n", encoding="utf-8")
+                return rf.LlmRunResult(
+                    resume=None,
+                    adapter_meta=proof._write_helper_command_events(
+                        work_dir=work_dir,
+                        commands=["search", "research"],
+                    ),
+                )
+            raise rf.ReviewflowSubprocessError(
+                cmd=["provider", "reconcile provider failed"],
+                cwd=None,
+                exit_code=1,
+                stdout="",
+                stderr="reconcile provider failed",
+            )
+
+        def assert_continuity(_lease: Any) -> None:
+            boundaries = (
+                "before-helper",
+                "after-helper",
+                "before-draft",
+                "after-draft",
+                "before-reconcile",
+                "after-reconcile-failure",
+            )
+            boundary = boundaries[len(continuity_checks)]
+            continuity_checks.append(boundary)
+            if boundary == "after-reconcile-failure":
+                raise continuity_failure
+
+        def flow_patch(stack: Any) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle.ChunkHoundDaemonLease,
+                    "assert_alive",
+                    autospec=True,
+                    side_effect=assert_continuity,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            _, calls = proof._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "reconcile-keeper-loss",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+                extra_cli_args=["--pr-context"],
+                pr_context_result_override={
+                    "orientation_brief": "singlepass context",
+                    "meta": {},
+                },
+                flow_patch=flow_patch,
+                expect_error=(
+                    r"ChunkHound daemon continuity failed \(RuntimeError\); "
+                    r"dispatched model work was not replayed\."
+                ),
+            )
+
+        self.assertEqual(
+            calls,
+            # the reconcile dispatch is recorded even though the provider
+            # call itself fails
+            ["pr_context_draft.md", "pr_context_reconciled.md"],
+        )
+        self.assertEqual(
+            continuity_checks,
+            [
+                "before-helper",
+                "after-helper",
+                "before-draft",
+                "after-draft",
+                "before-reconcile",
+                "after-reconcile-failure",
+            ],
+        )
+
     def test_singlepass_keeper_loss_before_reconcile_does_not_replay_draft(self) -> None:
         """TAP-03 A12: a completed draft is not replayed after keeper loss."""
         from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests

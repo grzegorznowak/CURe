@@ -11692,6 +11692,12 @@ def _pr_flow_impl(
                         run_llm=_run_prior_context_reconcile,
                     )
                 except _PrContextReconciliationExecutionFailure as exc:
+                    # B3/A12: verify the keeper survived the in-flight
+                    # reconciliation before accepting a degraded blind draft.
+                    # If the daemon was lost while the provider was failing,
+                    # the continuity error (infrastructure failure) must
+                    # surface instead of a degraded success.
+                    _assert_daemon_continuity()
                     _atomic_write_text(review_md_path, draft)
                     _record_reconciliation_observations()
                     context_meta.update(
