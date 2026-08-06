@@ -2383,7 +2383,6 @@ SENSITIVE_STAGED_PATH_KEYS = (
     "jira_config_file",
     "netrc",
     "rf_jira",
-    "chunkhound_session_launch_context",
 )
 
 
@@ -2403,10 +2402,7 @@ def cleanup_sensitive_staged_paths(
         if key in {"jira_config_file", "netrc"}:
             target = target.parent
         try:
-            if key == "chunkhound_session_launch_context":
-                cleanup_session_launch_context(target)
-                target.parent.rmdir()
-            elif target.is_dir():
+            if target.is_dir():
                 shutil.rmtree(target)
             elif target.exists():
                 target.unlink(missing_ok=True)
@@ -9169,20 +9165,6 @@ def _run_review_intelligence_preflight(
             stream=stream,
             stream_label="jira",
         )
-
-
-def _chunkhound_proof_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compact, secret-free fingerprint of one helper output payload."""
-    bound = dict(payload)
-    bound.pop("broker_record_id", None)
-    bound.pop("helper_path", None)
-    return {
-        "broker_record_id": str(payload.get("broker_record_id") or ""),
-        "operation": str(payload.get("command") or payload.get("tool_name") or ""),
-        "digest": hashlib.sha256(
-            json.dumps(bound, sort_keys=True, default=str).encode()
-        ).hexdigest(),
-    }
 
 
 def _replace_last_chunkhound_validation_run(
