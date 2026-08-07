@@ -4,6 +4,25 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
+## [0.10.0] - 2026-08-07
+
+### Added
+
+- `cure pr` reviews now retain a single ChunkHound daemon across the whole session: fresh reviews open one lease only after final indexing, reject pre-existing generations, and attest the newly opened daemon before review work begins, so research calls no longer pay a cold-start cost per query.
+- Helper calls remain independent native ChunkHound MCP proxies with no broker or query serializer, per the daemon-aware research-calls spec.
+- Readiness evidence v2: bounded polling, strict receipt identity, generation continuity, gitignore-aware witness selection, and an allowlist for persisted readiness evidence.
+
+### Changed
+
+- Keeper-loss continuity: post-dispatch daemon-continuity re-checks surface an explicit infrastructure failure instead of retrying or accepting output from an unknown ChunkHound generation.
+- Transport hardening: bounded pipe-EOF drain and process-group kill on teardown; JsonRpcSession caps for headers, Content-Length, JSON lines, and the aggregate stdout buffer.
+- Proof integrity: per-run Codex events are sealed, and helper executions are attested by launch identity and executable digest; the whole-file proof fallback remains only for legacy shared event files.
+
+### Fixed
+
+- Autouse fake-ChunkHound test fixture no longer aborts sessions when a real ChunkHound is on PATH (generator-fixture regression).
+- Reconcile failure paths now run the post-dispatch continuity check before degrading; keeper loss no longer surfaces as a blind-draft "degraded success".
+
 ## [0.9.1] - 2026-07-27
 
 ### Changed
