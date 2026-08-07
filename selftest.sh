@@ -21,8 +21,7 @@ python3 -m venv "$tmpdir/venv"
 "$tmpdir/venv/bin/cure" --help >/dev/null
 "$tmpdir/venv/bin/cure" doctor --help >/dev/null
 python3 "$repo_root/tests/story26_cli_smoke.py" \
-  --cli-bin "$tmpdir/venv/bin/cure" \
-  --script-bin /usr/bin/script
+  --cli-bin "$tmpdir/venv/bin/cure"
 
 mkdir -p "$tmpdir/home"
 uv_bin_dir="$(HOME="$tmpdir/home" uv tool dir --bin)"
@@ -30,5 +29,4 @@ HOME="$tmpdir/home" uv tool install --force --editable "$repo_root"
 "$uv_bin_dir/cure" --help >/dev/null
 "$uv_bin_dir/cure" doctor --help >/dev/null
 python3 "$repo_root/tests/story26_cli_smoke.py" \
-  --cli-bin "$uv_bin_dir/cure" \
-  --script-bin /usr/bin/script
+  --cli-bin "$uv_bin_dir/cure"

@@ -4,11 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 
@@ -235,62 +232,13 @@ def write_session(
     return session_dir
 
 
-def mutate_terminal_status(meta_path: Path, *, status: str, delay_seconds: float) -> None:
-    def update() -> None:
-        time.sleep(delay_seconds)
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
-        payload["status"] = status
-        if status == "done":
-            payload["completed_at"] = "2026-03-10T12:10:00+00:00"
-        else:
-            payload["failed_at"] = "2026-03-10T12:10:00+00:00"
-            payload["error"] = {"type": "exception", "message": "pty failure"}
-        phases = payload.get("phases")
-        if isinstance(phases, dict):
-            review = phases.get("review")
-            if isinstance(review, dict):
-                review["status"] = status
-                review["finished_at"] = "2026-03-10T12:10:00+00:00"
-        meta_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    thread = threading.Thread(target=update, daemon=True)
-    thread.start()
-
-
-def run_pty_watch(
-    *,
-    binary: Path,
-    script_bin: Path,
-    env: dict[str, str],
-    sandbox_root: Path,
-    session_id: str,
-) -> int:
-    status_file = sandbox_root / f"{session_id}.pty.exit"
-    shell_cmd = (
-        f"{shlex.quote(str(binary))} --no-config --sandbox-root {shlex.quote(str(sandbox_root))} "
-        f"watch {shlex.quote(session_id)} --interval 0.1 --verbosity quiet --no-color; "
-        f"rc=$?; printf '%s' \"$rc\" > {shlex.quote(str(status_file))}; exit 0"
-    )
-    proc = subprocess.run(
-        [str(script_bin), "-q", "-c", shell_cmd, "/dev/null"],
-        cwd=str(REPO_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20.0,
-    )
-    ensure(proc.returncode == 0, f"PTY wrapper failed: {proc.stderr}")
-    ensure(status_file.is_file(), f"missing PTY exit status for {session_id}")
-    return int(status_file.read_text(encoding="utf-8").strip())
-
-
 def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str], sandbox_root: Path) -> None:
     proc = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands", "--json"), env=env)
     payload = json.loads(proc.stdout)
     ensure(payload["schema_version"] == 2, "commands schema_version mismatch")
     ensure(payload["kind"] == "cure.commands", "commands kind mismatch")
     names = [entry["name"] for entry in payload["commands"]]
-    ensure(names == ["pr", "resume", "clean", "status", "watch"], "commands order mismatch")
+    ensure(names == ["pr", "resume", "clean", "status"], "commands order mismatch")
     ensure("interactive" not in names, "interactive should be absent from curated catalog")
     for entry in payload["commands"]:
         for key in (
@@ -308,7 +256,6 @@ def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str]
     human = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands"), env=env)
     ensure("cure clean closed --json" in human.stdout, "commands human output missing clean")
     ensure("cure status <session_id|PR_URL> --json" in human.stdout, "commands human output missing status")
-    ensure("cure watch <session_id|PR_URL>" in human.stdout, "commands human output missing watch")
     ensure("reviewflow" not in human.stdout, "commands human output should not advertise deprecated alias")
 
     _ = alias_bin
@@ -405,105 +352,6 @@ def test_status(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     ensure(unmatched.returncode != 0, "unmatched PR should fail")
 
 
-def test_watch(binary: Path, script_bin: Path, env: dict[str, str], sandbox_root: Path) -> None:
-    running_done = write_session(
-        root=sandbox_root,
-        session_id="watch-running-done",
-        status="running",
-        created_at="2026-03-10T11:00:00+00:00",
-        number=51,
-    )
-    mutate_terminal_status(running_done / "meta.json", status="done", delay_seconds=0.4)
-    proc_done = run_cmd(
-        cli_cmd(
-            binary,
-            sandbox_root,
-            "watch",
-            "watch-running-done",
-            "--interval",
-            "0.1",
-            "--verbosity",
-            "quiet",
-            "--no-color",
-        ),
-        env=env,
-        check=False,
-    )
-    ensure(proc_done.returncode == 0, "non-TTY watch done should exit 0")
-    ensure("session=watch-running-done" in proc_done.stdout, "non-TTY watch done missing session")
-    ensure("\x1b[" not in proc_done.stdout, "non-TTY watch done emitted ANSI")
-
-    running_error = write_session(
-        root=sandbox_root,
-        session_id="watch-running-error",
-        status="running",
-        created_at="2026-03-10T11:00:00+00:00",
-        number=52,
-    )
-    mutate_terminal_status(running_error / "meta.json", status="error", delay_seconds=0.4)
-    proc_error = run_cmd(
-        cli_cmd(
-            binary,
-            sandbox_root,
-            "watch",
-            "watch-running-error",
-            "--interval",
-            "0.1",
-            "--verbosity",
-            "quiet",
-            "--no-color",
-        ),
-        env=env,
-        check=False,
-    )
-    ensure(proc_error.returncode != 0, "non-TTY watch error should exit non-zero")
-    ensure("status=error" in proc_error.stdout, "non-TTY watch error missing status")
-    ensure("\x1b[" not in proc_error.stdout, "non-TTY watch error emitted ANSI")
-
-    pty_env = dict(env)
-    pty_env["TERM"] = "xterm-256color"
-
-    pty_done = write_session(
-        root=sandbox_root,
-        session_id="pty-watch-done",
-        status="running",
-        created_at="2026-03-10T11:00:00+00:00",
-        number=53,
-    )
-    mutate_terminal_status(pty_done / "meta.json", status="done", delay_seconds=0.4)
-    ensure(
-        run_pty_watch(
-            binary=binary,
-            script_bin=script_bin,
-            env=pty_env,
-            sandbox_root=sandbox_root,
-            session_id="pty-watch-done",
-        )
-        == 0,
-        "PTY watch done should exit 0",
-    )
-
-    pty_error = write_session(
-        root=sandbox_root,
-        session_id="pty-watch-error",
-        status="running",
-        created_at="2026-03-10T11:00:00+00:00",
-        number=54,
-    )
-    mutate_terminal_status(pty_error / "meta.json", status="error", delay_seconds=0.4)
-    ensure(
-        run_pty_watch(
-            binary=binary,
-            script_bin=script_bin,
-            env=pty_env,
-            sandbox_root=sandbox_root,
-            session_id="pty-watch-error",
-        )
-        != 0,
-        "PTY watch error should exit non-zero",
-    )
-
-
 def test_clean(binary: Path, env: dict[str, str], sandbox_root: Path) -> None:
     exact_root = sandbox_root / "exact"
     exact_root.mkdir(parents=True, exist_ok=True)
@@ -589,16 +437,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli-bin", required=True)
     parser.add_argument("--alias-bin")
-    parser.add_argument("--script-bin", required=True)
     args = parser.parse_args()
 
     binary = Path(args.cli_bin).resolve()
     alias_bin = Path(args.alias_bin).resolve() if args.alias_bin else None
-    script_bin = Path(args.script_bin).resolve()
     ensure(binary.is_file(), f"missing primary CLI binary: {binary}")
     if alias_bin is not None:
         ensure(alias_bin.is_file(), f"missing alias CLI binary: {alias_bin}")
-    ensure(script_bin.is_file(), f"missing script binary: {script_bin}")
 
     with tempfile.TemporaryDirectory(prefix="cure-story26-smoke-") as tmp:
         tmp_root = Path(tmp)
@@ -609,7 +454,6 @@ def main() -> int:
 
         test_commands(binary, alias_bin, env, tmp_root / "commands")
         test_status(binary, env, tmp_root / "status")
-        test_watch(binary, script_bin, env, tmp_root / "watch")
         test_clean(binary, env, tmp_root / "clean")
         test_bootstrap_gate_non_tty(binary, env, tmp_root / "bootstrap")
 

@@ -182,13 +182,11 @@ def _build_cli_runtime_policy(
     work_dir: Path,
     env: dict[str, str],
 ) -> dict[str, Any]:
-    args = argparse.Namespace(agent_runtime_profile="permissive")
+    args = argparse.Namespace()
     return rf.prepare_review_agent_runtime(
         args=args,
         resolved=resolved,
         resolution_meta=resolution_meta,
-        reviewflow_config_path=work_dir / "runtime.toml",
-        config_enabled=False,
         repo_dir=repo_dir,
         session_dir=session_dir,
         work_dir=work_dir,
