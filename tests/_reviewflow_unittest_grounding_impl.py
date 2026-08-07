@@ -8838,16 +8838,6 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     side_effect=fake_final_index_receipt,
                 )
             )
-            stack.enter_context(
-                mock.patch.object(
-                    rf,
-                    "select_git_tracked_source_witness",
-                    return_value=lifecycle.ExpectedSearchWitness(
-                        relative_path="source.py",
-                        literal="tool_proof_witness",
-                    ),
-                )
-            )
             if flow_patch is not None:
                 flow_patch(stack)
 
