@@ -4,6 +4,12 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
+## [0.10.1] - 2026-08-07
+
+### Fixed
+
+- Fixed a deterministic ChunkHound readiness failure: the search witness is now derived from the daemon's own index instead of repository configuration, so a witness can never point at a file the index does not contain (e.g. `.claude` files). Failed witness searches also persist a bounded, scrubbed response excerpt in the readiness evidence for diagnosis.
+
 ## [0.10.0] - 2026-08-07
 
 ### Added
