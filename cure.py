@@ -15750,7 +15750,6 @@ from cure_commands import (
     preferred_cli_invocation,
     resume_flow,
     setup_flow,
-    set_agent_flow,
     status_flow,
 )
 
@@ -15996,13 +15995,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Skip ChunkHound installation (fail if chunkhound is not already on PATH)",
     )
 
-    sap = sub.add_parser(
-        "set-agent",
-        help="Persist an operator-approved local coding agent choice used by CURe",
-        parents=[runtime_parent],
-    )
-    sap.add_argument("agent", choices=["codex"], help="Operator-approved local coding agent to persist")
-
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
     add_agent_runtime_args(dp)
@@ -16040,8 +16032,6 @@ def main(
     try:
         if args.cmd == "setup":
             return command_surface.setup_flow(args, runtime=runtime)
-        if args.cmd == "set-agent":
-            return command_surface.set_agent_flow(args, runtime=runtime)
         if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
             runtime = runtime_surface.resolve_runtime(args)
             paths = runtime.paths

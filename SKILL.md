@@ -203,7 +203,7 @@ If the file already exists and you want to rewrite it, rerun `cure setup --force
 cure setup
 ```
 
-`cure setup` can provision ChunkHound, repair missing non-secret bootstrap files, and persist the Codex local-agent choice only when the selected config target is operator-approved and the choice is explicit. It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when the operator has approved CURe installing or replacing that binary explicitly. Use `--agent codex` on `cure setup` only when Codex is the approved non-interactive choice, and use `cure set-agent codex` to refresh the sticky selection later.
+`cure setup` can provision ChunkHound, repair missing non-secret bootstrap files, and persist the Codex local-agent choice only when the selected config target is operator-approved and the choice is explicit. It reuses an existing `chunkhound` already on `PATH` by default. Pass `--chunkhound-source release` or `--chunkhound-source git-main` only when the operator has approved CURe installing or replacing that binary explicitly. Use `--agent codex` on `cure setup` only when Codex is the approved non-interactive choice, and re-run `cure setup --agent codex` to refresh the sticky selection later.
 
 9. Confirm readiness:
 

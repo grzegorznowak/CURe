@@ -635,7 +635,7 @@ def _agent_guidance_lines(*, command_name: str) -> list[str]:
     return [
         "Supported local coding agents are detected from executables on PATH; readiness is advisory and does not prove outer sandbox or network access.",
         f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` only after the operator approves persisting that choice.",
-        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex` to change an approved saved choice later, or pass `--llm-preset codex-cli` for a one-off run.",
+        f"Re-run `{PRIMARY_CLI_COMMAND} setup --agent codex` to change an approved saved choice later, or pass `--llm-preset codex-cli` for a one-off run.",
     ]
 
 
@@ -1103,29 +1103,6 @@ def setup_flow(
     return 0
 
 
-def set_agent_flow(
-    args: argparse.Namespace,
-    *,
-    runtime: ReviewflowRuntime,
-    stdout: TextIO | None = None,
-) -> int:
-    out_stream = stdout or sys.stdout
-    selected_agent = str(getattr(args, "agent", "") or "").strip().lower()
-    choice = _resolve_bootstrap_agent_choice(
-        runtime=runtime,
-        cli_agent=selected_agent,
-        command_name="set-agent",
-        interactive=False,
-    )
-    _ensure_bootstrap_files(runtime=runtime, stdout=out_stream)
-    resolved_agent = str(choice.get("agent") or "").strip()
-    preset = LOCAL_AGENT_PRESET_BY_NAME[resolved_agent]
-    changed = _upsert_llm_default_preset(config_path=runtime.config_path, default_preset=preset)
-    action = "Updated" if changed else "Left unchanged"
-    print(f"{action} saved local agent preference: {resolved_agent} ({preset})", file=out_stream)
-    return 0
-
-
 def pr_flow(
     args: argparse.Namespace,
     *,
@@ -1265,7 +1242,6 @@ __all__ = [
     "pr_flow",
     "preferred_cli_invocation",
     "resume_flow",
-    "set_agent_flow",
     "setup_flow",
     "status_flow",
 ]

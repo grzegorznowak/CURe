@@ -2638,9 +2638,6 @@ class TuiDashboardTests(unittest.TestCase):
         args6 = p.parse_args(["setup", "--agent", "codex"])
         self.assertEqual(args6.cmd, "setup")
         self.assertEqual(args6.agent, "codex")
-        args7 = p.parse_args(["set-agent", "codex"])
-        self.assertEqual(args7.cmd, "set-agent")
-        self.assertEqual(args7.agent, "codex")
 
     def test_parser_rejects_init_command(self) -> None:
         p = rf.build_parser()
@@ -3687,7 +3684,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("--config /tmp/cure-public/cure.toml", skill)
         self.assertIn("XDG_CONFIG_HOME", skill)
         self.assertIn("repair missing non-secret bootstrap files", skill)
-        self.assertIn("cure set-agent codex", skill)
+        self.assertIn("cure setup --agent codex", skill)
         self.assertIn("reuses an existing `chunkhound` already on `PATH` by default", skill)
         self.assertIn("`--chunkhound-source release` or `--chunkhound-source git-main`", skill)
         self.assertIn("Run `cure setup` before `cure doctor`.", skill)
@@ -4234,8 +4231,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_set_agent_flow_rejects_unavailable_agent(self) -> None:
-        root = ROOT / ".tmp_test_cure_set_agent_missing"
+    def test_setup_flow_agent_rejects_unavailable_agent(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_agent_missing"
         config_path = root / "config" / "cure.toml"
         runtime = rf.ReviewflowRuntime(
             config_path=config_path,
@@ -4258,9 +4255,9 @@ class InstallAndDoctorTests(unittest.TestCase):
                 side_effect=lambda name: None if name == "codex" else f"/usr/bin/{name}",
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
-                    rf.set_agent_flow(argparse.Namespace(agent="codex"), runtime=runtime)
+                    rf.setup_flow(argparse.Namespace(force=False, agent="codex", cmd="setup"), runtime=runtime)
             self.assertIn("`codex` is not installed on PATH", str(ctx.exception))
-            self.assertIn("Use `cure set-agent codex`", str(ctx.exception))
+            self.assertIn("setup --agent codex", str(ctx.exception))
             self.assertFalse(config_path.exists())
             self.assertFalse((root / "config" / "chunkhound-base.json").exists())
         finally:

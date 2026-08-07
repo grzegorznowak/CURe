@@ -170,7 +170,7 @@ cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json
 cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli
 ```
 
-To persist the choice for future runs, use `cure set-agent codex` after the operator has approved Codex as the local CLI provider. `cure setup` can repair missing non-secret bootstrap files and the saved local-agent choice only when the selected config target is approved and the choice is unambiguous.
+To persist the choice for future runs, use `cure setup --agent codex` after the operator has approved Codex as the local CLI provider. `cure setup` can repair missing non-secret bootstrap files and the saved local-agent choice only when the selected config target is approved and the choice is unambiguous.
 
 Need the full operator-controlled setup checklist for agent sessions or existing local setups? Use [SKILL.md](SKILL.md).
 

@@ -39,7 +39,7 @@ This document describes the internal architecture: how modules connect, what hap
 
 ### `cure_commands.py` — CLI Dispatch & Top-Level Flows
 
-The primary entry point for all user-facing commands. Receives parsed `argparse.Namespace` arguments and delegates to the appropriate flow function. Owns the command catalog (`commands --json`), `setup`, `doctor`, `status`, `clean`, `set-agent`, and `cache` subcommands. For review-producing commands (`pr`, `resume`, `interactive`), it delegates to `cure.py` via thin wrappers.
+The primary entry point for all user-facing commands. Receives parsed `argparse.Namespace` arguments and delegates to the appropriate flow function. Owns the command catalog (`commands --json`), `setup`, `doctor`, `status`, `clean`, and `cache` subcommands. For review-producing commands (`pr`, `resume`, `interactive`), it delegates to `cure.py` via thin wrappers.
 
 ### `cure.py` — Core Implementation (the "shell")
 
