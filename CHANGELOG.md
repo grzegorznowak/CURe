@@ -4,6 +4,17 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
+## [0.10.2] - 2026-08-07
+
+### Changed
+
+- Trimmed the CLI to its minimal surface: removed the unused `watch`, `followup`, `ui-preview`, and `migrate-storage` commands, the redundant `set-agent` command (its behavior is fully covered by `setup --agent codex`, which persists the same codex preference), and the degenerate `agent-runtime-profile` knob. The completed-session follow-up behavior previously exposed by `followup` remains reachable through `cure resume <PR_URL>`.
+
+### Fixed
+
+- `cure resume <PR_URL>` on a completed session now forwards the selected CURe/Codex configuration paths and generic LLM overrides (`--llm-preset`, `--llm-model`, `--llm-effort`, `--llm-verbosity`, `--llm-max-output-tokens`, `--llm-set`, `--llm-header`) into the follow-up review instead of silently falling back to defaults.
+- Strict-grounding recovery instructions no longer suggest the removed `cure watch` command.
+
 ## [0.10.1] - 2026-08-07
 
 ### Fixed
