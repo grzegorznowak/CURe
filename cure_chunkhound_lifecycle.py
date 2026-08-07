@@ -136,7 +136,15 @@ class NativeStatusReadinessError(ExpectedSessionReadinessError):
 
 
 class NativeSearchWitnessReadinessError(ExpectedSessionReadinessError):
-    """Raised when native search cannot prove the selected source witness."""
+    """Raised when native search cannot prove the selected source witness.
+
+    ``witness`` and ``response`` carry the failed search's inputs and raw
+    markdown response so the readiness evidence can persist a bounded,
+    scrubbed excerpt for diagnosis (see the evidence collector in cure.py).
+    """
+
+    witness: ExpectedSearchWitness | None = None
+    response: str | None = None
 
 
 class ExpectedSessionReadinessTimeoutError(NativeStatusReadinessError):
@@ -1341,9 +1349,12 @@ def _require_native_search_witness(
             "native ChunkHound search request failed"
         ) from exc
     if not _native_markdown_contains_witness(text, witness):
-        raise NativeSearchWitnessReadinessError(
+        error = NativeSearchWitnessReadinessError(
             "native ChunkHound search did not prove the exact source witness"
         )
+        error.witness = witness
+        error.response = text
+        raise error
 
 
 def wait_for_daemon_generation_absence(

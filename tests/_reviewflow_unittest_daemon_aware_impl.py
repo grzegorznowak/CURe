@@ -8467,6 +8467,80 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                     issubclass(error_type, lifecycle.ExpectedSessionReadinessError)
                 )
 
+    def test_search_witness_no_hit_carries_response_payload_for_evidence(
+        self,
+    ) -> None:
+        """A no-hit witness search attaches witness + raw response for evidence."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        witness = lifecycle.ExpectedSearchWitness(
+            relative_path=".github/workflows/ci.yml", literal="branches"
+        )
+        response = "No results found."
+        session = mock.Mock()
+        session.request.return_value = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": response}],
+                "isError": False,
+            },
+        }
+        with self.assertRaises(
+            lifecycle.NativeSearchWitnessReadinessError
+        ) as caught:
+            lifecycle._require_native_search_witness(session, witness)
+        self.assertEqual(
+            str(caught.exception),
+            "native ChunkHound search did not prove the exact source witness",
+        )
+        self.assertEqual(caught.exception.witness, witness)
+        self.assertEqual(caught.exception.response, response)
+
+    def test_readiness_evidence_records_witness_search_response_excerpt(
+        self,
+    ) -> None:
+        """Readiness evidence persists a bounded, scrubbed search response."""
+        cure = importlib.import_module("cure")
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        witness = lifecycle.ExpectedSearchWitness(
+            relative_path=".github/workflows/ci.yml", literal="branches"
+        )
+        with tempfile.TemporaryDirectory() as raw_root:
+            sandbox_dir = Path(raw_root) / "sandbox"
+            sandbox_dir.mkdir()
+            response = (
+                f"No results found. api_key = sk-test-1234 "
+                f"root={sandbox_dir}/repo"
+            )
+            exc = lifecycle.NativeSearchWitnessReadinessError(
+                "native ChunkHound search did not prove the exact source witness"
+            )
+            exc.witness = witness
+            exc.response = response
+            evidence = cure._collect_chunkhound_readiness_evidence(
+                stage="expected_session",
+                category="witness_search",
+                exc=exc,
+                identity=None,
+                receipt=None,
+                env=None,
+                sandbox_dir=sandbox_dir,
+            )
+        witness_section = evidence["witness_search"]
+        self.assertEqual(
+            witness_section["witness"],
+            {
+                "relative_path": ".github/workflows/ci.yml",
+                "literal": "branches",
+            },
+        )
+        self.assertEqual(witness_section["response_chars"], len(response))
+        self.assertFalse(witness_section["response_truncated"])
+        excerpt = witness_section["response_excerpt"]
+        self.assertIn("No results found.", excerpt)
+        self.assertNotIn("sk-test-1234", excerpt)
+        self.assertNotIn(str(sandbox_dir), excerpt)
+
     def test_readiness_status_timeout_tolerates_fresh_instance_resync_scan(
         self,
     ) -> None:

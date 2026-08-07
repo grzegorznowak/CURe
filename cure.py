@@ -98,6 +98,7 @@ from cure_chunkhound import probe_effective_daemon_log_exclusion
 from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
+    ExpectedSearchWitness,
     ExpectedSessionReadinessError,
     ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
@@ -9684,6 +9685,9 @@ def _sanitize_readiness_evidence_value(
     return value
 
 
+_WITNESS_SEARCH_EVIDENCE_EXCERPT_CHARS = 2000
+
+
 def _collect_chunkhound_readiness_evidence(
     *,
     stage: str,
@@ -9699,8 +9703,12 @@ def _collect_chunkhound_readiness_evidence(
     The evidence FILE must never persist sandbox paths (canonical root,
     executable, config/database locations, cwd), raw daemon status payloads,
     or the daemon server version: those are runtime secrets of the sandbox.
-    Only fixed public exception text, opaque ids, and boolean/summary probe
-    results are kept. write_redacted_json stays as defense-in-depth.
+    The one deliberate exception is the witness-search response: a bounded,
+    credential-scrubbed excerpt is persisted (with the witness inputs) so a
+    "did not prove the exact source witness" failure is diagnosable without
+    re-running the search. Only fixed public exception text, opaque ids, and
+    boolean/summary probe results are kept otherwise. write_redacted_json
+    stays as defense-in-depth.
     """
     message = str(exc)[:500]
     if isinstance(exc, _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES):
@@ -9751,6 +9759,27 @@ def _collect_chunkhound_readiness_evidence(
                 "elapsed_seconds": poll_evidence.get("elapsed_seconds"),
             }
         }
+    if isinstance(exc, NativeSearchWitnessReadinessError):
+        witness_search: dict[str, Any] = {}
+        witness = getattr(exc, "witness", None)
+        if isinstance(witness, ExpectedSearchWitness):
+            witness_search["witness"] = {
+                "relative_path": witness.relative_path,
+                "literal": witness.literal,
+            }
+        response = getattr(exc, "response", None)
+        if isinstance(response, str):
+            excerpt = response[: _WITNESS_SEARCH_EVIDENCE_EXCERPT_CHARS]
+            witness_search["response_chars"] = len(response)
+            witness_search["response_truncated"] = (
+                len(response) > len(excerpt)
+            )
+            # Credential-shaped values are scrubbed before the bounded excerpt
+            # is persisted; sandbox path needles are redacted by the final
+            # sanitize pass below.
+            witness_search["response_excerpt"] = _redact_secrets(excerpt)
+        if witness_search:
+            evidence["witness_search"] = witness_search
     if identity is not None:
         resolved_executable = getattr(identity, "resolved_executable", None)
         canonical_root = getattr(identity, "canonical_root", None)
@@ -16091,6 +16120,7 @@ from cure_runtime import (
     MULTIPASS_MAX_STEPS_HARD_CAP,
     MULTIPASS_STEP_WORKERS_HARD_CAP,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
+    _redact_secrets,
     DoctorCheck,
     ReviewIntelligenceConfig,
     ReviewIntelligenceSource,
