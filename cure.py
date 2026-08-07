@@ -14,6 +14,7 @@ import os
 import re
 import select
 import secrets
+import signal
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 from functools import lru_cache
 from importlib import metadata as importlib_metadata, resources
 from pathlib import Path
@@ -82,7 +84,34 @@ from paths import (
     safe_ref_slug,
     seed_dir,
 )
-from run import CommandResult, ReviewflowSubprocessError, merged_env, run_cmd
+from run import (
+    CommandResult,
+    LosslessCommandCapture,
+    OwnedProcessPipeCoordinator,
+    OwnedProcessRegistry,
+    OwnedProcessRole,
+    ReviewflowSubprocessError,
+    merged_env,
+    run_cmd,
+)
+from cure_chunkhound import probe_effective_daemon_log_exclusion
+from cure_chunkhound_lifecycle import (
+    ChunkHoundDaemonLease,
+    DaemonGenerationIdentity,
+    ExpectedSessionReadinessError,
+    ExpectedSessionReadinessTimeoutError,
+    ExpectedSessionReceiptV1,
+    LaunchIdentity,
+    NativeSearchWitnessReadinessError,
+    NativeStatusReadinessError,
+    PreNativeSpawnLeaseOpenError,
+    _STATUS_KEYS,
+    assert_daemon_log_startup_precondition,
+    build_launch_identity,
+    observe_native_daemon_generation,
+    project_expected_session_receipt_v1,
+    select_git_tracked_source_witness,
+)
 from cure_github import (
     _decode_gh_api_list_stdout,
     _looks_like_gh_auth_error,
@@ -2070,116 +2099,6 @@ def build_codex_exec_cmd(
     return cmd
 
 
-def run_codex_exec(
-    *,
-    repo_dir: Path,
-    codex_flags: list[str],
-    codex_config_overrides: list[str] | None,
-    output_path: Path,
-    prompt: str,
-    env: dict[str, str],
-    stream: bool,
-    progress: "SessionProgress",
-    add_dirs: list[Path] | None = None,
-    stream_label: str = "codex",
-    approval_policy: str = "never",
-    dangerously_bypass_approvals_and_sandbox: bool = True,
-    include_shell_environment_inherit_all: bool = True,
-) -> CodexRunResult:
-    started_at = datetime.now(timezone.utc)
-    cmd = build_codex_exec_cmd(
-        repo_dir=repo_dir,
-        codex_flags=codex_flags,
-        codex_config_overrides=codex_config_overrides,
-        review_md_path=output_path,
-        prompt=prompt,
-        add_dirs=add_dirs,
-        skip_git_repo_check=False,
-        approval_policy=approval_policy,
-        dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
-        include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-    )
-    progress.record_cmd(cmd)
-    try:
-        out = active_output()
-        if out is not None:
-            out.run_logged_cmd(
-                cmd,
-                kind="codex",
-                cwd=repo_dir,
-                env=env,
-                check=True,
-                stream_requested=stream,
-            )
-        else:
-            run_cmd(
-                cmd,
-                cwd=repo_dir,
-                env=env,
-                check=True,
-                stream=stream,
-                stream_label=stream_label,
-            )
-        normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-        return CodexRunResult(
-            resume=find_codex_resume_info(
-                repo_dir=repo_dir,
-                started_at=started_at,
-                env=env,
-                codex_flags=codex_flags,
-                codex_config_overrides=codex_config_overrides,
-                add_dirs=add_dirs,
-            )
-        )
-    except ReviewflowSubprocessError as e:
-        msg = (e.stderr or "") + "\n" + (e.stdout or "")
-        if "skip-git-repo-check" in msg or "trusted directory" in msg:
-            fallback = build_codex_exec_cmd(
-                repo_dir=repo_dir,
-                codex_flags=codex_flags,
-                codex_config_overrides=codex_config_overrides,
-                review_md_path=output_path,
-                prompt=prompt,
-                add_dirs=add_dirs,
-                skip_git_repo_check=True,
-                approval_policy=approval_policy,
-                dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
-                include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-            )
-            progress.record_cmd(fallback)
-            out = active_output()
-            if out is not None:
-                out.run_logged_cmd(
-                    fallback,
-                    kind="codex",
-                    cwd=repo_dir,
-                    env=env,
-                    check=True,
-                    stream_requested=stream,
-                )
-            else:
-                run_cmd(
-                    fallback,
-                    cwd=repo_dir,
-                    env=env,
-                    check=True,
-                    stream=stream,
-                    stream_label=stream_label,
-                )
-            normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-            return CodexRunResult(
-                resume=find_codex_resume_info(
-                    repo_dir=repo_dir,
-                    started_at=started_at,
-                    env=env,
-                    codex_flags=codex_flags,
-                    codex_config_overrides=codex_config_overrides,
-                    add_dirs=add_dirs,
-                )
-            )
-        raise
-
-
 def build_codex_flags_from_llm_config(
     *, resolved: dict[str, Any], resolution_meta: dict[str, Any], include_sandbox: bool = True
 ) -> tuple[list[str], dict[str, Any]]:
@@ -2347,6 +2266,7 @@ def run_llm_exec(
     add_dirs: list[Path] | None = None,
     codex_config_overrides: list[str] | None = None,
     runtime_policy: dict[str, Any] | None = None,
+    owned_processes: OwnedProcessRegistry | None = None,
 ) -> LlmRunResult:
     provider = str(resolved.get("provider") or "").strip().lower()
     if provider == "codex":
@@ -2371,6 +2291,7 @@ def run_llm_exec(
             include_shell_environment_inherit_all=bool(
                 policy.get("include_shell_environment_inherit_all", False)
             ),
+            owned_processes=owned_processes,
         )
         resume = None
         if result.resume is not None:
@@ -2457,10 +2378,20 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
     return env, staged_paths
 
 
-SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
+SENSITIVE_STAGED_PATH_KEYS = (
+    "gh_config_dir",
+    "jira_config_file",
+    "netrc",
+    "rf_jira",
+)
 
 
-def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
+def cleanup_sensitive_staged_paths(
+    staged_paths: dict[str, Any] | None,
+    *,
+    record_failure: Callable[[str, BaseException], None] | None = None,
+    quiet: bool = True,
+) -> None:
     if not isinstance(staged_paths, dict):
         return
     for key in SENSITIVE_STAGED_PATH_KEYS:
@@ -2472,11 +2403,17 @@ def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:
             target = target.parent
         try:
             if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+                shutil.rmtree(target)
             elif target.exists():
                 target.unlink(missing_ok=True)
-        except Exception:
-            continue
+        except Exception as exc:
+            message = (
+                f"Failed to clean sensitive staged path for {key}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            log(message, quiet=quiet)
+            if record_failure is not None:
+                record_failure(f"sensitive_staged_paths:{key}", exc)
 
 
 def _reviewflow_chunkhound_mcp_entry(
@@ -5378,6 +5315,8 @@ def _execute_multipass_synth_stage(
     stage_label: str,
     failure_message: str,
     multipass_cfg: dict[str, Any] | None = None,
+    owned_processes: OwnedProcessRegistry | None = None,
+    daemon_continuity_check: Callable[[], None] | None = None,
 ) -> str | None:
     # Mutates ``synth_llm`` in place on a retry-time effort override so the
     # next interactive retry prompt sees the last-tried effort as its default.
@@ -5439,6 +5378,8 @@ def _execute_multipass_synth_stage(
         synth_run_entry.pop("usage", None)
         progress.flush()
         try:
+            if daemon_continuity_check is not None:
+                daemon_continuity_check()
             synth_result = run_llm_exec(
                 repo_dir=repo_dir,
                 resolved=synth_llm["resolved"],
@@ -5451,9 +5392,19 @@ def _execute_multipass_synth_stage(
                 add_dirs=add_dirs,
                 codex_config_overrides=list(synth_runtime_policy.get("codex_config_overrides") or []),
                 runtime_policy=synth_runtime_policy,
+                owned_processes=owned_processes,
             )
         except ReviewflowSubprocessError as exc:
+            if daemon_continuity_check is not None:
+                # A12/A18: a daemon generation lost while the provider was
+                # failing must surface as an infrastructure failure instead of
+                # a retryable/degraded provider failure.
+                daemon_continuity_check()
             raise _PrContextSynthesisExecutionFailure(exc) from exc
+        if daemon_continuity_check is not None:
+            # Post-LLM continuity re-check: a daemon that died mid-call must
+            # abort before the synthesized artifact is accepted.
+            daemon_continuity_check()
         record_llm_usage(progress.meta.setdefault("llm", {}), synth_result.adapter_meta)
         _record_multipass_stage_llm(
             meta=progress.meta,
@@ -6621,6 +6572,8 @@ def _run_multipass_step_llm(
     add_dirs: list[Path] | None,
     runtime_policy: dict[str, Any],
     quiet: bool,
+    owned_processes: OwnedProcessRegistry | None = None,
+    daemon_continuity_check: Callable[[], None] | None = None,
 ) -> MultipassStepRunResult:
     started_at = _utc_now_iso()
     with progress.mutate():
@@ -6634,6 +6587,8 @@ def _run_multipass_step_llm(
     started_perf = time.perf_counter()
     try:
         log(f"Multipass step {entry.index:02d}: {entry.step_title}", quiet=quiet)
+        if daemon_continuity_check is not None:
+            daemon_continuity_check()
         llm_result = run_llm_exec(
             repo_dir=repo_dir,
             resolved=llm_resolved,
@@ -6646,7 +6601,12 @@ def _run_multipass_step_llm(
             add_dirs=add_dirs,
             codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=runtime_policy,
+            owned_processes=owned_processes,
         )
+        if daemon_continuity_check is not None:
+            # Re-verify after the LLM call too: a daemon that died mid-call is
+            # detected before the step result is accepted and replayed.
+            daemon_continuity_check()
         duration_seconds = time.perf_counter() - started_perf
         with progress.mutate():
             _set_multipass_step_state(
@@ -6664,6 +6624,12 @@ def _run_multipass_step_llm(
             duration_seconds=duration_seconds,
         )
     except Exception as exc:
+        if daemon_continuity_check is not None and not isinstance(exc, ReviewflowError):
+            # A12/A18: keeper loss concurrent with a provider failure must
+            # surface as an infrastructure failure instead of a step error.
+            # (A continuity error already raised by the pre/post checks is
+            # propagated unchanged.)
+            daemon_continuity_check()
         with progress.mutate():
             _set_multipass_step_state(
                 progress.meta,
@@ -6796,6 +6762,9 @@ def _execute_multipass_step_stage(
     prompt_template_name: str | None = None,
     multipass_cfg: dict[str, Any] | None = None,
     require_hypothesis_ledger: bool = False,
+    owned_processes: OwnedProcessRegistry | None = None,
+    on_terminal_abort: Callable[[], None] | None = None,
+    daemon_continuity_check: Callable[[], None] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     step_outputs = [str(entry.output_path) for entry in step_entries]
     runnable_entries = [entry for entry in step_entries if entry.should_run]
@@ -6837,46 +6806,74 @@ def _execute_multipass_step_stage(
     raw_results: dict[int, MultipassStepRunResult] = {}
     first_error: Exception | None = None
 
-    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="cure-multipass-step") as executor:
-        for entry in runnable_entries:
-            future = executor.submit(
-                _run_multipass_step_llm,
-                entry=entry,
-                progress=progress,
-                repo_dir=repo_dir,
-                llm_resolved=llm_resolved,
-                llm_resolution_meta=llm_resolution_meta,
-                env=env,
-                stream=worker_stream,
-                add_dirs=add_dirs,
-                runtime_policy=runtime_policy,
-                quiet=quiet,
-            )
-            future_to_entry[future] = entry
-
-        for future in as_completed(future_to_entry):
-            entry = future_to_entry[future]
-            try:
-                raw_result = future.result()
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-                    for other_future, other_entry in future_to_entry.items():
-                        if other_future.done():
-                            continue
-                        if other_future.cancel():
-                            with progress.mutate():
-                                _set_multipass_step_state(
-                                    progress.meta,
-                                    entry=other_entry,
-                                    status="canceled",
-                                    reusable=False,
-                                    finished_at=_utc_now_iso(),
-                                    error="canceled after another step failed",
-                                )
-                                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+    def _cancel_pending_futures(*, error: str) -> bool:
+        running_sibling = False
+        for other_future, other_entry in future_to_entry.items():
+            if other_future.done():
                 continue
-            raw_results[entry.index] = raw_result
+            if not other_future.cancel():
+                running_sibling = True
+                continue
+            with progress.mutate():
+                _set_multipass_step_state(
+                    progress.meta,
+                    entry=other_entry,
+                    status="canceled",
+                    reusable=False,
+                    finished_at=_utc_now_iso(),
+                    error=error,
+                )
+                progress.meta.setdefault("multipass", {})["status"] = "step_failed"
+        return running_sibling
+
+    def _abort_running_workers() -> None:
+        if on_terminal_abort is None:
+            return
+        try:
+            on_terminal_abort()
+        except BaseException:
+            # The owner hook is terminal cleanup only. It must never replace
+            # the worker/collection failure that caused the abort.
+            pass
+
+    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="cure-multipass-step") as executor:
+        try:
+            for entry in runnable_entries:
+                future = executor.submit(
+                    _run_multipass_step_llm,
+                    entry=entry,
+                    progress=progress,
+                    repo_dir=repo_dir,
+                    llm_resolved=llm_resolved,
+                    llm_resolution_meta=llm_resolution_meta,
+                    env=env,
+                    stream=worker_stream,
+                    add_dirs=add_dirs,
+                    runtime_policy=runtime_policy,
+                    quiet=quiet,
+                    owned_processes=owned_processes,
+                    daemon_continuity_check=daemon_continuity_check,
+                )
+                future_to_entry[future] = entry
+
+            for future in as_completed(future_to_entry):
+                entry = future_to_entry[future]
+                try:
+                    raw_result = future.result()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                        running_sibling = _cancel_pending_futures(
+                            error="canceled after another step failed"
+                        )
+                        if running_sibling:
+                            _abort_running_workers()
+                    continue
+                raw_results[entry.index] = raw_result
+        except BaseException:
+            _cancel_pending_futures(error="canceled after terminal interruption")
+            _abort_running_workers()
+            raise
 
     for entry in step_entries:
         raw_result = raw_results.get(entry.index)
@@ -7027,6 +7024,8 @@ def _execute_multipass_step_stage(
                         add_dirs=add_dirs,
                         runtime_policy=current_runtime_policy,
                         quiet=quiet,
+                        owned_processes=owned_processes,
+                        daemon_continuity_check=daemon_continuity_check,
                     )
                     continue
                 if choice != "skip" and len(grounding_attempts) <= _MULTIPASS_STEP_GROUNDING_MAX_RETRIES:
@@ -7059,6 +7058,8 @@ def _execute_multipass_step_stage(
                         add_dirs=add_dirs,
                         runtime_policy=current_runtime_policy,
                         quiet=quiet,
+                        owned_processes=owned_processes,
+                        daemon_continuity_check=daemon_continuity_check,
                     )
                     continue
                 skipped_record = _build_grounding_skipped_record(entry=entry, attempts=grounding_attempts)
@@ -7544,6 +7545,35 @@ def materialize_chunkhound_env_config(
     """
     cfg = dict(resolved_config)
 
+    if "indexing" not in cfg:
+        indexing: dict[str, Any] = {}
+    else:
+        raw_indexing = cfg["indexing"]
+        if not isinstance(raw_indexing, Mapping):
+            raise ReviewflowError("ChunkHound indexing config must be an object.")
+        indexing = dict(raw_indexing)
+
+    if "exclude" not in indexing:
+        indexing["exclude"] = ["**/.chunkhound/**"]
+    else:
+        raw_exclude = indexing["exclude"]
+        if raw_exclude == ".gitignore":
+            # The sentinel overrides exclude_mode to select .gitignore sources.
+            # Preserve that behavior when converting it to an explicit list.
+            indexing["exclude"] = ["**/.chunkhound/**"]
+            indexing["exclude_mode"] = "gitignore_only"
+        elif not isinstance(raw_exclude, list) or not all(
+            isinstance(pattern, str) for pattern in raw_exclude
+        ):
+            raise ReviewflowError(
+                "ChunkHound indexing.exclude must be a list of strings or '.gitignore'."
+            )
+        else:
+            indexing["exclude"] = [
+                pattern for pattern in raw_exclude if pattern != "**/.chunkhound/**"
+            ] + ["**/.chunkhound/**"]
+    cfg["indexing"] = indexing
+
     emb = cfg.get("embedding")
     if isinstance(emb, dict) and "api_key" in emb:
         # Avoid materializing secrets to disk, even if present in the source config.
@@ -7686,9 +7716,15 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
     chunkhound_work_dir: Path,
     repo_dir: Path,
     reuse_source_kind: str,
+    reviewed_head: str | None = None,
     seed_source_db_path: Path | None = None,
-) -> None:
-    env = merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+    env: dict[str, str] | None = None,
+) -> ExpectedSessionReceiptV1 | None:
+    child_env = (
+        dict(env)
+        if env is not None
+        else merged_env(chunkhound_env(source_config_path=chunkhound_cfg.base_config_path))
+    )
     index_cmd = [
         "chunkhound",
         "index",
@@ -7713,31 +7749,51 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
             reason="compatibility canary or reuse failure" if attempt == 2 else None,
         )
         reporter.start()
+        capture: LosslessCommandCapture | None = None
         index_ok = False
         try:
+            capture = LosslessCommandCapture(spool_dir=chunkhound_work_dir)
             progress.record_cmd(index_cmd)
             reporter.mark_running()
             if out is not None:
-                out.run_logged_cmd(
+                result = out.run_logged_cmd(
                     index_cmd,
                     kind="chunkhound",
                     cwd=chunkhound_work_dir,
-                    env=env,
+                    env=child_env,
                     check=True,
                     stream_requested=stream,
                     stream_text_callback=reporter.consume_text,
+                    lossless_capture=capture,
                 )
             else:
                 result = run_cmd(
                     index_cmd,
                     cwd=chunkhound_work_dir,
-                    env=env,
+                    env=child_env,
                     check=True,
                     stream=stream,
                     stream_label="chunkhound",
+                    lossless_capture=capture,
                 )
                 reporter.consume_text(result.stdout)
                 reporter.consume_text(result.stderr)
+            receipt: ExpectedSessionReceiptV1 | None = None
+            if reviewed_head is not None:
+                launch_identity = build_launch_identity(
+                    repo_path=repo_dir,
+                    config_path=chunkhound_cfg_path,
+                    database_path=chunkhound_db_path,
+                    cwd=chunkhound_work_dir,
+                    binary=index_cmd[0],
+                    environment=child_env,
+                )
+                receipt = project_expected_session_receipt_v1(
+                    capture=capture,
+                    exit_code=result.exit_code,
+                    reviewed_head=reviewed_head,
+                    launch_identity_projection=launch_identity,
+                )
             index_ok = True
             if attempt == 2 and last_failure is not None:
                 _record_session_chunkhound_rebuild_fallback(
@@ -7748,7 +7804,7 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
                     failed_error=last_failure,
                     retry_status="recovered",
                 )
-            return
+            return receipt
         except ReviewflowSubprocessError as exc:
             if attempt == 1:
                 last_failure = exc
@@ -7776,7 +7832,13 @@ def _run_session_chunkhound_index_with_rebuild_fallback(
             )
             raise
         finally:
-            reporter.finish(status="done" if index_ok else "error")
+            try:
+                if capture is not None:
+                    capture.dispose()
+            finally:
+                reporter.finish(status="done" if index_ok else "error")
+
+    raise AssertionError("ChunkHound index retry loop exited without a receipt")
 
 
 def ensure_review_config(paths: ReviewflowPaths, *, config_path: Path | None = None) -> None:
@@ -8586,7 +8648,11 @@ def _run_chunkhound_helper_preflight(
     runtime_policy: dict[str, Any],
     meta: dict[str, Any],
     progress: SessionProgress | None,
+    owned_processes: OwnedProcessRegistry | None = None,
+    owned_role: OwnedProcessRole | None = None,
 ) -> dict[str, Any]:
+    if (owned_processes is None) != (owned_role is None):
+        raise ValueError("owned_processes and owned_role must be supplied together")
     helper_path = str(cmd[0])
     started_at = time.monotonic()
     observed_trace: list[dict[str, Any]] = []
@@ -8669,34 +8735,25 @@ def _run_chunkhound_helper_preflight(
     if progress is not None:
         progress.flush()
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(repo_dir),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-    )
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-
-    open_fds: dict[int, str] = {
-        proc.stdout.fileno(): "stdout",
-        proc.stderr.fileno(): "stderr",
+    popen_options: dict[str, Any] = {
+        "cwd": str(repo_dir),
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": False,
     }
-    timed_out = False
-    while open_fds:
-        remaining = _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
-        if remaining <= 0:
-            timed_out = True
-            break
-        readable, _, _ = select.select(list(open_fds.keys()), [], [], min(0.2, remaining))
-        if not readable:
-            continue
+    pipe_coordinator = (
+        OwnedProcessPipeCoordinator(manual_reader_reserved=True)
+        if owned_processes is not None
+        else None
+    )
+    proc: subprocess.Popen[Any]
+
+    def _consume_ready_fds(readable: list[int]) -> None:
         for fd in readable:
             kind = open_fds.get(fd)
-            if not kind:
+            if kind is None:
                 continue
             try:
                 chunk = os.read(fd, 65536)
@@ -8715,30 +8772,135 @@ def _run_chunkhound_helper_preflight(
                     del helper_stderr[:-16000]
                 _consume_stderr_lines(text)
 
-    if timed_out:
+    def _drain_until(deadline: float) -> None:
+        while open_fds and time.monotonic() < deadline:
+            try:
+                readable, _, _ = select.select(
+                    list(open_fds),
+                    [],
+                    [],
+                    min(0.05, max(0.0, deadline - time.monotonic())),
+                )
+            except BaseException:
+                return
+            if readable:
+                try:
+                    _consume_ready_fds(readable)
+                except BaseException:
+                    return
+
+    def _unowned_group_exists() -> bool:
         try:
-            proc.kill()
-        except Exception:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def _cleanup_unowned() -> None:
+        # Cleanup is non-throwing so it cannot mask a timeout result or an
+        # in-flight BaseException from the sole manual reader.
+        try:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            term_deadline = time.monotonic() + 0.2
+            _drain_until(term_deadline)
+            try:
+                proc.wait(timeout=max(0.0, term_deadline - time.monotonic()))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if _unowned_group_exists():
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            kill_deadline = time.monotonic() + 0.5
+            _drain_until(kill_deadline)
+            try:
+                proc.wait(timeout=max(0.0, kill_deadline - time.monotonic()))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except BaseException:
             pass
+        finally:
+            try:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            except BaseException:
+                pass
+            try:
+                if proc.stderr is not None:
+                    proc.stderr.close()
+            except BaseException:
+                pass
 
     try:
-        extra_stdout, extra_stderr = proc.communicate(timeout=1)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        extra_stdout, extra_stderr = proc.communicate()
-    if extra_stdout:
-        helper_stdout.extend(extra_stdout)
-        _write_chunkhound_log(extra_stdout.decode("utf-8", errors="replace"))
-    if extra_stderr:
-        helper_stderr.extend(extra_stderr)
-        if len(helper_stderr) > 16000:
-            del helper_stderr[:-16000]
-        extra_text = extra_stderr.decode("utf-8", errors="replace")
-        _write_chunkhound_log(extra_text)
-        _consume_stderr_lines(extra_text)
+        if owned_processes is not None:
+            assert owned_role is not None
+            assert pipe_coordinator is not None
+            proc = owned_processes.spawn(
+                role=owned_role,
+                cmd=cmd,
+                pipe_coordinator=pipe_coordinator,
+                **popen_options,
+            )
+        else:
+            proc = subprocess.Popen(cmd, start_new_session=True, **popen_options)
+        open_fds: dict[int, str] = {}
+        timed_out = False
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        open_fds = {
+            proc.stdout.fileno(): "stdout",
+            proc.stderr.fileno(): "stderr",
+        }
+        while open_fds:
+            remaining = _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS - (
+                time.monotonic() - started_at
+            )
+            if remaining <= 0:
+                timed_out = True
+                break
+            readable, _, _ = select.select(
+                list(open_fds), [], [], min(0.2, remaining)
+            )
+            if readable:
+                _consume_ready_fds(readable)
+
+        if not timed_out:
+            remaining = _CHUNKHOUND_HELPER_PREFLIGHT_TIMEOUT_SECONDS - (
+                time.monotonic() - started_at
+            )
+            try:
+                proc.wait(timeout=max(0.0, remaining))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+
+        if timed_out:
+            if owned_processes is None:
+                _cleanup_unowned()
+            else:
+                assert pipe_coordinator is not None
+                pipe_coordinator.release_manual_reader()
+        else:
+            # EOF on both pipes plus process exit completes sole-reader drain.
+            proc.stdout.close()
+            proc.stderr.close()
+            if owned_processes is not None:
+                assert pipe_coordinator is not None
+                pipe_coordinator.complete_manual_reader(proc)
+                owned_processes.unregister(proc)
+    except BaseException:
+        if owned_processes is None:
+            if "proc" in locals():
+                _cleanup_unowned()
+        else:
+            assert pipe_coordinator is not None
+            pipe_coordinator.release_manual_reader()
+        raise
     if stderr_line_buffer.strip():
         parsed = _parse_chunkhound_helper_stage_line(stderr_line_buffer.strip())
         if parsed is not None:
@@ -8818,6 +8980,32 @@ def _run_chunkhound_helper_preflight(
     return result_payload
 
 
+class _ChunkHoundDaemonRoute(str, Enum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    BYPASS = "bypass"
+
+
+def _classify_chunkhound_daemon_route(
+    *,
+    provider: str,
+    access_mode: str,
+    no_index: bool,
+    no_review: bool,
+    platform: str,
+) -> _ChunkHoundDaemonRoute:
+    """Classify command routes before assigning daemon keeper authority."""
+    if no_review or no_index:
+        return _ChunkHoundDaemonRoute.BYPASS
+    if str(access_mode or "").strip() != "cli_helper_daemon":
+        return _ChunkHoundDaemonRoute.BYPASS
+    if str(provider or "").strip().lower() != "codex" or not str(
+        platform or ""
+    ).startswith("linux"):
+        return _ChunkHoundDaemonRoute.UNSUPPORTED
+    return _ChunkHoundDaemonRoute.SUPPORTED
+
+
 def _run_chunkhound_access_preflight(
     *,
     repo_dir: Path,
@@ -8826,6 +9014,7 @@ def _run_chunkhound_access_preflight(
     stream: bool,
     meta: dict[str, Any],
     progress: SessionProgress | None = None,
+    owned_processes: OwnedProcessRegistry | None = None,
 ) -> dict[str, Any] | None:
     metadata = runtime_policy.get("metadata") if isinstance(runtime_policy, dict) else {}
     provider = str((metadata or {}).get("provider") or "").strip()
@@ -8874,6 +9063,8 @@ def _run_chunkhound_access_preflight(
         runtime_policy=runtime_policy,
         meta=meta,
         progress=progress,
+        owned_processes=owned_processes,
+        owned_role=("chunkhound-helper" if owned_processes is not None else None),
     )
 
     access_meta = _record_chunkhound_access_meta(
@@ -8987,6 +9178,23 @@ def _run_review_intelligence_preflight(
         )
 
 
+def _replace_last_chunkhound_validation_run(
+    work_dir: Path, report: dict[str, Any]
+) -> None:
+    """Keep the persisted validation artifact in sync with a whole-file report."""
+    report_path = (work_dir / "chunkhound_tool_validation.json").resolve()
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return
+        runs = payload.get("runs")
+        if isinstance(runs, list) and runs:
+            runs[-1] = report
+            write_redacted_json(report_path, payload)
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def _enforce_chunkhound_tool_proof(
     *,
     meta: dict[str, Any],
@@ -9009,6 +9217,39 @@ def _enforce_chunkhound_tool_proof(
         prompt_template_name=template_name,
         adapter_meta=adapter_meta,
     )
+    if (
+        report is not None
+        and not bool(report.get("valid"))
+        and adapter_meta is not None
+        and str(adapter_meta.get("codex_events_path") or "").strip()
+    ):
+        # Legacy shared codex events files (codex.events.jsonl in old
+        # sandboxes) can miss a step's own helper output in the recorded byte
+        # slice (interleaved appends or flush lag) while the payload exists
+        # intact in the file; rescue by re-adjudicating over the whole file.
+        # Per-run files (codex.events.<32-hex>.jsonl) are sealed: their slice
+        # is [0, size-at-run-end], so no whole-file fallback applies.
+        events_path = Path(str(adapter_meta.get("codex_events_path") or ""))
+        per_run_events_file = (
+            re.fullmatch(
+                r"codex\.events\.[0-9a-f]{32}\.jsonl", events_path.name
+            )
+            is not None
+        )
+        if not per_run_events_file:
+            whole_report = validate_chunkhound_tool_proof(
+                provider=provider,
+                review_stage=review_stage,
+                prompt_template_name=template_name,
+                adapter_meta={
+                    **adapter_meta,
+                    "codex_events_start_offset": None,
+                    "codex_events_end_offset": None,
+                },
+            )
+            if whole_report is not None and whole_report.get("valid") is True:
+                report = whole_report
+                _replace_last_chunkhound_validation_run(work_dir, whole_report)
     if report is None or bool(report.get("valid")):
         return report
     label = review_stage.replace("_", " ")
@@ -9332,6 +9573,276 @@ Return the final review in the same format as the draft. Integrate validated con
     return run_llm(reconcile_prompt)
 
 
+_CHUNKHOUND_READINESS_EVIDENCE_FILENAME = "chunkhound_readiness_failure.json"
+_CHUNKHOUND_PROOF_DIAGNOSTICS_FILENAME = "chunkhound_proof_failure.json"
+_CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES = (
+    NativeStatusReadinessError,
+    ExpectedSessionReadinessTimeoutError,
+    NativeSearchWitnessReadinessError,
+)
+
+
+def _iter_exception_causes(exc: BaseException) -> list[BaseException]:
+    """Walk the raise-cause chain, bounded and cycle-safe, without messages."""
+    causes: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc.__cause__ or exc.__context__
+    while current is not None and len(causes) < 4:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        causes.append(current)
+        current = current.__cause__ or current.__context__
+    return causes
+
+
+def _probe_chunkhound_environment(
+    *,
+    identity: LaunchIdentity | None,
+    env: Mapping[str, str] | None,
+    sandbox_dir: Path,
+) -> dict[str, Any]:
+    """Best-effort, side-effect-free probes that explain readiness failure causes."""
+
+    def run_version_probe(command: list[str]) -> dict[str, object]:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        output = (completed.stdout or completed.stderr or "").strip()
+        if output:
+            return {"version": output[:300]}
+        return {"error": f"exit status {completed.returncode}, no output"}
+
+    probes: dict[str, Any] = {}
+    resolved_binary: str | None = None
+    if identity is not None:
+        resolved = getattr(identity, "resolved_executable", None)
+        if isinstance(resolved, Path):
+            resolved_binary = str(resolved)
+    probes["chunkhound"] = {
+        "resolved_executable_found": bool(resolved_binary)
+        and os.path.isfile(resolved_binary),
+        "on_path": shutil.which("chunkhound") is not None,
+    }
+    if resolved_binary is not None and os.path.isfile(resolved_binary):
+        probes["chunkhound"]["version"] = run_version_probe(
+            [resolved_binary, "--version"]
+        )
+    watchman = shutil.which("watchman")
+    probes["watchman"] = {"on_path": watchman is not None}
+    if watchman is not None:
+        probes["watchman"]["version"] = run_version_probe([watchman, "--version"])
+    relevant_keys = sorted(
+        key
+        for key in (env or {})
+        if "CHUNKHOUND" in key.upper() or "VOYAGE" in key.upper()
+    )
+    probes["env_keys"] = [
+        {"name": key, "set": bool((env or {}).get(key))} for key in relevant_keys
+    ]
+    probes["tmp_writable"] = os.access("/tmp", os.W_OK)
+    probes["socket_dir_parent_exists"] = Path(
+        "/tmp/chunkhound-daemon-sockets"
+    ).is_dir()
+    if identity is not None:
+        root = getattr(identity, "canonical_root", None)
+        if isinstance(root, Path):
+            probes["daemon_log_exists"] = (root / ".chunkhound" / "daemon.log").exists()
+    try:
+        probes["sandbox_disk_free_bytes"] = shutil.disk_usage(sandbox_dir).free
+    except OSError:
+        pass
+    return probes
+
+
+def _sanitize_readiness_evidence_value(
+    value: Any, *, redacted: tuple[str, ...]
+) -> Any:
+    """Recursively scrub known path needles from persisted evidence values."""
+    if isinstance(value, str):
+        text = value
+        for needle in redacted:
+            text = text.replace(needle, "<redacted>")
+        return text
+    if isinstance(value, list):
+        return [
+            _sanitize_readiness_evidence_value(item, redacted=redacted)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_readiness_evidence_value(item, redacted=redacted)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _collect_chunkhound_readiness_evidence(
+    *,
+    stage: str,
+    category: str,
+    exc: Exception,
+    identity: LaunchIdentity | None,
+    receipt: ExpectedSessionReceiptV1 | None,
+    env: Mapping[str, str] | None,
+    sandbox_dir: Path,
+) -> dict[str, Any]:
+    """Serialize a strict allowlist of safe facts about a readiness failure.
+
+    The evidence FILE must never persist sandbox paths (canonical root,
+    executable, config/database locations, cwd), raw daemon status payloads,
+    or the daemon server version: those are runtime secrets of the sandbox.
+    Only fixed public exception text, opaque ids, and boolean/summary probe
+    results are kept. write_redacted_json stays as defense-in-depth.
+    """
+    message = str(exc)[:500]
+    if isinstance(exc, _CHUNKHOUND_READINESS_PUBLIC_TEXT_TYPES):
+        exception_section: dict[str, Any] = {
+            "type": type(exc).__name__,
+            "message": message,
+        }
+    else:
+        # Only the typed readiness family is guaranteed fixed public text by
+        # construction; other exceptions could carry dynamic detail, so their
+        # message is never persisted (same guarantee the meta diagnostic keeps).
+        exception_section = {
+            "type": type(exc).__name__,
+            "message_chars": len(message),
+            "message": "<not persisted: not fixed public text>",
+        }
+    evidence: dict[str, Any] = {
+        "schema_version": 2,
+        "raised_at": _utc_now_iso(),
+        "stage": stage,
+        "category": category,
+        "exception": exception_section,
+        "causes": [
+            {"type": type(cause).__name__}
+            for cause in _iter_exception_causes(exc)
+        ],
+    }
+    poll_evidence = getattr(exc, "poll_evidence", None)
+    if isinstance(poll_evidence, dict):
+        # Poll summary only; observations are filtered to named, path-free
+        # fields (server_version is a runtime detail and is never persisted).
+        filtered_observations: list[dict[str, Any]] = []
+        for observation in poll_evidence.get("observations") or []:
+            if not isinstance(observation, dict):
+                continue
+            filtered_observations.append(
+                {
+                    key: observation[key]
+                    for key in ("signal", "status", "query_ready")
+                    if key in observation
+                }
+            )
+        evidence["native_status"] = {
+            "poll": {
+                "polls": poll_evidence.get("polls"),
+                "observations": filtered_observations,
+                "timeout_seconds": poll_evidence.get("timeout_seconds"),
+                "elapsed_seconds": poll_evidence.get("elapsed_seconds"),
+            }
+        }
+    if identity is not None:
+        resolved_executable = getattr(identity, "resolved_executable", None)
+        canonical_root = getattr(identity, "canonical_root", None)
+        evidence["identity"] = {
+            "resolved_executable_found": bool(resolved_executable)
+            and os.path.isfile(str(resolved_executable)),
+            "canonical_root_present": bool(canonical_root)
+            and os.path.isdir(str(canonical_root)),
+        }
+    if receipt is not None:
+        # config_digest is an opaque digest (safe id); no receipt path fields.
+        evidence["receipt"] = {
+            "schema_version": receipt.schema_version,
+            "config_digest": str(getattr(receipt, "config_digest", "") or ""),
+            "total_chunks": receipt.total_chunks,
+        }
+    evidence["environment"] = _probe_chunkhound_environment(
+        identity=identity, env=env, sandbox_dir=sandbox_dir
+    )
+    evidence["expected_status_schema"] = sorted(_STATUS_KEYS)
+    redacted: list[str] = [str(sandbox_dir)]
+    if identity is not None:
+        for attr in (
+            "resolved_executable",
+            "canonical_root",
+            "resolved_config_path",
+            "resolved_database_path",
+            "cwd",
+        ):
+            candidate = getattr(identity, attr, None)
+            if candidate is not None:
+                redacted.append(str(candidate))
+    return _sanitize_readiness_evidence_value(
+        evidence, redacted=tuple(sorted({item for item in redacted if item}))
+    )
+
+
+def _raise_chunkhound_readiness_failure(
+    *,
+    progress: SessionProgress,
+    stage: str,
+    exc: Exception,
+    identity: LaunchIdentity | None = None,
+    receipt: ExpectedSessionReceiptV1 | None = None,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    if isinstance(exc, NativeSearchWitnessReadinessError):
+        category = "witness_search"
+    elif isinstance(exc, ExpectedSessionReadinessTimeoutError):
+        category = "native_status_timeout"
+    elif isinstance(exc, NativeStatusReadinessError):
+        category = "native_status"
+    else:
+        category = stage
+    diagnostic = {"stage": stage, "category": category}
+    with progress.mutate() as meta:
+        meta["chunkhound_readiness_failure"] = diagnostic
+    evidence = _collect_chunkhound_readiness_evidence(
+        stage=stage,
+        category=category,
+        exc=exc,
+        identity=identity,
+        receipt=receipt,
+        env=env,
+        sandbox_dir=progress.meta_path.parent,
+    )
+    evidence_path = progress.meta_path.with_name(
+        _CHUNKHOUND_READINESS_EVIDENCE_FILENAME
+    )
+    try:
+        write_redacted_json(evidence_path, evidence)
+    except (OSError, UnicodeError) as write_exc:
+        log(
+            f"ChunkHound readiness evidence could not be written: {write_exc}",
+            quiet=progress.quiet,
+        )
+        evidence_path = None
+    location = (
+        f"Evidence written to {evidence_path}" if evidence_path is not None else ""
+    )
+    log(
+        f"ChunkHound daemon startup/readiness failed "
+        f"(stage={stage}; category={category}). {location}".rstrip(),
+        quiet=progress.quiet,
+    )
+    suffix = f" {location}" if evidence_path is not None else ""
+    raise ReviewflowError(
+        "ChunkHound daemon startup/readiness failed "
+        f"(stage={stage}; category={category}).{suffix}"
+    ) from None
+
+
 def _pr_flow_impl(
     args: argparse.Namespace,
     *,
@@ -9537,9 +10048,48 @@ def _pr_flow_impl(
     success_resume_command: str | None = None
     codex_meta: dict[str, Any] | None = None
     runtime_policy: dict[str, Any] | None = None
+    daemon_lease: ChunkHoundDaemonLease | None = None
+    expected_daemon_generation: DaemonGenerationIdentity | None = None
+    owned_processes: OwnedProcessRegistry | None = None
+    close_owned_processes_once: Callable[[], None] | None = None
+    owned_processes_teardown_failure: BaseException | None = None
+    final_index_receipt: ExpectedSessionReceiptV1 | None = None
+    session_chunkhound_env: dict[str, str] | None = None
     llm_resolved: dict[str, Any] | None = None
     llm_resolution_meta: dict[str, Any] | None = None
     picker_completed = bool(args.no_review)
+
+    def _probe_expected_daemon_generation() -> DaemonGenerationIdentity | None:
+        if final_index_receipt is None or session_chunkhound_env is None:
+            raise ExpectedSessionReadinessError(
+                "ChunkHound daemon generation lacks an exact launch receipt"
+            )
+        identity = final_index_receipt.launch_identity_projection
+        return observe_native_daemon_generation(
+            repo_path=identity.canonical_root,
+            cwd=identity.cwd,
+            binary=identity.resolved_executable,
+            environment=session_chunkhound_env,
+        )
+
+    def _assert_daemon_continuity() -> None:
+        if daemon_lease is None:
+            return
+        try:
+            daemon_lease.assert_alive()
+            current_generation = _probe_expected_daemon_generation()
+            if (
+                expected_daemon_generation is None
+                or current_generation != expected_daemon_generation
+            ):
+                raise ExpectedSessionReadinessError(
+                    "ChunkHound daemon generation changed after startup"
+                )
+        except Exception as exc:
+            raise ReviewflowError(
+                "ChunkHound daemon continuity failed "
+                f"({type(exc).__name__}); dispatched model work was not replayed."
+            ) from None
 
     base_cache_meta: dict[str, Any] | None = None
     seed_source_db_path: Path | None = None
@@ -9854,6 +10404,7 @@ def _pr_flow_impl(
                     orientation_env["CODEX_HOME"] = str(orientation_codex_home)
                 try:
                     try:
+                        _assert_daemon_continuity()
                         orientation_result = run_llm_exec(
                             repo_dir=repo_dir,
                             resolved=llm_resolved,
@@ -9865,9 +10416,11 @@ def _pr_flow_impl(
                             progress=orientation_progress,
                             add_dirs=[],
                             runtime_policy=None,
+                            owned_processes=owned_processes,
                         )
                     except ReviewflowSubprocessError as exc:
                         raise OrientationProviderExecutionFailure(exc) from exc
+                    _assert_daemon_continuity()
                     orientation_usage = _normalize_llm_usage(
                         orientation_result.adapter_meta.get("usage")
                     )
@@ -9880,7 +10433,10 @@ def _pr_flow_impl(
                     shutil.rmtree(runtime_root)
                     _assert_orientation_runtime_absent()
 
-            if pr_context_meta["enabled"] and pr_context_meta["eligible"]:
+            def _build_fresh_pr_context_after_readiness() -> None:
+                nonlocal pr_context_result, prior_context
+                if not (pr_context_meta["enabled"] and pr_context_meta["eligible"]):
+                    return
                 with phase("build_pr_context", progress=progress, quiet=quiet):
                     try:
                         _remove_fresh_pr_context_artifacts(work_dir)
@@ -9937,9 +10493,7 @@ def _pr_flow_impl(
                                 "selected_discussion": [],
                                 "meta": exc.meta,
                             }
-                        apply_build_metadata(
-                            pr_context_meta, {"meta": exc.meta}, ""
-                        )
+                        apply_build_metadata(pr_context_meta, {"meta": exc.meta}, "")
                         pr_context_meta.update(
                             outcome="degraded", reason=exc.stage, context_mode="off"
                         )
@@ -10067,7 +10621,10 @@ def _pr_flow_impl(
                     f"ChunkHound top-up index: seed={seed_kind} db={chunkhound_db_path}",
                     quiet=quiet,
                 )
-                _run_session_chunkhound_index_with_rebuild_fallback(
+                session_chunkhound_env = merged_env(
+                    chunkhound_env(source_config_path=chunkhound_cfg.base_config_path)
+                )
+                final_index_receipt = _run_session_chunkhound_index_with_rebuild_fallback(
                     progress=progress,
                     scope="topup",
                     quiet=quiet,
@@ -10078,7 +10635,22 @@ def _pr_flow_impl(
                     chunkhound_work_dir=chunkhound_work_dir,
                     repo_dir=repo_dir,
                     reuse_source_kind=seed_kind,
+                    reviewed_head=(
+                        review_head_sha
+                        if (
+                            not bool(args.no_review)
+                            and llm_resolved is not None
+                            and str(llm_resolved.get("provider") or "").strip().lower()
+                            == "codex"
+                            and str(llm_resolved.get("transport") or "cli")
+                            .strip()
+                            .lower()
+                            == "cli"
+                        )
+                        else None
+                    ),
                     seed_source_db_path=seed_source_db_path,
+                    env=session_chunkhound_env,
                 )
 
         if bool(args.no_review):
@@ -10181,7 +10753,242 @@ def _pr_flow_impl(
             if bool((runtime_policy.get("metadata") or {}).get("chunkhound_dry_run")):
                 log("ChunkHound helper: dry-run mode enabled", quiet=quiet)
 
+            runtime_metadata = runtime_policy.get("metadata") or {}
+            daemon_route = _classify_chunkhound_daemon_route(
+                provider=str(runtime_metadata.get("provider") or ""),
+                access_mode=str(runtime_metadata.get("chunkhound_access_mode") or ""),
+                no_index=bool(args.no_index),
+                no_review=bool(args.no_review),
+                platform=sys.platform,
+            )
+            if daemon_route is _ChunkHoundDaemonRoute.UNSUPPORTED:
+                raise ReviewflowError(
+                    "CURe-managed ChunkHound daemon helper access requires Linux; "
+                    f"the indexed {str(runtime_metadata.get('provider') or 'review')} "
+                    f"route is unsupported on {sys.platform}."
+                )
+            if daemon_route is _ChunkHoundDaemonRoute.SUPPORTED:
+                owned_processes = OwnedProcessRegistry()
+                owned_processes_teardown_attempted = False
+                route_owned_processes = owned_processes
+
+                def _close_owned_processes_once() -> None:
+                    nonlocal owned_processes_teardown_attempted
+                    nonlocal owned_processes_teardown_failure
+                    if owned_processes_teardown_attempted:
+                        return
+                    owned_processes_teardown_attempted = True
+                    try:
+                        route_owned_processes.terminate_and_drain()
+                    except BaseException as exc:
+                        owned_processes_teardown_failure = exc
+
+                close_owned_processes_once = _close_owned_processes_once
+                if final_index_receipt is None or session_chunkhound_env is None:
+                    raise ReviewflowError(
+                        "ChunkHound daemon readiness requires the final index receipt."
+                    )
+                launch_identity = final_index_receipt.launch_identity_projection
+
+                def _validate_immediate_pre_spawn_inputs() -> None:
+                    current_identity = build_launch_identity(
+                        repo_path=launch_identity.canonical_root,
+                        config_path=launch_identity.resolved_config_path,
+                        database_path=launch_identity.resolved_database_path,
+                        cwd=launch_identity.cwd,
+                        binary=launch_identity.resolved_executable,
+                        environment=session_chunkhound_env,
+                    )
+                    if (
+                        current_identity.config_digest
+                        != final_index_receipt.config_digest
+                        or current_identity != launch_identity
+                    ):
+                        raise ExpectedSessionReadinessError(
+                            "materialized ChunkHound launch identity changed immediately before startup"
+                        )
+                    assert_daemon_log_startup_precondition(
+                        repo_path=current_identity.canonical_root
+                    )
+
+                for startup_attempt in range(2):
+                    try:
+                        attempt_identity = build_launch_identity(
+                            repo_path=launch_identity.canonical_root,
+                            config_path=launch_identity.resolved_config_path,
+                            database_path=launch_identity.resolved_database_path,
+                            cwd=launch_identity.cwd,
+                            binary=launch_identity.resolved_executable,
+                            environment=session_chunkhound_env,
+                        )
+                        if (
+                            attempt_identity.config_digest
+                            != final_index_receipt.config_digest
+                            or attempt_identity != launch_identity
+                        ):
+                            raise ExpectedSessionReadinessError(
+                                "materialized ChunkHound launch identity changed after final index"
+                            )
+                        assert_daemon_log_startup_precondition(
+                            repo_path=attempt_identity.canonical_root
+                        )
+                        probe_effective_daemon_log_exclusion(
+                            repo_path=attempt_identity.canonical_root,
+                            config_path=attempt_identity.resolved_config_path,
+                            cwd=attempt_identity.cwd,
+                            binary=attempt_identity.resolved_executable,
+                            env=session_chunkhound_env,
+                        )
+                        post_probe_identity = build_launch_identity(
+                            repo_path=launch_identity.canonical_root,
+                            config_path=launch_identity.resolved_config_path,
+                            database_path=launch_identity.resolved_database_path,
+                            cwd=launch_identity.cwd,
+                            binary=launch_identity.resolved_executable,
+                            environment=session_chunkhound_env,
+                        )
+                        if (
+                            post_probe_identity != attempt_identity
+                            or post_probe_identity != launch_identity
+                        ):
+                            raise ExpectedSessionReadinessError(
+                                "materialized ChunkHound launch identity changed during startup probe"
+                            )
+                        assert_daemon_log_startup_precondition(
+                            repo_path=post_probe_identity.canonical_root
+                        )
+                        if _probe_expected_daemon_generation() is not None:
+                            raise ExpectedSessionReadinessError(
+                                "a pre-existing same-root ChunkHound generation is active"
+                            )
+                    except Exception as exc:
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="launch_validation",
+                            exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
+                        )
+
+                    candidate_lease = ChunkHoundDaemonLease(
+                        config_path=attempt_identity.resolved_config_path,
+                        repo_path=attempt_identity.canonical_root,
+                        cwd=attempt_identity.cwd,
+                        binary=str(attempt_identity.resolved_executable),
+                        env=session_chunkhound_env,
+                        launch_identity=launch_identity,
+                        generation_probe=_probe_expected_daemon_generation,
+                        pre_spawn_validation=_validate_immediate_pre_spawn_inputs,
+                    )
+                    daemon_lease = candidate_lease
+                    try:
+                        candidate_lease.open()
+                    except PreNativeSpawnLeaseOpenError as exc:
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Keep the failed lease owned so outer teardown retries and
+                            # records cleanup without replacing the startup failure.
+                            pass
+                        else:
+                            daemon_lease = None
+                            if startup_attempt == 0:
+                                continue
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="lease_open",
+                            exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
+                        )
+                    except Exception as exc:
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve the terminal open failure as primary; outer
+                            # teardown still owns and retries the candidate cleanup.
+                            pass
+                        else:
+                            daemon_lease = None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="lease_open",
+                            exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
+                        )
+
+                    try:
+                        opened_generation = _probe_expected_daemon_generation()
+                        if (
+                            opened_generation is None
+                            or candidate_lease.owned_generation is None
+                        ):
+                            raise ExpectedSessionReadinessError(
+                                "newly opened ChunkHound generation is not CURe-owned"
+                            )
+                    except Exception as exc:
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve attestation/generation failure as primary; the
+                            # outer teardown still owns the candidate cleanup.
+                            pass
+                        else:
+                            daemon_lease = None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage="generation_attestation",
+                            exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
+                        )
+
+                    expected_daemon_generation = opened_generation
+                    failure_stage = "expected_session"
+                    try:
+                        if final_index_receipt.total_chunks == 0:
+                            candidate_lease.adjudicate_expected_session(
+                                final_index_receipt,
+                                expected_generation=candidate_lease.owned_generation,
+                            )
+                        else:
+                            failure_stage = "witness_selection"
+                            witness = select_git_tracked_source_witness(
+                                repo_path=launch_identity.canonical_root,
+                                config_path=launch_identity.resolved_config_path,
+                            )
+                            failure_stage = "expected_session"
+                            candidate_lease.adjudicate_expected_session(
+                                final_index_receipt,
+                                witness=witness,
+                            )
+                    except Exception as exc:
+                        try:
+                            candidate_lease.close()
+                        except BaseException:
+                            # Preserve readiness as primary and retain ownership for
+                            # the outer teardown retry/diagnostic path.
+                            pass
+                        else:
+                            daemon_lease = None
+                        expected_daemon_generation = None
+                        _raise_chunkhound_readiness_failure(
+                            progress=progress,
+                            stage=failure_stage,
+                            exc=exc,
+                            identity=launch_identity,
+                            receipt=final_index_receipt,
+                            env=session_chunkhound_env,
+                        )
+                    break
+
             with phase("chunkhound_access_preflight", progress=progress, quiet=quiet):
+                _assert_daemon_continuity()
                 _run_chunkhound_access_preflight(
                     repo_dir=repo_dir,
                     env=env,
@@ -10189,7 +10996,9 @@ def _pr_flow_impl(
                     stream=stream,
                     meta=progress.meta,
                     progress=progress,
+                    owned_processes=owned_processes,
                 )
+                _assert_daemon_continuity()
 
             with phase("review_intelligence_preflight", progress=progress, quiet=quiet):
                 _run_review_intelligence_preflight(
@@ -10201,6 +11010,8 @@ def _pr_flow_impl(
                     stream=stream,
                     progress=progress,
                 )
+
+            _build_fresh_pr_context_after_readiness()
 
             add_dirs = list(runtime_policy.get("add_dirs") or [])
             if str(llm_resolved.get("provider") or "") == "codex":
@@ -10296,6 +11107,7 @@ def _pr_flow_impl(
                         stage_llm_meta=plan_llm["meta"],
                     )
                     progress.flush()
+                    _assert_daemon_continuity()
                     plan_result = run_llm_exec(
                         repo_dir=repo_dir,
                         resolved=plan_llm["resolved"],
@@ -10308,7 +11120,9 @@ def _pr_flow_impl(
                         add_dirs=add_dirs,
                         codex_config_overrides=list(plan_runtime_policy.get("codex_config_overrides") or []),
                         runtime_policy=plan_runtime_policy,
+                        owned_processes=owned_processes,
                     )
+                    _assert_daemon_continuity()
                     record_llm_usage(progress.meta.setdefault("llm", {}), plan_result.adapter_meta)
                     _record_multipass_stage_llm(
                         meta=progress.meta,
@@ -10502,6 +11316,13 @@ def _pr_flow_impl(
                             ui_enabled=ui_enabled,
                             multipass_cfg=multipass_defaults,
                             require_hypothesis_ledger=bool(getattr(args, "cod_ledger", False)),
+                            owned_processes=owned_processes,
+                            on_terminal_abort=close_owned_processes_once,
+                            daemon_continuity_check=(
+                                _assert_daemon_continuity
+                                if daemon_lease is not None
+                                else None
+                            ),
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
@@ -10577,6 +11398,8 @@ def _pr_flow_impl(
                                 stage_label="multipass synth",
                                 failure_message="Multipass synth grounding validation failed for review.md.",
                                 multipass_cfg=multipass_defaults,
+                                owned_processes=owned_processes,
+                                daemon_continuity_check=_assert_daemon_continuity,
                             )
 
                         delivery_context = prior_context
@@ -10736,6 +11559,7 @@ def _pr_flow_impl(
                     progress=progress,
                     quiet=quiet,
                 ):
+                    _assert_daemon_continuity()
                     review_result = run_llm_exec(
                         repo_dir=repo_dir,
                         resolved=llm_resolved,
@@ -10748,7 +11572,9 @@ def _pr_flow_impl(
                         add_dirs=add_dirs,
                         codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
                         runtime_policy=runtime_policy,
+                        owned_processes=owned_processes,
                     )
+                    _assert_daemon_continuity()
                     record_llm_usage(progress.meta.setdefault("llm", {}), review_result.adapter_meta)
                     success_resume_command = record_llm_resume(
                         progress.meta.setdefault("llm", {}), review_result.resume
@@ -10828,6 +11654,7 @@ def _pr_flow_impl(
                 def _run_prior_context_reconcile(prompt: str) -> str:
                     nonlocal reconciliation_usage
                     try:
+                        _assert_daemon_continuity()
                         reconcile_result = run_llm_exec(
                             repo_dir=repo_dir,
                             resolved=llm_resolved,
@@ -10839,9 +11666,11 @@ def _pr_flow_impl(
                             progress=progress,
                             add_dirs=add_dirs,
                             runtime_policy=None,
+                            owned_processes=owned_processes,
                         )
                     except ReviewflowSubprocessError as exc:
                         raise _PrContextReconciliationExecutionFailure(exc) from exc
+                    _assert_daemon_continuity()
                     reconciliation_usage = _normalize_llm_usage(
                         reconcile_result.adapter_meta.get("usage")
                     )
@@ -10874,6 +11703,12 @@ def _pr_flow_impl(
                         run_llm=_run_prior_context_reconcile,
                     )
                 except _PrContextReconciliationExecutionFailure as exc:
+                    # B3/A12: verify the keeper survived the in-flight
+                    # reconciliation before accepting a degraded blind draft.
+                    # If the daemon was lost while the provider was failing,
+                    # the continuity error (infrastructure failure) must
+                    # surface instead of a degraded success.
+                    _assert_daemon_continuity()
                     _atomic_write_text(review_md_path, draft)
                     _record_reconciliation_observations()
                     context_meta.update(
@@ -10933,6 +11768,10 @@ def _pr_flow_impl(
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
+        # A12/A18: a provider or daemon-dependent subprocess failure with a
+        # concurrently lost keeper/generation must surface as an infrastructure
+        # failure rather than an ordinary subprocess error.
+        _assert_daemon_continuity()
         progress.error(
             {
                 "type": "subprocess",
@@ -10956,13 +11795,94 @@ def _pr_flow_impl(
             shutil.rmtree(session_dir, ignore_errors=True)
         raise
     finally:
-        cleanup_sensitive_staged_paths((runtime_policy or {}).get("staged_paths"))
-        clear_active_output(out)
-        out.stop()
-        maybe_print_markdown_after_tui(
-            ui_enabled=ui_enabled, stderr=out.stderr, markdown_path=success_markdown_path
-        )
-        maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
+        primary_error = sys.exception()
+        teardown_errors: list[tuple[str, BaseException]] = []
+
+        def _record_teardown_failure(stage: str, exc: BaseException) -> None:
+            teardown_errors.append((stage, exc))
+            teardown_info = {
+                "status": "failed",
+                "stage": stage,
+                "category": type(exc).__name__,
+                "recorded_at": _utc_now_iso(),
+            }
+            try:
+                progress.meta["teardown"] = teardown_info
+                if len(teardown_errors) > 1:
+                    progress.meta["teardown"]["failures"] = [
+                        {"stage": item_stage, "category": type(item_exc).__name__}
+                        for item_stage, item_exc in teardown_errors
+                    ]
+                if primary_error is None:
+                    progress.error(
+                        {
+                            "type": "teardown",
+                            "stage": stage,
+                            "category": type(exc).__name__,
+                        }
+                    )
+                else:
+                    progress.flush()
+            except Exception:
+                pass
+
+        try:
+            if close_owned_processes_once is not None:
+                close_owned_processes_once()
+            if owned_processes_teardown_failure is not None:
+                _record_teardown_failure(
+                    "owned_processes", owned_processes_teardown_failure
+                )
+            try:
+                if daemon_lease is not None:
+                    daemon_lease.close()
+            except BaseException as exc:
+                _record_teardown_failure("keeper_close", exc)
+            else:
+                # Boundedly verify the native daemon actually released its lock
+                # after close (lock gone or holder pid dead). A failed close
+                # already records keeper_close; verification is meaningless
+                # then (the daemon may still be up), so it only runs on the
+                # successful-close path.
+                if daemon_lease is not None:
+                    try:
+                        if not daemon_lease.wait_for_daemon_release():
+                            _record_teardown_failure(
+                                "daemon_release_verify",
+                                RuntimeError(
+                                    "ChunkHound daemon release was not verified "
+                                    "within the bounded deadline after lease close"
+                                ),
+                            )
+                    except BaseException as exc:
+                        _record_teardown_failure("daemon_release_verify", exc)
+        finally:
+            cleanup_sensitive_staged_paths(
+                (runtime_policy or {}).get("staged_paths"),
+                record_failure=_record_teardown_failure,
+                quiet=quiet,
+            )
+            clear_active_output(out)
+            out.stop()
+            maybe_print_markdown_after_tui(
+                ui_enabled=ui_enabled,
+                stderr=out.stderr,
+                markdown_path=success_markdown_path,
+            )
+            maybe_print_codex_resume_command(
+                stderr=out.stderr, command=success_resume_command
+            )
+        if teardown_errors:
+            if primary_error is not None:
+                add_note = getattr(primary_error, "add_note", None)
+                if callable(add_note):
+                    for stage, exc in teardown_errors:
+                        add_note(
+                            f"Additional CURe teardown failure: {stage} "
+                            f"({type(exc).__name__})"
+                        )
+            else:
+                raise teardown_errors[0][1]
 
     # Success: keep stdout machine-friendly for scripting.
     print(str(session_dir))
@@ -15272,7 +16192,6 @@ from cure_llm import (
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
-    cleanup_sensitive_staged_paths,
     codex_mcp_overrides_for_reviewflow,
     codex_resume_meta_dict,
     find_codex_resume_info,

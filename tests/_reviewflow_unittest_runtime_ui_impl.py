@@ -114,7 +114,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         "import sys",
                         "from pathlib import Path",
                         "",
-                        "if len(sys.argv) > 1 and sys.argv[1] == '-c':",
+                        "if len(sys.argv) > 2 and sys.argv[1:3] == ['-I', '-c']:",
                         f"    runtime_dir = Path({json.dumps(str(runtime_dir))})",
                         f"    derived_lock = Path({json.dumps(str(derived_lock))})",
                         f"    derived_log = Path({json.dumps(str(derived_log))})",
@@ -1810,6 +1810,96 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
 
 class CodexJsonProgressTests(unittest.TestCase):
+    def _run_parallel_codex_invocations(
+        self, *, root: Path
+    ) -> tuple[dict[str, cure_llm.CodexRunResult], object]:
+        repo_dir = root / "repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        barrier = threading.Barrier(2)
+        results: dict[str, cure_llm.CodexRunResult] = {}
+        failures: list[BaseException] = []
+
+        class _DummyProgress:
+            def __init__(self) -> None:
+                self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+                self.commands: list[list[str]] = []
+
+            def record_cmd(self, cmd: list[str]) -> None:
+                self.commands.append(list(cmd))
+
+            def flush(self) -> None:
+                return None
+
+        progress = _DummyProgress()
+
+        def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+            output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+            marker = output_path.stem
+            barrier.wait(timeout=5.0)
+            sink = kwargs["stream_to"]
+            assert sink is not None
+            sink.write(json.dumps({"type": "agent_message", "text": marker}) + "\n")
+            sink.flush()
+            output_path.write_text(f"{marker}\n", encoding="utf-8")
+            return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0)
+
+        def invoke(marker: str) -> None:
+            try:
+                results[marker] = cure_llm.run_codex_exec(
+                    repo_dir=repo_dir,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=root / f"{marker}.md",
+                    prompt=marker,
+                    env={},
+                    stream=False,
+                    progress=progress,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+            cure_llm, "run_cmd", side_effect=fake_run_cmd
+        ), mock.patch.object(
+            cure_llm, "normalize_markdown_artifact"
+        ), mock.patch.object(
+            cure_llm, "find_codex_resume_info", return_value=None
+        ):
+            threads = [threading.Thread(target=invoke, args=(marker,)) for marker in ("plan", "step-01")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(failures, [])
+        self.assertEqual(set(results), {"plan", "step-01"})
+        return results, progress
+
+    def test_parallel_codex_runs_use_distinct_events_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results, progress = self._run_parallel_codex_invocations(root=Path(tmp))
+
+            event_paths = {result.events_log_path for result in results.values()}
+            self.assertEqual(len(event_paths), 2)
+            self.assertTrue(all(path is not None and path.is_file() for path in event_paths))
+            latest_path = Path(str(progress.meta["logs"]["codex_events"]))
+            self.assertIn(latest_path, event_paths)
+
+    def test_parallel_codex_event_slices_exclude_foreign_run_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results, _progress = self._run_parallel_codex_invocations(root=Path(tmp))
+
+            for marker, result in results.items():
+                self.assertEqual(result.events_start_offset, 0)
+                assert result.events_log_path is not None
+                assert result.events_end_offset is not None
+                with result.events_log_path.open("rb") as fh:
+                    fh.seek(result.events_start_offset or 0)
+                    event_text = fh.read(result.events_end_offset).decode("utf-8")
+                payloads = [json.loads(line) for line in event_text.splitlines() if line]
+                self.assertEqual(payloads, [{"type": "agent_message", "text": marker}])
+
     def test_codex_review_artifact_heuristic_prefers_real_review_markdown(self) -> None:
         review_text = "\n".join(
             [

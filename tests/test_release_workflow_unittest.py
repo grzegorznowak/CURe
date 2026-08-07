@@ -42,8 +42,52 @@ class ReleaseWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
 
         workflow_lines = workflow.splitlines()
-        self.assertIn("        run: python -m pip install --upgrade build twine pytest", workflow_lines)
+        self.assertIn("        run: python -m pip install --upgrade build twine pytest setuptools", workflow_lines)
         self.assertIn("        run: python -m pytest", workflow_lines)
+
+    def test_publish_workflow_runs_checkout_isolated_daemon_aware_wheel_smoke(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")
+
+        self.assertIn("tests/daemon_aware_research_calls_smoke.py", workflow)
+        self.assertIn("env -u PYTHONPATH PYTHONSAFEPATH=1", workflow)
+        self.assertIn('--cure-bin "$smoke_root/venv/bin/cure"', workflow)
+        self.assertIn('cd "$smoke_root/run"', workflow)
+
+    def test_daemon_aware_wheel_smoke_owns_complete_a25_residue_matrix(self) -> None:
+        smoke = (ROOT / "tests" / "daemon_aware_research_calls_smoke.py").read_text(
+            encoding="utf-8"
+        )
+
+        for scenario in (
+            "success",
+            "failure",
+            "provider-ctrl-c-publication",
+            "helper-ctrl-c-publication",
+            "spawn-wins",
+            "close-wins",
+            "keeper-db-release",
+        ):
+            self.assertIn(f'"{scenario}"', smoke)
+        self.assertIn("_assert_process_gone", smoke)
+        self.assertIn("_assert_database_unlocked", smoke)
+        for scenario in (
+            "initializing-then-ready",
+            "never-ready-timeout",
+            "fresh-resync-then-ready",
+            "fresh-resync-realtime-error",
+        ):
+            self.assertIn(f'"{scenario}"', smoke)
+        self.assertIn("for scenario in _READINESS_SCENARIOS:", smoke)
+        self.assertIn("_run_readiness_scenario(root, cure_bin, scenario)", smoke)
+        self.assertIn("lease.adjudicate_expected_session(", smoke)
+        self.assertIn("ExpectedSessionReadinessTimeoutError", smoke)
+        self.assertIn('"live_indexing_state": "degraded"', smoke)
+        self.assertIn('"status:degraded:false"', smoke)
+        self.assertIn('"status:degraded:true"', smoke)
+        self.assertIn('"status:ready:true"', smoke)
+        self.assertIn("except ExpectedSessionReadinessError as exc:", smoke)
+        self.assertNotIn('"not strictly query-ready"', smoke)
+        self.assertIn("if not terminal_degraded or events != expected_events or sleeps:", smoke)
 
     def test_publish_workflow_gates_release_tag_shape_and_package_version(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-package.yml").read_text(encoding="utf-8")

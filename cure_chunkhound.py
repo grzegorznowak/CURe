@@ -8,11 +8,21 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 _STDERR_TAIL_MAX = 16000
+# Read-time caps for the MCP stdout framing (guards against pathological daemon
+# output; legitimate traffic stays far below these): headers before the blank
+# line, the declared Content-Length body, a single JSON-RPC line, and the total
+# buffered stdout bytes.
+_MAX_MCP_HEADER_BYTES = 16 * 1024
+_MAX_MCP_CONTENT_LENGTH_BYTES = 32 * 1024 * 1024
+_MAX_MCP_JSON_LINE_BYTES = 8 * 1024 * 1024
+_MAX_MCP_STDOUT_BUFFER_BYTES = 64 * 1024 * 1024
 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 _DEFAULT_PREFLIGHT_STAGE_TIMEOUTS: dict[str, float] = {
     "spawn": 3.0,
@@ -26,6 +36,24 @@ _DEFAULT_TOOL_CALL_TIMEOUTS: dict[str, float] = {
     "code_research": 1200.0,
 }
 _TRANSPORT_MODES = ("json_line", "mcp_framed")
+_REQUIRED_KEEPER_TOOLS = ("search", "code_research", "daemon_status")
+
+DAEMON_LOG_EXCLUSION_PROBE = """import json
+import sys
+from pathlib import Path
+from chunkhound.api.cli.main import create_parser
+from chunkhound.core.config.config import Config
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
+
+repo = Path(sys.argv[1]).resolve()
+config_path = Path(sys.argv[2]).resolve()
+args = create_parser().parse_args(["mcp", "--config", str(config_path), str(repo)])
+filter_ = RealtimePathFilter(config=Config(args), root_path=repo)
+print(json.dumps({
+    "ok": True,
+    "excluded": not filter_.should_index(repo / ".chunkhound" / "daemon.log"),
+    "degraded": filter_.is_degraded,
+}, sort_keys=True))"""
 
 DAEMON_METADATA_PROBE = "\n".join(
     [
@@ -198,8 +226,10 @@ def _chunkhound_runtime_cmd(binary: str = "chunkhound") -> list[str] | None:
         resolved = shutil.which("chunkhound") or "chunkhound"
     if resolved == "chunkhound":
         return None
-    launcher = Path(resolved)
     try:
+        launcher = Path(resolved).resolve(strict=True)
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            return None
         first_line = launcher.read_text(encoding="utf-8").splitlines()[0].strip()
     except Exception:
         return None
@@ -212,7 +242,65 @@ def _chunkhound_runtime_cmd(binary: str = "chunkhound") -> list[str] | None:
         cmd = shlex.split(shebang)
     except ValueError:
         return None
-    return cmd or None
+    if len(cmd) != 1:
+        return None
+    interpreter = Path(cmd[0])
+    if not interpreter.is_absolute():
+        return None
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        return None
+    return [str(interpreter), "-I"]
+
+
+def probe_effective_daemon_log_exclusion(
+    *,
+    repo_path: str | Path,
+    config_path: str | Path,
+    cwd: str | Path,
+    binary: str | Path,
+    env: Mapping[str, str],
+    timeout: float = 5.0,
+) -> dict[str, bool]:
+    """Fail closed unless the installed runtime excludes its canonical daemon log."""
+    runtime_cmd = _chunkhound_runtime_cmd(str(binary))
+    if runtime_cmd is None:
+        raise RuntimeError("unable to resolve ChunkHound runtime interpreter")
+
+    try:
+        result = subprocess.run(
+            runtime_cmd
+            + [
+                "-c",
+                DAEMON_LOG_EXCLUSION_PROBE,
+                str(Path(repo_path).resolve()),
+                str(Path(config_path).resolve()),
+            ],
+            cwd=str(Path(cwd).resolve()),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=dict(env),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ChunkHound daemon-log exclusion probe timed out") from exc
+    except OSError as exc:
+        raise RuntimeError("ChunkHound daemon-log exclusion probe could not run") from exc
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ChunkHound daemon-log exclusion probe failed with status {result.returncode}"
+        )
+    try:
+        report = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("ChunkHound daemon-log exclusion probe returned malformed JSON") from exc
+
+    expected = {"ok": True, "excluded": True, "degraded": False}
+    if report != expected or any(type(report[key]) is not bool for key in expected):
+        raise RuntimeError("ChunkHound daemon-log exclusion probe returned an unsafe result")
+    return expected
 
 
 def daemon_metadata_payload(
@@ -220,6 +308,8 @@ def daemon_metadata_payload(
     chunkhound_cwd: str | Path | None = None,
     binary: str = "chunkhound",
     timeout: float = 5.0,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "chunkhound_path": str(binary or "chunkhound"),
@@ -237,8 +327,9 @@ def daemon_metadata_payload(
     if runtime_cmd is None:
         payload["daemon_metadata_error"] = "unable to resolve chunkhound runtime interpreter"
         return payload
-    env = os.environ.copy()
-    env["PYTHONSAFEPATH"] = "1"
+    child_env = dict(os.environ if env is None else env)
+    if env is None:
+        child_env["PYTHONSAFEPATH"] = "1"
     cwd = str(Path(chunkhound_cwd).resolve(strict=False) if chunkhound_cwd is not None else Path(repo_dir).resolve(strict=False))
     try:
         result = subprocess.run(
@@ -248,7 +339,7 @@ def daemon_metadata_payload(
             capture_output=True,
             text=True,
             check=False,
-            env=env,
+            env=child_env,
             timeout=float(timeout),
         )
     except subprocess.TimeoutExpired:
@@ -293,6 +384,7 @@ class JsonRpcSession:
         repo_path: str | Path,
         cwd: str | Path | None = None,
         binary: str = "chunkhound",
+        env: Mapping[str, str] | None = None,
         transport_mode: str = "json_line",
         heartbeat_provider: str = "claude",
         heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
@@ -300,15 +392,25 @@ class JsonRpcSession:
         self.config_path = Path(config_path)
         self.repo_path = Path(repo_path)
         self.cwd = Path(cwd).resolve(strict=False) if cwd is not None else self.repo_path.resolve(strict=False)
-        self.binary = str(binary or "chunkhound")
+        child_env = dict(os.environ if env is None else env)
+        child_env["PYTHONSAFEPATH"] = "1"
+        self._child_env: Mapping[str, str] = MappingProxyType(child_env)
+        requested_binary = str(binary or "chunkhound")
+        if env is None or os.path.dirname(requested_binary):
+            self.binary = requested_binary
+        else:
+            resolved_binary = shutil.which(requested_binary, path=child_env.get("PATH"))
+            if resolved_binary is None:
+                raise FileNotFoundError(
+                    f"unable to resolve {requested_binary!r} from the explicit child PATH"
+                )
+            self.binary = str(Path(resolved_binary).resolve(strict=False))
         self._next_id = 1
         self._transport_mode = str(transport_mode or "").strip() or "json_line"
         if self._transport_mode not in _TRANSPORT_MODES:
             raise ValueError(f"unsupported transport mode: {self._transport_mode}")
         self._heartbeat_provider = str(heartbeat_provider or "").strip().lower() or "claude"
         self._heartbeat_interval = float(heartbeat_interval)
-        env = os.environ.copy()
-        env["PYTHONSAFEPATH"] = "1"
         self.proc = subprocess.Popen(
             _base_cmd(self.config_path, self.repo_path, binary=self.binary),
             cwd=str(self.cwd),
@@ -316,7 +418,7 @@ class JsonRpcSession:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
-            env=env,
+            env=self._child_env,
         )
         if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
             raise RuntimeError("chunkhound mcp stdio pipes are unavailable")
@@ -377,6 +479,11 @@ class JsonRpcSession:
                 if chunk:
                     self._stdout_buffer.extend(chunk)
                     saw_data = True
+                    if len(self._stdout_buffer) > _MAX_MCP_STDOUT_BUFFER_BYTES:
+                        raise RuntimeError(
+                            "chunkhound mcp stdout exceeded the maximum buffered byte"
+                            f" cap ({_MAX_MCP_STDOUT_BUFFER_BYTES} bytes)"
+                        )
                 else:
                     self._stdout_open = False
             else:
@@ -396,6 +503,11 @@ class JsonRpcSession:
             header_end = self._stdout_buffer.find(b"\n\n")
             delimiter_len = 2
         if header_end < 0:
+            if len(self._stdout_buffer) > _MAX_MCP_HEADER_BYTES:
+                raise RuntimeError(
+                    "chunkhound mcp headers exceeded the maximum byte cap"
+                    f" ({_MAX_MCP_HEADER_BYTES} bytes) without a terminator"
+                )
             return None
         headers_blob = bytes(self._stdout_buffer[:header_end]).decode("utf-8", errors="replace")
         headers: dict[str, str] = {}
@@ -408,6 +520,11 @@ class JsonRpcSession:
             length = int(headers["content-length"])
         except Exception as exc:
             raise RuntimeError("invalid MCP content-length header") from exc
+        if length < 0 or length > _MAX_MCP_CONTENT_LENGTH_BYTES:
+            raise RuntimeError(
+                "chunkhound MCP content-length exceeds the maximum byte cap"
+                f" ({_MAX_MCP_CONTENT_LENGTH_BYTES} bytes)"
+            )
         body_start = header_end + delimiter_len
         body_end = body_start + length
         if len(self._stdout_buffer) < body_end:
@@ -424,6 +541,11 @@ class JsonRpcSession:
             return None
         newline_idx = self._stdout_buffer.find(b"\n")
         if newline_idx < 0:
+            if len(self._stdout_buffer) > _MAX_MCP_JSON_LINE_BYTES:
+                raise RuntimeError(
+                    "chunkhound mcp JSON line exceeded the maximum byte cap"
+                    f" ({_MAX_MCP_JSON_LINE_BYTES} bytes) without a newline"
+                )
             return None
         raw_line = bytes(self._stdout_buffer[: newline_idx + 1])
         del self._stdout_buffer[: newline_idx + 1]
@@ -718,6 +840,39 @@ def _tool_payload_base(
     return payload
 
 
+def _validate_keeper_tools_response(
+    tools_response: Mapping[str, Any],
+    *,
+    required_tools: tuple[str, ...] = _REQUIRED_KEEPER_TOOLS,
+) -> tuple[list[str], list[str], str | None]:
+    result = tools_response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        return [], list(required_tools), "ChunkHound tools/list returned a malformed tools collection"
+
+    available: list[str] = []
+    for index, tool in enumerate(result["tools"]):
+        if not isinstance(tool, dict):
+            return available, list(required_tools), (
+                f"ChunkHound tools/list entry {index} is not an object"
+            )
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return available, list(required_tools), (
+                f"ChunkHound tools/list entry {index} has an invalid name"
+            )
+        available.append(name.strip())
+
+    available.sort()
+    missing = [name for name in required_tools if name not in available]
+    if missing:
+        return (
+            available,
+            missing,
+            "required ChunkHound tools are unavailable: " + ", ".join(missing),
+        )
+    return available, [], None
+
+
 def _run_preflight(
     session: JsonRpcSession,
     *,
@@ -727,6 +882,7 @@ def _run_preflight(
     binary: str,
     helper_path: str | Path | None,
     stage_timeouts: dict[str, float],
+    required_tools: tuple[str, ...] = _REQUIRED_KEEPER_TOOLS,
     emit_stage_lines: bool = True,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
@@ -738,6 +894,7 @@ def _run_preflight(
             chunkhound_cwd=cwd,
             binary=binary,
             timeout=stage_timeouts["daemon_metadata"],
+            env=session._child_env,
         )
 
     def _run_stage(stage: str, timeout_seconds: float, func: Any) -> tuple[bool, Any]:
@@ -916,19 +1073,14 @@ def _run_preflight(
             stderr_tail=session._stderr_tail_text(),
         )
 
-    tools_payload = tools_response.get("result") if isinstance(tools_response.get("result"), dict) else {}
-    raw_tools = tools_payload.get("tools") if isinstance(tools_payload, dict) else []
-    tools = raw_tools if isinstance(raw_tools, list) else []
-    available = sorted(
-        str(tool.get("name") or "").strip()
-        for tool in tools
-        if isinstance(tool, dict) and str(tool.get("name") or "").strip()
+    available, missing_tools, validation_error = _validate_keeper_tools_response(
+        tools_response,
+        required_tools=required_tools,
     )
-    missing_tools = [name for name in ("search", "code_research") if name not in available]
     stage_started = time.monotonic()
     _emit_stage("running", "validate tools", enabled=emit_stage_lines)
-    if missing_tools:
-        detail = "required ChunkHound tools are unavailable: " + ", ".join(missing_tools)
+    if validation_error:
+        detail = validation_error
         _emit_stage("error", "validate tools", elapsed_seconds=time.monotonic() - stage_started, detail=detail, enabled=emit_stage_lines)
         stage_trace.append(_stage_trace_entry(stage="tool_validation", status="error", started_at=stage_started, detail=detail))
         return _build_preflight_payload(
@@ -993,6 +1145,37 @@ def _run_preflight(
     )
 
 
+def bootstrap_chunkhound_mcp_session(
+    session: JsonRpcSession,
+    *,
+    config_path: str | Path,
+    repo_path: str | Path,
+    cwd: str | Path | None = None,
+    binary: str | None = None,
+    helper_path: str | Path | None = None,
+    stage_timeouts: Mapping[str, float] | None = None,
+    timeout: float | None = None,
+    required_tools: tuple[str, ...] = _REQUIRED_KEEPER_TOOLS,
+    emit_stage_lines: bool = True,
+) -> dict[str, Any]:
+    """Run the canonical strict MCP bootstrap while leaving ``session`` open."""
+    active_timeouts = _normalized_stage_timeouts(
+        dict(stage_timeouts) if stage_timeouts is not None else None,
+        timeout,
+    )
+    return _run_preflight(
+        session,
+        config_path=config_path,
+        repo_path=repo_path,
+        cwd=cwd,
+        binary=binary or session.binary,
+        helper_path=helper_path,
+        stage_timeouts=active_timeouts,
+        required_tools=required_tools,
+        emit_stage_lines=emit_stage_lines,
+    )
+
+
 def _should_retry_with_alternate_transport(payload: dict[str, Any]) -> bool:
     if bool(payload.get("ok")):
         return False
@@ -1047,7 +1230,7 @@ def run_chunkhound_mcp_preflight_payload(
             heartbeat_interval=heartbeat_interval,
         )
         try:
-            payload = _run_preflight(
+            payload = bootstrap_chunkhound_mcp_session(
                 session,
                 config_path=config_path,
                 repo_path=repo_path,
@@ -1055,6 +1238,7 @@ def run_chunkhound_mcp_preflight_payload(
                 binary=binary,
                 helper_path=helper_path,
                 stage_timeouts=active_timeouts,
+                required_tools=("search", "code_research") if helper_path is not None else _REQUIRED_KEEPER_TOOLS,
             )
         finally:
             session.close()
@@ -1168,6 +1352,7 @@ def run_chunkhound_tool_payload(
                     binary=binary,
                     helper_path=helper_path,
                     stage_timeouts=active_stage_timeouts,
+                    required_tools=("search", "code_research") if helper_path is not None else _REQUIRED_KEEPER_TOOLS,
                     emit_stage_lines=False,
                 )
             if not preflight.get("ok"):

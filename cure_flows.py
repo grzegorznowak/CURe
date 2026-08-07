@@ -1677,6 +1677,35 @@ def materialize_chunkhound_env_config(
     """
     cfg = dict(resolved_config)
 
+    if "indexing" not in cfg:
+        indexing: dict[str, Any] = {}
+    else:
+        raw_indexing = cfg["indexing"]
+        if not isinstance(raw_indexing, Mapping):
+            raise ReviewflowError("ChunkHound indexing config must be an object.")
+        indexing = dict(raw_indexing)
+
+    if "exclude" not in indexing:
+        indexing["exclude"] = ["**/.chunkhound/**"]
+    else:
+        raw_exclude = indexing["exclude"]
+        if raw_exclude == ".gitignore":
+            # The sentinel overrides exclude_mode to select .gitignore sources.
+            # Preserve that behavior when converting it to an explicit list.
+            indexing["exclude"] = ["**/.chunkhound/**"]
+            indexing["exclude_mode"] = "gitignore_only"
+        elif not isinstance(raw_exclude, list) or not all(
+            isinstance(pattern, str) for pattern in raw_exclude
+        ):
+            raise ReviewflowError(
+                "ChunkHound indexing.exclude must be a list of strings or '.gitignore'."
+            )
+        else:
+            indexing["exclude"] = [
+                pattern for pattern in raw_exclude if pattern != "**/.chunkhound/**"
+            ] + ["**/.chunkhound/**"]
+    cfg["indexing"] = indexing
+
     emb = cfg.get("embedding")
     if isinstance(emb, dict) and "api_key" in emb:
         # Avoid materializing secrets to disk, even if present in the source config.

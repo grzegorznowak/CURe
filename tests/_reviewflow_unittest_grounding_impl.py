@@ -1,4 +1,5 @@
 # ruff: noqa: F403, F405
+import importlib
 from typing import Any
 
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
@@ -8484,6 +8485,17 @@ class CodexToolProofFlowTests(unittest.TestCase):
             "dangerously_bypass_approvals_and_sandbox": True,
         }
 
+    def _codex_helper_daemon_runtime_policy(self) -> dict[str, object]:
+        helper_path = "/tmp/cure/work/bin/cure-chunkhound"
+        policy = self._codex_runtime_policy()
+        policy["env"] = {"CURE_CHUNKHOUND_HELPER": helper_path}
+        policy["metadata"] = {
+            "provider": "codex",
+            "chunkhound_access_mode": "cli_helper_daemon",
+        }
+        policy["staged_paths"] = {"chunkhound_helper": helper_path}
+        return policy
+
     def _write_event_payloads(self, *, work_dir: Path, payloads: list[dict[str, object]]) -> dict[str, object]:
         logs_dir = work_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -8653,8 +8665,32 @@ class CodexToolProofFlowTests(unittest.TestCase):
         runtime_policy = (
             dict(runtime_policy_override)
             if isinstance(runtime_policy_override, dict)
-            else self._codex_runtime_policy()
+            else self._codex_helper_daemon_runtime_policy()
         )
+
+        def fake_final_index_receipt(**kwargs: object) -> object:
+            lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+            identity = lifecycle.LaunchIdentity(
+                resolved_executable=Path("/usr/bin/chunkhound"),
+                executable_digest="a" * 64,
+                canonical_root=Path(str(kwargs["repo_dir"])).resolve(),
+                resolved_config_path=Path(str(kwargs["chunkhound_cfg_path"])).resolve(),
+                config_digest="a" * 64,
+                resolved_database_path=Path(str(kwargs["chunkhound_db_path"])).resolve(),
+                cwd=Path(str(kwargs["chunkhound_work_dir"])).resolve(),
+                curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
+                environment_equality_digest="b" * 64,
+            )
+            return lifecycle.ExpectedSessionReceiptV1(
+                schema_version=1,
+                canonical_root=identity.canonical_root,
+                reviewed_head="1" * 40,
+                resolved_config_path=identity.resolved_config_path,
+                config_digest=identity.config_digest,
+                resolved_database_path=identity.resolved_database_path,
+                total_chunks=1,
+                launch_identity_projection=identity,
+            )
 
         def fake_copy_duckdb_files(src: Path, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -8794,8 +8830,208 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         side_effect=synth_stage_side_effect,
                     )
                 )
+            lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "_run_session_chunkhound_index_with_rebuild_fallback",
+                    side_effect=fake_final_index_receipt,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    rf,
+                    "select_git_tracked_source_witness",
+                    return_value=lifecycle.ExpectedSearchWitness(
+                        relative_path="source.py",
+                        literal="tool_proof_witness",
+                    ),
+                )
+            )
             if flow_patch is not None:
                 flow_patch(stack)
+
+            default_generation = lifecycle.DaemonGenerationIdentity(
+                pid=4242,
+                process_started_at=1.0,
+            )
+            default_generation_active = False
+
+            def default_build_launch_identity(**kwargs: object) -> object:
+                return lifecycle.LaunchIdentity(
+                    resolved_executable=Path(str(kwargs["binary"])).resolve(),
+                executable_digest="a" * 64,
+                    canonical_root=Path(str(kwargs["repo_path"])).resolve(),
+                    resolved_config_path=Path(str(kwargs["config_path"])).resolve(),
+                    config_digest="a" * 64,
+                    resolved_database_path=Path(str(kwargs["database_path"])).resolve(),
+                    cwd=Path(str(kwargs["cwd"])).resolve(),
+                    curated_environment_keys=("PATH", "PYTHONSAFEPATH"),
+                    environment_equality_digest="b" * 64,
+                )
+
+            def default_generation_probe(**_kwargs: object) -> object:
+                return default_generation if default_generation_active else None
+
+            def default_open(lease: object) -> object:
+                nonlocal default_generation_active
+                default_generation_active = True
+                return lease
+
+            def default_close(_lease: object) -> None:
+                nonlocal default_generation_active
+                default_generation_active = False
+
+            if not isinstance(rf.build_launch_identity, mock.Mock):
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "build_launch_identity",
+                        side_effect=default_build_launch_identity,
+                    )
+                )
+            if not isinstance(rf.probe_effective_daemon_log_exclusion, mock.Mock):
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "probe_effective_daemon_log_exclusion",
+                        return_value={"ok": True, "excluded": True, "degraded": False},
+                    )
+                )
+            using_default_generation_probe = not isinstance(
+                rf.observe_native_daemon_generation,
+                mock.Mock,
+            )
+            if using_default_generation_probe:
+                stack.enter_context(
+                    mock.patch.object(
+                        rf,
+                        "observe_native_daemon_generation",
+                        side_effect=default_generation_probe,
+                    )
+                )
+            owned_generation_descriptor = inspect.getattr_static(
+                lifecycle.ChunkHoundDaemonLease,
+                "owned_generation",
+            )
+            if not isinstance(owned_generation_descriptor, mock.PropertyMock):
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "owned_generation",
+                        new_callable=mock.PropertyMock,
+                        return_value=default_generation,
+                    )
+                )
+            open_callable = lifecycle.ChunkHoundDaemonLease.open
+            open_mock = (
+                open_callable
+                if isinstance(open_callable, mock.Mock)
+                else getattr(open_callable, "mock", None)
+            )
+            if open_mock is None:
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "open",
+                        autospec=True,
+                        side_effect=default_open,
+                    )
+                )
+            elif using_default_generation_probe:
+                original_open_side_effect = open_mock.side_effect
+                original_open_return_value = open_mock.return_value
+
+                def tracked_open(*args: object, **kwargs: object) -> object:
+                    nonlocal default_generation_active
+                    if callable(original_open_side_effect):
+                        result = original_open_side_effect(*args, **kwargs)
+                    else:
+                        result = original_open_return_value
+                    default_generation_active = True
+                    return result
+
+                open_mock.side_effect = tracked_open
+
+            close_callable = lifecycle.ChunkHoundDaemonLease.close
+            close_mock = (
+                close_callable
+                if isinstance(close_callable, mock.Mock)
+                else getattr(close_callable, "mock", None)
+            )
+            if close_mock is None:
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "close",
+                        autospec=True,
+                        side_effect=default_close,
+                    )
+                )
+            elif using_default_generation_probe:
+                original_close_side_effect = close_mock.side_effect
+                original_close_return_value = close_mock.return_value
+
+                def tracked_close(*args: object, **kwargs: object) -> object:
+                    nonlocal default_generation_active
+                    try:
+                        if callable(original_close_side_effect):
+                            return original_close_side_effect(*args, **kwargs)
+                        return original_close_return_value
+                    finally:
+                        default_generation_active = False
+
+                close_mock.side_effect = tracked_close
+            # Teardown now verifies daemon release after close via
+            # wait_for_daemon_release; flow tests stub close (lease state stays
+            # OPEN) so the real method would raise RuntimeError. Default to a
+            # verified release; tests targeting the verification wiring patch
+            # the method themselves in flow_patch.
+            release_callable = lifecycle.ChunkHoundDaemonLease.wait_for_daemon_release
+            release_mock = (
+                release_callable
+                if isinstance(release_callable, mock.Mock)
+                else getattr(release_callable, "mock", None)
+            )
+            if release_mock is None:
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "wait_for_daemon_release",
+                        autospec=True,
+                        return_value=True,
+                    )
+                )
+            if not (
+                isinstance(lifecycle.ChunkHoundDaemonLease.assert_alive, mock.Mock)
+                or hasattr(lifecycle.ChunkHoundDaemonLease.assert_alive, "mock")
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "assert_alive",
+                        autospec=True,
+                        return_value=None,
+                    )
+                )
+            if not (
+                isinstance(
+                    lifecycle.ChunkHoundDaemonLease.adjudicate_expected_session,
+                    mock.Mock,
+                )
+                or hasattr(
+                    lifecycle.ChunkHoundDaemonLease.adjudicate_expected_session,
+                    "mock",
+                )
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        lifecycle.ChunkHoundDaemonLease,
+                        "adjudicate_expected_session",
+                        autospec=True,
+                        return_value=object(),
+                    )
+                )
             if expected_exception is not None:
                 with self.assertRaises(type(expected_exception)) as raised:
                     rf.pr_flow(
@@ -11167,6 +11403,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight", return_value=None))
                 stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
                 stack.enter_context(
                     mock.patch.object(
@@ -11332,6 +11569,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight", return_value=None))
                 stack.enter_context(mock.patch.object(rf, "run_cmd", side_effect=fake_run_cmd))
                 stack.enter_context(
                     mock.patch.object(
@@ -11815,6 +12053,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(mock.patch.object(rf, "_run_review_intelligence_preflight"))
+                stack.enter_context(mock.patch.object(rf, "_run_chunkhound_access_preflight", return_value=None))
                 stack.enter_context(mock.patch.object(rf, "run_llm_exec", side_effect=fake_run_llm_exec))
                 rc = rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 

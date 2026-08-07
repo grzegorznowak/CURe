@@ -36,7 +36,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install build dependencies
-        run: python -m pip install --upgrade build twine pytest
+        # setuptools is required by tests that build a wheel with
+        # --no-build-isolation (ambient build backend).
+        run: python -m pip install --upgrade build twine pytest setuptools
 
       - name: Validate tag and package metadata
         id: meta
@@ -89,11 +91,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m venv .tmp_release_venv
-          ./.tmp_release_venv/bin/python -m pip install --upgrade pip
-          ./.tmp_release_venv/bin/python -m pip install dist/*.whl
-          ./.tmp_release_venv/bin/cure --help >/dev/null
-          if [[ -x ./.tmp_release_venv/bin/reviewflow ]]; then
+          repo_root="$PWD"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install --upgrade pip
+          "$smoke_root/venv/bin/python" -m pip install dist/*.whl
+          mkdir "$smoke_root/run"
+          (
+            cd "$smoke_root/run"
+            env -u PYTHONPATH PYTHONSAFEPATH=1 \
+              "$smoke_root/venv/bin/python" \
+              "$repo_root/tests/daemon_aware_research_calls_smoke.py" \
+              --cure-bin "$smoke_root/venv/bin/cure"
+          )
+          if [[ -x "$smoke_root/venv/bin/reviewflow" ]]; then
             echo "Unexpected deprecated reviewflow entrypoint in release artifact" >&2
             exit 1
           fi

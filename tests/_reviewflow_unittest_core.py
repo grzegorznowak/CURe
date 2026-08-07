@@ -1,4 +1,16 @@
 # ruff: noqa: F401
+from _reviewflow_unittest_daemon_aware_impl import (
+    A13TransportOwnershipTests,
+    ChunkHoundDaemonLeaseTests,
+    ChunkHoundKeeperRuntimeTests,
+    DaemonAwareResearchCallFlowTests,
+    DaemonLogEffectiveFilterAdapterTests,
+    DaemonLifecycleProductionUtilityTests,
+    ExpectedSessionReadinessTests,
+    ExpectedSessionReceiptProjectionTests,
+    JsonRpcSessionReadCapTests,
+    LosslessCommandCaptureTransportTests,
+)
 from _reviewflow_unittest_grounding_impl import (
     BaselineSelectionTests,
     ChunkHoundToolProofValidationTests,
@@ -40,10 +52,19 @@ from _reviewflow_unittest_runtime_ui_impl import (
 )
 
 __all__ = [
+    "A13TransportOwnershipTests",
     "BaselineSelectionTests",
     "ChunkHoundAccessPreflightTests",
+    "ChunkHoundDaemonLeaseTests",
+    "ChunkHoundKeeperRuntimeTests",
     "ChunkHoundToolProofValidationTests",
     "CleanFlowTests",
+    "DaemonAwareResearchCallFlowTests",
+    "DaemonLifecycleProductionUtilityTests",
+    "DaemonLogEffectiveFilterAdapterTests",
+    "ExpectedSessionReadinessTests",
+    "ExpectedSessionReceiptProjectionTests",
+    "JsonRpcSessionReadCapTests",
     "CodexCommandTests",
     "CodexJsonProgressTests",
     "CodexResumeOutputTests",
@@ -59,6 +80,7 @@ __all__ = [
     "InstallAndDoctorTests",
     "InteractiveFlowTests",
     "JiraConfigCopyTests",
+    "LosslessCommandCaptureTransportTests",
     "ListSessionsTests",
     "LocalMarkdownNormalizationTests",
     "MultipassGroundingRecoveryUnitTests",
