@@ -124,16 +124,16 @@
 - **Proof Statement**: PENDING — historical pre-incident proof remains recorded but is not current completion evidence.
 
 ## PR State
-- PR URL: https://github.com/grzegorznowak/CURe/pull/33
-- Number: 33
-- Title: Retain one ChunkHound daemon across indexed review research calls
-- Branch: feat/daemon-aware-chunkhound-research-calls
-- Opened at: 2026-08-01T06:39:32Z
-- PR status: open
-- Review decision:
-- Merge commit: —
-- Merged at: —
-- Last synced: 2026-08-01T06:39:58Z
+- PR URL: https://github.com/grzegorznowak/CURe/pull/34
+- Number: 34
+- Title: feat: daemon-aware chunkhound research calls — native-helper cut (supersedes #33)
+- Branch: feat/daemon-aware-chunkhound-research-calls-native
+- Opened at: 2026-08-06T08:11:42Z
+- PR status: merged
+- Review decision: approved to merge by operator (2026-08-07); merge gates closed at dfdff39/cc17ede
+- Merge commit: ef4efefbadd26bfe3d43db26d8d86b27104858f4
+- Merged at: 2026-08-07T07:24:57Z
+- Last synced: 2026-08-07T07:41:59Z
 
 ## Unresolved Debt Friction
 - None.

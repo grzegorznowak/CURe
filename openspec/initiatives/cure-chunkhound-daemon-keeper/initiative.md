@@ -18,6 +18,8 @@ CURe review commands currently route each ChunkHound research request through a 
 
 **Make standard and multipass research calls daemon-aware.** Retain the generated helper as a thin per-call access and policy adapter, and hold one ordinary native MCP keeper connection per top-level indexed Linux review command from final index readiness until all agent work ends. Existing helper calls continue to use independent native MCP proxies, which attach to the keeper-held daemon instead of cold-starting the backend. Add privacy-safe lifecycle reporting, native capability and expected-index checks, concurrent-client proof, and proof that successful reviews, failures, cancellation with Ctrl-C, and cleanup do not leave background processes or locked database files. Preserve CURe's source-boundary guarantee, narrowed only to creation of an initially absent canonical indexed-root `.chunkhound/` directory when needed and creation of its initially absent regular `daemon.log`, including when the parent already exists as a real directory, after proving the log is excluded from every research authority.
 
+- **Archived**: `cure-chunkhound-daemon-aware-research-calls` was archived on 2026-08-07.
+
 ## Decisions & Constraints
 
 Supported review agents will continue to invoke CURe's generated helper, and each helper call will continue to use its own native ChunkHound MCP proxy. CURe will keep the shared daemon alive by holding one additional ordinary keeper client connection open for the duration of a supported review command. The keeper will not broker, proxy, serialize, or replay agent research calls, and CURe will not implement ChunkHound's private IPC protocol or replace native connections with a shared query service.
