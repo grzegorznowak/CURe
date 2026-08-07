@@ -124,7 +124,7 @@ from cure_github import (
 )
 from cure_runtime import _normalize_optional_reasoning_effort
 
-from ui import UiSnapshot, Verbosity, build_dashboard_lines
+from ui import Verbosity
 
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
@@ -3127,178 +3127,6 @@ def parse_pr_url(pr_url: str) -> PullRequestRef:
     return PullRequestRef(host=host, owner=owner, repo=repo, number=number)
 
 
-def _normalize_pr_identity_value(value: object) -> str:
-    return str(value or "").strip().lower()
-
-
-def resolve_resume_target(
-    target: str, *, sandbox_root: Path, from_phase: str
-) -> tuple[str, str]:
-    """Resolve `cure resume <target>` into (session_id, action).
-
-    `target` may be either:
-    - a session folder name (session_id), or
-    - a GitHub PR URL (e.g. https://github.com/OWNER/REPO/pull/123)
-
-    Action:
-    - "resume": resume a multipass session (existing behavior)
-    - "followup": run follow-up review for the latest completed session (PR URL mode only)
-    """
-    raw = str(target or "").strip()
-    if not raw:
-        raise ReviewflowError("resume requires a session_id.")
-
-    pr: PullRequestRef | None = None
-    try:
-        pr = parse_pr_url(raw)
-    except ReviewflowError:
-        pr = None
-
-    if pr is None:
-        if Path(raw).is_absolute() or ("/" in raw) or ("\\" in raw):
-            raise ReviewflowError(
-                "resume expects a session id (folder name) or a PR URL. "
-                f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id. Got: {raw!r}"
-            )
-        return (raw, "resume")
-
-    root = sandbox_root
-    if not root.is_dir():
-        raise ReviewflowError(
-            f"No review sandboxes found under {root} (needed to resolve PR {pr.owner}/{pr.repo}#{pr.number})."
-        )
-
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    resumable: list[tuple[datetime, str]] = []
-    completed: list[tuple[datetime, str]] = []
-    for entry in root.iterdir():
-        if not entry.is_dir():
-            continue
-        meta = _load_session_meta(entry / "meta.json")
-        if not meta:
-            continue
-        if not _meta_matches_pr(meta=meta, pr=pr):
-            continue
-
-        status = str(meta.get("status") or "").strip()
-        notes = meta.get("notes") if isinstance(meta.get("notes"), dict) else {}
-        no_index = bool((notes or {}).get("no_index") or False)
-        mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
-        mp_enabled = bool((mp or {}).get("enabled") is True)
-        llm_meta = resolve_meta_llm(meta)
-        supports_resume = bool(((llm_meta.get("capabilities") or {}).get("supports_resume")))
-
-        if mp_enabled and (not no_index) and supports_resume and (
-            status in {"running", "error"} or _multipass_has_invalid_artifacts(meta)
-        ):
-            resumed_at = str(meta.get("resumed_at") or "").strip() or None
-            failed_at = str(meta.get("failed_at") or "").strip() or None
-            completed_at = str(meta.get("completed_at") or "").strip() or None
-            created_at = str(meta.get("created_at") or "").strip() or None
-            dt = (
-                _parse_iso_dt(resumed_at)
-                or _parse_iso_dt(failed_at)
-                or _parse_iso_dt(completed_at)
-                or _parse_iso_dt(created_at)
-                or epoch
-            )
-            resumable.append((dt, entry.name))
-            continue
-
-        completed_at = str(meta.get("completed_at") or "").strip() or None
-        if status == "done" or completed_at:
-            meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-            raw_review_md = str((meta_paths or {}).get("review_md") or (entry / "review.md")).strip()
-            review_md_path = Path(raw_review_md) if raw_review_md else (entry / "review.md")
-            if not review_md_path.is_absolute():
-                review_md_path = (entry / review_md_path).resolve()
-            else:
-                review_md_path = review_md_path.resolve()
-            if not review_md_path.is_file():
-                continue
-            created_at = str(meta.get("created_at") or "").strip() or None
-            dt = _parse_iso_dt(completed_at) or _parse_iso_dt(created_at) or epoch
-            completed.append((dt, entry.name))
-
-    resumable.sort(key=lambda t: t[0], reverse=True)
-    completed.sort(key=lambda t: t[0], reverse=True)
-
-    if resumable:
-        return (resumable[0][1], "resume")
-
-    if str(from_phase or "auto").strip().lower() != "auto":
-        raise ReviewflowError(
-            f"No resumable multipass session found for PR {pr.owner}/{pr.repo}#{pr.number}. "
-            f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id."
-        )
-
-    if completed:
-        return (completed[0][1], "followup")
-
-    raise ReviewflowError(
-        f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {root}. "
-        f"Tip: run `{PRIMARY_CLI_COMMAND} list`."
-    )
-
-
-def resolve_resume_session_id(target: str, *, sandbox_root: Path, from_phase: str) -> str:
-    session_id, _ = resolve_resume_target(target, sandbox_root=sandbox_root, from_phase=from_phase)
-    return session_id
-
-
-def parse_owner_repo(value: str) -> tuple[str, str, str]:
-    """Parse OWNER/REPO or HOST/OWNER/REPO."""
-    text = value.strip().strip("/")
-    parts = text.split("/")
-    if len(parts) == 2:
-        return ("github.com", parts[0], parts[1])
-    if len(parts) == 3:
-        return (parts[0], parts[1], parts[2])
-    raise ReviewflowError(f"Expected OWNER/REPO or HOST/OWNER/REPO, got: {value}")
-
-
-def _tail_file_lines(path: Path, n: int, *, max_bytes: int = 256 * 1024) -> list[str]:
-    n = max(0, int(n))
-    if n == 0:
-        return []
-    try:
-        if not path.is_file():
-            return []
-    except Exception:
-        return []
-
-    try:
-        with path.open("rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            pos = fh.tell()
-            buf = b""
-            block = 4096
-            while pos > 0 and buf.count(b"\n") <= n:
-                take = min(block, pos)
-                pos -= take
-                fh.seek(pos, os.SEEK_SET)
-                buf = fh.read(take) + buf
-                if len(buf) > max_bytes:
-                    buf = buf[-max_bytes:]
-                    break
-        text = buf.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        return lines[-n:] if len(lines) > n else lines
-    except Exception:
-        return []
-
-
-def _resolve_log_path(*, session_dir: Path, raw: str | None) -> Path | None:
-    if not raw:
-        return None
-    try:
-        p = Path(str(raw)).expanduser()
-        if not p.is_absolute():
-            p = (session_dir / p).resolve()
-        return p
-    except Exception:
-        return None
-
 
 @dataclass(frozen=True)
 class ResolvedObservationTarget:
@@ -3608,289 +3436,6 @@ def build_status_payload(
     return payload
 
 
-def _coerce_ui_verbosity(raw: str) -> Verbosity:
-    try:
-        return Verbosity(str(raw or "normal").strip().lower())
-    except Exception as e:
-        raise ReviewflowError("--verbosity must be one of: quiet, normal, debug") from e
-
-
-def _stream_supports_color(stream: TextIO) -> bool:
-    try:
-        if not stream.isatty():
-            return False
-    except Exception:
-        return False
-    term = str(os.environ.get("TERM") or "")
-    if term in {"", "dumb"}:
-        return False
-    if "NO_COLOR" in os.environ:
-        return False
-    return True
-
-
-def _load_ui_preview_snapshot(
-    *,
-    meta_path: Path,
-    session_dir: Path,
-    verbosity: Verbosity,
-) -> tuple[dict[str, Any], list[str], list[str]]:
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ReviewflowError(f"ui-preview: failed to parse meta.json: {e}") from e
-    if not isinstance(meta, dict):
-        raise ReviewflowError("ui-preview: meta.json must contain a JSON object")
-
-    if verbosity is Verbosity.quiet:
-        ch_n, cx_n = (0, 0)
-    else:
-        ch_n, cx_n = (200, 400)
-
-    fallback_ch = session_dir / "work" / "logs" / "chunkhound.log"
-    fallback_cx = session_dir / "work" / "logs" / "codex.log"
-    logs = meta.get("logs")
-    logs = logs if isinstance(logs, dict) else {}
-    ch_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("chunkhound") or "").strip())
-    cx_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("codex") or "").strip())
-    if ch_log is None or (not ch_log.is_file()):
-        ch_log = fallback_ch if fallback_ch.is_file() else None
-    if cx_log is None or (not cx_log.is_file()):
-        cx_log = fallback_cx if fallback_cx.is_file() else None
-
-    chunkhound_tail = _tail_file_lines(ch_log, ch_n) if ch_log is not None else []
-    codex_tail = _tail_file_lines(cx_log, cx_n) if cx_log is not None else []
-    return meta, chunkhound_tail, codex_tail
-
-
-def _render_ui_preview(
-    *,
-    session_dir: Path,
-    meta_path: Path,
-    verbosity: Verbosity,
-    color: bool,
-    width: int | None,
-    height: int | None,
-    final_newline: bool,
-    stdout: TextIO,
-) -> str:
-    meta, chunkhound_tail, codex_tail = _load_ui_preview_snapshot(
-        meta_path=meta_path,
-        session_dir=session_dir,
-        verbosity=verbosity,
-    )
-    snap = UiSnapshot(verbosity=verbosity, show_help=False)
-    term = shutil.get_terminal_size(fallback=(120, 40))
-    render_width = int(width) if isinstance(width, int) else int(term.columns)
-    render_height = int(height) if isinstance(height, int) else int(term.lines)
-    lines = build_dashboard_lines(
-        meta=meta,
-        snapshot=snap,
-        chunkhound_tail=chunkhound_tail,
-        codex_tail=codex_tail,
-        no_stream=False,
-        width=render_width,
-        height=render_height,
-        color=color,
-    )
-    stdout.write("\n".join(lines))
-    if final_newline:
-        stdout.write("\n")
-    stdout.flush()
-    return str(meta.get("status") or "").strip().lower() or "unknown"
-
-
-def _watch_line_for_payload(payload: dict[str, Any]) -> str:
-    pr = payload.get("pr") if isinstance(payload.get("pr"), dict) else {}
-    repo_slug = f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}"
-    parts = [
-        f"session={payload.get('session_id')}",
-        f"repo={repo_slug}",
-        f"status={payload.get('status')}",
-        f"phase={payload.get('phase')}",
-    ]
-    latest_artifact = payload.get("latest_artifact") if isinstance(payload.get("latest_artifact"), dict) else {}
-    latest_path = str((latest_artifact or {}).get("path") or "").strip()
-    if latest_path:
-        parts.append(f"artifact={latest_path}")
-    llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
-    llm_summary = str((llm or {}).get("summary") or "").strip()
-    if llm_summary:
-        parts.append(llm_summary)
-    chunkhound = payload.get("chunkhound") if isinstance(payload.get("chunkhound"), dict) else {}
-    access = chunkhound.get("access") if isinstance(chunkhound.get("access"), dict) else {}
-    access_stage = str((access or {}).get("preflight_stage") or "").strip()
-    access_status = str((access or {}).get("preflight_stage_status") or "").strip()
-    access_error = str((access or {}).get("error") or "").strip()
-    access_elapsed = access.get("elapsed_seconds")
-    show_access = bool(access_stage) and (
-        str(payload.get("phase") or "").strip() == "chunkhound_access_preflight"
-        or (not bool(access.get("preflight_ok")))
-        or access_status in {"running", "error", "timeout"}
-    )
-    if show_access:
-        access_bits = [f"chunkhound={access_stage}"]
-        if access_status:
-            access_bits.append(access_status)
-        if isinstance(access_elapsed, (int, float)):
-            access_bits.append(f"{float(access_elapsed):.1f}s")
-        if access_error and access_status in {"error", "timeout"}:
-            compact_error = " ".join(access_error.split())
-            if len(compact_error) > 80:
-                compact_error = compact_error[:79] + "…"
-            access_bits.append(compact_error)
-        parts.append(" ".join(access_bits))
-    return " ".join(parts)
-
-
-def preferred_cli_invocation(invocation: str) -> str:
-    return f"{PRIMARY_CLI_COMMAND} {invocation}"
-
-
-def build_commands_catalog_payload() -> dict[str, Any]:
-    return {
-        "schema_version": 2,
-        "kind": "cure.commands",
-        "commands": [
-            {
-                "name": "pr",
-                "summary": "Create a new review session for a PR.",
-                "targets": ["PR_URL"],
-                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Prints the created session directory path on success.",
-                "exit_codes": {"0": "review started", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("pr <PR_URL> --if-reviewed new"),
-                "variants": [
-                    {
-                        "name": "compatibility",
-                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
-                        "invocation": preferred_cli_invocation("pr <PR_URL>"),
-                    },
-                ],
-            },
-            {
-                "name": "resume",
-                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Human-readable progress only.",
-                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
-                "variants": [
-                    {
-                        "name": "pr_url_compatibility",
-                        "summary": "PR URL mode preserves the existing special behavior documented in the README.",
-                        "invocation": preferred_cli_invocation("resume <PR_URL>"),
-                    },
-                ],
-            },
-            {
-                "name": "clean",
-                "summary": "Delete an exact session, preview closed-session cleanup, or use the TTY cleaner.",
-                "targets": ["session_id", "closed"],
-                "safety": "Bulk cleanup is preview-first with `clean closed --json`; exact delete rejects `--yes`.",
-                "tty": "Required only for `clean` with no target and `clean closed` without `--yes`.",
-                "stdout": "Structured JSON on `--json`; otherwise human-readable cleanup output.",
-                "exit_codes": {"0": "cleanup query or deletion completed", "2": "usage, lookup, or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("clean closed --json"),
-                "variants": [
-                    {
-                        "name": "bulk_execute",
-                        "summary": "Execute closed-session cleanup after previewing matches.",
-                        "invocation": preferred_cli_invocation("clean closed --yes --json"),
-                    },
-                    {
-                        "name": "exact_delete",
-                        "summary": "Delete one exact session with a structured result.",
-                        "invocation": preferred_cli_invocation("clean <session_id> --json"),
-                    },
-                ],
-            },
-            {
-                "name": "status",
-                "summary": "Resolve a session or PR URL and report the current recorded run state.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "Read-only view backed by `meta.json` and recorded artifacts/logs.",
-                "tty": "No TTY required.",
-                "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
-                "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
-                "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
-                "variants": [],
-            },
-            {
-                "name": "watch",
-                "summary": "Attach to a recorded session and follow progress until completion.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "Read-only attach flow; uses the same resolver as `status`.",
-                "tty": "TTY mode reuses the existing dashboard; non-TTY mode prints plain polling lines.",
-                "stdout": "Progress lines until the session reaches `done` or `error`.",
-                "exit_codes": {
-                    "0": "session finished with status=done",
-                    "1": "session finished with status=error",
-                    "2": "invalid target, lookup failure, or corrupt metadata",
-                },
-                "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
-                "variants": [],
-            },
-        ],
-    }
-
-
-def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
-    session_id = str(getattr(args, "session_id", "") or "").strip()
-    if not session_id:
-        raise ReviewflowError("ui-preview: session_id is required")
-
-    session_dir = paths.sandbox_root / session_id
-    meta_path = session_dir / "meta.json"
-    if not meta_path.is_file():
-        raise ReviewflowError(f"ui-preview: missing meta.json at {meta_path}")
-
-    verbosity = _coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
-    width_arg = getattr(args, "width", None)
-    height_arg = getattr(args, "height", None)
-    color = _stream_supports_color(sys.stdout) and (not bool(getattr(args, "no_color", False)))
-
-    watch = bool(getattr(args, "watch", False))
-    if not watch:
-        # If the command line wrapped, some terminals start program output at a non-zero
-        # column; add a leading newline in TTY mode to keep the dashboard aligned.
-        try:
-            if sys.stdout.isatty():
-                sys.stdout.write("\n")
-        except Exception:
-            pass
-        _render_ui_preview(
-            session_dir=session_dir,
-            meta_path=meta_path,
-            verbosity=verbosity,
-            color=color,
-            width=width_arg,
-            height=height_arg,
-            final_newline=True,
-            stdout=sys.stdout,
-        )
-        return 0
-
-    try:
-        while True:
-            sys.stdout.write("\x1b[2J\x1b[H")
-            sys.stdout.flush()
-            _render_ui_preview(
-                session_dir=session_dir,
-                meta_path=meta_path,
-                verbosity=verbosity,
-                color=color,
-                width=width_arg,
-                height=height_arg,
-                final_newline=False,
-                stdout=sys.stdout,
-            )
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        return 0
 
 
 def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -> dict[str, Any]:
@@ -7519,16 +7064,6 @@ def _persist_discovered_embedding_config(
     base_config_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(base_config_path, updated)
     return True
-
-
-def migrate_storage_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
-    _ = args
-    _ = paths
-    _eprint(
-        f"`{PRIMARY_CLI_COMMAND} migrate-storage` is deprecated and no longer performs any migration.\n"
-        "Reviewflow now uses generic XDG/home defaults and does not auto-discover legacy workspace paths."
-    )
-    return 0
 
 
 def materialize_chunkhound_env_config(
@@ -16217,7 +15752,6 @@ from cure_commands import (
     setup_flow,
     set_agent_flow,
     status_flow,
-    watch_flow,
 )
 
 
@@ -16390,13 +15924,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     cp.add_argument("--yes", action="store_true", help="Execute bulk closed-session cleanup without confirmation")
     cp.add_argument("--json", dest="json_output", action="store_true", help="Print structured cleanup JSON")
 
-    mp = sub.add_parser(
-        "migrate-storage",
-        help="Show the storage-migration deprecation notice",
-        parents=[runtime_parent],
-    )
-    mp.add_argument("--apply", action="store_true", help="Accepted for compatibility; no migration is performed")
-
     rp = sub.add_parser(
         "resume",
         help="Resume a multipass review session",
@@ -16437,49 +15964,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    fup = sub.add_parser("followup", help=argparse.SUPPRESS, parents=[runtime_parent])
-    fup.add_argument("session_id", help="Session id (folder name)")
-    fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
-    add_llm_override_args(fup)
-    add_agent_runtime_args(fup)
-    fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    fup.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
-    fup.add_argument(
-        "--codex-plan-effort",
-        dest="codex_plan_effort",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    fup.add_argument(
-        "--wtf",
-        dest="wtf",
-        type=_parse_on_off_bool,
-        default=True,
-        metavar="{on,off,1,0}",
-        help="Toggle verbose finding explanations in the final review artifact (default: on; use off for concise)",
-    )
-    fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
-    fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
-    fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-
-    upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
-    upp.add_argument("session_id", help="Session id (folder name)")
-    upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
-    upp.add_argument("--width", type=int, default=None, help="Terminal width")
-    upp.add_argument("--height", type=int, default=None, help="Terminal height")
-    upp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-    upp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
-
     sp = sub.add_parser("status", help="Show run status for a session id or PR URL", parents=[runtime_parent])
     sp.add_argument("target", help="Session id (folder name) or PR URL")
     sp.add_argument("--json", dest="json_output", action="store_true", help="Print structured status JSON")
-
-    wp = sub.add_parser("watch", help="Follow run status for a session id or PR URL", parents=[runtime_parent])
-    wp.add_argument("target", help="Session id (folder name) or PR URL")
-    wp.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds (default: 2.0)")
-    wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-    wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
     setupp = sub.add_parser(
         "setup",
@@ -16532,12 +16019,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Evaluate readiness for starting a review of this PR URL",
     )
 
-    hidden_subcommands = {"followup"}
-    sub._choices_actions = [
-        action for action in sub._choices_actions if getattr(action, "dest", None) not in hidden_subcommands
-    ]
-    visible_subcommands = [name for name in sub.choices.keys() if name not in hidden_subcommands]
-    sub.metavar = "{" + ",".join(visible_subcommands) + "}"
 
     return parser
 
@@ -16575,12 +16056,8 @@ def main(
                 config_path=runtime.config_path,
                 codex_base_config_path=runtime.codex_base_config_path,
             )
-        if args.cmd == "ui-preview":
-            return ui_preview_flow(args, paths=paths)
         if args.cmd == "status":
             return command_surface.status_flow(args, paths=paths)
-        if args.cmd == "watch":
-            return command_surface.watch_flow(args, paths=paths)
         if args.cmd == "cache":
             host, owner, repo = parse_owner_repo(args.owner_repo)
             if args.cache_cmd == "prime":
@@ -16610,17 +16087,8 @@ def main(
             return command_surface.interactive_flow(args, paths=paths, config_path=runtime.config_path)
         if args.cmd == "clean":
             return command_surface.clean_flow(args, paths=paths)
-        if args.cmd == "migrate-storage":
-            return migrate_storage_flow(args, paths=paths)
         if args.cmd == "resume":
             return command_surface.resume_flow(
-                args,
-                paths=paths,
-                config_path=runtime.config_path,
-                codex_base_config_path=runtime.codex_base_config_path,
-            )
-        if args.cmd == "followup":
-            return command_surface.followup_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,

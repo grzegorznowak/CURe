@@ -135,7 +135,7 @@ Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-fi
 
 If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
-Commands that actually require bootstrap now fail or repair approved non-secret defaults earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure followup`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before review side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor` so a human operator or approved automation can complete setup.
+Commands that actually require bootstrap now fail or repair approved non-secret defaults earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before review side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor` so a human operator or approved automation can complete setup.
 
 On an interactive `cure pr` cold start with no existing CURe-managed base cache for the selected baseline, CURe may also ask whether you already have a matching ChunkHound workspace/config for that exact repo. If validation passes, CURe hot-starts the managed base cache from that workspace before running the normal top-up index. Non-TTY runs skip this prompt and build the baseline cache normally.
 
@@ -202,12 +202,6 @@ Check status:
 
 ```bash
 cure status <session_id|PR_URL> --json
-```
-
-Watch a run:
-
-```bash
-cure watch <session_id|PR_URL>
 ```
 
 Resume a session:
@@ -344,7 +338,7 @@ step_workers = 4
 
 On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in Codex defaults are explicit: `codex-cli` defaults to effort `high`.
 
-When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json` or `cure watch <session_id|PR_URL>`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
+When strict multipass grounding fails, CURe keeps the invalid artifact on disk and writes the validation details to `work/grounding_report.json` inside the session. Inspect the persisted state with `cure status <session_id|PR_URL> --json`, then rerun the same session with `cure resume <session_id>` or the narrower `cure resume <session_id> --from steps` / `cure resume <session_id> --from synth`. If you want fail-open behavior for future runs, set `[multipass].grounding_mode = "warn"`.
 
 If an embedding key is already present in the environment, `cure setup` adds the matching non-secret embedding provider/model block and continues. If `VOYAGE_API_KEY` already exists, `cure setup` writes the Voyage embedding model into the active ChunkHound base config and continues. Otherwise, if `OPENAI_API_KEY` already exists, `cure setup` writes the OpenAI embedding model into the active ChunkHound base config and continues. CURe does not write the secret value into that config.
 

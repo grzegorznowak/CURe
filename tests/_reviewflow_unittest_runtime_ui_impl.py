@@ -2487,7 +2487,7 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(summary["embeddings"], 0)
         self.assertEqual(summary["duration_text"], "0.07s")
 
-    def test_parser_accepts_if_reviewed_and_followup_flags(self) -> None:
+    def test_parser_accepts_if_reviewed_and_clean_status_flags(self) -> None:
         p = rf.build_parser()
         help_text = p.format_help()
         self.assertNotIn("followup", help_text)
@@ -2518,12 +2518,6 @@ class TuiDashboardTests(unittest.TestCase):
         )
         self.assertFalse(args_pr_no_cod_ledger.cod_ledger)
 
-        args2 = p.parse_args(["followup", "session-123", "--no-update", "--wtf", "0"])
-        self.assertEqual(args2.session_id, "session-123")
-        self.assertTrue(args2.no_update)
-        self.assertFalse(args2.wtf)
-        self.assertFalse(hasattr(args2, "cod_ledger"))
-
         args_resume = p.parse_args(["resume", "session-123", "--wtf", "1", "--cod-ledger", "on"])
         self.assertEqual(args_resume.session_id, "session-123")
         self.assertTrue(args_resume.wtf)
@@ -2532,9 +2526,6 @@ class TuiDashboardTests(unittest.TestCase):
         args_resume_default = p.parse_args(["resume", "session-456"])
         self.assertTrue(args_resume_default.wtf)
         self.assertTrue(args_resume_default.cod_ledger)
-
-        args_followup_default = p.parse_args(["followup", "session-789"])
-        self.assertTrue(args_followup_default.wtf)
 
         args3 = p.parse_args(["interactive", "https://github.com/acme/repo/pull/1"])
         self.assertEqual(args3.target, "https://github.com/acme/repo/pull/1")
@@ -2552,22 +2543,6 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertEqual(args7.target, "session-123")
         self.assertTrue(args7.json_output)
 
-        args8 = p.parse_args(
-            [
-                "watch",
-                "https://github.com/acme/repo/pull/1",
-                "--interval",
-                "5",
-                "--verbosity",
-                "quiet",
-                "--no-color",
-            ]
-        )
-        self.assertEqual(args8.target, "https://github.com/acme/repo/pull/1")
-        self.assertEqual(args8.interval, 5.0)
-        self.assertEqual(args8.verbosity, "quiet")
-        self.assertTrue(args8.no_color)
-
         args9 = p.parse_args(["clean", "closed", "--yes", "--json"])
         self.assertEqual(args9.session_id, "closed")
         self.assertTrue(args9.yes)
@@ -2578,7 +2553,6 @@ class TuiDashboardTests(unittest.TestCase):
         subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
         pr_help = subparsers.choices["pr"].format_help()
         resume_help = subparsers.choices["resume"].format_help()
-        followup_help = subparsers.choices["followup"].format_help()
         doctor_help = subparsers.choices["doctor"].format_help()
 
         self.assertIn("--no-index", pr_help)
@@ -2596,14 +2570,9 @@ class TuiDashboardTests(unittest.TestCase):
         self.assertIn("--cod-ledger {on,off,1,0}", resume_help)
         self.assertIn("use off to disable", resume_help)
         self.assertIn("Do not stream ChunkHound or review-agent output", resume_help)
-        self.assertIn("--wtf {on,off,1,0}", followup_help)
-        self.assertIn("default: on", followup_help)
-        self.assertNotIn("--cod-ledger", followup_help)
-        self.assertIn("Do not stream ChunkHound or review-agent output", followup_help)
         self.assertNotIn("codex review", pr_help.lower())
         self.assertNotIn("chunkhound/codex output", pr_help.lower())
         self.assertNotIn("chunkhound/codex output", resume_help.lower())
-        self.assertNotIn("chunkhound/codex output", followup_help.lower())
         self.assertIn("--llm-preset", doctor_help)
         self.assertIn("--llm-model", doctor_help)
         self.assertIn("--llm-effort", doctor_help)
@@ -2748,27 +2717,6 @@ class TuiDashboardTests(unittest.TestCase):
         args2 = p.parse_args(["resume", "session-123", "--ui", "auto", "--verbosity", "normal"])
         self.assertEqual(args2.ui, "auto")
         self.assertEqual(args2.verbosity, "normal")
-
-        args3 = p.parse_args(
-            [
-                "ui-preview",
-                "session-123",
-                "--watch",
-                "--width",
-                "100",
-                "--height",
-                "30",
-                "--verbosity",
-                "debug",
-                "--no-color",
-            ]
-        )
-        self.assertEqual(args3.session_id, "session-123")
-        self.assertTrue(args3.watch)
-        self.assertEqual(args3.width, 100)
-        self.assertEqual(args3.height, 30)
-        self.assertEqual(args3.verbosity, "debug")
-        self.assertTrue(args3.no_color)
 
 
 class RuntimeResolutionTests(unittest.TestCase):
@@ -2929,7 +2877,6 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertIs(cure.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(cure.commands_flow, cure_commands.commands_flow)
         self.assertIs(cure.status_flow, cure_commands.status_flow)
-        self.assertIs(cure.watch_flow, cure_commands.watch_flow)
 
     def test_reviewflow_reexports_active_extracted_owners(self) -> None:
         self.assertIs(rf.resolve_runtime, cure_runtime.resolve_runtime)
@@ -2938,7 +2885,6 @@ class CanonicalShellOwnershipTests(RuntimeResolutionTests):
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
         self.assertIs(rf.status_flow, cure_commands.status_flow)
-        self.assertIs(rf.watch_flow, cure_commands.watch_flow)
 
     def test_cure_main_uses_canonical_build_parser(self) -> None:
         args = argparse.Namespace(cmd="commands", json_output=True)
@@ -3682,7 +3628,6 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("`--skip-install`", readme)
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
-        self.assertIn("cure watch <session_id|PR_URL>", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
         self.assertIn("That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended.", readme)
         self.assertIn("The operator should not need to provide a local checkout path", readme)

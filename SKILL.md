@@ -1,6 +1,6 @@
 ---
 name: cure
-description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure setup`, `cure pr`, `cure status`, `cure watch`, and `resume`.
+description: Run GitHub pull request reviews in isolated sandboxes with CURe. Use when you need a safe, repeatable PR review workflow with `cure setup`, `cure pr`, `cure status`, and `resume`.
 metadata:
   short-description: Review GitHub PRs in isolated sandboxes with CURe
 ---
@@ -248,7 +248,6 @@ cure pr <PR_URL> --if-reviewed new
 
 ```bash
 cure status <session_id|PR_URL> --json
-cure watch <session_id|PR_URL>
 ```
 
 ## What Success Looks Like
@@ -256,8 +255,7 @@ cure watch <session_id|PR_URL>
 Success means:
 - `cure pr <PR_URL> --if-reviewed new` creates a sandbox session
 - the command prints the created session path to stdout
-- `cure status ... --json` returns machine-readable run state
-- `cure watch ...` lets a human or assisting agent observe the run; humans remain responsible for interpreting readiness and failures
+- `cure status ... --json` returns machine-readable run state; humans remain responsible for interpreting readiness and failures
 
 Common next actions:
 
@@ -358,13 +356,13 @@ Required behavior:
 - If `VOYAGE_API_KEY` is present, let `cure setup` configure Voyage embeddings automatically.
 - Otherwise, if `OPENAI_API_KEY` is present, let `cure setup` configure OpenAI embeddings automatically.
 - If `chunkhound` is still missing on `PATH`, let `cure setup` or the setup wizard install it only when the operator approved binary installation/replacement; otherwise stop and report the exact command to run.
-- Commands that require bootstrap readiness (`pr`, `resume`, `followup`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
+- Commands that require bootstrap readiness (`pr`, `resume`, `cache prime`, and `interactive`) now fail or repair earlier instead of surfacing late config or agent-selection errors. On non-TTY runs, they should fail fast and point back to `cure setup` plus `cure doctor`.
 - Then run `cure doctor --pr-url <PR_URL> --json` and use it as the readiness gate for `pr` and `resume`.
 - If autodetect needs to be overridden, rerun `cure doctor` and `cure pr` with `--llm-preset codex-cli`.
 - Read the `repo_local_chunkhound` payload plus the `repo-local-chunkhound` and `executor-network` checks from `cure doctor` before guessing from raw local files.
 - If using Codex execution, treat internet / network access as a prerequisite for obtaining code-under-review context.
 - If the environment is ready, start the review with `cure pr <PR_URL> --if-reviewed new`.
-- Then report progress with `cure status <session_id|PR_URL> --json` and `cure watch <session_id|PR_URL>`.
+- Then report progress with `cure status <session_id|PR_URL> --json`.
 - In constrained sandboxes, ask the operator for help instead of promising reliable unattended setup or runtime access.
 - If a required embedding secret is still missing, provide the exact local remediation steps for secret placement and the rerun command, then stop.
 ```

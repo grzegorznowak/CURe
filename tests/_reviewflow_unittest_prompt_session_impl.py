@@ -8,29 +8,6 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(rf.DEFAULT_PATHS.sandbox_root, (home / ".local/state/cure/sandboxes").resolve())
         self.assertEqual(rf.DEFAULT_PATHS.cache_root, (home / ".cache/cure").resolve())
 
-    def test_migrate_storage_flow_is_deprecation_stub(self) -> None:
-        paths = rf.ReviewflowPaths(
-            sandbox_root=ROOT / ".tmp_test_storage_migration",
-            cache_root=ROOT / ".tmp_test_storage_migration_cache",
-        )
-        with mock.patch.object(rf, "_eprint") as eprint:
-            rc = rf.migrate_storage_flow(argparse.Namespace(apply=False), paths=paths)
-        self.assertEqual(rc, 0)
-        text = "\n".join(" ".join(str(a) for a in call.args) for call in eprint.call_args_list)
-        self.assertIn("deprecated", text)
-        self.assertIn("no longer performs any migration", text)
-
-    def test_migrate_storage_apply_flag_is_tolerated_without_side_effects(self) -> None:
-        paths = rf.ReviewflowPaths(
-            sandbox_root=ROOT / ".tmp_test_storage_migration_apply",
-            cache_root=ROOT / ".tmp_test_storage_migration_apply_cache",
-        )
-        with mock.patch.object(rf, "_eprint") as eprint:
-            rc = rf.migrate_storage_flow(argparse.Namespace(apply=True), paths=paths)
-        self.assertEqual(rc, 0)
-        text = "\n".join(" ".join(str(a) for a in call.args) for call in eprint.call_args_list)
-        self.assertIn("deprecated", text)
-
 
 class GhConfigCopyTests(unittest.TestCase):
     def test_prepare_gh_config_for_codex_copies_directory(self) -> None:
@@ -4581,7 +4558,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
-        self.assertEqual(names, ["pr", "resume", "clean", "status", "watch"])
+        self.assertEqual(names, ["pr", "resume", "clean", "status"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
@@ -4597,7 +4574,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("pr: Create a new review session for a PR.", rendered)
         self.assertIn("cure clean closed --json", rendered)
         self.assertIn("cure status <session_id|PR_URL> --json", rendered)
-        self.assertIn("cure watch <session_id|PR_URL>", rendered)
         self.assertNotIn("reviewflow", rendered)
         self.assertNotIn("interactive", rendered)
 
@@ -4607,7 +4583,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIs(rf.run_llm_exec, cure_llm.run_llm_exec)
         self.assertIs(rf.commands_flow, cure_commands.commands_flow)
         self.assertIs(rf.status_flow, cure_commands.status_flow)
-        self.assertIs(rf.watch_flow, cure_commands.watch_flow)
         self.assertIs(rf.doctor_flow, cure_commands.doctor_flow)
         self.assertIs(rf.pr_flow, cure_commands.pr_flow)
         self.assertIs(rf.resume_flow, cure_commands.resume_flow)
@@ -4683,15 +4658,6 @@ class WorkflowContractTests(unittest.TestCase):
             (
                 "resume",
                 "resume_flow",
-                {
-                    "paths": mock.sentinel.paths,
-                    "config_path": Path("/tmp/reviewflow.toml"),
-                    "codex_base_config_path": Path("/tmp/codex.toml"),
-                },
-            ),
-            (
-                "followup",
-                "followup_flow",
                 {
                     "paths": mock.sentinel.paths,
                     "config_path": Path("/tmp/reviewflow.toml"),
@@ -5088,81 +5054,6 @@ class WorkflowContractTests(unittest.TestCase):
         with self.assertRaises(rf.ReviewflowError):
             rf.status_flow(argparse.Namespace(target="", json_output=True), paths=paths, stdout=StringIO())
 
-    def test_watch_flow_non_tty_prints_plain_status_and_uses_terminal_exit_codes(self) -> None:
-        root = ROOT / ".tmp_test_watch_error_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            paths, cfg = self._make_paths(root, suffix="watch_error")
-            self._write_session(
-                root=root,
-                session_id="watch-error",
-                status="error",
-                created_at="2026-03-10T09:00:00+00:00",
-                number=28,
-                error={"type": "exception", "message": "bad"},
-            )
-
-            stdout = StringIO()
-            rc = rf.watch_flow(
-                argparse.Namespace(
-                    target="watch-error",
-                    interval=0.0,
-                    verbosity="quiet",
-                    no_color=True,
-                ),
-                paths=paths,
-                stdout=stdout,
-                stderr=StringIO(),
-            )
-
-            rendered = stdout.getvalue()
-            self.assertEqual(rc, 1)
-            self.assertIn("session=watch-error", rendered)
-            self.assertIn("status=error", rendered)
-            self.assertIn("phase=review", rendered)
-            self.assertNotIn("\x1b[", rendered)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
-
-    def test_watch_flow_non_tty_returns_zero_for_done(self) -> None:
-        root = ROOT / ".tmp_test_watch_done_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            paths, cfg = self._make_paths(root, suffix="watch_done")
-            self._write_session(
-                root=root,
-                session_id="watch-done",
-                status="done",
-                created_at="2026-03-10T09:00:00+00:00",
-                completed_at="2026-03-10T09:05:00+00:00",
-                number=30,
-            )
-
-            stdout = StringIO()
-            rc = rf.watch_flow(
-                argparse.Namespace(
-                    target="watch-done",
-                    interval=0.0,
-                    verbosity="quiet",
-                    no_color=True,
-                ),
-                paths=paths,
-                stdout=stdout,
-                stderr=StringIO(),
-            )
-
-            rendered = stdout.getvalue()
-            self.assertEqual(rc, 0)
-            self.assertIn("session=watch-done", rendered)
-            self.assertIn("status=done", rendered)
-            self.assertNotIn("\x1b[", rendered)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
-
     def test_status_flow_json_includes_multipass_worker_metadata(self) -> None:
         root = ROOT / ".tmp_test_status_multipass_root"
         try:
@@ -5229,99 +5120,3 @@ class WorkflowContractTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_watch_flow_non_tty_includes_multipass_worker_summary(self) -> None:
-        root = ROOT / ".tmp_test_watch_multipass_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            paths, cfg = self._make_paths(root, suffix="watch_multipass")
-            self._write_session(
-                root=root,
-                session_id="watch-multipass",
-                status="running",
-                created_at="2026-03-10T09:00:00+00:00",
-                number=32,
-                phase="multipass_steps",
-                multipass={
-                    "enabled": True,
-                    "mode": "multipass",
-                    "status": "steps_ready",
-                    "step_workers": 3,
-                    "effective_step_workers": 2,
-                    "step_states": [
-                        {"step_index": 1, "step_title": "API", "status": "completed"},
-                        {"step_index": 2, "step_title": "Tests", "status": "running"},
-                        {"step_index": 3, "step_title": "Docs", "status": "queued"},
-                    ],
-                },
-            )
-
-            with mock.patch.object(cure_commands.time, "sleep", side_effect=KeyboardInterrupt):
-                stdout = StringIO()
-                with self.assertRaises(KeyboardInterrupt):
-                    rf.watch_flow(
-                        argparse.Namespace(
-                            target="watch-multipass",
-                            interval=0.0,
-                            verbosity="quiet",
-                            no_color=True,
-                        ),
-                        paths=paths,
-                        stdout=stdout,
-                        stderr=StringIO(),
-                    )
-
-            rendered = stdout.getvalue()
-            self.assertIn("session=watch-multipass", rendered)
-            self.assertIn("multipass_workers=2/3", rendered)
-            self.assertIn("steps=1 running,1 queued,1 completed", rendered)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
-
-    def test_watch_flow_non_tty_omits_multipass_worker_summary_for_singlepass_session(self) -> None:
-        root = ROOT / ".tmp_test_watch_singlepass_root"
-        try:
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir(parents=True, exist_ok=True)
-            paths, cfg = self._make_paths(root, suffix="watch_singlepass")
-            self._write_session(
-                root=root,
-                session_id="watch-singlepass",
-                status="done",
-                created_at="2026-03-10T09:00:00+00:00",
-                completed_at="2026-03-10T09:03:00+00:00",
-                number=33,
-                phase="codex_review",
-                multipass={
-                    "enabled": False,
-                    "mode": "singlepass",
-                    "step_workers": 3,
-                    "effective_step_workers": 0,
-                    "step_states": [
-                        {"step_index": 1, "step_title": "placeholder", "status": "queued"},
-                    ],
-                },
-            )
-
-            stdout = StringIO()
-            rc = rf.watch_flow(
-                argparse.Namespace(
-                    target="watch-singlepass",
-                    interval=0.0,
-                    verbosity="quiet",
-                    no_color=True,
-                ),
-                paths=paths,
-                stdout=stdout,
-                stderr=StringIO(),
-            )
-
-            rendered = stdout.getvalue()
-            self.assertEqual(rc, 0)
-            self.assertIn("session=watch-singlepass", rendered)
-            self.assertNotIn("multipass_workers=", rendered)
-            self.assertNotIn("steps=", rendered)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-            cfg.unlink(missing_ok=True)
