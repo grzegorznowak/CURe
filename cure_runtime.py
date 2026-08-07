@@ -44,8 +44,6 @@ LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
-AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
-DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "openai-responses",
@@ -118,7 +116,6 @@ algorithm = "hybrid"
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
 LEGACY_ENV_RENAMES = {
-    "REVIEWFLOW_AGENT_RUNTIME_PROFILE": "CURE_AGENT_RUNTIME_PROFILE",
     "REVIEWFLOW_CACHE_ROOT": "CURE_CACHE_ROOT",
     "REVIEWFLOW_CODEX_CONFIG": "CURE_CODEX_CONFIG",
     "REVIEWFLOW_CONFIG": "CURE_CONFIG",
@@ -1151,6 +1148,11 @@ def load_reviewflow_llm_config(
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    agent_runtime = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
+    if isinstance(agent_runtime, dict) and "gemini" in agent_runtime:
+        _raise_removed_gemini_support(
+            context="Remove the `[agent_runtime.gemini]` block from the CURe config.",
+        )
     utility_raw = llm.get("utility", {})
     if utility_raw in (None, ""):
         utility_raw = {}
@@ -1222,68 +1224,6 @@ def load_reviewflow_llm_config(
         "deprecated_explicit_presets": sorted(deprecated_explicit_presets),
     }
     return cfg, meta
-
-
-def _normalize_agent_runtime_profile(value: object, *, source: str) -> str | None:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    if text not in AGENT_RUNTIME_PROFILE_CHOICES:
-        raise ReviewflowError(
-            f"Invalid agent runtime profile from {source}: {text!r}. "
-            f"Expected one of: {', '.join(AGENT_RUNTIME_PROFILE_CHOICES)}"
-        )
-    return text
-
-
-def load_reviewflow_agent_runtime_config(
-    *, config_path: Path | None = None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = config_path or _default_reviewflow_config_path()
-    raw = load_toml(path)
-    section = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
-    section = section if isinstance(section, dict) else {}
-    if "gemini" in section:
-        _raise_removed_gemini_support(
-            context="Remove the `[agent_runtime.gemini]` block from the CURe config.",
-        )
-
-    profile = _normalize_agent_runtime_profile(section.get("profile"), source="config")
-    cfg = {"profile": profile}
-    meta = {
-        "config_path": str(path),
-        "loaded": bool(raw),
-        "agent_runtime": {
-            "profile": profile,
-        },
-    }
-    return cfg, meta
-
-
-def resolve_agent_runtime_profile(
-    *,
-    cli_value: str | None,
-    config_path: Path | None = None,
-    config_enabled: bool = True,
-) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-    cfg, meta = load_reviewflow_agent_runtime_config(config_path=config_path)
-    cli_profile = _normalize_agent_runtime_profile(cli_value, source="cli")
-    if cli_profile is not None:
-        return cli_profile, "cli", cfg, meta
-
-    env_profile = _normalize_agent_runtime_profile(
-        _read_supported_env_value("CURE_AGENT_RUNTIME_PROFILE", "REVIEWFLOW_AGENT_RUNTIME_PROFILE"),
-        source="env",
-    )
-    if env_profile is not None:
-        return env_profile, "env", cfg, meta
-
-    if config_enabled:
-        config_profile = _normalize_agent_runtime_profile(cfg.get("profile"), source="config")
-        if config_profile is not None:
-            return config_profile, "config", cfg, meta
-
-    return DEFAULT_AGENT_RUNTIME_PROFILE, "default", cfg, meta
 
 
 def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
@@ -3098,14 +3038,8 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
 def _resolved_doctor_agent_runtime(
     runtime: ReviewflowRuntime,
     *,
-    cli_profile: str | None = None,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    profile, profile_source, _, _ = resolve_agent_runtime_profile(
-        cli_value=cli_profile,
-        config_path=runtime.config_path,
-        config_enabled=runtime.config_enabled,
-    )
     llm_resolved, llm_meta = resolve_llm_config(
         base_codex_config_path=runtime.codex_base_config_path,
         reviewflow_config_path=runtime.config_path,
@@ -3131,8 +3065,6 @@ def _resolved_doctor_agent_runtime(
         env=os.environ,
     )
     payload: dict[str, Any] = {
-        "profile": profile,
-        "profile_source": profile_source,
         "preset": llm_resolved.get("preset"),
         "preset_source": llm_meta.get("selected_preset_source"),
         "provider": provider,
@@ -3165,7 +3097,6 @@ def _resolved_doctor_agent_runtime(
 def _doctor_runtime_payload(
     runtime: ReviewflowRuntime,
     *,
-    cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
     artifacts: dict[str, Any] | None = None,
@@ -3233,7 +3164,7 @@ def _doctor_runtime_payload(
             source=runtime.codex_base_config_source,
             exists=runtime.codex_base_config_path.is_file(),
         ),
-        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args),
+        "agent_runtime": _resolved_doctor_agent_runtime(runtime, args=args),
         "agent_selection": agent_selection,
         "acknowledged_sources": _doctor_acknowledged_sources(target=target),
         "review_intelligence": review_intelligence_payload,
@@ -3304,14 +3235,13 @@ def _doctor_runtime_payload(
 def _doctor_runtime_checks(
     runtime: ReviewflowRuntime,
     *,
-    cli_profile: str | None = None,
     pr_url: str | None = None,
     args: argparse.Namespace | None = None,
     artifacts: dict[str, Any] | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     target = _resolve_doctor_target_context(pr_url)
-    agent_runtime = _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args)
+    agent_runtime = _resolved_doctor_agent_runtime(runtime, args=args)
     agent_selection = resolve_local_agent_selection(
         base_codex_config_path=runtime.codex_base_config_path,
         reviewflow_config_path=runtime.config_path,
@@ -3411,11 +3341,9 @@ def _doctor_runtime_checks(
         checks.append(DoctorCheck(name="codex-config", status="warn", detail=f"missing: {runtime.codex_base_config_path} (source={runtime.codex_base_config_source})"))
 
     agent_runtime_detail = (
-        f"profile={agent_runtime.get('profile')} "
         f"provider={agent_runtime.get('provider')} "
         f"preset={agent_runtime.get('preset')} "
-        f"preset_source={agent_runtime.get('preset_source')} "
-        f"profile_source={agent_runtime.get('profile_source')}"
+        f"preset_source={agent_runtime.get('preset_source')}"
     )
     checks.append(
         DoctorCheck(
@@ -3567,14 +3495,12 @@ def _doctor_runtime_checks(
 
 
 __all__ = [
-    "AGENT_RUNTIME_PROFILE_CHOICES",
     "BUILTIN_LLM_PRESET_IDS",
     "CHUNKHOUND_CONFIG_EXAMPLE",
     "CLI_LLM_PROVIDERS",
     "CLI_PROVIDER_SESSION_ENV_PREFIXES",
     "CODEX_REASONING_EFFORT_CHOICES",
     "CURATED_ENV_INHERIT_KEYS",
-    "DEFAULT_AGENT_RUNTIME_PROFILE",
     "DEFAULT_LEGACY_CODEX_PRESET",
     "DEFAULT_MULTIPASS_ENABLED",
     "DEFAULT_MULTIPASS_MAX_STEPS",
@@ -3611,7 +3537,6 @@ __all__ = [
     "fingerprint_chunkhound_reviewflow_config",
     "load_chunkhound_runtime_config",
     "load_review_intelligence_config",
-    "load_reviewflow_agent_runtime_config",
     "load_reviewflow_chunkhound_config",
     "load_reviewflow_codex_base_config_path",
     "load_reviewflow_codex_defaults",
@@ -3623,7 +3548,6 @@ __all__ = [
     "parse_llm_key_value",
     "parse_llm_request_overrides",
     "require_builtin_review_intelligence",
-    "resolve_agent_runtime_profile",
     "resolve_chunkhound_reviewflow_config",
     "resolve_codex_base_config_path",
     "resolve_codex_flags",

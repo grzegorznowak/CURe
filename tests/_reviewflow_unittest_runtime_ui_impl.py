@@ -2595,8 +2595,6 @@ class TuiDashboardTests(unittest.TestCase):
                 "doctor",
                 "--config",
                 "/tmp/reviewflow.toml",
-                "--agent-runtime-profile",
-                "permissive",
                 "--sandbox-root",
                 "/tmp/sandboxes",
                 "--cache-root",
@@ -2607,7 +2605,6 @@ class TuiDashboardTests(unittest.TestCase):
         )
         self.assertEqual(args2.config_path, "/tmp/reviewflow.toml")
         self.assertFalse(args2.no_config)
-        self.assertEqual(args2.agent_runtime_profile, "permissive")
         self.assertEqual(args2.sandbox_root, "/tmp/sandboxes")
         self.assertEqual(args2.cache_root, "/tmp/cache")
         self.assertEqual(args2.codex_config_path, "/tmp/codex.toml")
@@ -2721,7 +2718,6 @@ class RuntimeResolutionTests(unittest.TestCase):
         payload = {
             "config_path": None,
             "no_config": False,
-            "agent_runtime_profile": None,
             "sandbox_root": None,
             "cache_root": None,
             "codex_config_path": None,
@@ -3474,7 +3470,6 @@ class InstallAndDoctorTests(unittest.TestCase):
         payload = {
             "config_path": None,
             "no_config": False,
-            "agent_runtime_profile": None,
             "sandbox_root": None,
             "cache_root": None,
             "codex_config_path": None,
@@ -4755,7 +4750,6 @@ class InstallAndDoctorTests(unittest.TestCase):
             self.assertTrue(payload["cure_config"]["exists"])
             self.assertEqual(payload["chunkhound_base_config"]["source"], "config")
             self.assertEqual(payload["sandbox_root"]["source"], "config")
-            self.assertEqual(payload["agent_runtime"]["profile"], "permissive")
             self.assertEqual(payload["agent_runtime"]["preset"], "codex-cli")
             self.assertEqual(payload["agent_runtime"]["preset_source"], "cure.toml")
             self.assertEqual(payload["agent_runtime"]["provider"], "codex")
@@ -4801,7 +4795,6 @@ class InstallAndDoctorTests(unittest.TestCase):
                 llm_max_output_tokens=None,
                 llm_set=[],
                 llm_header=[],
-                agent_runtime_profile=None,
                 pr_url=None,
             )
             with mock.patch.object(shutil, "which", return_value=None), mock.patch.object(
@@ -4913,7 +4906,6 @@ class InstallAndDoctorTests(unittest.TestCase):
                 llm_max_output_tokens=None,
                 llm_set=[],
                 llm_header=[],
-                agent_runtime_profile=None,
                 pr_url=None,
             )
             with mock.patch.dict(

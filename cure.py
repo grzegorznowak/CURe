@@ -10208,8 +10208,6 @@ def _pr_flow_impl(
                 args=args,
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
-                reviewflow_config_path=effective_config_path,
-                config_enabled=True,
                 repo_dir=repo_dir,
                 session_dir=session_dir,
                 work_dir=work_dir,
@@ -12149,8 +12147,6 @@ def _resume_flow_impl(
             args=args,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
-            reviewflow_config_path=effective_config_path,
-            config_enabled=True,
             repo_dir=repo_dir,
             session_dir=session_dir,
             work_dir=work_dir,
@@ -13014,8 +13010,6 @@ def _followup_flow_impl(
             args=args,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
-            reviewflow_config_path=effective_config_path,
-            config_enabled=True,
             repo_dir=repo_dir,
             session_dir=session_dir,
             work_dir=work_dir,
@@ -14202,15 +14196,10 @@ def build_interactive_resume_command(
             resolved_saved["reasoning_effort_source"] = "session_reuse"
         llm_resolution_meta["resolved"] = resolved_saved
 
-    saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
     runtime_policy = prepare_review_agent_runtime(
-        args=argparse.Namespace(
-            agent_runtime_profile=(saved_runtime_meta.get("profile") if isinstance(saved_runtime_meta, dict) else None)
-        ),
+        args=argparse.Namespace(),
         resolved=llm_meta,
         resolution_meta=llm_resolution_meta,
-        reviewflow_config_path=effective_config_path,
-        config_enabled=True,
         repo_dir=repo_dir,
         session_dir=session.session_dir,
         work_dir=work_dir,
@@ -15608,12 +15597,10 @@ from cure_sessions import (
     scan_interactive_review_sessions,
 )
 from cure_runtime import (
-    AGENT_RUNTIME_PROFILE_CHOICES,
     BUILTIN_LLM_PRESET_IDS,
     CHUNKHOUND_CONFIG_EXAMPLE,
     CLI_LLM_PROVIDERS,
     CODEX_REASONING_EFFORT_CHOICES,
-    DEFAULT_AGENT_RUNTIME_PROFILE,
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
     DEFAULT_MULTIPASS_MAX_STEPS,
@@ -15650,7 +15637,6 @@ from cure_runtime import (
     fingerprint_chunkhound_reviewflow_config,
     load_chunkhound_runtime_config,
     load_review_intelligence_config,
-    load_reviewflow_agent_runtime_config,
     load_reviewflow_chunkhound_config,
     load_reviewflow_codex_base_config_path,
     load_reviewflow_codex_defaults,
@@ -15662,7 +15648,6 @@ from cure_runtime import (
     parse_llm_key_value,
     parse_llm_request_overrides,
     require_builtin_review_intelligence,
-    resolve_agent_runtime_profile,
     resolve_chunkhound_reviewflow_config,
     resolve_codex_base_config_path,
     resolve_codex_flags,
@@ -15788,16 +15773,6 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--agent-runtime-profile",
-        dest="agent_runtime_profile",
-        choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
-        default=None,
-        help="Operator-approved CLI coding-agent runtime profile (permissive only)",
-    )
-
-
 def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     add_runtime_args(runtime_parent)
@@ -15834,7 +15809,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     prp.add_argument("--refresh-base", action="store_true", help="Force base cache refresh")
     prp.add_argument("--base-ttl-hours", type=int, default=24, help="Base cache TTL in hours")
     add_llm_override_args(prp)
-    add_agent_runtime_args(prp)
     prp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     prp.add_argument(
         "--codex-effort",
@@ -15931,7 +15905,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
     rp.add_argument("--from", dest="from_phase", choices=["auto", "plan", "steps", "synth"], default="auto")
     add_llm_override_args(rp)
-    add_agent_runtime_args(rp)
     rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     rp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     rp.add_argument(
@@ -15997,7 +15970,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
 
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
-    add_agent_runtime_args(dp)
     dp.add_argument(
         "--json",
         dest="json_output",

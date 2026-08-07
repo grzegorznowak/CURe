@@ -1198,7 +1198,6 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
     artifacts: dict[str, object] = {}
     checks = _doctor_runtime_checks(
         runtime,
-        cli_profile=getattr(args, "agent_runtime_profile", None),
         pr_url=pr_url,
         args=args,
         artifacts=artifacts,
@@ -1209,7 +1208,6 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
         fail_count = sum(1 for item in checks if item.status == "fail")
         payload = _doctor_runtime_payload(
             runtime,
-            cli_profile=getattr(args, "agent_runtime_profile", None),
             pr_url=pr_url,
             args=args,
             artifacts=artifacts,

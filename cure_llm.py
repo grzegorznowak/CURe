@@ -28,7 +28,6 @@ from cure_runtime import (
     augment_cli_provider_session_env,
     build_curated_subprocess_env,
     build_http_response_request,
-    resolve_agent_runtime_profile,
     toml_string,
 )
 from meta import write_json
@@ -1240,8 +1239,6 @@ def prepare_review_agent_runtime(
     args: argparse.Namespace,
     resolved: dict[str, Any],
     resolution_meta: dict[str, Any],
-    reviewflow_config_path: Path,
-    config_enabled: bool,
     repo_dir: Path,
     session_dir: Path,
     work_dir: Path,
@@ -1257,11 +1254,6 @@ def prepare_review_agent_runtime(
     provider = str(resolved.get("provider") or "").strip().lower()
     if provider == "gemini":
         _raise_removed_gemini_support(context="Gemini agent runtime preparation is no longer available.")
-    profile, profile_source, _, runtime_meta = resolve_agent_runtime_profile(
-        cli_value=getattr(args, "agent_runtime_profile", None),
-        config_path=reviewflow_config_path,
-        config_enabled=config_enabled,
-    )
     env = build_curated_subprocess_env(extra_env=base_env)
     env = augment_cli_provider_session_env(env=env, provider=provider)
     env.update(_string_dict(resolved.get("env")))
@@ -1271,8 +1263,6 @@ def prepare_review_agent_runtime(
         env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
     add_dirs = _dedupe_paths([session_dir, work_dir])
     runtime: dict[str, Any] = {
-        "profile": profile,
-        "profile_source": profile_source,
         "provider": provider,
         "transport": transport,
         "command": str(resolved.get("command") or provider).strip() or None,
@@ -1289,17 +1279,12 @@ def prepare_review_agent_runtime(
         "codex_config_overrides": [],
         "provider_args": [],
         "config": {
-            "resolved_profile": profile,
-            "profile_source": profile_source,
-            "agent_runtime": runtime_meta.get("agent_runtime"),
             "chunkhound_dry_run": chunkhound_dry_run,
         },
     }
     if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
         runtime["command"] = str(resolved.get("command") or "") or None
         runtime["metadata"] = {
-            "profile": profile,
-            "profile_source": profile_source,
             "provider": provider,
             "transport": transport,
             "supported": False,
@@ -1327,10 +1312,7 @@ def prepare_review_agent_runtime(
             env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
             runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
         codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta, include_sandbox=False)
-        if profile == "permissive":
-            runtime["dangerously_bypass_approvals_and_sandbox"] = True
-        else:
-            raise ReviewflowError(f"Unsupported codex agent runtime profile: {profile!r}")
+        runtime["dangerously_bypass_approvals_and_sandbox"] = True
         if runtime["sandbox_mode"]:
             codex_flags.extend(["--sandbox", str(runtime["sandbox_mode"])])
         if runtime["approval_policy"]:
@@ -1351,8 +1333,6 @@ def prepare_review_agent_runtime(
         raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
 
     runtime["metadata"] = {
-        "profile": runtime["profile"],
-        "profile_source": runtime["profile_source"],
         "provider": runtime["provider"],
         "sandbox_mode": runtime["sandbox_mode"],
         "approval_policy": runtime["approval_policy"],
