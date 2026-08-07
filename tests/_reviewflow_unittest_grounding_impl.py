@@ -6103,6 +6103,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         self.assertIn(error_fragment, playbook)
         self.assertIn(f"cure status {session_id} --json", playbook)
         self.assertIn(f"cure resume {session_id}", playbook)
+        self.assertNotIn("cure watch", playbook)
         self.assertIn(f"cure resume {session_id} --from {resume_from}", playbook)
         self.assertIn('[multipass].grounding_mode = "warn"', playbook)
         self.assertIn("- strict: blocks completion for invalid artifacts", playbook)

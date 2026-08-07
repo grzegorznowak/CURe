@@ -4555,7 +4555,6 @@ def _emit_multipass_grounding_failure_playbook(
             "",
             "Suggested next steps:",
             f"- {PRIMARY_CLI_COMMAND} status {session_id} --json",
-            f"- {PRIMARY_CLI_COMMAND} watch {session_id}",
             f"- {PRIMARY_CLI_COMMAND} resume {session_id}",
         ]
     )
@@ -11261,13 +11260,28 @@ def _resume_flow_impl(
             codex_model=getattr(args, "codex_model", None),
             codex_effort=getattr(args, "codex_effort", None),
             codex_plan_effort=getattr(args, "codex_plan_effort", None),
+            llm_preset=getattr(args, "llm_preset", None),
+            llm_model=getattr(args, "llm_model", None),
+            llm_effort=getattr(args, "llm_effort", None),
+            llm_plan_effort=getattr(args, "llm_plan_effort", None),
+            llm_verbosity=getattr(args, "llm_verbosity", None),
+            llm_max_output_tokens=getattr(args, "llm_max_output_tokens", None),
+            llm_set=list(getattr(args, "llm_set", []) or []),
+            llm_header=list(getattr(args, "llm_header", []) or []),
+            multipass_max_steps=getattr(args, "multipass_max_steps", None),
+            cod_ledger=getattr(args, "cod_ledger", True),
             wtf=bool(getattr(args, "wtf", False)),
             quiet=bool(getattr(args, "quiet", False)),
             no_stream=bool(getattr(args, "no_stream", False)),
             ui=str(getattr(args, "ui", "auto") or "auto"),
             verbosity=str(getattr(args, "verbosity", "normal") or "normal"),
         )
-        return followup_flow(followup_args, paths=paths)
+        return followup_flow(
+            followup_args,
+            paths=paths,
+            config_path=config_path,
+            codex_base_config_path=codex_base_config_path,
+        )
 
     root = paths.sandbox_root.resolve()
     session_dir = (paths.sandbox_root / session_id).resolve()
