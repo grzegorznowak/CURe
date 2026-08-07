@@ -28,7 +28,6 @@ from cure_chunkhound_lifecycle import (
     _require_native_search_witness,
     build_launch_identity,
     observe_native_daemon_generation,
-    select_git_tracked_source_witness,
 )
 from test_chunkhound_daemon_aware_source import (
     _A22_LIVE_RECEIPT_CASES,
@@ -520,29 +519,19 @@ def _exercise_live_index(
         assert_owned_generation_continuity("opened")
         assert daemon_log.is_file() and not daemon_log.is_symlink()
 
+        readiness = lease.adjudicate_expected_session(
+            receipt,
+            expected_generation=owned_generation,
+            readiness_timeout_seconds=600.0,
+        )
+        assert readiness.launch_identity == identity
         if total_chunks:
-            witness = select_git_tracked_source_witness(
-                repo_path=repo, config_path=config
-            )
-            assert witness.relative_path == "fixture.py"
-            assert witness.literal in before_source.decode("utf-8")
-            readiness = lease.adjudicate_expected_session(
-                receipt,
-                witness=witness,
-                expected_generation=owned_generation,
-                readiness_timeout_seconds=600.0,
-            )
-            assert readiness.launch_identity == identity
-            assert readiness.search_witness == witness
+            assert readiness.search_witness is not None
+            assert readiness.search_witness.relative_path == "fixture.py"
+            assert readiness.search_witness.literal in before_source.decode("utf-8")
             assert isinstance(readiness.expected_generation, ExpectedGenerationEvidence)
-            client_witness: ExpectedSearchWitness | None = witness
+            client_witness: ExpectedSearchWitness | None = readiness.search_witness
         else:
-            readiness = lease.adjudicate_expected_session(
-                receipt,
-                expected_generation=owned_generation,
-                readiness_timeout_seconds=600.0,
-            )
-            assert readiness.launch_identity == identity
             assert readiness.search_witness is None
             assert readiness.expected_generation is owned_generation
             client_witness = None
@@ -846,10 +835,6 @@ def test_tap05_watchman_fresh_instance_degraded_then_ready_live(
         total_chunks=total_chunks,
         launch_identity_projection=identity,
     )
-    witness = select_git_tracked_source_witness(repo_path=repo, config_path=config)
-    assert witness.relative_path == "fixture.py"
-    assert witness.literal in before_source.decode("utf-8")
-
     generation_probe = partial(
         observe_native_daemon_generation,
         repo_path=repo,
@@ -1054,7 +1039,6 @@ def test_tap05_watchman_fresh_instance_degraded_then_ready_live(
         try:
             readiness = lease.adjudicate_expected_session(
                 receipt,
-                witness=witness,
                 expected_generation=owned_generation,
                 readiness_timeout_seconds=600.0,
             )
@@ -1064,7 +1048,9 @@ def test_tap05_watchman_fresh_instance_degraded_then_ready_live(
         if adjudication_error is None:
             assert readiness is not None
             assert readiness.launch_identity == identity
-            assert readiness.search_witness == witness
+            assert readiness.search_witness is not None
+            assert readiness.search_witness.relative_path == "fixture.py"
+            assert readiness.search_witness.literal in before_source.decode("utf-8")
             assert isinstance(readiness.expected_generation, ExpectedGenerationEvidence)
             assert generation_probe() == opened_generation
 

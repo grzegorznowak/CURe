@@ -4506,16 +4506,6 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    rf,
-                    "select_git_tracked_source_witness",
-                    return_value=lifecycle.ExpectedSearchWitness(
-                        relative_path="source.py",
-                        literal="orientation_witness",
-                    ),
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
                     lifecycle.ChunkHoundDaemonLease,
                     "open",
                     autospec=True,
@@ -4610,16 +4600,6 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     rf,
                     "_run_session_chunkhound_index_with_rebuild_fallback",
                     side_effect=final_index_receipt_boundary,
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
-                    rf,
-                    "select_git_tracked_source_witness",
-                    return_value=lifecycle.ExpectedSearchWitness(
-                        relative_path="source.py",
-                        literal="readiness_witness",
-                    ),
                 )
             )
             stack.enter_context(
@@ -5566,13 +5546,6 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     side_effect=track_precondition,
                 ),
                 mock.patch.object(
-                    rf,
-                    "select_git_tracked_source_witness",
-                    return_value=lifecycle.ExpectedSearchWitness(
-                        relative_path="source.py", literal="tool_proof_witness"
-                    ),
-                ),
-                mock.patch.object(
                     lifecycle,
                     "attest_native_daemon_generation_ownership",
                     side_effect=attest_ownership,
@@ -5665,11 +5638,21 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
         if expect_error is None:
             self.assertEqual(dispatches, ["helper", "model"])
             self.assertEqual(result[1], ["review.md"])
-            self.assertEqual(tools, ["daemon_status"] * len(statuses) + ["search"])
+            self.assertEqual(
+                tools,
+                # daemon_status polls + broad probe search + targeted witness search.
+                ["daemon_status"] * len(statuses) + ["search", "search"],
+            )
         else:
             self.assertEqual(dispatches, [])
             if expect_search_on_error:
-                self.assertEqual(tools, ["daemon_status"] * len(statuses) + ["search"])
+                # Derivation retries the broad probe before failing: one attempt
+                # per configured retry plus the initial attempt.
+                self.assertEqual(
+                    tools,
+                    ["daemon_status"] * len(statuses)
+                    + ["search"] * (1 + lifecycle._INDEX_WITNESS_PROBE_RETRIES),
+                )
             else:
                 self.assertNotIn("search", tools)
         session_dir = next((root / "sandboxes").iterdir())
@@ -5747,7 +5730,13 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
         self.assertEqual(
             result["tools"],
-            ["daemon_status", "daemon_status", "daemon_status", "search"],
+            [
+                "daemon_status",
+                "daemon_status",
+                "daemon_status",
+                "search",
+                "search",
+            ],
         )
         self.assertEqual(sleeps, [0.25, 0.25])
         rows = result["rows"]
@@ -5783,6 +5772,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 "status-classification:FRESH_INSTANCE_RESYNC",
                 "status-response:ready:True",
                 "status-classification:READY",
+                "search",
                 "search",
                 "helper",
                 "model",
@@ -8541,6 +8531,193 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
         self.assertNotIn("sk-test-1234", excerpt)
         self.assertNotIn(str(sandbox_dir), excerpt)
 
+    def _derive_witness_mock_envelope(self, text: str) -> dict[str, object]:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": False,
+            },
+        }
+
+    def test_derive_index_witness_extracts_from_broad_search_response(
+        self,
+    ) -> None:
+        """A broad regex search hit yields the first payload with an identifier."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        markdown = (
+            "## `src/a.py` L1\n\n```python\nshort\n```\n\n---\n\n"
+            "## `src/b.py` L1\n\n```python\ndef derived_witness():\n"
+            "    pass\n```\n\n---\nResults 1–2"
+        )
+        session = mock.Mock()
+        session.request.return_value = self._derive_witness_mock_envelope(markdown)
+        witness = lifecycle._derive_index_witness(
+            session,
+            timeout_seconds=30.0,
+            retries=0,
+            retry_interval_seconds=0.0,
+        )
+        self.assertEqual(witness.relative_path, "src/b.py")
+        self.assertEqual(witness.literal, "derived_witness")
+        request_params = session.request.call_args.args[1]
+        self.assertEqual(
+            request_params,
+            {
+                "name": "search",
+                "arguments": {
+                    "type": "regex",
+                    "query": ".",
+                    "page_size": 5,
+                    "offset": 0,
+                },
+            },
+        )
+
+    def test_derive_index_witness_retries_then_derives(self) -> None:
+        """Empty results retry on the probe interval before a hit succeeds."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        empty = self._derive_witness_mock_envelope("No results found.")
+        valid = self._derive_witness_mock_envelope(
+            "## `src/b.py` L1\n\n```python\ndef derived_witness():\n"
+            "    pass\n```\n\n---\nResults 1–1"
+        )
+        session = mock.Mock()
+        session.request.side_effect = [empty, empty, valid]
+        sleeps: list[float] = []
+        witness = lifecycle._derive_index_witness(
+            session,
+            timeout_seconds=30.0,
+            retries=3,
+            retry_interval_seconds=0.25,
+            sleep=sleeps.append,
+        )
+        self.assertEqual(session.request.call_count, 3)
+        self.assertEqual(sleeps, [0.25, 0.25])
+        self.assertEqual(witness.relative_path, "src/b.py")
+        self.assertEqual(witness.literal, "derived_witness")
+
+    def test_derive_index_witness_fails_on_empty_index_with_response_payload(
+        self,
+    ) -> None:
+        """A persistently empty index fails with the last response attached."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        session = mock.Mock()
+        session.request.return_value = self._derive_witness_mock_envelope(
+            "No results found."
+        )
+        with self.assertRaises(
+            lifecycle.NativeSearchWitnessReadinessError
+        ) as caught:
+            lifecycle._derive_index_witness(
+                session,
+                timeout_seconds=30.0,
+                retries=1,
+                retry_interval_seconds=0.0,
+            )
+        self.assertIn("derive", str(caught.exception))
+        self.assertEqual(caught.exception.response, "No results found.")
+        self.assertIsNone(caught.exception.witness)
+
+    def test_derive_index_witness_fails_when_results_lack_identifier(
+        self,
+    ) -> None:
+        """Hits without an 8-64 char identifier cannot form a witness."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        markdown = (
+            "## `src/a.py` L1\n\n```python\nshort\n```\n\n---\n"
+            "Results 1–1"
+        )
+        session = mock.Mock()
+        session.request.return_value = self._derive_witness_mock_envelope(markdown)
+        with self.assertRaises(
+            lifecycle.NativeSearchWitnessReadinessError
+        ) as caught:
+            lifecycle._derive_index_witness(
+                session,
+                timeout_seconds=30.0,
+                retries=0,
+                retry_interval_seconds=0.0,
+            )
+        self.assertEqual(caught.exception.response, markdown)
+        self.assertIsNone(caught.exception.witness)
+
+    def test_adjudicate_derives_witness_from_daemon_index_when_none_supplied(
+        self,
+    ) -> None:
+        """Nonempty receipts derive their witness from the daemon's own index."""
+        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
+        (
+            identity_type,
+            receipt_type,
+            lease_type,
+            _,
+            _,
+            evidence_type,
+            readiness_type,
+            _,
+        ) = self._api()
+        search_text = (
+            "## `src/fixture.py` L1\n\n```python\ndef derived_witness():\n"
+            "    pass\n```\n\n---\nResults 1–1"
+        )
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            lease, identity, ledger = self._open_lease(
+                root,
+                lease_type,
+                identity_type,
+                name="derive",
+                search_text=search_text,
+            )
+            try:
+                readiness = lease.adjudicate_expected_session(
+                    self._receipt(receipt_type, identity, total_chunks=2)
+                )
+                self.assertIsInstance(readiness, readiness_type)
+                self.assertEqual(
+                    readiness.search_witness,
+                    lifecycle.ExpectedSearchWitness(
+                        relative_path="src/fixture.py", literal="derived_witness"
+                    ),
+                )
+                self.assertIsInstance(
+                    readiness.expected_generation, evidence_type
+                )
+            finally:
+                lease.close()
+            tools = [
+                (row.get("tool"), row.get("arguments"))
+                for row in _read_ledger(ledger)
+                if row.get("method") == "tools/call"
+            ]
+            self.assertEqual(len(tools), 3)
+            self.assertEqual(tools[0][0], "daemon_status")
+            self.assertEqual(
+                tools[1],
+                (
+                    "search",
+                    {
+                        "type": "regex",
+                        "query": ".",
+                        "page_size": 5,
+                        "offset": 0,
+                    },
+                ),
+            )
+            self.assertEqual(
+                tools[2],
+                (
+                    "search",
+                    {
+                        "type": "regex",
+                        "query": re.escape("derived_witness"),
+                        "path": "src/fixture.py",
+                    },
+                ),
+            )
+
     def test_readiness_status_timeout_tolerates_fresh_instance_resync_scan(
         self,
     ) -> None:
@@ -9374,239 +9551,3 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 env=env,
             )
 
-    def test_matches_index_pattern_honors_recursive_root_subtree_globs(self) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        cases = (
-            (".claude/skills/cure_release/SKILL.md", "**/.claude/**", True),
-            (".claude/SKILL.md", "**/.claude/**", True),
-            ("pkg/.claude/skills/review/SKILL.md", "**/.claude/**", True),
-            ("openspec/initiatives/example/story.md", "**/openspec/**", True),
-            ("src/__pycache__/nested/module.pyc", "**/__pycache__/**", True),
-            (".claude2/skills/SKILL.md", "**/.claude/**", False),
-            ("src/.claude2/SKILL.md", "**/.claude/**", False),
-            ("foo/x/bar/file.py", "**/foo*bar/**", False),
-            ("foo-bar/nested/file.py", "**/foo*bar/**", True),
-            ("src/selected.py", "**/.claude/**", False),
-            ("src/selected.py", "**/*.py", True),
-            ("foo", "foo/**", False),
-            ("foo/child.py", "foo/**", True),
-            ("foo/nested/child.py", "foo/**", True),
-        )
-        for relative_path, pattern, expected in cases:
-            with self.subTest(relative_path=relative_path, pattern=pattern):
-                self.assertIs(
-                    lifecycle._matches_index_pattern(relative_path, pattern),
-                    expected,
-                )
-
-    def test_matches_index_pattern_handles_deep_components_without_recursion(
-        self,
-    ) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        relative_path = "/".join(["component"] * 1100 + ["leaf.py"])
-        self.assertTrue(
-            lifecycle._matches_index_pattern(relative_path, "**/leaf.py")
-        )
-        self.assertFalse(
-            lifecycle._matches_index_pattern(relative_path, "**/other.py")
-        )
-
-    def test_selector_does_not_treat_terminal_globstar_as_prefix_file(self) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            (repo / "foo").write_text("prefix_file_witness\n", encoding="utf-8")
-            (repo / "z.py").write_text("selected_witness = 1\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(repo), "add", "foo", "z.py"], check=True
-            )
-            config = repo / "chunkhound.json"
-            config.write_text(
-                json.dumps(
-                    {"indexing": {"include": ["foo/**", "**/*.py"]}}
-                ),
-                encoding="utf-8",
-            )
-
-            witness = lifecycle.select_git_tracked_source_witness(
-                repo_path=repo,
-                config_path=config,
-                max_tracked_paths=8,
-                max_candidates=4,
-                max_file_bytes=1024,
-                max_tokens_per_file=8,
-            )
-
-        self.assertEqual(witness.relative_path, "z.py")
-        self.assertEqual(witness.literal, "selected_witness")
-
-    def test_selector_skips_lexically_first_excluded_recursive_root_subtree(
-        self,
-    ) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            excluded = repo / ".claude" / "skills" / "cure_release" / "SKILL.md"
-            excluded.parent.mkdir(parents=True)
-            excluded.write_text("excluded_witness\n", encoding="utf-8")
-            selected = repo / "src" / "selected.py"
-            selected.parent.mkdir()
-            selected.write_text("selected_witness = 1\n", encoding="utf-8")
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "add",
-                    ".claude/skills/cure_release/SKILL.md",
-                    "src/selected.py",
-                ],
-                check=True,
-            )
-            config = repo / "chunkhound.json"
-            config.write_text(
-                json.dumps(
-                    {
-                        "indexing": {
-                            "include": ["**/*.md", "**/*.py"],
-                            "exclude": ["**/.claude/**"],
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            witness = lifecycle.select_git_tracked_source_witness(
-                repo_path=repo,
-                config_path=config,
-                max_tracked_paths=8,
-                max_candidates=4,
-                max_file_bytes=1024,
-                max_tokens_per_file=8,
-            )
-
-        self.assertEqual(witness.relative_path, "src/selected.py")
-        self.assertEqual(witness.literal, "selected_witness")
-
-    def test_select_git_tracked_source_witness_is_bounded_and_honors_policy(self) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            (repo / "src").mkdir()
-            (repo / "docs").mkdir()
-            (repo / "src" / "a.py").write_text(
-                "excluded_identifier = 1\n", encoding="utf-8"
-            )
-            (repo / "src" / "b.py").write_text(
-                "selected_identifier = 2\n", encoding="utf-8"
-            )
-            (repo / "docs" / "guide.md").write_text(
-                "documentation_identifier\n", encoding="utf-8"
-            )
-            (repo / "untracked.py").write_text(
-                "untracked_identifier = 3\n", encoding="utf-8"
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "add", "src/a.py", "src/b.py", "docs/guide.md"],
-                check=True,
-            )
-            config = repo / "chunkhound.json"
-            config.write_text(
-                json.dumps(
-                    {
-                        "indexing": {
-                            "include": ["**/*.py"],
-                            "exclude": ["src/a.py"],
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            witness = lifecycle.select_git_tracked_source_witness(
-                repo_path=repo,
-                config_path=config,
-                max_tracked_paths=16,
-                max_candidates=4,
-                max_file_bytes=1024,
-                max_tokens_per_file=8,
-            )
-            self.assertEqual(witness.relative_path, "src/b.py")
-            self.assertEqual(witness.literal, "selected_identifier")
-
-            with self.assertRaises(lifecycle.SourceWitnessSelectionError):
-                lifecycle.select_git_tracked_source_witness(
-                    repo_path=repo,
-                    config_path=config,
-                    max_tracked_paths=1,
-                    max_candidates=4,
-                    max_file_bytes=1024,
-                    max_tokens_per_file=8,
-                )
-
-    def test_select_git_tracked_source_witness_honors_gitignore_only_exclude_mode(
-        self,
-    ) -> None:
-        lifecycle = importlib.import_module("cure_chunkhound_lifecycle")
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            # a_ignored.txt sorts first, is tracked, and is matched by an
-            # UNTRACKED working-tree .gitignore (gitignore rules apply to the
-            # working tree whether or not the .gitignore itself is tracked;
-            # leaving it untracked keeps it out of the candidate listing).
-            (repo / "a_ignored.txt").write_text(
-                "ignored_witness = 1\n", encoding="utf-8"
-            )
-            (repo / "kept.py").write_text(
-                "selected_witness = 2\n", encoding="utf-8"
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "add", "a_ignored.txt", "kept.py"],
-                check=True,
-            )
-            # Ignore rules written AFTER tracking: tracked files stay in the
-            # index even when .gitignore later matches them (the exact
-            # production failure mode). The .gitignore itself stays untracked
-            # to keep it out of the candidate listing.
-            (repo / ".gitignore").write_text(
-                "a_ignored.txt\n", encoding="utf-8"
-            )
-
-            def select(exclude_mode: str | None) -> "object":
-                config = repo / "chunkhound.json"
-                indexing: dict[str, object] = {
-                    "include": ["**/*.txt", "**/*.py"],
-                }
-                if exclude_mode is not None:
-                    indexing["exclude_mode"] = exclude_mode
-                config.write_text(
-                    json.dumps({"indexing": indexing}), encoding="utf-8"
-                )
-                return lifecycle.select_git_tracked_source_witness(
-                    repo_path=repo,
-                    config_path=config,
-                    max_tracked_paths=16,
-                    max_candidates=4,
-                    max_file_bytes=1024,
-                    max_tokens_per_file=8,
-                )
-
-            # (a) gitignore_only: the tracked-but-ignored candidate is skipped.
-            witness = select("gitignore_only")
-            self.assertEqual(witness.relative_path, "kept.py")
-            self.assertEqual(witness.literal, "selected_witness")
-
-            # (b) default mode: the ignored candidate remains selectable,
-            # because the daemon indexes tracked files regardless of gitignore.
-            witness = select(None)
-            self.assertEqual(witness.relative_path, "a_ignored.txt")
-            self.assertEqual(witness.literal, "ignored_witness")
-
-            # (c) all candidates gitignored -> clear selection failure.
-            (repo / ".gitignore").write_text("*\n", encoding="utf-8")
-            with self.assertRaises(lifecycle.SourceWitnessSelectionError):
-                select("gitignore_only")

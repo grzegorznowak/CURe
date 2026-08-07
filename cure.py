@@ -111,7 +111,6 @@ from cure_chunkhound_lifecycle import (
     build_launch_identity,
     observe_native_daemon_generation,
     project_expected_session_receipt_v1,
-    select_git_tracked_source_witness,
 )
 from cure_github import (
     _decode_gh_api_list_stdout,
@@ -10980,22 +10979,10 @@ def _pr_flow_impl(
                     expected_daemon_generation = opened_generation
                     failure_stage = "expected_session"
                     try:
-                        if final_index_receipt.total_chunks == 0:
-                            candidate_lease.adjudicate_expected_session(
-                                final_index_receipt,
-                                expected_generation=candidate_lease.owned_generation,
-                            )
-                        else:
-                            failure_stage = "witness_selection"
-                            witness = select_git_tracked_source_witness(
-                                repo_path=launch_identity.canonical_root,
-                                config_path=launch_identity.resolved_config_path,
-                            )
-                            failure_stage = "expected_session"
-                            candidate_lease.adjudicate_expected_session(
-                                final_index_receipt,
-                                witness=witness,
-                            )
+                        candidate_lease.adjudicate_expected_session(
+                            final_index_receipt,
+                            expected_generation=candidate_lease.owned_generation,
+                        )
                     except Exception as exc:
                         try:
                             candidate_lease.close()
