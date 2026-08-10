@@ -88,7 +88,7 @@ def _write_fake_codex_session(
 
 def _explain_args(**overrides: object) -> argparse.Namespace:
     values: dict[str, object] = {
-        "pr": PR_URL,
+        "pr_url": PR_URL,
         "explain_prompt": None,
         "codex_model": None,
         "codex_effort": None,
@@ -222,7 +222,7 @@ class ExplainCommandTests(unittest.TestCase):
 
     def test_explain_flow_invalid_pr_url_raises(self) -> None:
         with self.assertRaisesRegex(rf.ReviewflowError, "Invalid PR URL"):
-            rf._explain_flow_impl(_explain_args(pr="not a pr url at all"), paths=self.paths)
+            rf._explain_flow_impl(_explain_args(pr_url="not a pr url at all"), paths=self.paths)
 
     def test_explain_flow_cleans_staged_paths_on_llm_failure(self) -> None:
         _write_completed_session(root=self.root)
@@ -264,15 +264,15 @@ class ExplainCommandTests(unittest.TestCase):
     def test_explain_subparser_registers_arguments(self) -> None:
         parser = rf.build_parser(prog="cure")
         args = parser.parse_args(
-            ["explain", "--pr", PR_URL, "--explain-prompt", "hello", "--quiet", "--no-stream"]
+            ["explain", PR_URL, "--explain-prompt", "hello", "--quiet", "--no-stream"]
         )
         self.assertEqual(args.cmd, "explain")
-        self.assertEqual(args.pr, PR_URL)
+        self.assertEqual(args.pr_url, PR_URL)
         self.assertEqual(args.explain_prompt, "hello")
         self.assertTrue(args.quiet)
         self.assertTrue(args.no_stream)
 
-    def test_explain_subparser_requires_pr(self) -> None:
+    def test_explain_subparser_requires_pr_url(self) -> None:
         parser = rf.build_parser(prog="cure")
         with self.assertRaises(SystemExit):
             parser.parse_args(["explain", "--explain-prompt", "hello"])
@@ -312,11 +312,19 @@ class ExplainCommandTests(unittest.TestCase):
         base_before = base_path.read_bytes()
         _write_completed_session(root=self.root, extra_meta=self._codex_meta())
 
-        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+            rf, "log"
+        ) as log_mock:
             captured = self._patched_run(
                 _explain_args(),
                 resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
             )
+
+        resume_lines = [
+            str(c.args[0]) for c in log_mock.call_args_list if "EXPLAIN resume" in str(c.args[0])
+        ]
+        self.assertEqual(len(resume_lines), 1)
+        self.assertIn("replaying the full review context", resume_lines[0])
 
         self.assertEqual(captured["_rc"], 0)
         self.assertEqual(captured["_builtin_calls"], ["explain.md"])

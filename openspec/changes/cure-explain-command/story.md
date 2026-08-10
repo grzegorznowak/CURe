@@ -7,7 +7,7 @@ Status: 🟣 IN REVIEW
 > planning via Gate 1 human decisions; implementation complete and verified.
 
 ## Purpose
-Users can run `cure explain --pr <PR_URL> [--explain-prompt <text>]` to get a
+Users can run `cure explain <PR_URL> [--explain-prompt <text>]` to get a
 human-friendly, LLM-generated explanation of the final synthesized review of a
 completed review session — grounded in the review's full context (codex resume-fork
 mode) without disturbing the pristine post-review session state that `interactive`
@@ -50,7 +50,7 @@ None (standalone change; no dependency story workspaces).
 - TUI rendering; changes to `interactive`, `followup`, or the pr flow
 
 ## Scenarios / Behavior Examples
-- S1: User runs `cure explain --pr <url>` after a completed review → prints the
+- S1: User runs `cure explain <url>` after a completed review → prints the
   explanation of the review and the artifact path. Covers: A2
 - S2: User passes `--explain-prompt "Why was X flagged?"` → answer addresses X;
   builtin prompt not used. Covers: A3
@@ -65,9 +65,12 @@ None (standalone change; no dependency story workspaces).
   sandbox denied the action; the run completes read-only. Covers: A9
 - S8: Non-quiet, non-no-stream run → answer text reaches the terminal during
   generation. Covers: A5
+- S9: Fork-mode run prints an explicit resume line (fork id + full-context replay
+  notice) before the LLM call. Covers: A5
 
 ## Acceptance
-- A1: `cure explain --help` shows `--pr` (required) and `--explain-prompt`.
+- A1: `cure explain --help` shows the `pr_url` positional (like `cure pr`) and
+  `--explain-prompt`; `cure explain <PR_URL>` requires no flags.
 - A2: Default-prompt run against a completed session exits 0, prints explanation
   + artifact path, writes `explain/explain-<ts>.md`, records an `explains` entry
   with `prompt_source: builtin:explain.md`.
@@ -102,7 +105,7 @@ ruff check cure.py cure_llm.py cure_commands.py tests/_reviewflow_unittest_expla
 python3 -m py_compile cure.py cure_llm.py cure_commands.py
 # Real-run evidence (codex-cli, completed PR21 session):
 sha256sum ~/.codex/sessions/2026/08/04/rollout-*019fcb76*.jsonl   # before == after (a3711ee6…)
-cure explain --pr https://github.com/grzegorznowak/CURe/pull/21 \
+cure explain https://github.com/grzegorznowak/CURe/pull/21 \
   --explain-prompt "In one sentence: what must the author fix, and why?"
 python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explains"][-1])'
 ```

@@ -219,7 +219,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "stdout": "Prints the explanation text followed by the explain artifact path.",
                 "exit_codes": {"0": "explanation produced", "2": "usage, lookup, or runtime error"},
                 "recommended_invocation": preferred_cli_invocation(
-                    "explain --pr <PR_URL> --explain-prompt 'Why did you flag X?'"
+                    "explain <PR_URL> --explain-prompt 'Why did you flag X?'"
                 ),
                 "variants": [],
             },

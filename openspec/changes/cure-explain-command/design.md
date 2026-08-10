@@ -3,11 +3,12 @@
 ## Command surface
 
 ```
-cure explain --pr <PR_URL> [--explain-prompt <TEXT>]
+cure explain <PR_URL> [--explain-prompt <TEXT>]
              [--llm-* overrides] [--codex-model ...] [--quiet] [--no-stream] [--verbosity ...]
 ```
 
-- Visible command (unlike hidden `followup`); `--pr` required; no TTY requirement.
+- Visible command; the `pr_url` positional is required (same argument shape as
+  `cure pr`); no TTY requirement.
 - Registered via the standard three touch points: `build_parser` subparser (after
   the `followup` block), `main()` dispatch (after `followup`), `explain_flow`
   wrapper in cure_commands.py delegating to `_explain_flow_impl`. Catalog entry in

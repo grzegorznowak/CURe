@@ -12674,9 +12674,9 @@ def _explain_flow_impl(
     no_stream = bool(getattr(args, "no_stream", False))
     stream = (not quiet) and (not no_stream)
 
-    pr_url = str(getattr(args, "pr", "") or "").strip()
+    pr_url = str(getattr(args, "pr_url", "") or "").strip()
     if not pr_url:
-        raise ReviewflowError("explain requires a PR URL (--pr).")
+        raise ReviewflowError("explain requires a PR URL.")
     pr = parse_pr_url(pr_url)
 
     sessions = scan_completed_sessions_for_pr(sandbox_root=paths.sandbox_root, pr=pr)
@@ -12735,6 +12735,13 @@ def _explain_flow_impl(
                         created_at=str(meta.get("created_at") or ""),
                         completed_at=str(meta.get("completed_at") or ""),
                     )
+                    if resume_fork_id is not None:
+                        log(
+                            f"EXPLAIN resume: forked codex session {str(resume_fork_id)[:8]} "
+                            f"from base {str(resume_base_id)[:8]} — replaying the full review "
+                            "context, first output may take a minute",
+                            quiet=quiet,
+                        )
                 except ReviewflowError:
                     # Base codex session unavailable: fall back to inline review-text mode.
                     resume_fork_id = None
@@ -15394,12 +15401,7 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Explain the final synthesized review of a completed PR review session",
         parents=[runtime_parent],
     )
-    ep.add_argument(
-        "--pr",
-        dest="pr",
-        required=True,
-        help="PR URL whose most recent completed review to explain",
-    )
+    ep.add_argument("pr_url", help="GitHub PR URL whose most recent completed review to explain")
     ep.add_argument(
         "--explain-prompt",
         dest="explain_prompt",

@@ -1,7 +1,7 @@
 # Proposal: cure-explain-command
 
 ## Goal / Context
-Users can run `cure explain --pr <PR_URL> [--explain-prompt <text>]` to get a
+Users can run `cure explain <PR_URL> [--explain-prompt <text>]` to get a
 human-friendly, LLM-generated explanation of the final synthesized review of a
 completed review session — grounded in the review's full context (codex resume-fork
 mode) without disturbing the pristine post-review session state that `interactive`
