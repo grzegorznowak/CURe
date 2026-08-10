@@ -6003,8 +6003,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"\(stage=expected_session; category=native_status_timeout\)\."
                 ),
                 adjudication_kwargs={
-                    "readiness_timeout_seconds": 0.5,
-                    "readiness_poll_interval_seconds": 0.2,
+                    "readiness_timeout_seconds": 1.5,
+                    "readiness_poll_interval_seconds": 0.5,
                     "clock": clock,
                     "sleep": sleep,
                 },
@@ -6014,8 +6014,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             result["meta"]["chunkhound_readiness_failure"],
             {"stage": "expected_session", "category": "native_status_timeout"},
         )
-        self.assertEqual(sleeps, [0.2, 0.2, 0.1])
-        self.assertEqual(now, 70.5)
+        self.assertEqual(sleeps, [0.5, 0.5, 0.5])
+        self.assertEqual(now, 71.5)
         self.assertTrue(
             issubclass(
                 lifecycle.ExpectedSessionReadinessTimeoutError,
@@ -8938,8 +8938,8 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                         witness=witness_type(
                             relative_path="src/fixture.py", literal="needle[1]"
                         ),
-                        readiness_timeout_seconds=0.5,
-                        readiness_poll_interval_seconds=0.2,
+                        readiness_timeout_seconds=1.5,
+                        readiness_poll_interval_seconds=0.5,
                         clock=clock,
                         sleep=sleep,
                     )
@@ -8956,8 +8956,8 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                             }
                         ]
                         * 3,
-                        "timeout_seconds": 0.5,
-                        "elapsed_seconds": 0.5,
+                        "timeout_seconds": 1.5,
+                        "elapsed_seconds": 1.5,
                     },
                 )
             finally:

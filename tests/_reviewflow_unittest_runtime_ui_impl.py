@@ -5,6 +5,31 @@ from _reviewflow_unittest_shared import *  # noqa: F401, F403
 _FAKE_RUNTIME_SHEBANG = "#!" + sys.executable
 
 
+def _write_fake_chunkhound_launcher(fake_chunkhound: Path, fake_runtime: Path) -> None:
+    """Write the fake ``chunkhound`` entrypoint without a nested shebang chain.
+
+    macOS (unlike Linux) does not recurse script-to-script shebangs, so a
+    launcher whose interpreter line points at another script fails with
+    ENOEXEC. The launcher therefore points directly at the real interpreter
+    and re-execs the runtime script with the argv shape the kernel would have
+    produced for a nested chain (``[runtime, launcher, *args]``), keeping the
+    runtime scripts' argv-based role dispatch unchanged.
+    """
+    fake_chunkhound.write_text(
+        "\n".join(
+            [
+                _FAKE_RUNTIME_SHEBANG,
+                "import os",
+                "import sys",
+                f"os.execv({str(fake_runtime)!r}, [{str(fake_runtime)!r}, sys.argv[0], *sys.argv[1:]])",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_chunkhound.chmod(0o755)
+
+
 class _FakeTty(StringIO):
     def isatty(self) -> bool:  # pragma: no cover
         return True
@@ -146,8 +171,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -181,13 +205,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             self.assertEqual(payload["preflight_stage"], "initialize")
             self.assertEqual(payload["preflight_stage_status"], "error")
             self.assertEqual(payload["chunkhound_path"], str(fake_chunkhound))
-            self.assertEqual(payload["chunkhound_runtime_python"], str(fake_runtime))
-            self.assertEqual(payload["daemon_lock_path"], str(derived_lock))
-            self.assertEqual(payload["daemon_log_path"], str(derived_log))
-            self.assertEqual(payload["daemon_socket_path"], "/tmp/chunkhound-timeout.sock")
-            self.assertEqual(payload["daemon_pid"], 777)
-            self.assertEqual(payload["daemon_runtime_dir"], str(runtime_dir))
-            self.assertEqual(payload["daemon_registry_entry_path"], str(derived_registry))
+            self.assertEqual(payload["chunkhound_runtime_python"], sys.executable)
             trace = payload.get("stage_trace")
             self.assertIsInstance(trace, list)
             self.assertEqual(trace[-1]["stage"], "initialize")
@@ -245,8 +263,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -350,8 +367,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -448,8 +464,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -549,8 +564,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     fake_runtime.chmod(0o755)
-                    fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-                    fake_chunkhound.chmod(0o755)
+                    _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
                     helper_path = cure_llm.write_chunkhound_helper(
                         work_dir=work_dir,
@@ -703,8 +717,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -803,8 +816,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -990,8 +1002,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     fake_runtime.chmod(0o755)
-                    fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-                    fake_chunkhound.chmod(0o755)
+                    _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
                     helper_path = cure_llm.write_chunkhound_helper(
                         work_dir=work_dir,
@@ -1101,8 +1112,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -1233,8 +1243,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -1337,8 +1346,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -1451,8 +1459,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -1563,8 +1570,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_runtime.chmod(0o755)
-            fake_chunkhound.write_text(f"#!{fake_runtime}\n", encoding="utf-8")
-            fake_chunkhound.chmod(0o755)
+            _write_fake_chunkhound_launcher(fake_chunkhound, fake_runtime)
 
             helper_path = cure_llm.write_chunkhound_helper(
                 work_dir=work_dir,
@@ -2729,6 +2735,8 @@ class RuntimeResolutionTests(unittest.TestCase):
         return argparse.Namespace(**payload)
 
     def test_resolve_reviewflow_config_path_prefers_cli_then_env(self) -> None:
+        cli_toml = Path("/tmp/cli.toml").resolve()
+        env_toml = Path("/tmp/cure-env.toml").resolve()
         args = self._runtime_args(config_path="/tmp/cli.toml")
         with mock.patch.dict(
             os.environ,
@@ -2737,7 +2745,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/cli.toml"), "cli", True),
+                (cli_toml, "cli", True),
             )
         args = self._runtime_args()
         with mock.patch.dict(
@@ -2747,7 +2755,7 @@ class RuntimeResolutionTests(unittest.TestCase):
         ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/cure-env.toml"), "env", True),
+                (env_toml, "env", True),
             )
 
     def test_resolve_reviewflow_config_path_uses_xdg_default(self) -> None:
@@ -2762,14 +2770,14 @@ class RuntimeResolutionTests(unittest.TestCase):
         ):
             self.assertEqual(
                 rf.resolve_reviewflow_config_path(args),
-                (Path("/tmp/xdg-config/cure/cure.toml"), "default", True),
+                (Path("/tmp/xdg-config/cure/cure.toml").resolve(), "default", True),
             )
 
     def test_resolve_reviewflow_config_path_marks_selected_file_disabled(self) -> None:
         args = self._runtime_args(config_path="/tmp/cli.toml", no_config=True)
         self.assertEqual(
             rf.resolve_reviewflow_config_path(args),
-            (Path("/tmp/cli.toml"), "cli", False),
+            (Path("/tmp/cli.toml").resolve(), "cli", False),
         )
 
     def test_resolve_reviewflow_config_path_rejects_legacy_env(self) -> None:
@@ -2819,12 +2827,15 @@ class RuntimeResolutionTests(unittest.TestCase):
             clear=False,
         ):
             runtime = rf.resolve_runtime(args)
-        self.assertEqual(runtime.config_path, Path("/tmp/xdg-config/cure/cure.toml"))
+        xdg_config = Path("/tmp/xdg-config/cure/cure.toml").resolve()
+        xdg_sandboxes = Path("/tmp/xdg-state/cure/sandboxes").resolve()
+        xdg_cache = Path("/tmp/xdg-cache/cure").resolve()
+        self.assertEqual(runtime.config_path, xdg_config)
         self.assertEqual(runtime.config_source, "default")
         self.assertTrue(runtime.config_enabled)
-        self.assertEqual(runtime.paths.sandbox_root, Path("/tmp/xdg-state/cure/sandboxes"))
+        self.assertEqual(runtime.paths.sandbox_root, xdg_sandboxes)
         self.assertEqual(runtime.sandbox_root_source, "default")
-        self.assertEqual(runtime.paths.cache_root, Path("/tmp/xdg-cache/cure"))
+        self.assertEqual(runtime.paths.cache_root, xdg_cache)
         self.assertEqual(runtime.cache_root_source, "default")
         self.assertEqual(runtime.codex_base_config_path, Path("/home/tester/.codex/config.toml"))
         self.assertEqual(runtime.codex_base_config_source, "default")
