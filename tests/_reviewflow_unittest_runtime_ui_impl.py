@@ -2,6 +2,9 @@
 from _reviewflow_unittest_shared import *  # noqa: F401, F403
 
 
+_FAKE_RUNTIME_SHEBANG = "#!" + sys.executable
+
+
 class _FakeTty(StringIO):
     def isatty(self) -> bool:  # pragma: no cover
         return True
@@ -109,7 +112,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -211,7 +214,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "import time",
@@ -301,7 +304,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -398,7 +401,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -498,7 +501,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                     fake_runtime.write_text(
                         "\n".join(
                             [
-                                "#!/usr/bin/env python3",
+                                _FAKE_RUNTIME_SHEBANG,
                                 "import json",
                                 "import sys",
                                 "import time",
@@ -652,7 +655,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "import time",
@@ -756,7 +759,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -939,7 +942,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
                     fake_runtime.write_text(
                         "\n".join(
                             [
-                                "#!/usr/bin/env python3",
+                                _FAKE_RUNTIME_SHEBANG,
                                 "import json",
                                 "import sys",
                                 "import time",
@@ -1045,7 +1048,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "import time",
@@ -1179,7 +1182,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -1282,7 +1285,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "import time",
@@ -1393,7 +1396,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "import time",
@@ -1507,7 +1510,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             fake_runtime.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "import sys",
                         "from pathlib import Path",
@@ -1609,7 +1612,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             helper_path.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "payload = {",
                         '    "ok": True,',
@@ -1696,7 +1699,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             helper_path.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import json",
                         "payload = {",
                         '    "ok": False,',
@@ -1767,7 +1770,7 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
             helper_path.write_text(
                 "\n".join(
                     [
-                        "#!/usr/bin/env python3",
+                        _FAKE_RUNTIME_SHEBANG,
                         "import sys",
                         "import time",
                         "sys.stderr.write('  ok start MCP server (0.0s)\\n')",

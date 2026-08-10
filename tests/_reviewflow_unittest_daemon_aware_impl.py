@@ -2547,12 +2547,14 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             _sectioned_review_markdown,
         )
 
+        flow_tests = CodexToolProofFlowTests()
+
         def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
             output_path.write_text(
                 _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
                 encoding="utf-8",
             )
-            adapter_meta = self._write_helper_command_events(
+            adapter_meta = flow_tests._write_helper_command_events(
                 work_dir=work_dir,
                 commands=["search", "research"],
             )
@@ -2560,7 +2562,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
         root = Path(tempfile.mkdtemp(prefix=".tmp_test_darwin_keeper_route"))
         try:
-            root, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
+            root, calls = flow_tests._run_pr_flow_for_tool_proof(
                 root=root,
                 profile_resolved="normal",
                 multipass_enabled=False,
