@@ -2515,9 +2515,18 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("model")
             raise AssertionError("model must not run on an unsupported daemon route")
 
+        # Patching sys.platform to win32 also confuses shutil.which (stdlib
+        # consults _winapi for win32); route the real which through a linux
+        # platform window so capability probing does not crash first.
+        real_which = shutil.which
+
+        def which_with_real_platform(name: str, *args: Any, **kwargs: Any) -> Any:
+            with mock.patch.object(rf.sys, "platform", "linux"):
+                return real_which(name, *args, **kwargs)
+
         with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
             rf.sys, "platform", "win32"
-        ):
+        ), mock.patch("shutil.which", side_effect=which_with_real_platform):
             _, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
                 root=Path(raw_root) / "unsupported-route",
                 profile_resolved="normal",
@@ -2532,33 +2541,37 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform.startswith("darwin"), "darwin keeper route is exercised on macOS CI")
     def test_darwin_indexed_helper_route_runs_keeper_and_model(self) -> None:
-        """The indexed helper route acquires the keeper and runs on macOS."""
-        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+        """The indexed helper route acquires the keeper and completes on macOS."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
 
-        events: list[str] = []
-
-        def helper_seen(**_kwargs: Any) -> None:
-            events.append("helper")
-
-        def complete_review(output_path: Path, _work_dir: Path) -> Any:
-            from _reviewflow_unittest_grounding_impl import _sectioned_review_markdown
-
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
             output_path.write_text(
                 _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
                 encoding="utf-8",
             )
-            return rf.LlmRunResult(resume=None, adapter_meta={})
-
-        with tempfile.TemporaryDirectory() as raw_root:
-            root, _calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
-                root=Path(raw_root) / "darwin-route",
-                profile_resolved="normal",
-                multipass_enabled=False,
-                llm_side_effect=complete_review,
-                helper_preflight_side_effect=helper_seen,
+            adapter_meta = self._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
             )
-            self.assertTrue(root.is_dir())
-        self.assertEqual(events, ["helper"])
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
+            root=Path(".tmp_test_darwin_keeper_route"),
+            profile_resolved="normal",
+            multipass_enabled=False,
+            llm_side_effect=llm_side_effect,
+        )
+        try:
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_http_non_helper_and_no_index_routes_remain_keeper_free(self) -> None:
         """TAP-03 A9: bypass routes retain model behavior without keeper authority."""
