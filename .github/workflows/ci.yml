@@ -36,9 +36,17 @@ jobs:
   # The wheel smoke (tests/daemon_aware_research_calls_smoke.py) writes its own
   # fake MCP chunkhound binary with short deadlines and needs no live daemon,
   # network, or secrets, so it is safe to run on every PR.
+  #
+  # macOS (arm64) coverage: tracked by issue #38 (indexed Codex route is
+  # currently gated to Linux). The macOS leg is expected to fail until the
+  # Darwin route work lands; keep fail-fast off so both legs report.
   test:
     name: Test, lint, and verify package
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
