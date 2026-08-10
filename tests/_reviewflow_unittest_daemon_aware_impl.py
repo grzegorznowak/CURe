@@ -78,7 +78,7 @@ def _write_fake_chunkhound(
     daemon_status_no_response: bool = False,
 ) -> None:
     """Write an executable, line-framed stdio JSON-RPC ChunkHound fixture."""
-    script = f"""#!/usr/bin/python3
+    script = f"""#!{sys.executable}
 import json
 import os
 import signal
@@ -226,7 +226,7 @@ def _state_name(value: object) -> str:
 
 
 def _write_owned_process_fixture(path: Path) -> None:
-    script = """#!/usr/bin/python3
+    script = f"#!{sys.executable}\n" + """
 import json
 import os
 import signal
@@ -2558,13 +2558,14 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             )
             return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
 
-        root, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
-            root=Path(".tmp_test_darwin_keeper_route"),
-            profile_resolved="normal",
-            multipass_enabled=False,
-            llm_side_effect=llm_side_effect,
-        )
+        root = Path(tempfile.mkdtemp(prefix=".tmp_test_darwin_keeper_route"))
         try:
+            root, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+            )
             session_dir = next((root / "sandboxes").iterdir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.md"])
@@ -9588,7 +9589,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 encoding="ascii",
             )
             executable = root / "chunkhound"
-            executable.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+            executable.write_text(f"#!{sys.executable}\n", encoding="utf-8")
             executable.chmod(0o755)
             env = MappingProxyType({"PATH": "/curated", "MARKER": "exact"})
             with mock.patch.object(
