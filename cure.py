@@ -124,7 +124,7 @@ from cure_github import (
 )
 from cure_runtime import _normalize_optional_reasoning_effort
 
-from ui import UiSnapshot, Verbosity, build_dashboard_lines
+from ui import Verbosity
 
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
@@ -220,8 +220,6 @@ DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
 DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_PROMPT_PACKAGE = "prompts"
-AGENT_RUNTIME_PROFILE_CHOICES = ("permissive",)
-DEFAULT_AGENT_RUNTIME_PROFILE = "permissive"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
     "openai-responses",
@@ -1116,12 +1114,6 @@ def _string_list(raw: object) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-def _raise_removed_gemini_support(*, context: str) -> None:
-    supported = ", ".join(BUILTIN_LLM_PRESET_IDS)
-    raise ReviewflowError(
-        "Gemini support was removed from CURe. "
-        f"{context} Use supported presets instead: {supported}."
-    )
 
 
 def builtin_llm_presets() -> dict[str, dict[str, Any]]:
@@ -1246,140 +1238,12 @@ def _merge_builtin_preset(
     return merged
 
 
-def load_reviewflow_llm_config(
-    *, config_path: Path | None = None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = config_path or default_reviewflow_config_path()
-    raw = load_toml(path)
-    llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
-    llm = llm if isinstance(llm, dict) else {}
-    _validate_no_legacy_effort_controls(raw=llm, field_scope="[llm]")
-    default_preset = str(llm.get("default_preset") or "").strip() or None
-    if default_preset == "gemini-cli":
-        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
-
-    presets_raw = raw.get("llm_presets", {}) if isinstance(raw, dict) else {}
-    presets_raw = presets_raw if isinstance(presets_raw, dict) else {}
-    presets: dict[str, dict[str, Any]] = {}
-    deprecated_explicit_presets: list[str] = []
-    invalid_mixed_presets: list[str] = []
-    removed_gemini_presets: list[str] = []
-    for raw_name, raw_preset in presets_raw.items():
-        name = str(raw_name or "").strip()
-        if not name or not isinstance(raw_preset, dict):
-            continue
-        builtin_id = str(raw_preset.get("preset") or "").strip()
-        transport = str(raw_preset.get("transport") or "").strip().lower()
-        provider = str(raw_preset.get("provider") or "").strip().lower()
-        removed_keys = {"transport", "provider", "endpoint", "base_url", "command"}
-        present_removed = [key for key in removed_keys if key in raw_preset]
-        if builtin_id == "gemini-cli" or (transport == "cli" and provider == "gemini"):
-            removed_gemini_presets.append(name)
-            continue
-        if builtin_id:
-            if present_removed:
-                invalid_mixed_presets.append(name)
-                continue
-            preset = _merge_builtin_preset(preset_id=builtin_id, raw_preset=raw_preset, source_mode="builtin")
-        else:
-            compat_id = _preset_compat_id_from_explicit_block(raw_preset)
-            if compat_id is None:
-                continue
-            deprecated_explicit_presets.append(name)
-            preset = _merge_builtin_preset(
-                preset_id=compat_id,
-                raw_preset=raw_preset,
-                source_mode="deprecated_explicit",
-            )
-        presets[name] = preset
-
-    if invalid_mixed_presets:
-        raise ReviewflowError(
-            "llm preset blocks cannot mix `preset = ...` with explicit transport/provider/command/base_url/endpoint "
-            f"fields: {', '.join(sorted(invalid_mixed_presets))}"
-        )
-    if removed_gemini_presets:
-        _raise_removed_gemini_support(
-            context=(
-                "Remove or migrate Gemini llm preset blocks: "
-                f"{', '.join(sorted(removed_gemini_presets))}."
-            ),
-        )
-
-    cfg = {"default_preset": default_preset, "presets": presets}
-    meta: dict[str, Any] = {
-        "config_path": str(path),
-        "loaded": bool(raw),
-        "default_preset": default_preset,
-        "preset_names": sorted(presets.keys()),
-        "builtin_preset_ids": list(BUILTIN_LLM_PRESET_IDS),
-        "deprecated_explicit_presets": sorted(deprecated_explicit_presets),
-    }
-    return cfg, meta
 
 
-def _normalize_agent_runtime_profile(value: object, *, source: str) -> str | None:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    if text not in AGENT_RUNTIME_PROFILE_CHOICES:
-        raise ReviewflowError(
-            f"Invalid agent runtime profile from {source}: {text!r}. "
-            f"Expected one of: {', '.join(AGENT_RUNTIME_PROFILE_CHOICES)}"
-        )
-    return text
 
 
-def load_reviewflow_agent_runtime_config(
-    *, config_path: Path | None = None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = config_path or default_reviewflow_config_path()
-    raw = load_toml(path)
-    section = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
-    section = section if isinstance(section, dict) else {}
-    if "gemini" in section:
-        _raise_removed_gemini_support(
-            context="Remove the `[agent_runtime.gemini]` block from the CURe config.",
-        )
-
-    profile = _normalize_agent_runtime_profile(section.get("profile"), source="config")
-    cfg = {"profile": profile}
-    meta = {
-        "config_path": str(path),
-        "loaded": bool(raw),
-        "agent_runtime": {
-            "profile": profile,
-        },
-    }
-    return cfg, meta
 
 
-def resolve_agent_runtime_profile(
-    *,
-    cli_value: str | None,
-    config_path: Path | None = None,
-    config_enabled: bool = True,
-) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-    cfg, meta = load_reviewflow_agent_runtime_config(config_path=config_path)
-    cli_profile = _normalize_agent_runtime_profile(cli_value, source="cli")
-    if cli_profile is not None:
-        return cli_profile, "cli", cfg, meta
-
-    legacy_env_profile = str(os.environ.get("REVIEWFLOW_AGENT_RUNTIME_PROFILE") or "").strip()
-    if legacy_env_profile:
-        raise ReviewflowError(
-            "REVIEWFLOW_AGENT_RUNTIME_PROFILE is no longer supported. Use CURE_AGENT_RUNTIME_PROFILE instead."
-        )
-    env_profile = _normalize_agent_runtime_profile(os.environ.get("CURE_AGENT_RUNTIME_PROFILE"), source="env")
-    if env_profile is not None:
-        return env_profile, "env", cfg, meta
-
-    if config_enabled:
-        config_profile = _normalize_agent_runtime_profile(cfg.get("profile"), source="config")
-        if config_profile is not None:
-            return config_profile, "config", cfg, meta
-
-    return DEFAULT_AGENT_RUNTIME_PROFILE, "default", cfg, meta
 
 
 def _base_codex_runtime_defaults(base_config_path: Path) -> dict[str, Any]:
@@ -1495,214 +1359,6 @@ def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tup
     return None, None
 
 
-def resolve_llm_config(
-    *,
-    base_codex_config_path: Path,
-    reviewflow_config_path: Path | None,
-    cli_preset: str | None,
-    cli_model: str | None,
-    cli_effort: str | None,
-    cli_plan_effort: str | None,
-    cli_verbosity: str | None,
-    cli_max_output_tokens: int | None,
-    cli_request_overrides: dict[str, Any] | None,
-    cli_header_overrides: dict[str, str] | None,
-    deprecated_codex_model: str | None,
-    deprecated_codex_effort: str | None,
-    deprecated_codex_plan_effort: str | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if cli_plan_effort not in (None, ""):
-        _raise_effort_migration_error(field_name="--llm-plan-effort", replacement="--llm-effort")
-    if deprecated_codex_effort not in (None, ""):
-        _raise_effort_migration_error(field_name="--codex-effort", replacement="--llm-effort")
-    if deprecated_codex_plan_effort not in (None, ""):
-        _raise_effort_migration_error(field_name="--codex-plan-effort", replacement="--llm-effort")
-    llm_cfg, llm_meta = load_reviewflow_llm_config(config_path=reviewflow_config_path)
-    presets = llm_cfg.get("presets", {})
-    presets = presets if isinstance(presets, dict) else {}
-    builtin_presets = builtin_llm_presets()
-
-    selected_name = str(cli_preset or "").strip()
-    preset_source = "cli" if selected_name else ""
-    if not selected_name:
-        selected_name = str(llm_cfg.get("default_preset") or "").strip()
-        preset_source = "cure.toml" if selected_name else ""
-    if not selected_name:
-        detected_name, detected_source = _autodetect_cli_preset_from_env()
-        selected_name = str(detected_name or "").strip()
-        preset_source = str(detected_source or "").strip()
-    if selected_name == "gemini-cli":
-        _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
-    if selected_name:
-        if selected_name in presets:
-            base_preset = dict(presets[selected_name])
-            resolved_preset_id = str(base_preset.get("preset") or selected_name).strip() or selected_name
-        elif selected_name in builtin_presets:
-            base_preset = dict(builtin_presets[selected_name])
-            base_preset["preset"] = selected_name
-            base_preset["_source_mode"] = "builtin_direct"
-            resolved_preset_id = selected_name
-        else:
-            available = sorted(set(presets.keys()) | set(builtin_presets.keys()))
-            raise ReviewflowError(
-                f"Unknown llm preset: {selected_name!r}. Available presets: {', '.join(available) or '(none)'}"
-            )
-    else:
-        selected_name = DEFAULT_IMPLICIT_CODEX_PRESET
-        preset_source = IMPLICIT_CODEX_PRESET_SOURCE
-        base_preset = _synthetic_legacy_codex_preset(
-            base_codex_config_path=base_codex_config_path,
-            reviewflow_config_path=reviewflow_config_path,
-        )
-        resolved_preset_id = DEFAULT_IMPLICIT_CODEX_PRESET
-
-    transport = str(base_preset.get("transport") or "").strip().lower()
-    provider = str(base_preset.get("provider") or "").strip().lower()
-    if transport not in LLM_TRANSPORT_CHOICES:
-        raise ReviewflowError(f"Invalid llm preset transport for {selected_name!r}: {transport!r}")
-    if transport == "http" and provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Invalid HTTP llm provider for {selected_name!r}: {provider!r}")
-    if transport == "cli" and provider not in CLI_LLM_PROVIDERS:
-        raise ReviewflowError(f"Invalid CLI llm provider for {selected_name!r}: {provider!r}")
-
-    legacy_defaults, legacy_meta = load_reviewflow_codex_defaults(config_path=reviewflow_config_path)
-    base_codex_meta = _base_codex_runtime_defaults(base_codex_config_path)
-
-    explicit_preset_fields = {
-        str(item).strip()
-        for item in (
-            base_preset.get("_explicit_overrides")
-            if isinstance(base_preset.get("_explicit_overrides"), list)
-            else []
-        )
-        if str(item).strip()
-    }
-    preset_source_mode = str(base_preset.get("_source_mode") or "").strip()
-
-    def _preset_source_detail(field: str) -> str:
-        if field in explicit_preset_fields:
-            return "preset_explicit"
-        if preset_source_mode in {"builtin", "builtin_direct", "deprecated_explicit"}:
-            return "preset_builtin"
-        if preset_source_mode == "synthetic_legacy_codex":
-            return "preset_explicit"
-        return "preset"
-
-    def _pick(
-        *,
-        field: str,
-        generic_value: Any,
-        deprecated_value: Any = None,
-        allow_deprecated: bool = False,
-        base_value: Any = None,
-    ) -> tuple[Any, str, str]:
-        if generic_value not in (None, ""):
-            return generic_value, "cli", "cli"
-        if allow_deprecated and provider == "codex" and deprecated_value not in (None, ""):
-            return deprecated_value, "deprecated_codex_cli", "deprecated_codex_cli"
-        preset_value = base_preset.get(field)
-        if preset_value not in (None, "", [], {}):
-            return preset_value, "preset", _preset_source_detail(field)
-        if provider == "codex":
-            legacy_key = {"reasoning_effort": "model_reasoning_effort"}.get(field, field)
-            legacy_value = legacy_defaults.get(legacy_key)
-            if legacy_value not in (None, ""):
-                return legacy_value, "reviewflow_defaults", "reviewflow_defaults"
-            if base_value not in (None, ""):
-                return base_value, "base_codex_config", "base_codex_config"
-        return None, "unset", "unset"
-
-    model, model_source, model_source_detail = _pick(
-        field="model",
-        generic_value=(str(cli_model).strip() if cli_model else None),
-        deprecated_value=(str(deprecated_codex_model).strip() if deprecated_codex_model else None),
-        allow_deprecated=True,
-        base_value=base_codex_meta.get("model"),
-    )
-    reasoning_effort, reasoning_effort_source, reasoning_effort_source_detail = _pick(
-        field="reasoning_effort",
-        generic_value=(str(cli_effort).strip() if cli_effort else None),
-        base_value=base_codex_meta.get("reasoning_effort"),
-    )
-    text_verbosity, text_verbosity_source, _ = _pick(
-        field="text_verbosity",
-        generic_value=(str(cli_verbosity).strip() if cli_verbosity else None),
-    )
-    max_output_tokens, max_output_tokens_source, _ = _pick(
-        field="max_output_tokens",
-        generic_value=cli_max_output_tokens,
-    )
-
-    allowed_efforts = _reasoning_effort_choices_for_provider(provider)
-    if reasoning_effort is not None and str(reasoning_effort) not in allowed_efforts:
-        raise ReviewflowError(
-            f"Invalid reasoning_effort: {reasoning_effort!r}. Expected one of: {', '.join(allowed_efforts)}"
-        )
-
-    request = dict(_plain_dict(base_preset.get("request")))
-    if cli_request_overrides:
-        request.update(cli_request_overrides)
-    headers = dict(_string_dict(base_preset.get("headers")))
-    if cli_header_overrides:
-        headers.update({str(k): str(v) for k, v in cli_header_overrides.items()})
-
-    resolved = {
-        "preset": resolved_preset_id,
-        "selected_name": selected_name,
-        "transport": transport,
-        "provider": provider,
-        "command": str(base_preset.get("command") or provider).strip() if transport == "cli" else None,
-        "endpoint": str(base_preset.get("endpoint") or "responses").strip() if transport == "http" else None,
-        "base_url": str(base_preset.get("base_url") or "").strip() or None,
-        "api_key": str(base_preset.get("api_key") or "").strip() or None,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
-        "text_verbosity": text_verbosity,
-        "max_output_tokens": int(max_output_tokens) if isinstance(max_output_tokens, int) else None,
-        "store": base_preset.get("store") if isinstance(base_preset.get("store"), bool) else None,
-        "include": _string_list(base_preset.get("include")),
-        "metadata": _plain_dict(base_preset.get("metadata")),
-        "headers": headers,
-        "request": request,
-        "env": _string_dict(base_preset.get("env")),
-        "capabilities": {"supports_resume": provider in LLM_RESUME_PROVIDERS},
-    }
-
-    meta: dict[str, Any] = {
-        "llm_config": llm_meta,
-        "reviewflow_defaults": legacy_meta,
-        "base_codex_config": base_codex_meta,
-        "selected_preset_source": preset_source,
-        "selected_name": selected_name,
-        "resolved_preset_id": resolved_preset_id,
-        "resolved": {
-            "model": model,
-            "model_source": model_source,
-            "model_source_detail": model_source_detail,
-            "reasoning_effort": reasoning_effort,
-            "reasoning_effort_source": reasoning_effort_source,
-            "reasoning_effort_source_detail": reasoning_effort_source_detail,
-            "text_verbosity": text_verbosity,
-            "text_verbosity_source": text_verbosity_source,
-            "max_output_tokens": resolved["max_output_tokens"],
-            "max_output_tokens_source": max_output_tokens_source,
-            "sandbox_mode": base_codex_meta.get("sandbox_mode"),
-            "web_search": base_codex_meta.get("web_search"),
-        },
-        "runtime_overrides": {
-            "preset": (str(cli_preset).strip() if cli_preset else None),
-            "model": (str(cli_model).strip() if cli_model else None),
-            "reasoning_effort": (str(cli_effort).strip() if cli_effort else None),
-            "text_verbosity": (str(cli_verbosity).strip() if cli_verbosity else None),
-            "max_output_tokens": cli_max_output_tokens if isinstance(cli_max_output_tokens, int) else None,
-            "request": dict(cli_request_overrides or {}),
-            "headers": dict(cli_header_overrides or {}),
-            "deprecated_codex_model": (
-                str(deprecated_codex_model).strip() if deprecated_codex_model else None
-            ),
-        },
-    }
-    return resolved, meta
 
 
 def build_http_response_request(resolved: dict[str, Any], *, prompt: str) -> dict[str, Any]:
@@ -2048,55 +1704,6 @@ def require_builtin_review_intelligence(
     )
 
 
-def build_codex_exec_cmd(
-    *,
-    repo_dir: Path,
-    codex_flags: list[str],
-    codex_config_overrides: list[str] | None,
-    review_md_path: Path,
-    prompt: str,
-    add_dirs: list[Path] | None = None,
-    skip_git_repo_check: bool = False,
-    approval_policy: str = "never",
-    dangerously_bypass_approvals_and_sandbox: bool = True,
-    include_shell_environment_inherit_all: bool = True,
-) -> list[str]:
-    overrides = list(codex_config_overrides or [])
-    has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    cmd = [
-        "codex",
-        "-C",
-        str(repo_dir),
-        "--add-dir",
-        "/tmp",
-    ]
-    for d in add_dirs or []:
-        cmd.extend(["--add-dir", str(d)])
-    cmd.extend(codex_flags)
-    if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
-        cmd.extend(["-a", approval_policy])
-    for override in overrides:
-        cmd.extend(["-c", override])
-    if include_shell_environment_inherit_all:
-        cmd.extend(["-c", "shell_environment_policy.inherit=all"])
-    cmd.extend(
-        [
-        "exec",
-        ]
-    )
-    if dangerously_bypass_approvals_and_sandbox:
-        cmd.append("--dangerously-bypass-approvals-and-sandbox")
-    if skip_git_repo_check:
-        cmd.append("--skip-git-repo-check")
-    cmd.extend(
-        [
-            "--output-last-message",
-            str(review_md_path),
-            "--",
-            prompt,
-        ]
-    )
-    return cmd
 
 
 def build_codex_flags_from_llm_config(
@@ -2253,69 +1860,6 @@ def run_http_response_exec(
     )
 
 
-def run_llm_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    resolution_meta: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    env: dict[str, str],
-    stream: bool,
-    progress: "SessionProgress",
-    add_dirs: list[Path] | None = None,
-    codex_config_overrides: list[str] | None = None,
-    runtime_policy: dict[str, Any] | None = None,
-    owned_processes: OwnedProcessRegistry | None = None,
-) -> LlmRunResult:
-    provider = str(resolved.get("provider") or "").strip().lower()
-    if provider == "codex":
-        codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta)
-        policy = runtime_policy if isinstance(runtime_policy, dict) else {}
-        codex_flags = list(policy.get("codex_flags") or codex_flags)
-        codex_config_overrides = list(policy.get("codex_config_overrides") or codex_config_overrides or [])
-        result = run_codex_exec(
-            repo_dir=repo_dir,
-            codex_flags=codex_flags,
-            codex_config_overrides=codex_config_overrides,
-            output_path=output_path,
-            prompt=prompt,
-            env=env,
-            stream=stream,
-            progress=progress,
-            add_dirs=list(policy.get("add_dirs") or add_dirs or []),
-            approval_policy=str(policy.get("approval_policy") or "never"),
-            dangerously_bypass_approvals_and_sandbox=bool(
-                policy.get("dangerously_bypass_approvals_and_sandbox", True)
-            ),
-            include_shell_environment_inherit_all=bool(
-                policy.get("include_shell_environment_inherit_all", False)
-            ),
-            owned_processes=owned_processes,
-        )
-        resume = None
-        if result.resume is not None:
-            resume = LlmResumeInfo(
-                provider="codex",
-                session_id=result.resume.session_id,
-                cwd=result.resume.cwd,
-                command=result.resume.command,
-            )
-        return LlmRunResult(
-            resume=resume,
-            adapter_meta={"transport": "cli-codex", "flags": codex_flags},
-        )
-    if provider == "gemini":
-        _raise_removed_gemini_support(context="Gemini CLI execution is no longer available.")
-    if provider in HTTP_LLM_PROVIDERS:
-        return run_http_response_exec(
-            repo_dir=repo_dir,
-            resolved=resolved,
-            output_path=output_path,
-            prompt=prompt,
-            progress=progress,
-        )
-    raise ReviewflowError(f"Unsupported llm provider: {provider!r}")
 
 
 def codex_mcp_overrides_for_reviewflow(
@@ -2455,125 +1999,6 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
-def prepare_review_agent_runtime(
-    *,
-    args: argparse.Namespace,
-    resolved: dict[str, Any],
-    resolution_meta: dict[str, Any],
-    reviewflow_config_path: Path,
-    config_enabled: bool,
-    repo_dir: Path,
-    session_dir: Path,
-    work_dir: Path,
-    base_env: dict[str, str],
-    chunkhound_config_path: Path | None,
-    chunkhound_db_path: Path | None,
-    chunkhound_cwd: Path | None,
-    enable_mcp: bool,
-    interactive: bool,
-    paths: ReviewflowPaths,
-) -> dict[str, Any]:
-    _ = paths
-    transport = str(resolved.get("transport") or "").strip().lower()
-    provider = str(resolved.get("provider") or "").strip().lower()
-    if provider == "gemini":
-        _raise_removed_gemini_support(context="Gemini agent runtime preparation is no longer available.")
-    profile, profile_source, _, runtime_meta = resolve_agent_runtime_profile(
-        cli_value=getattr(args, "agent_runtime_profile", None),
-        config_path=reviewflow_config_path,
-        config_enabled=config_enabled,
-    )
-    env = build_curated_subprocess_env(extra_env=base_env)
-    env.update(_string_dict(resolved.get("env")))
-    env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
-
-    add_dirs = _dedupe_paths([session_dir, work_dir])
-    runtime: dict[str, Any] = {
-        "profile": profile,
-        "profile_source": profile_source,
-        "provider": provider,
-        "transport": transport,
-        "command": str(resolved.get("command") or provider).strip() or None,
-        "env": env,
-        "add_dirs": add_dirs,
-        "staged_paths": staged_paths,
-        "dangerously_bypass_approvals_and_sandbox": False,
-        "dangerously_skip_permissions": False,
-        "sandbox_mode": None,
-        "approval_policy": None,
-        "permission_mode": None,
-        "approval_mode": None,
-        "codex_flags": [],
-        "codex_config_overrides": [],
-        "provider_args": [],
-        "config": {
-            "resolved_profile": profile,
-            "profile_source": profile_source,
-            "agent_runtime": runtime_meta.get("agent_runtime"),
-        },
-    }
-
-    if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
-        runtime["command"] = str(resolved.get("command") or "") or None
-        runtime["metadata"] = {
-            "profile": profile,
-            "profile_source": profile_source,
-            "provider": provider,
-            "transport": transport,
-            "supported": False,
-            "detail": "agent runtime profiles apply only to CLI coding-agent providers",
-            "env_keys": sorted(env.keys()),
-            "add_dirs": [str(path) for path in add_dirs],
-            "staged_paths": dict(staged_paths),
-        }
-        return runtime
-
-    command = _require_provider_command(str(resolved.get("command") or provider), provider=provider)
-    runtime["command"] = command
-
-    if provider == "codex":
-        codex_flags, _ = build_codex_flags_from_llm_config(
-            resolved=resolved,
-            resolution_meta=resolution_meta,
-            include_sandbox=False,
-        )
-        if profile == "permissive":
-            runtime["dangerously_bypass_approvals_and_sandbox"] = True
-        else:
-            raise ReviewflowError(f"Unsupported codex agent runtime profile: {profile!r}")
-        if runtime["sandbox_mode"]:
-            codex_flags.extend(["--sandbox", str(runtime["sandbox_mode"])])
-        if runtime["approval_policy"]:
-            codex_flags.extend(["-a", str(runtime["approval_policy"])])
-        runtime["codex_flags"] = codex_flags
-        runtime["codex_config_overrides"] = codex_mcp_overrides_for_reviewflow(
-            enable_sandbox_chunkhound=enable_mcp,
-            sandbox_repo_dir=repo_dir,
-            chunkhound_db_path=chunkhound_db_path,
-            chunkhound_cwd=chunkhound_cwd,
-            chunkhound_config_path=chunkhound_config_path,
-            paths=paths,
-        )
-    else:
-        raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
-
-    runtime["metadata"] = {
-        "profile": runtime["profile"],
-        "profile_source": runtime["profile_source"],
-        "provider": runtime["provider"],
-        "sandbox_mode": runtime["sandbox_mode"],
-        "approval_policy": runtime["approval_policy"],
-        "permission_mode": runtime["permission_mode"],
-        "approval_mode": runtime["approval_mode"],
-        "dangerously_bypass_approvals_and_sandbox": bool(
-            runtime["dangerously_bypass_approvals_and_sandbox"]
-        ),
-        "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
-        "env_keys": sorted(env.keys()),
-        "add_dirs": [str(path) for path in add_dirs],
-        "staged_paths": dict(runtime["staged_paths"]),
-    }
-    return runtime
 class SessionProgress:
     def __init__(self, meta_path: Path, *, quiet: bool) -> None:
         self.meta_path = meta_path
@@ -3131,178 +2556,6 @@ def parse_pr_url(pr_url: str) -> PullRequestRef:
     return PullRequestRef(host=host, owner=owner, repo=repo, number=number)
 
 
-def _normalize_pr_identity_value(value: object) -> str:
-    return str(value or "").strip().lower()
-
-
-def resolve_resume_target(
-    target: str, *, sandbox_root: Path, from_phase: str
-) -> tuple[str, str]:
-    """Resolve `cure resume <target>` into (session_id, action).
-
-    `target` may be either:
-    - a session folder name (session_id), or
-    - a GitHub PR URL (e.g. https://github.com/OWNER/REPO/pull/123)
-
-    Action:
-    - "resume": resume a multipass session (existing behavior)
-    - "followup": run follow-up review for the latest completed session (PR URL mode only)
-    """
-    raw = str(target or "").strip()
-    if not raw:
-        raise ReviewflowError("resume requires a session_id.")
-
-    pr: PullRequestRef | None = None
-    try:
-        pr = parse_pr_url(raw)
-    except ReviewflowError:
-        pr = None
-
-    if pr is None:
-        if Path(raw).is_absolute() or ("/" in raw) or ("\\" in raw):
-            raise ReviewflowError(
-                "resume expects a session id (folder name) or a PR URL. "
-                f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id. Got: {raw!r}"
-            )
-        return (raw, "resume")
-
-    root = sandbox_root
-    if not root.is_dir():
-        raise ReviewflowError(
-            f"No review sandboxes found under {root} (needed to resolve PR {pr.owner}/{pr.repo}#{pr.number})."
-        )
-
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    resumable: list[tuple[datetime, str]] = []
-    completed: list[tuple[datetime, str]] = []
-    for entry in root.iterdir():
-        if not entry.is_dir():
-            continue
-        meta = _load_session_meta(entry / "meta.json")
-        if not meta:
-            continue
-        if not _meta_matches_pr(meta=meta, pr=pr):
-            continue
-
-        status = str(meta.get("status") or "").strip()
-        notes = meta.get("notes") if isinstance(meta.get("notes"), dict) else {}
-        no_index = bool((notes or {}).get("no_index") or False)
-        mp = meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
-        mp_enabled = bool((mp or {}).get("enabled") is True)
-        llm_meta = resolve_meta_llm(meta)
-        supports_resume = bool(((llm_meta.get("capabilities") or {}).get("supports_resume")))
-
-        if mp_enabled and (not no_index) and supports_resume and (
-            status in {"running", "error"} or _multipass_has_invalid_artifacts(meta)
-        ):
-            resumed_at = str(meta.get("resumed_at") or "").strip() or None
-            failed_at = str(meta.get("failed_at") or "").strip() or None
-            completed_at = str(meta.get("completed_at") or "").strip() or None
-            created_at = str(meta.get("created_at") or "").strip() or None
-            dt = (
-                _parse_iso_dt(resumed_at)
-                or _parse_iso_dt(failed_at)
-                or _parse_iso_dt(completed_at)
-                or _parse_iso_dt(created_at)
-                or epoch
-            )
-            resumable.append((dt, entry.name))
-            continue
-
-        completed_at = str(meta.get("completed_at") or "").strip() or None
-        if status == "done" or completed_at:
-            meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
-            raw_review_md = str((meta_paths or {}).get("review_md") or (entry / "review.md")).strip()
-            review_md_path = Path(raw_review_md) if raw_review_md else (entry / "review.md")
-            if not review_md_path.is_absolute():
-                review_md_path = (entry / review_md_path).resolve()
-            else:
-                review_md_path = review_md_path.resolve()
-            if not review_md_path.is_file():
-                continue
-            created_at = str(meta.get("created_at") or "").strip() or None
-            dt = _parse_iso_dt(completed_at) or _parse_iso_dt(created_at) or epoch
-            completed.append((dt, entry.name))
-
-    resumable.sort(key=lambda t: t[0], reverse=True)
-    completed.sort(key=lambda t: t[0], reverse=True)
-
-    if resumable:
-        return (resumable[0][1], "resume")
-
-    if str(from_phase or "auto").strip().lower() != "auto":
-        raise ReviewflowError(
-            f"No resumable multipass session found for PR {pr.owner}/{pr.repo}#{pr.number}. "
-            f"Tip: run `{PRIMARY_CLI_COMMAND} list` to find a session id."
-        )
-
-    if completed:
-        return (completed[0][1], "followup")
-
-    raise ReviewflowError(
-        f"No sessions found for PR {pr.owner}/{pr.repo}#{pr.number} under {root}. "
-        f"Tip: run `{PRIMARY_CLI_COMMAND} list`."
-    )
-
-
-def resolve_resume_session_id(target: str, *, sandbox_root: Path, from_phase: str) -> str:
-    session_id, _ = resolve_resume_target(target, sandbox_root=sandbox_root, from_phase=from_phase)
-    return session_id
-
-
-def parse_owner_repo(value: str) -> tuple[str, str, str]:
-    """Parse OWNER/REPO or HOST/OWNER/REPO."""
-    text = value.strip().strip("/")
-    parts = text.split("/")
-    if len(parts) == 2:
-        return ("github.com", parts[0], parts[1])
-    if len(parts) == 3:
-        return (parts[0], parts[1], parts[2])
-    raise ReviewflowError(f"Expected OWNER/REPO or HOST/OWNER/REPO, got: {value}")
-
-
-def _tail_file_lines(path: Path, n: int, *, max_bytes: int = 256 * 1024) -> list[str]:
-    n = max(0, int(n))
-    if n == 0:
-        return []
-    try:
-        if not path.is_file():
-            return []
-    except Exception:
-        return []
-
-    try:
-        with path.open("rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            pos = fh.tell()
-            buf = b""
-            block = 4096
-            while pos > 0 and buf.count(b"\n") <= n:
-                take = min(block, pos)
-                pos -= take
-                fh.seek(pos, os.SEEK_SET)
-                buf = fh.read(take) + buf
-                if len(buf) > max_bytes:
-                    buf = buf[-max_bytes:]
-                    break
-        text = buf.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        return lines[-n:] if len(lines) > n else lines
-    except Exception:
-        return []
-
-
-def _resolve_log_path(*, session_dir: Path, raw: str | None) -> Path | None:
-    if not raw:
-        return None
-    try:
-        p = Path(str(raw)).expanduser()
-        if not p.is_absolute():
-            p = (session_dir / p).resolve()
-        return p
-    except Exception:
-        return None
-
 
 @dataclass(frozen=True)
 class ResolvedObservationTarget:
@@ -3612,289 +2865,6 @@ def build_status_payload(
     return payload
 
 
-def _coerce_ui_verbosity(raw: str) -> Verbosity:
-    try:
-        return Verbosity(str(raw or "normal").strip().lower())
-    except Exception as e:
-        raise ReviewflowError("--verbosity must be one of: quiet, normal, debug") from e
-
-
-def _stream_supports_color(stream: TextIO) -> bool:
-    try:
-        if not stream.isatty():
-            return False
-    except Exception:
-        return False
-    term = str(os.environ.get("TERM") or "")
-    if term in {"", "dumb"}:
-        return False
-    if "NO_COLOR" in os.environ:
-        return False
-    return True
-
-
-def _load_ui_preview_snapshot(
-    *,
-    meta_path: Path,
-    session_dir: Path,
-    verbosity: Verbosity,
-) -> tuple[dict[str, Any], list[str], list[str]]:
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ReviewflowError(f"ui-preview: failed to parse meta.json: {e}") from e
-    if not isinstance(meta, dict):
-        raise ReviewflowError("ui-preview: meta.json must contain a JSON object")
-
-    if verbosity is Verbosity.quiet:
-        ch_n, cx_n = (0, 0)
-    else:
-        ch_n, cx_n = (200, 400)
-
-    fallback_ch = session_dir / "work" / "logs" / "chunkhound.log"
-    fallback_cx = session_dir / "work" / "logs" / "codex.log"
-    logs = meta.get("logs")
-    logs = logs if isinstance(logs, dict) else {}
-    ch_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("chunkhound") or "").strip())
-    cx_log = _resolve_log_path(session_dir=session_dir, raw=str(logs.get("codex") or "").strip())
-    if ch_log is None or (not ch_log.is_file()):
-        ch_log = fallback_ch if fallback_ch.is_file() else None
-    if cx_log is None or (not cx_log.is_file()):
-        cx_log = fallback_cx if fallback_cx.is_file() else None
-
-    chunkhound_tail = _tail_file_lines(ch_log, ch_n) if ch_log is not None else []
-    codex_tail = _tail_file_lines(cx_log, cx_n) if cx_log is not None else []
-    return meta, chunkhound_tail, codex_tail
-
-
-def _render_ui_preview(
-    *,
-    session_dir: Path,
-    meta_path: Path,
-    verbosity: Verbosity,
-    color: bool,
-    width: int | None,
-    height: int | None,
-    final_newline: bool,
-    stdout: TextIO,
-) -> str:
-    meta, chunkhound_tail, codex_tail = _load_ui_preview_snapshot(
-        meta_path=meta_path,
-        session_dir=session_dir,
-        verbosity=verbosity,
-    )
-    snap = UiSnapshot(verbosity=verbosity, show_help=False)
-    term = shutil.get_terminal_size(fallback=(120, 40))
-    render_width = int(width) if isinstance(width, int) else int(term.columns)
-    render_height = int(height) if isinstance(height, int) else int(term.lines)
-    lines = build_dashboard_lines(
-        meta=meta,
-        snapshot=snap,
-        chunkhound_tail=chunkhound_tail,
-        codex_tail=codex_tail,
-        no_stream=False,
-        width=render_width,
-        height=render_height,
-        color=color,
-    )
-    stdout.write("\n".join(lines))
-    if final_newline:
-        stdout.write("\n")
-    stdout.flush()
-    return str(meta.get("status") or "").strip().lower() or "unknown"
-
-
-def _watch_line_for_payload(payload: dict[str, Any]) -> str:
-    pr = payload.get("pr") if isinstance(payload.get("pr"), dict) else {}
-    repo_slug = f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}"
-    parts = [
-        f"session={payload.get('session_id')}",
-        f"repo={repo_slug}",
-        f"status={payload.get('status')}",
-        f"phase={payload.get('phase')}",
-    ]
-    latest_artifact = payload.get("latest_artifact") if isinstance(payload.get("latest_artifact"), dict) else {}
-    latest_path = str((latest_artifact or {}).get("path") or "").strip()
-    if latest_path:
-        parts.append(f"artifact={latest_path}")
-    llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
-    llm_summary = str((llm or {}).get("summary") or "").strip()
-    if llm_summary:
-        parts.append(llm_summary)
-    chunkhound = payload.get("chunkhound") if isinstance(payload.get("chunkhound"), dict) else {}
-    access = chunkhound.get("access") if isinstance(chunkhound.get("access"), dict) else {}
-    access_stage = str((access or {}).get("preflight_stage") or "").strip()
-    access_status = str((access or {}).get("preflight_stage_status") or "").strip()
-    access_error = str((access or {}).get("error") or "").strip()
-    access_elapsed = access.get("elapsed_seconds")
-    show_access = bool(access_stage) and (
-        str(payload.get("phase") or "").strip() == "chunkhound_access_preflight"
-        or (not bool(access.get("preflight_ok")))
-        or access_status in {"running", "error", "timeout"}
-    )
-    if show_access:
-        access_bits = [f"chunkhound={access_stage}"]
-        if access_status:
-            access_bits.append(access_status)
-        if isinstance(access_elapsed, (int, float)):
-            access_bits.append(f"{float(access_elapsed):.1f}s")
-        if access_error and access_status in {"error", "timeout"}:
-            compact_error = " ".join(access_error.split())
-            if len(compact_error) > 80:
-                compact_error = compact_error[:79] + "…"
-            access_bits.append(compact_error)
-        parts.append(" ".join(access_bits))
-    return " ".join(parts)
-
-
-def preferred_cli_invocation(invocation: str) -> str:
-    return f"{PRIMARY_CLI_COMMAND} {invocation}"
-
-
-def build_commands_catalog_payload() -> dict[str, Any]:
-    return {
-        "schema_version": 2,
-        "kind": "cure.commands",
-        "commands": [
-            {
-                "name": "pr",
-                "summary": "Create a new review session for a PR.",
-                "targets": ["PR_URL"],
-                "safety": "Use `--if-reviewed new` for stable agent-safe start semantics.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Prints the created session directory path on success.",
-                "exit_codes": {"0": "review started", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("pr <PR_URL> --if-reviewed new"),
-                "variants": [
-                    {
-                        "name": "compatibility",
-                        "summary": "Bare `pr` keeps current prompt-or-new compatibility behavior.",
-                        "invocation": preferred_cli_invocation("pr <PR_URL>"),
-                    },
-                ],
-            },
-            {
-                "name": "resume",
-                "summary": "Resume a multipass session, or use its existing completed-session PR URL compatibility behavior.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "PR URL mode keeps its existing completed-session compatibility behavior.",
-                "tty": "Optional TUI on stderr when running in a real terminal.",
-                "stdout": "Human-readable progress only.",
-                "exit_codes": {"0": "resume or compatible completed-session flow completed", "2": "usage or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("resume <session_id>"),
-                "variants": [
-                    {
-                        "name": "pr_url_compatibility",
-                        "summary": "PR URL mode preserves the existing special behavior documented in the README.",
-                        "invocation": preferred_cli_invocation("resume <PR_URL>"),
-                    },
-                ],
-            },
-            {
-                "name": "clean",
-                "summary": "Delete an exact session, preview closed-session cleanup, or use the TTY cleaner.",
-                "targets": ["session_id", "closed"],
-                "safety": "Bulk cleanup is preview-first with `clean closed --json`; exact delete rejects `--yes`.",
-                "tty": "Required only for `clean` with no target and `clean closed` without `--yes`.",
-                "stdout": "Structured JSON on `--json`; otherwise human-readable cleanup output.",
-                "exit_codes": {"0": "cleanup query or deletion completed", "2": "usage, lookup, or runtime error"},
-                "recommended_invocation": preferred_cli_invocation("clean closed --json"),
-                "variants": [
-                    {
-                        "name": "bulk_execute",
-                        "summary": "Execute closed-session cleanup after previewing matches.",
-                        "invocation": preferred_cli_invocation("clean closed --yes --json"),
-                    },
-                    {
-                        "name": "exact_delete",
-                        "summary": "Delete one exact session with a structured result.",
-                        "invocation": preferred_cli_invocation("clean <session_id> --json"),
-                    },
-                ],
-            },
-            {
-                "name": "status",
-                "summary": "Resolve a session or PR URL and report the current recorded run state.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "Read-only view backed by `meta.json` and recorded artifacts/logs.",
-                "tty": "No TTY required.",
-                "stdout": "Human-readable single-line status by default, structured JSON with `--json`.",
-                "exit_codes": {"0": "target resolved", "2": "invalid target, lookup failure, or corrupt metadata"},
-                "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
-                "variants": [],
-            },
-            {
-                "name": "watch",
-                "summary": "Attach to a recorded session and follow progress until completion.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "Read-only attach flow; uses the same resolver as `status`.",
-                "tty": "TTY mode reuses the existing dashboard; non-TTY mode prints plain polling lines.",
-                "stdout": "Progress lines until the session reaches `done` or `error`.",
-                "exit_codes": {
-                    "0": "session finished with status=done",
-                    "1": "session finished with status=error",
-                    "2": "invalid target, lookup failure, or corrupt metadata",
-                },
-                "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
-                "variants": [],
-            },
-        ],
-    }
-
-
-def ui_preview_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
-    session_id = str(getattr(args, "session_id", "") or "").strip()
-    if not session_id:
-        raise ReviewflowError("ui-preview: session_id is required")
-
-    session_dir = paths.sandbox_root / session_id
-    meta_path = session_dir / "meta.json"
-    if not meta_path.is_file():
-        raise ReviewflowError(f"ui-preview: missing meta.json at {meta_path}")
-
-    verbosity = _coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
-    width_arg = getattr(args, "width", None)
-    height_arg = getattr(args, "height", None)
-    color = _stream_supports_color(sys.stdout) and (not bool(getattr(args, "no_color", False)))
-
-    watch = bool(getattr(args, "watch", False))
-    if not watch:
-        # If the command line wrapped, some terminals start program output at a non-zero
-        # column; add a leading newline in TTY mode to keep the dashboard aligned.
-        try:
-            if sys.stdout.isatty():
-                sys.stdout.write("\n")
-        except Exception:
-            pass
-        _render_ui_preview(
-            session_dir=session_dir,
-            meta_path=meta_path,
-            verbosity=verbosity,
-            color=color,
-            width=width_arg,
-            height=height_arg,
-            final_newline=True,
-            stdout=sys.stdout,
-        )
-        return 0
-
-    try:
-        while True:
-            sys.stdout.write("\x1b[2J\x1b[H")
-            sys.stdout.flush()
-            _render_ui_preview(
-                session_dir=session_dir,
-                meta_path=meta_path,
-                verbosity=verbosity,
-                color=color,
-                width=width_arg,
-                height=height_arg,
-                final_newline=False,
-                stdout=sys.stdout,
-            )
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        return 0
 
 
 def compute_pr_stats(*, repo_dir: Path, base_ref: str, head_ref: str = "HEAD") -> dict[str, Any]:
@@ -4150,98 +3120,12 @@ def _legacy_llm_meta_from_codex(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _runtime_llm_identity_from_adapter(adapter: object) -> dict[str, str]:
-    payload = adapter if isinstance(adapter, dict) else {}
-    provider = str(payload.get("provider") or "").strip()
-    model = str(payload.get("model") or "").strip()
-    out: dict[str, str] = {}
-    if provider:
-        out["provider"] = provider
-    if model:
-        out["model"] = model
-    return out
 
 
-def _default_llm_preset_for_provider(provider: object) -> str | None:
-    value = str(provider or "").strip().lower()
-    if value == "codex":
-        return DEFAULT_IMPLICIT_CODEX_PRESET
-    if value == "gemini":
-        return "gemini-cli"
-    if value == "openai":
-        return "openai-responses"
-    if value == "openrouter":
-        return "openrouter-responses"
-    return None
 
 
-def resolve_meta_llm(meta: dict[str, Any]) -> dict[str, Any]:
-    llm = meta.get("llm") if isinstance(meta.get("llm"), dict) else {}
-    if llm:
-        out = dict(llm)
-        normalized_preset = _normalize_llm_preset_name(out.get("preset"))
-        if normalized_preset is not None:
-            out["preset"] = normalized_preset
-        normalized_selected = _normalize_llm_preset_name(out.get("selected_name"))
-        if normalized_selected is not None:
-            out["selected_name"] = normalized_selected
-        normalized_config = _normalize_llm_config_meta(out.get("config"))
-        if normalized_config is not None:
-            resolved_cfg = (
-                normalized_config.get("resolved")
-                if isinstance(normalized_config.get("resolved"), dict)
-                else {}
-            )
-            reviewflow_defaults = (
-                normalized_config.get("reviewflow_defaults")
-                if isinstance(normalized_config.get("reviewflow_defaults"), dict)
-                else {}
-            )
-            resolved_preset_id = (
-                _normalize_llm_preset_name(normalized_config.get("resolved_preset_id"))
-                or _normalize_llm_preset_name(out.get("preset"))
-                or DEFAULT_IMPLICIT_CODEX_PRESET
-            )
-            builtin_preset = builtin_llm_presets().get(resolved_preset_id, {})
-            if (
-                resolved_cfg.get("reasoning_effort_source") == "reviewflow_defaults"
-                and reviewflow_defaults.get("model_reasoning_effort") in (None, "", [], {})
-                and reviewflow_defaults.get("reasoning_effort") in (None, "", [], {})
-                and builtin_preset.get("reasoning_effort") not in (None, "", [], {})
-            ):
-                resolved_cfg["reasoning_effort_source"] = "preset"
-                normalized_config["resolved"] = resolved_cfg
-            out["config"] = normalized_config
-        out["capabilities"] = (
-            dict(out.get("capabilities"))
-            if isinstance(out.get("capabilities"), dict)
-            else {"supports_resume": False}
-        )
-        runtime_identity = _runtime_llm_identity_from_adapter(out.get("adapter"))
-        if runtime_identity.get("provider") and not str(out.get("provider") or "").strip():
-            out["provider"] = runtime_identity["provider"]
-        if runtime_identity.get("model") and not str(out.get("model") or "").strip():
-            out["model"] = runtime_identity["model"]
-        if not _normalize_llm_preset_name(out.get("preset")):
-            inferred_preset = _default_llm_preset_for_provider(out.get("provider"))
-            if inferred_preset is not None:
-                out["preset"] = inferred_preset
-        return out
-    return _legacy_llm_meta_from_codex(meta)
 
 
-def resolve_codex_summary(meta: dict[str, Any]) -> str:
-    llm = resolve_meta_llm(meta)
-    preset = _normalize_llm_preset_name(llm.get("preset")) or _default_llm_preset_for_provider(llm.get("provider")) or DEFAULT_IMPLICIT_CODEX_PRESET
-    model = str(llm.get("model") or "").strip() or None
-    effort = str(llm.get("reasoning_effort") or "").strip() or None
-    if model and effort:
-        return f"llm={preset}/{model}/{effort}"
-    if model:
-        return f"llm={preset}/{model}/?"
-    if effort:
-        return f"llm={preset}/?/{effort}"
-    return f"llm={preset}/?"
 
 
 def _singlepass_review_phase_name(*, provider: object) -> str:
@@ -5675,7 +4559,6 @@ def _emit_multipass_grounding_failure_playbook(
             "",
             "Suggested next steps:",
             f"- {PRIMARY_CLI_COMMAND} status {session_id} --json",
-            f"- {PRIMARY_CLI_COMMAND} watch {session_id}",
             f"- {PRIMARY_CLI_COMMAND} resume {session_id}",
         ]
     )
@@ -7523,16 +6406,6 @@ def _persist_discovered_embedding_config(
     base_config_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(base_config_path, updated)
     return True
-
-
-def migrate_storage_flow(args: argparse.Namespace, *, paths: ReviewflowPaths) -> int:
-    _ = args
-    _ = paths
-    _eprint(
-        f"`{PRIMARY_CLI_COMMAND} migrate-storage` is deprecated and no longer performs any migration.\n"
-        "Reviewflow now uses generic XDG/home defaults and does not auto-discover legacy workspace paths."
-    )
-    return 0
 
 
 def materialize_chunkhound_env_config(
@@ -10705,8 +9578,6 @@ def _pr_flow_impl(
                 args=args,
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
-                reviewflow_config_path=effective_config_path,
-                config_enabled=True,
                 repo_dir=repo_dir,
                 session_dir=session_dir,
                 work_dir=work_dir,
@@ -12409,13 +11280,28 @@ def _resume_flow_impl(
             codex_model=getattr(args, "codex_model", None),
             codex_effort=getattr(args, "codex_effort", None),
             codex_plan_effort=getattr(args, "codex_plan_effort", None),
+            llm_preset=getattr(args, "llm_preset", None),
+            llm_model=getattr(args, "llm_model", None),
+            llm_effort=getattr(args, "llm_effort", None),
+            llm_plan_effort=getattr(args, "llm_plan_effort", None),
+            llm_verbosity=getattr(args, "llm_verbosity", None),
+            llm_max_output_tokens=getattr(args, "llm_max_output_tokens", None),
+            llm_set=list(getattr(args, "llm_set", []) or []),
+            llm_header=list(getattr(args, "llm_header", []) or []),
+            multipass_max_steps=getattr(args, "multipass_max_steps", None),
+            cod_ledger=getattr(args, "cod_ledger", True),
             wtf=bool(getattr(args, "wtf", False)),
             quiet=bool(getattr(args, "quiet", False)),
             no_stream=bool(getattr(args, "no_stream", False)),
             ui=str(getattr(args, "ui", "auto") or "auto"),
             verbosity=str(getattr(args, "verbosity", "normal") or "normal"),
         )
-        return followup_flow(followup_args, paths=paths)
+        return followup_flow(
+            followup_args,
+            paths=paths,
+            config_path=config_path,
+            codex_base_config_path=codex_base_config_path,
+        )
 
     root = paths.sandbox_root.resolve()
     session_dir = (paths.sandbox_root / session_id).resolve()
@@ -12634,8 +11520,6 @@ def _resume_flow_impl(
             args=args,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
-            reviewflow_config_path=effective_config_path,
-            config_enabled=True,
             repo_dir=repo_dir,
             session_dir=session_dir,
             work_dir=work_dir,
@@ -13499,8 +12383,6 @@ def _followup_flow_impl(
             args=args,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
-            reviewflow_config_path=effective_config_path,
-            config_enabled=True,
             repo_dir=repo_dir,
             session_dir=session_dir,
             work_dir=work_dir,
@@ -14875,15 +13757,10 @@ def build_interactive_resume_command(
             resolved_saved["reasoning_effort_source"] = "session_reuse"
         llm_resolution_meta["resolved"] = resolved_saved
 
-    saved_runtime_meta = meta.get("agent_runtime") if isinstance(meta.get("agent_runtime"), dict) else {}
     runtime_policy = prepare_review_agent_runtime(
-        args=argparse.Namespace(
-            agent_runtime_profile=(saved_runtime_meta.get("profile") if isinstance(saved_runtime_meta, dict) else None)
-        ),
+        args=argparse.Namespace(),
         resolved=llm_meta,
         resolution_meta=llm_resolution_meta,
-        reviewflow_config_path=effective_config_path,
-        config_enabled=True,
         repo_dir=repo_dir,
         session_dir=session.session_dir,
         work_dir=work_dir,
@@ -15982,119 +14859,8 @@ def _doctor_path_payload(*, path: Path, source: str, exists: bool, enabled: bool
     return payload
 
 
-def _resolved_doctor_agent_runtime(
-    runtime: ReviewflowRuntime,
-    *,
-    cli_profile: str | None = None,
-    args: argparse.Namespace | None = None,
-) -> dict[str, Any]:
-    profile, profile_source, _, _ = resolve_agent_runtime_profile(
-        cli_value=cli_profile,
-        config_path=runtime.config_path,
-        config_enabled=runtime.config_enabled,
-    )
-    llm_resolved, llm_meta = resolve_llm_config(
-        base_codex_config_path=runtime.codex_base_config_path,
-        reviewflow_config_path=runtime.config_path,
-        cli_preset=getattr(args, "llm_preset", None),
-        cli_model=getattr(args, "llm_model", None),
-        cli_effort=getattr(args, "llm_effort", None),
-        cli_plan_effort=getattr(args, "llm_plan_effort", None),
-        cli_verbosity=getattr(args, "llm_verbosity", None),
-        cli_max_output_tokens=getattr(args, "llm_max_output_tokens", None),
-        cli_request_overrides=parse_llm_request_overrides(getattr(args, "llm_set", [])),
-        cli_header_overrides=parse_llm_header_overrides(getattr(args, "llm_header", [])),
-        deprecated_codex_model=getattr(args, "codex_model", None),
-        deprecated_codex_effort=getattr(args, "codex_effort", None),
-        deprecated_codex_plan_effort=getattr(args, "codex_plan_effort", None),
-    )
-    provider = str(llm_resolved.get("provider") or "").strip().lower()
-    transport = str(llm_resolved.get("transport") or "").strip().lower()
-    payload: dict[str, Any] = {
-        "profile": profile,
-        "profile_source": profile_source,
-        "preset": llm_resolved.get("preset"),
-        "preset_source": llm_meta.get("selected_preset_source"),
-        "provider": provider,
-        "transport": transport,
-        "command": llm_resolved.get("command"),
-    }
-    if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
-        payload["supported"] = False
-        payload["detail"] = "agent runtime profiles apply only to CLI coding-agent providers"
-        return payload
-
-    payload["supported"] = True
-    if provider == "codex":
-        payload.update(
-            {
-                "dangerously_bypass_approvals_and_sandbox": True,
-                "sandbox_mode": None,
-                "approval_policy": None,
-            }
-        )
-    return payload
 
 
-def _doctor_runtime_payload(
-    runtime: ReviewflowRuntime,
-    *,
-    cli_profile: str | None = None,
-    args: argparse.Namespace | None = None,
-) -> dict[str, Any]:
-    config_exists = runtime.config_path.is_file()
-    payload: dict[str, Any] = {
-        "cure_config": _doctor_path_payload(
-            path=runtime.config_path,
-            source=runtime.config_source,
-            exists=config_exists,
-            enabled=runtime.config_enabled,
-        ),
-        "sandbox_root": _doctor_path_payload(
-            path=runtime.paths.sandbox_root,
-            source=runtime.sandbox_root_source,
-            exists=runtime.paths.sandbox_root.exists(),
-        ),
-        "cache_root": _doctor_path_payload(
-            path=runtime.paths.cache_root,
-            source=runtime.cache_root_source,
-            exists=runtime.paths.cache_root.exists(),
-        ),
-        "codex_base_config": _doctor_path_payload(
-            path=runtime.codex_base_config_path,
-            source=runtime.codex_base_config_source,
-            exists=runtime.codex_base_config_path.is_file(),
-        ),
-        "agent_runtime": _resolved_doctor_agent_runtime(runtime, cli_profile=cli_profile, args=args),
-    }
-
-    if not runtime.config_enabled:
-        payload["chunkhound_base_config"] = {
-            "path": None,
-            "source": "disabled",
-            "exists": False,
-            "enabled": False,
-        }
-        return payload
-
-    try:
-        chunkhound_cfg, _ = load_reviewflow_chunkhound_config(config_path=runtime.config_path, require=True)
-    except ReviewflowError as e:
-        payload["chunkhound_base_config"] = {
-            "path": None,
-            "source": "config",
-            "exists": False,
-            "error": str(e).splitlines()[0],
-        }
-        return payload
-
-    assert chunkhound_cfg is not None
-    payload["chunkhound_base_config"] = _doctor_path_payload(
-        path=chunkhound_cfg.base_config_path,
-        source="config",
-        exists=chunkhound_cfg.base_config_path.is_file(),
-    )
-    return payload
 
 
 def _doctor_runtime_checks(
@@ -16281,12 +15047,10 @@ from cure_sessions import (
     scan_interactive_review_sessions,
 )
 from cure_runtime import (
-    AGENT_RUNTIME_PROFILE_CHOICES,
     BUILTIN_LLM_PRESET_IDS,
     CHUNKHOUND_CONFIG_EXAMPLE,
     CLI_LLM_PROVIDERS,
     CODEX_REASONING_EFFORT_CHOICES,
-    DEFAULT_AGENT_RUNTIME_PROFILE,
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
     DEFAULT_MULTIPASS_MAX_STEPS,
@@ -16324,7 +15088,6 @@ from cure_runtime import (
     fingerprint_chunkhound_reviewflow_config,
     load_chunkhound_runtime_config,
     load_review_intelligence_config,
-    load_reviewflow_agent_runtime_config,
     load_reviewflow_chunkhound_config,
     load_reviewflow_codex_base_config_path,
     load_reviewflow_codex_defaults,
@@ -16336,7 +15099,6 @@ from cure_runtime import (
     parse_llm_key_value,
     parse_llm_request_overrides,
     require_builtin_review_intelligence,
-    resolve_agent_runtime_profile,
     resolve_chunkhound_reviewflow_config,
     resolve_codex_base_config_path,
     resolve_codex_flags,
@@ -16426,9 +15188,7 @@ from cure_commands import (
     preferred_cli_invocation,
     resume_flow,
     setup_flow,
-    set_agent_flow,
     status_flow,
-    watch_flow,
 )
 
 
@@ -16463,16 +15223,6 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         dest="codex_config_path",
         default=argparse.SUPPRESS,
         help="Override the Codex base config path",
-    )
-
-
-def add_agent_runtime_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--agent-runtime-profile",
-        dest="agent_runtime_profile",
-        choices=list(AGENT_RUNTIME_PROFILE_CHOICES),
-        default=None,
-        help="Operator-approved CLI coding-agent runtime profile (permissive only)",
     )
 
 
@@ -16512,7 +15262,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     prp.add_argument("--refresh-base", action="store_true", help="Force base cache refresh")
     prp.add_argument("--base-ttl-hours", type=int, default=24, help="Base cache TTL in hours")
     add_llm_override_args(prp)
-    add_agent_runtime_args(prp)
     prp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     prp.add_argument(
         "--codex-effort",
@@ -16601,13 +15350,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     cp.add_argument("--yes", action="store_true", help="Execute bulk closed-session cleanup without confirmation")
     cp.add_argument("--json", dest="json_output", action="store_true", help="Print structured cleanup JSON")
 
-    mp = sub.add_parser(
-        "migrate-storage",
-        help="Show the storage-migration deprecation notice",
-        parents=[runtime_parent],
-    )
-    mp.add_argument("--apply", action="store_true", help="Accepted for compatibility; no migration is performed")
-
     rp = sub.add_parser(
         "resume",
         help="Resume a multipass review session",
@@ -16616,7 +15358,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("session_id", help="Session id (folder name) or PR URL")
     rp.add_argument("--from", dest="from_phase", choices=["auto", "plan", "steps", "synth"], default="auto")
     add_llm_override_args(rp)
-    add_agent_runtime_args(rp)
     rp.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
     rp.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
     rp.add_argument(
@@ -16648,32 +15389,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    fup = sub.add_parser("followup", help=argparse.SUPPRESS, parents=[runtime_parent])
-    fup.add_argument("session_id", help="Session id (folder name)")
-    fup.add_argument("--no-update", action="store_true", help="Do not update the sandbox repo before reviewing")
-    add_llm_override_args(fup)
-    add_agent_runtime_args(fup)
-    fup.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
-    fup.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
-    fup.add_argument(
-        "--codex-plan-effort",
-        dest="codex_plan_effort",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    fup.add_argument(
-        "--wtf",
-        dest="wtf",
-        type=_parse_on_off_bool,
-        default=True,
-        metavar="{on,off,1,0}",
-        help="Toggle verbose finding explanations in the final review artifact (default: on; use off for concise)",
-    )
-    fup.add_argument("--quiet", action="store_true", help="Suppress progress output")
-    fup.add_argument("--no-stream", action="store_true", help="Do not stream ChunkHound or review-agent output")
-    fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
-    fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-
     ep = sub.add_parser(
         "explain",
         help="Explain the final synthesized review of a completed PR review session",
@@ -16704,23 +15419,9 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     ep.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
     ep.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
-    upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
-    upp.add_argument("session_id", help="Session id (folder name)")
-    upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
-    upp.add_argument("--width", type=int, default=None, help="Terminal width")
-    upp.add_argument("--height", type=int, default=None, help="Terminal height")
-    upp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-    upp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
-
     sp = sub.add_parser("status", help="Show run status for a session id or PR URL", parents=[runtime_parent])
     sp.add_argument("target", help="Session id (folder name) or PR URL")
     sp.add_argument("--json", dest="json_output", action="store_true", help="Print structured status JSON")
-
-    wp = sub.add_parser("watch", help="Follow run status for a session id or PR URL", parents=[runtime_parent])
-    wp.add_argument("target", help="Session id (folder name) or PR URL")
-    wp.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds (default: 2.0)")
-    wp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
-    wp.add_argument("--no-color", action="store_true", help="Disable ANSI styling")
 
     setupp = sub.add_parser(
         "setup",
@@ -16750,16 +15451,8 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Skip ChunkHound installation (fail if chunkhound is not already on PATH)",
     )
 
-    sap = sub.add_parser(
-        "set-agent",
-        help="Persist an operator-approved local coding agent choice used by CURe",
-        parents=[runtime_parent],
-    )
-    sap.add_argument("agent", choices=["codex"], help="Operator-approved local coding agent to persist")
-
     dp = sub.add_parser("doctor", help="Diagnose external tool and config readiness", parents=[runtime_parent])
     add_llm_override_args(dp)
-    add_agent_runtime_args(dp)
     dp.add_argument(
         "--json",
         dest="json_output",
@@ -16773,12 +15466,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         help="Evaluate readiness for starting a review of this PR URL",
     )
 
-    hidden_subcommands = {"followup"}
-    sub._choices_actions = [
-        action for action in sub._choices_actions if getattr(action, "dest", None) not in hidden_subcommands
-    ]
-    visible_subcommands = [name for name in sub.choices.keys() if name not in hidden_subcommands]
-    sub.metavar = "{" + ",".join(visible_subcommands) + "}"
 
     return parser
 
@@ -16800,8 +15487,6 @@ def main(
     try:
         if args.cmd == "setup":
             return command_surface.setup_flow(args, runtime=runtime)
-        if args.cmd == "set-agent":
-            return command_surface.set_agent_flow(args, runtime=runtime)
         if command_surface.ensure_chunkhound_bootstrap_ready(args, runtime=runtime):
             runtime = runtime_surface.resolve_runtime(args)
             paths = runtime.paths
@@ -16816,12 +15501,8 @@ def main(
                 config_path=runtime.config_path,
                 codex_base_config_path=runtime.codex_base_config_path,
             )
-        if args.cmd == "ui-preview":
-            return ui_preview_flow(args, paths=paths)
         if args.cmd == "status":
             return command_surface.status_flow(args, paths=paths)
-        if args.cmd == "watch":
-            return command_surface.watch_flow(args, paths=paths)
         if args.cmd == "cache":
             host, owner, repo = parse_owner_repo(args.owner_repo)
             if args.cache_cmd == "prime":
@@ -16851,17 +15532,8 @@ def main(
             return command_surface.interactive_flow(args, paths=paths, config_path=runtime.config_path)
         if args.cmd == "clean":
             return command_surface.clean_flow(args, paths=paths)
-        if args.cmd == "migrate-storage":
-            return migrate_storage_flow(args, paths=paths)
         if args.cmd == "resume":
             return command_surface.resume_flow(
-                args,
-                paths=paths,
-                config_path=runtime.config_path,
-                codex_base_config_path=runtime.codex_base_config_path,
-            )
-        if args.cmd == "followup":
-            return command_surface.followup_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,

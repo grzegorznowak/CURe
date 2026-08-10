@@ -6102,8 +6102,8 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         self.assertIn("logs directory:", playbook)
         self.assertIn(error_fragment, playbook)
         self.assertIn(f"cure status {session_id} --json", playbook)
-        self.assertIn(f"cure watch {session_id}", playbook)
         self.assertIn(f"cure resume {session_id}", playbook)
+        self.assertNotIn("cure watch", playbook)
         self.assertIn(f"cure resume {session_id} --from {resume_from}", playbook)
         self.assertIn('[multipass].grounding_mode = "warn"', playbook)
         self.assertIn("- strict: blocks completion for invalid artifacts", playbook)
@@ -14279,7 +14279,6 @@ class ExtractionOwnershipTests(unittest.TestCase):
         )
         self.assertIs(rf.commands_flow, command_surface.commands_flow)
         self.assertIs(rf.status_flow, command_surface.status_flow)
-        self.assertIs(rf.watch_flow, command_surface.watch_flow)
         self.assertIs(rf.doctor_flow, command_surface.doctor_flow)
 
     def test_main_dispatches_pr_through_cure_commands(self) -> None:

@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import sys
-import time
 from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Mapping, TextIO
@@ -23,7 +22,7 @@ from cure_runtime import (
     resolve_local_agent_selection,
     toml_string,
 )
-from cure_sessions import build_status_payload, resolve_observation_target
+from cure_sessions import build_status_payload
 from paths import ReviewflowPaths
 
 if TYPE_CHECKING:
@@ -212,21 +211,6 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "variants": [],
             },
             {
-                "name": "watch",
-                "summary": "Attach to a recorded session and follow progress until completion.",
-                "targets": ["session_id", "PR_URL"],
-                "safety": "Read-only attach flow; uses the same resolver as `status`.",
-                "tty": "TTY mode reuses the existing dashboard; non-TTY mode prints plain polling lines.",
-                "stdout": "Progress lines until the session reaches `done` or `error`.",
-                "exit_codes": {
-                    "0": "session finished with status=done",
-                    "1": "session finished with status=error",
-                    "2": "invalid target, lookup failure, or corrupt metadata",
-                },
-                "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
-                "variants": [],
-            },
-            {
                 "name": "explain",
                 "summary": "Explain the final synthesized review of a completed PR review session using a custom or builtin prompt.",
                 "targets": ["PR_URL"],
@@ -271,59 +255,6 @@ def status_flow(
         return 0
     print(_watch_line_for_payload(payload), file=out)
     return 0
-
-
-def watch_flow(
-    args: argparse.Namespace,
-    *,
-    paths: ReviewflowPaths,
-    stdout: TextIO | None = None,
-    stderr: TextIO | None = None,
-) -> int:
-    rf = _reviewflow()
-    out = stdout or sys.stdout
-    err = stderr or sys.stderr
-    target = str(getattr(args, "target", "") or "")
-    resolved = resolve_observation_target(target, sandbox_root=paths.sandbox_root, command_name="watch")
-    interval = max(0.0, float(getattr(args, "interval", 2.0) or 0.0))
-    verbosity = rf._coerce_ui_verbosity(str(getattr(args, "verbosity", "normal") or "normal"))
-
-    try:
-        is_tty = bool(out.isatty()) and bool(err.isatty())
-    except Exception:
-        is_tty = False
-
-    if is_tty:
-        color = rf._stream_supports_color(out) and (not bool(getattr(args, "no_color", False)))
-        while True:
-            out.write("\x1b[2J\x1b[H")
-            out.flush()
-            status = rf._render_ui_preview(
-                session_dir=resolved.session_dir,
-                meta_path=resolved.meta_path,
-                verbosity=verbosity,
-                color=color,
-                width=None,
-                height=None,
-                final_newline=False,
-                stdout=out,
-            )
-            if status in {"done", "error"}:
-                return 0 if status == "done" else 1
-            time.sleep(interval if interval > 0 else 0.2)
-
-    last_line = None
-    while True:
-        payload = build_status_payload(resolved.session_id, sandbox_root=paths.sandbox_root, command_name="watch")
-        line = _watch_line_for_payload(payload)
-        if line != last_line:
-            print(line, file=out)
-            out.flush()
-            last_line = line
-        status = str(payload.get("status") or "").strip().lower()
-        if status in {"done", "error"}:
-            return 0 if status == "done" else 1
-        time.sleep(interval if interval > 0 else 0.2)
 
 
 def cache_prime(
@@ -717,7 +648,7 @@ def _agent_guidance_lines(*, command_name: str) -> list[str]:
     return [
         "Supported local coding agents are detected from executables on PATH; readiness is advisory and does not prove outer sandbox or network access.",
         f"Run `{PRIMARY_CLI_COMMAND} setup --agent codex` only after the operator approves persisting that choice.",
-        f"Use `{PRIMARY_CLI_COMMAND} set-agent codex` to change an approved saved choice later, or pass `--llm-preset codex-cli` for a one-off run.",
+        f"Re-run `{PRIMARY_CLI_COMMAND} setup --agent codex` to change an approved saved choice later, or pass `--llm-preset codex-cli` for a one-off run.",
     ]
 
 
@@ -1072,7 +1003,6 @@ def ensure_chunkhound_bootstrap_ready(
     gated = {
         "pr",
         "resume",
-        "followup",
         "interactive",
     }
     if command_name == "cache" and str(getattr(args, "cache_cmd", "") or "").strip() == "prime":
@@ -1183,29 +1113,6 @@ def setup_flow(
         raise _reviewflow()._chunkhound_not_on_path_error(uv_path=shutil.which("uv"))
     if bool(final_selection.get("blocking")):
         raise ReviewflowError(str(final_selection.get("detail") or "bootstrap readiness is still blocked"))
-    return 0
-
-
-def set_agent_flow(
-    args: argparse.Namespace,
-    *,
-    runtime: ReviewflowRuntime,
-    stdout: TextIO | None = None,
-) -> int:
-    out_stream = stdout or sys.stdout
-    selected_agent = str(getattr(args, "agent", "") or "").strip().lower()
-    choice = _resolve_bootstrap_agent_choice(
-        runtime=runtime,
-        cli_agent=selected_agent,
-        command_name="set-agent",
-        interactive=False,
-    )
-    _ensure_bootstrap_files(runtime=runtime, stdout=out_stream)
-    resolved_agent = str(choice.get("agent") or "").strip()
-    preset = LOCAL_AGENT_PRESET_BY_NAME[resolved_agent]
-    changed = _upsert_llm_default_preset(config_path=runtime.config_path, default_preset=preset)
-    action = "Updated" if changed else "Left unchanged"
-    print(f"{action} saved local agent preference: {resolved_agent} ({preset})", file=out_stream)
     return 0
 
 
@@ -1320,7 +1227,6 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
     artifacts: dict[str, object] = {}
     checks = _doctor_runtime_checks(
         runtime,
-        cli_profile=getattr(args, "agent_runtime_profile", None),
         pr_url=pr_url,
         args=args,
         artifacts=artifacts,
@@ -1331,7 +1237,6 @@ def doctor_flow(args: argparse.Namespace, *, runtime: ReviewflowRuntime) -> int:
         fail_count = sum(1 for item in checks if item.status == "fail")
         payload = _doctor_runtime_payload(
             runtime,
-            cli_profile=getattr(args, "agent_runtime_profile", None),
             pr_url=pr_url,
             args=args,
             artifacts=artifacts,
@@ -1365,8 +1270,6 @@ __all__ = [
     "pr_flow",
     "preferred_cli_invocation",
     "resume_flow",
-    "set_agent_flow",
     "setup_flow",
     "status_flow",
-    "watch_flow",
 ]

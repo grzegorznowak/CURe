@@ -2214,15 +2214,12 @@ class UtilityModelConfigTests(unittest.TestCase):
 
 
 class AgentRuntimeConfigTests(unittest.TestCase):
-    def test_load_reviewflow_agent_runtime_config_rejects_gemini_backend_block(self) -> None:
+    def test_load_reviewflow_llm_config_rejects_gemini_backend_block(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_agent_runtime.toml"
         try:
             cfg.write_text(
                 "\n".join(
                     [
-                        "[agent_runtime]",
-                        'profile = "permissive"',
-                        "",
                         "[agent_runtime.gemini]",
                         'sandbox = "runsc"',
                         'seatbelt_profile = "strict-open"',
@@ -2232,73 +2229,11 @@ class AgentRuntimeConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(rf.ReviewflowError) as ctx:
-                rf.load_reviewflow_agent_runtime_config(config_path=cfg)
+                rf.load_reviewflow_llm_config(config_path=cfg)
             self.assertIn("Gemini support was removed from CURe", str(ctx.exception))
             self.assertIn("[agent_runtime.gemini]", str(ctx.exception))
         finally:
             cfg.unlink(missing_ok=True)
-
-    def test_resolve_agent_runtime_profile_precedence(self) -> None:
-        cfg = ROOT / ".tmp_test_reviewflow_agent_runtime_precedence.toml"
-        try:
-            cfg.write_text(
-                "\n".join(
-                    [
-                        "[agent_runtime]",
-                        'profile = "permissive"',
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            profile, source, loaded, _ = rf.resolve_agent_runtime_profile(
-                cli_value=None,
-                config_path=cfg,
-                config_enabled=True,
-            )
-            self.assertEqual(profile, "permissive")
-            self.assertEqual(source, "config")
-            self.assertEqual(loaded["profile"], "permissive")
-
-            with mock.patch.dict(
-                os.environ,
-                {"CURE_AGENT_RUNTIME_PROFILE": "permissive"},
-                clear=False,
-            ):
-                profile, source, _, _ = rf.resolve_agent_runtime_profile(
-                    cli_value=None,
-                    config_path=cfg,
-                    config_enabled=True,
-                )
-            self.assertEqual(profile, "permissive")
-            self.assertEqual(source, "env")
-
-            profile, source, _, _ = rf.resolve_agent_runtime_profile(
-                cli_value="permissive",
-                config_path=cfg,
-                config_enabled=True,
-            )
-            self.assertEqual(profile, "permissive")
-            self.assertEqual(source, "cli")
-
-            profile, source, _, _ = rf.resolve_agent_runtime_profile(
-                cli_value=None,
-                config_path=cfg,
-                config_enabled=False,
-            )
-            self.assertEqual(profile, "permissive")
-            self.assertEqual(source, "default")
-        finally:
-            cfg.unlink(missing_ok=True)
-
-    def test_resolve_agent_runtime_profile_rejects_non_permissive_values(self) -> None:
-        for value in ("balanced", "strict"):
-            with self.assertRaises(rf.ReviewflowError):
-                rf.resolve_agent_runtime_profile(
-                    cli_value=value,
-                    config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=False,
-                )
 
 
 class AgentRuntimePolicyTests(unittest.TestCase):
@@ -2337,18 +2272,10 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             "runtime_overrides": {},
         }
 
-    def _runtime_args(
-        self,
-        *,
-        profile: str | None = None,
-        dry_run_chunkhound: bool = False,
-    ) -> argparse.Namespace:
-        return argparse.Namespace(
-            agent_runtime_profile=profile,
-            dry_run_chunkhound=dry_run_chunkhound,
-        )
+    def _runtime_args(self, *, dry_run_chunkhound: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(dry_run_chunkhound=dry_run_chunkhound)
 
-    def test_prepare_review_agent_runtime_uses_permissive_codex_profile(self) -> None:
+    def test_prepare_review_agent_runtime_builds_codex_runtime(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex"
         try:
             shutil.rmtree(root, ignore_errors=True)
@@ -2370,11 +2297,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 ),
             ):
                 runtime = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="permissive"),
+                    args=self._runtime_args(),
                     resolved=self._llm_resolved("codex"),
                     resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=True,
                     repo_dir=repo,
                     session_dir=session,
                     work_dir=work,
@@ -2386,7 +2311,6 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                     interactive=False,
                     paths=rf.DEFAULT_PATHS,
                 )
-                self.assertEqual(runtime["profile"], "permissive")
                 self.assertEqual(runtime["provider"], "codex")
                 self.assertIsNone(runtime["sandbox_mode"])
                 self.assertIsNone(runtime["approval_policy"])
@@ -2427,11 +2351,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
 
             with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
                 runtime = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="permissive"),
+                    args=self._runtime_args(),
                     resolved=self._llm_resolved("codex"),
                     resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=True,
                     repo_dir=repo,
                     session_dir=session,
                     work_dir=work,
@@ -2461,11 +2383,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
 
             with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
                 runtime = rf.prepare_review_agent_runtime(
-                    args=self._runtime_args(profile="permissive", dry_run_chunkhound=True),
+                    args=self._runtime_args(dry_run_chunkhound=True),
                     resolved=self._llm_resolved("codex"),
                     resolution_meta=self._llm_resolution_meta(),
-                    reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                    config_enabled=True,
                     repo_dir=repo,
                     session_dir=session,
                     work_dir=work,
@@ -2497,11 +2417,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.prepare_review_agent_runtime(
-                        args=self._runtime_args(profile="permissive"),
+                        args=self._runtime_args(),
                         resolved=self._llm_resolved("gemini"),
                         resolution_meta=self._llm_resolution_meta(),
-                        reviewflow_config_path=work / "runtime.toml",
-                        config_enabled=False,
                         repo_dir=repo,
                         session_dir=session,
                         work_dir=work,
@@ -2534,11 +2452,9 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.prepare_review_agent_runtime(
-                        args=self._runtime_args(profile="permissive"),
+                        args=self._runtime_args(),
                         resolved=self._llm_resolved("codex"),
                         resolution_meta=self._llm_resolution_meta(),
-                        reviewflow_config_path=ROOT / ".tmp_unused_runtime_config.toml",
-                        config_enabled=True,
                         repo_dir=repo,
                         session_dir=session,
                         work_dir=work,

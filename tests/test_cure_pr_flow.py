@@ -1301,3 +1301,91 @@ def test_fresh_pr_context_independently_finalizes_before_route_owned_delivery(
         "meta_artifact": "not_attempted",
         "warning": None,
     }
+
+
+def test_completed_session_resume_forwards_config_and_llm_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed-session resume must reach the follow-up flow with the
+    operator-selected configuration paths and generic LLM overrides intact."""
+    sandbox_root = tmp_path / "sandboxes"
+    session_dir = sandbox_root / "completed-0001"
+    session_dir.mkdir(parents=True)
+    (session_dir / "review.md").write_text("# review", encoding="utf-8")
+    (session_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "status": "done",
+                "created_at": "2026-08-06T00:00:00Z",
+                "completed_at": "2026-08-07T00:00:00Z",
+                "host": "github.com",
+                "owner": "grzegorznowak",
+                "repo": "CURe",
+                "number": 99,
+                "multipass": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def fake_followup_flow(
+        args: argparse.Namespace,
+        *,
+        paths: Any,
+        config_path: Path | None = None,
+        codex_base_config_path: Path | None = None,
+    ) -> int:
+        captured["args"] = args
+        captured["config_path"] = config_path
+        captured["codex_base_config_path"] = codex_base_config_path
+        return 0
+
+    monkeypatch.setattr(cure, "followup_flow", fake_followup_flow)
+
+    class FakePaths:
+        def __init__(self) -> None:
+            self.sandbox_root = sandbox_root
+
+    config_path = tmp_path / "custom.toml"
+    base_config_path = tmp_path / "codex-base.json"
+    args = argparse.Namespace(
+        session_id="https://github.com/grzegorznowak/CURe/pull/99",
+        from_phase="auto",
+        no_index=False,
+        codex_model=None,
+        codex_effort=None,
+        codex_plan_effort=None,
+        llm_preset="custom-preset",
+        llm_model="gpt-custom",
+        llm_effort="high",
+        llm_plan_effort=None,
+        llm_verbosity="normal",
+        llm_max_output_tokens=4096,
+        llm_set=["timeout=60"],
+        llm_header=["X-Custom=1"],
+        wtf=True,
+        quiet=False,
+        no_stream=False,
+        ui="auto",
+        verbosity="normal",
+    )
+
+    result = cure._resume_flow_impl(
+        args,
+        paths=FakePaths(),
+        config_path=config_path,
+        codex_base_config_path=base_config_path,
+    )
+
+    assert result == 0
+    assert captured["config_path"] == config_path
+    assert captured["codex_base_config_path"] == base_config_path
+    followup_args = captured["args"]
+    assert followup_args.llm_preset == "custom-preset"
+    assert followup_args.llm_model == "gpt-custom"
+    assert followup_args.llm_effort == "high"
+    assert followup_args.llm_max_output_tokens == 4096
+    assert list(followup_args.llm_set) == ["timeout=60"]
+    assert list(followup_args.llm_header) == ["X-Custom=1"]
