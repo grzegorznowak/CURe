@@ -2430,7 +2430,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 "supported",
             ),
             (
-                "rejected-non-linux-helper",
+                "supported-darwin-helper",
                 {
                     "provider": "codex",
                     "access_mode": "cli_helper_daemon",
@@ -2438,7 +2438,29 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     "no_review": False,
                     "platform": "darwin",
                 },
+                "supported",
+            ),
+            (
+                "rejected-windows-helper",
+                {
+                    "provider": "codex",
+                    "access_mode": "cli_helper_daemon",
+                    "no_index": False,
+                    "no_review": False,
+                    "platform": "win32",
+                },
                 "unsupported",
+            ),
+            (
+                "bypass-other-posix-helper",
+                {
+                    "provider": "codex",
+                    "access_mode": "cli_helper_daemon",
+                    "no_index": False,
+                    "no_review": False,
+                    "platform": "freebsd",
+                },
+                "bypass",
             ),
             (
                 "bypass-http-non-helper",
@@ -2494,7 +2516,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             raise AssertionError("model must not run on an unsupported daemon route")
 
         with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-            rf.sys, "platform", "darwin"
+            rf.sys, "platform", "win32"
         ):
             _, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
                 root=Path(raw_root) / "unsupported-route",
@@ -2502,11 +2524,41 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 multipass_enabled=False,
                 llm_side_effect=forbidden_model,
                 helper_preflight_side_effect=forbidden_helper,
-                expect_error="requires Linux",
+                expect_error="requires Linux or macOS",
             )
 
         self.assertEqual(events, [])
         self.assertEqual(calls, [])
+
+    @unittest.skipUnless(sys.platform.startswith("darwin"), "darwin keeper route is exercised on macOS CI")
+    def test_darwin_indexed_helper_route_runs_keeper_and_model(self) -> None:
+        """The indexed helper route acquires the keeper and runs on macOS."""
+        from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
+
+        events: list[str] = []
+
+        def helper_seen(**_kwargs: Any) -> None:
+            events.append("helper")
+
+        def complete_review(output_path: Path, _work_dir: Path) -> Any:
+            from _reviewflow_unittest_grounding_impl import _sectioned_review_markdown
+
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta={})
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root, _calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
+                root=Path(raw_root) / "darwin-route",
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=complete_review,
+                helper_preflight_side_effect=helper_seen,
+            )
+            self.assertTrue(root.is_dir())
+        self.assertEqual(events, ["helper"])
 
     def test_http_non_helper_and_no_index_routes_remain_keeper_free(self) -> None:
         """TAP-03 A9: bypass routes retain model behavior without keeper authority."""
@@ -6689,6 +6741,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
                                 generation=observed,
                                 expected_parent_pid=proxy_pid,
                                 proc_root=proc_root,
+                                platform="linux",
                             )
                         ),
                     )
@@ -6729,6 +6782,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
                         generation=observed,
                         expected_parent_pid=proxy_pid,
                         proc_root=proc_root,
+                        platform="linux",
                     )
                 ),
             )
@@ -9536,6 +9590,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                     environment=env,
                     timeout=2.5,
                     proc_root=proc_root,
+                    platform="linux",
                 )
             self.assertEqual(
                 generation,
@@ -9551,3 +9606,65 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 env=env,
             )
 
+
+
+class DarwinProcessIdentityTests(unittest.TestCase):
+    """Native daemon process identity observation on macOS (issue #38)."""
+
+    @staticmethod
+    def _pack_bsdinfo(*, pid: int, ppid: int, status: int, tvsec: int, tvusec: int) -> bytes:
+        import ctypes
+
+        from cure_chunkhound_lifecycle import _DarwinProcBsdInfo
+
+        info = _DarwinProcBsdInfo()
+        info.pbi_pid = pid
+        info.pbi_ppid = ppid
+        info.pbi_status = status
+        info.pbi_start_tvsec = tvsec
+        info.pbi_start_tvusec = tvusec
+        return ctypes.string_at(ctypes.byref(info), ctypes.sizeof(_DarwinProcBsdInfo))
+
+    def test_parse_bsdinfo_extracts_identity(self) -> None:
+        from cure_chunkhound_lifecycle import _parse_darwin_bsdinfo
+
+        data = self._pack_bsdinfo(pid=321, ppid=100, status=ord("S"), tvsec=1_700_000_000, tvusec=500_000)
+        identity = _parse_darwin_bsdinfo(data)
+        self.assertEqual(identity.pid, 321)
+        self.assertEqual(identity.parent_pid, 100)
+        self.assertEqual(identity.state, "S")
+        self.assertEqual(identity.process_started_at, 1_700_000_000.5)
+
+    def test_parse_bsdinfo_rejects_truncated_buffer(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
+
+        with self.assertRaises(DaemonGenerationObservationError):
+            _parse_darwin_bsdinfo(b"x" * 8)
+
+    def test_parse_bsdinfo_rejects_zombie_and_invalid_pids(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
+
+        for kwargs in (
+            {"pid": 321, "ppid": 100, "status": ord("Z"), "tvsec": 1, "tvusec": 0},
+            {"pid": 0, "ppid": 100, "status": ord("S"), "tvsec": 1, "tvusec": 0},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(DaemonGenerationObservationError):
+                _parse_darwin_bsdinfo(self._pack_bsdinfo(**kwargs))
+
+    def test_read_process_identity_dispatches_to_darwin_backend(self) -> None:
+        import cure_chunkhound_lifecycle as lifecycle
+
+        fixture = self._pack_bsdinfo(pid=321, ppid=100, status=ord("S"), tvsec=1_700_000_000, tvusec=250_000)
+        with mock.patch.object(
+            lifecycle, "_darwin_proc_pidinfo_bsdinfo", return_value=fixture
+        ):
+            identity = lifecycle._read_process_identity(321, platform="darwin")
+        self.assertEqual(identity.pid, 321)
+        self.assertEqual(identity.parent_pid, 100)
+        self.assertEqual(identity.process_started_at, 1_700_000_000.25)
+
+    def test_read_process_identity_rejects_unsupported_platform(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _read_process_identity
+
+        with self.assertRaises(DaemonGenerationObservationError):
+            _read_process_identity(321, platform="freebsd")

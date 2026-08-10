@@ -7872,11 +7872,14 @@ def _classify_chunkhound_daemon_route(
         return _ChunkHoundDaemonRoute.BYPASS
     if str(access_mode or "").strip() != "cli_helper_daemon":
         return _ChunkHoundDaemonRoute.BYPASS
-    if str(provider or "").strip().lower() != "codex" or not str(
-        platform or ""
-    ).startswith("linux"):
+    if str(provider or "").strip().lower() != "codex":
         return _ChunkHoundDaemonRoute.UNSUPPORTED
-    return _ChunkHoundDaemonRoute.SUPPORTED
+    current = str(platform or "").strip().lower()
+    if current.startswith(("linux", "darwin")):
+        return _ChunkHoundDaemonRoute.SUPPORTED
+    if current.startswith("win"):
+        return _ChunkHoundDaemonRoute.UNSUPPORTED
+    return _ChunkHoundDaemonRoute.BYPASS
 
 
 def _run_chunkhound_access_preflight(
@@ -9662,7 +9665,7 @@ def _pr_flow_impl(
             )
             if daemon_route is _ChunkHoundDaemonRoute.UNSUPPORTED:
                 raise ReviewflowError(
-                    "CURe-managed ChunkHound daemon helper access requires Linux; "
+                    "CURe-managed ChunkHound daemon helper access requires Linux or macOS; "
                     f"the indexed {str(runtime_metadata.get('provider') or 'review')} "
                     f"route is unsupported on {sys.platform}."
                 )
