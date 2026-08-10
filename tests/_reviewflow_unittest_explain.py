@@ -112,7 +112,14 @@ class ExplainCommandTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _patched_run(
-        self, args: argparse.Namespace, *, resolved: dict[str, object] | None = None
+        self,
+        args: argparse.Namespace,
+        *,
+        resolved: dict[str, object] | None = None,
+        resolve_error: bool = False,
+        llm_fail: bool = False,
+        record_file_lock: bool = False,
+        staged_paths_value: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Run _explain_flow_impl with mocked LLM plumbing; return captured kwargs + stdout."""
         captured: dict[str, object] = {"_builtin_calls": []}
@@ -120,6 +127,8 @@ class ExplainCommandTests(unittest.TestCase):
 
         def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
             captured.update(kwargs)
+            if llm_fail:
+                raise rf.ReviewflowError("llm exploded")
             Path(str(kwargs["output_path"])).write_text(EXPLAIN_ARTIFACT_TEXT, encoding="utf-8")
             return rf.LlmRunResult(resume=None, adapter_meta={"transport": "http-openai"})
 
@@ -130,7 +139,7 @@ class ExplainCommandTests(unittest.TestCase):
         def fake_stage_auth_support(
             *, work_dir: Path, repo_dir: Path, env: dict[str, str]
         ) -> tuple[dict[str, str], dict[str, str]]:
-            return dict(env), {}
+            return dict(env), (staged_paths_value if staged_paths_value is not None else {})
 
         out = StringIO()
         with contextlib.ExitStack() as stack:
@@ -138,7 +147,10 @@ class ExplainCommandTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "resolve_llm_config_from_args",
-                    return_value=(llm_resolved, {}),
+                    side_effect=rf.ReviewflowError("bad llm config") if resolve_error else None,
+                    return_value=(
+                        None if resolve_error else (llm_resolved, {})
+                    ),
                 )
             )
             stack.enter_context(
@@ -150,6 +162,10 @@ class ExplainCommandTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(rf, "load_builtin_prompt_text", side_effect=fake_load_builtin_prompt_text)
             )
+            if record_file_lock:
+                captured["_file_lock_mock"] = stack.enter_context(
+                    mock.patch.object(rf, "file_lock", wraps=rf.file_lock)
+                )
             with contextlib.redirect_stdout(out):
                 rc = rf._explain_flow_impl(args, paths=self.paths)
         captured["_stdout"] = out.getvalue()
@@ -415,3 +431,145 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertIn(new_id, fork_text)
         self.assertNotIn(BASE_CODEX_SESSION_ID, fork_text)
         self.assertEqual(base_path.read_bytes(), base_before)
+
+    # -- PR #37 review remediation obligations ------------------------------
+
+    def test_build_codex_exec_cmd_resume_filters_incompatible_flags_and_read_only(self) -> None:
+        cmd = rf.build_codex_exec_cmd(
+            repo_dir=self.root,
+            codex_flags=[
+                "-m", "gpt-5.6-sol",
+                "--sandbox", "workspace-write",
+                "--search",
+                "-c", "model_reasoning_effort=high",
+            ],
+            codex_config_overrides=[],
+            review_md_path=self.root / "out.md",
+            prompt="why?",
+            skip_git_repo_check=True,
+            dangerously_bypass_approvals_and_sandbox=False,
+            json_output=True,
+            resume_session_id="fork-1",
+            sandbox_mode="read-only",
+        )
+        self.assertEqual(cmd[:4], ["codex", "exec", "resume", "fork-1"])
+        self.assertIn("-m", cmd)
+        self.assertIn("gpt-5.6-sol", cmd)
+        self.assertIn("-c", cmd)
+        self.assertIn("model_reasoning_effort=high", cmd)
+        self.assertIn('sandbox_mode="read-only"', cmd)
+        self.assertIn("--skip-git-repo-check", cmd)
+        self.assertNotIn("--sandbox", cmd)
+        self.assertNotIn("--search", cmd)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+
+    def test_build_codex_exec_cmd_exec_read_only_without_bypass(self) -> None:
+        cmd = rf.build_codex_exec_cmd(
+            repo_dir=self.root,
+            codex_flags=["-m", "gpt-5.6-sol", "--sandbox", "workspace-write"],
+            codex_config_overrides=[],
+            review_md_path=self.root / "out.md",
+            prompt="why?",
+            dangerously_bypass_approvals_and_sandbox=False,
+            approval_policy=None,
+            json_output=True,
+            sandbox_mode="read-only",
+        )
+        self.assertIn("--sandbox", cmd)
+        self.assertIn("read-only", cmd)
+        self.assertEqual(cmd.count("--sandbox"), 1)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+        self.assertNotIn("-a", cmd)
+        self.assertNotIn("--search", cmd)
+
+    def test_explain_flow_constrains_codex_runtime(self) -> None:
+        codex_root = self.root / "codex-home"
+        _write_fake_codex_session(codex_root=codex_root)
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
+            captured = self._patched_run(
+                _explain_args(),
+                resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+            )
+
+        self.assertEqual(captured["_rc"], 0)
+        self.assertEqual(
+            captured["runtime_policy"],
+            {"dangerously_bypass_approvals_and_sandbox": False, "approval_policy": None},
+        )
+        self.assertEqual(captured["sandbox_mode"], "read-only")
+
+    def test_explain_flow_cleans_staged_paths_on_config_failure(self) -> None:
+        _write_completed_session(root=self.root)
+        cleaned: list[object] = []
+
+        with mock.patch.object(
+            rf,
+            "cleanup_sensitive_staged_paths",
+            side_effect=lambda staged: cleaned.append(staged),
+        ):
+            with self.assertRaisesRegex(rf.ReviewflowError, "bad llm config"):
+                self._patched_run(
+                    _explain_args(), resolve_error=True, staged_paths_value={"staged": "path"}
+                )
+        self.assertEqual(cleaned, [{"staged": "path"}])
+
+    def test_explain_flow_unique_artifact_names(self) -> None:
+        _write_completed_session(root=self.root)
+        first = self._patched_run(_explain_args())
+        second = self._patched_run(_explain_args())
+        first_path = Path(str(first["output_path"]))
+        second_path = Path(str(second["output_path"]))
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.name.startswith("explain-"))
+        self.assertEqual(len(first_path.name.rsplit(".", 1)[0].split("-")[-1]), 8)
+
+    def test_explain_flow_uses_meta_file_lock(self) -> None:
+        _write_completed_session(root=self.root)
+        captured = self._patched_run(_explain_args(), record_file_lock=True)
+        self.assertEqual(captured["_rc"], 0)
+        lock_mock = captured["_file_lock_mock"]
+        self.assertTrue(lock_mock.called)
+        self.assertEqual(
+            lock_mock.call_args.args[0], self.root / "session-1" / "meta.json"
+        )
+
+    def test_explain_flow_removes_fork_on_llm_failure(self) -> None:
+        codex_root = self.root / "codex-home"
+        base_path = _write_fake_codex_session(codex_root=codex_root)
+        base_before = base_path.read_bytes()
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
+            with self.assertRaisesRegex(rf.ReviewflowError, "llm exploded"):
+                self._patched_run(
+                    _explain_args(),
+                    resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+                    llm_fail=True,
+                )
+
+        rollouts = list(codex_root.glob("sessions/*/*/*/rollout-*.jsonl"))
+        self.assertEqual([p for p in rollouts if p != base_path], [])
+        self.assertEqual(base_path.read_bytes(), base_before)
+
+    def test_fork_codex_session_io_failure_raises_reviewflow_error(self) -> None:
+        codex_root = self.root / "codex-home"
+        _write_fake_codex_session(codex_root=codex_root)
+        import datetime as _dt
+
+        now = _dt.datetime(2026, 8, 10, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        day_dir = codex_root / "sessions" / "2026" / "08" / "10"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        day_dir.chmod(0o500)
+        try:
+            with self.assertRaisesRegex(rf.ReviewflowError, "Cannot fork"):
+                rf.fork_codex_session(
+                    codex_root=codex_root,
+                    session_id=BASE_CODEX_SESSION_ID,
+                    created_at="2026-08-04T06:30:00+00:00",
+                    completed_at="2026-08-04T06:35:31+00:00",
+                    now=now,
+                )
+        finally:
+            day_dir.chmod(0o700)

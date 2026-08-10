@@ -65,7 +65,41 @@ cure explain --pr <PR_URL> [--explain-prompt <TEXT>]
 |---|---|
 | provider != codex | inline |
 | no `meta.llm.resume`/`codex.resume` session id | inline |
-| base rollout not found / fork write error | inline (silent, entry without `resume` key) |
+| base rollout not found / fork read/write/decode failure | inline (silent, entry without `resume` key) |
+
+Fork read/write/decoding failures (`OSError`/`UnicodeError`) are converted to
+`ReviewflowError` inside `fork_codex_session` so the flow's single fallback catch
+handles them.
+
+## Read-only runtime (PR #37 review)
+
+- The flow passes `runtime_policy={dangerously_bypass_approvals_and_sandbox: False,
+  approval_policy: None}` and `sandbox_mode="read-only"` to `run_llm_exec`.
+- `build_codex_exec_cmd`: inline path adds `--sandbox read-only` (stripping any
+  config `--sandbox`/`--search`); resume path adds `-c sandbox_mode="read-only"`
+  and filters flags to the resume-compatible subset (`-m`/`-c` only), honoring
+  `--skip-git-repo-check` on the trusted-directory retry.
+- `run_llm_exec` passes `approval_policy` through as-is (None) instead of forcing
+  `"never"` — codex 0.144.6 has no `-a` flag, so the `-a` branch must not fire.
+
+## Streaming (PR #37 review)
+
+- The flow registers a `ReviewflowOutput` (ui disabled, `stderr`, session
+  `logs_dir`, verbosity) via `set_active_output`/`start`/`stop`/`clear_active_output`
+  around the LLM run — `run_logged_cmd` then streams codex display lines to stderr
+  (`also_to`) while the model generates; the completed artifact is still printed
+  on stdout at the end.
+
+## Concurrency and cleanup (PR #37 review)
+
+- Artifact names: `explain-<ts>-<uuid8>.md` (no same-second collisions).
+- Meta append: `file_lock(meta_path)` + fresh `_load_session_meta` reload inside
+  the lock, then `write_redacted_json`.
+- Cleanup span: `cleanup_sensitive_staged_paths` covers the whole post-staging
+  span; `_stage_review_auth_support` (both cure.py and cure_llm.py copies)
+  rolls back already-staged paths if a later staging step fails.
+- Failure-scoped fork rollback: the fork rollout is deleted when the run does not
+  complete (kept on success — referenced by the explains entry).
 
 ## Metadata contract (`meta.json`)
 
@@ -88,6 +122,10 @@ cure explain --pr <PR_URL> [--explain-prompt <TEXT>]
   inline happy path / custom prompt / streaming / error paths / parser / catalog /
   wrapper / fork+resume (base byte-identical, ids rewritten, no review append,
   resume pointers untouched) / three fallback cases / fork helper unit tests.
-- Full suite regression, ruff, py_compile.
-- Real-run proof: fork resume against the completed PR21 session with
-  `sha256sum` of the base rollout before/after.
+- PR #37 remediation obligations (8 more): resume flag whitelist + read-only cmd
+  shape (both branches), flow runtime policy, early-failure credential cleanup,
+  unique artifact names, meta file_lock usage, fork deletion on LLM failure,
+  fork I/O failure → ReviewflowError.
+- Full suite regression, ruff, py_compile; Story 26 smoke against an editable
+  install venv; real-run proof (write/gh probes denied, live stderr streaming,
+  base sha unchanged).

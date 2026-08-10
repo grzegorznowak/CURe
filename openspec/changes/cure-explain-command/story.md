@@ -61,6 +61,10 @@ None (standalone change; no dependency story workspaces).
 - S5: Non-codex provider (or missing base session) → inline explanation from review
   text; no fork created; exit 0. Covers: A7
 - S6: `cure commands` lists explain with a recommended invocation. Covers: A8
+- S7: User asks explain (codex) to modify a file or call gh → the agent reports the
+  sandbox denied the action; the run completes read-only. Covers: A9
+- S8: Non-quiet, non-no-stream run → answer text reaches the terminal during
+  generation. Covers: A5
 
 ## Acceptance
 - A1: `cure explain --help` shows `--pr` (required) and `--explain-prompt`.
@@ -70,13 +74,23 @@ None (standalone change; no dependency story workspaces).
 - A3: `--explain-prompt` overrides the builtin (loader not called; prompt contains
   the custom text; entry `prompt_source: user:explain_prompt`).
 - A4: No completed session or invalid PR URL → exit 2 with a ReviewflowError message.
-- A5: `stream=True` is passed to the LLM runner unless quiet/no-stream.
+- A5: Answer text streams to the terminal during generation unless `--quiet`/
+  `--no-stream` (active output controller registered; display lines reach stderr
+  while the LLM runs).
 - A6: Codex provider + recorded `meta.llm.resume` → a forked rollout with a new id
   is created; `codex exec resume <fork>` runs; base rollout is byte-identical;
   `meta.llm.resume` still names the base; entry records `resume.mode=fork`.
-- A7: Non-codex provider, no resume info, or missing base → inline mode (prompt
-  contains the review text), no fork created, exit 0.
+- A7: Non-codex provider, no resume info, or missing/unforkable base → inline mode
+  (prompt contains the review text), no fork created, exit 0. Fork I/O failures
+  (unreadable/unwritable store) also fall back inline.
 - A8: `cure commands` catalog contains an `explain` entry.
+- A9: Codex runs are read-only: no `--dangerously-bypass-approvals-and-sandbox`;
+  `--sandbox read-only` (inline) / `-c sandbox_mode="read-only"` (resume); config
+  `--sandbox`/`--search` flags are filtered out of the resume command; staged
+  credentials are cleaned up on any failure path.
+- A10: Repository selftest (`selftest.sh` Story 26 smoke) passes with the new
+  catalog; `explain_flow` is exported via `cure_commands.__all__`, the `cure`
+  re-export, and the reexport contract test.
 
 ## Verification
 
@@ -101,6 +115,10 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 | TAP-3 | unit / flow | error paths + parser (A1, A4) | same owner | parse_pr_url, scan, subparser | ReviewflowError regexes; SystemExit; args mapping | empty sandbox; bad URL | same | — | CLI surface owner |
 | TAP-4 | unit / flow | resume-fork + fallbacks (A6, A7) | same owner | fork_codex_session + run_llm_exec kwarg | fork rollout exists, ids rewritten, base byte-equal, resume_session_id set/None, prompt mode | tmp CODEX_HOME + fake base rollout | same | — | fork mechanics owner |
 | TAP-5 | unit / helpers | fork helper, catalog, wrapper (A6, A8) | same owner | fork_codex_session; catalog payload; wrapper delegation | raise when base missing; catalog contains explain; delegation rc | tmp codex store; parser | same | — | helper-level proof |
+| TAP-8 | unit / runner | read-only + resume flags (A9) | same owner | build_codex_exec_cmd both branches | `--sandbox read-only` / `-c sandbox_mode=...`; no bypass; `--sandbox`/`--search` filtered; skip-git-repo-check present on retry | direct cmd assertions | same | — | command-shape owner |
+| TAP-9 | unit / flow | cleanup scope, unique artifacts, meta lock, fork rollback (A7, A9) | same owner | early-failure cleanup; same-second runs; file_lock; LLM-failure fork deletion | cleaned staged dict; distinct artifact names; lock on meta path; fork removed on failure | fake staged dict; recorder lock | same | — | lifecycle owners |
+| TAP-10 | selftest / repo | installed-package catalog (A10) | tests/story26_cli_smoke.py + selftest.sh | editable-install venv smoke | smoke rc=0 with 6-command catalog | pip venv install | `python3 tests/story26_cli_smoke.py --cli-bin <venv>/bin/cure` | CI selftest.sh | install-contract gate |
+| TAP-11 | real-run / e2e | read-only + streaming + pristine base (A5, A6, A9) | manual evidence (PR21, 2026-08-10 12:08Z) | real codex resume with sandbox + active output | stderr shows incremental agent text; write/gh probes denied; rc=0; base sha unchanged | PR21 session + codex 0.144.6 | manual | TAP-8/9 | real-provider proof |
 | TAP-6 | regression / repo | all suites + lint + compile (A2–A8) | full tests/ + ruff + py_compile | whole-repo | 762 tests OK; ruff clean | repo fixtures | full unittest discover | CI selftest.sh | regression gate |
 | TAP-7 | real-run / e2e | live fork + pristine base (A2, A6) | manual evidence (PR21, 2026-08-10) | real codex exec resume | rc=0, answer grounded, base sha unchanged, meta resume block | completed PR21 session + codex 0.144.6 | manual | mocked owners TAP-1/4 | real-provider proof |
 
@@ -111,10 +129,12 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 | A2 | final | automated TAP-1 + real TAP-7 | run TAP-1; inspect 2026-08-10 run log | rc=0, artifact, entry builtin:explain.md | _explain_flow_impl | — |
 | A3 | final | automated TAP-2 | run TAP-2 | loader uncalled, custom prompt, entry source | prompt assembly | — |
 | A4 | final | automated TAP-3 | run TAP-3 | ReviewflowError exit-2 paths | parse_pr_url, scan_completed_sessions_for_pr | — |
-| A5 | final | automated TAP-1 | run stream test | stream flag True/False | flow verbosity | — |
-| A6 | final | automated TAP-4/5 + real TAP-7 | run TAP-4; re-hash base rollout | fork rollout, base sha a3711ee6…, meta.llm.resume unchanged, entry fork ids | fork_codex_session, resume cmd | — |
-| A7 | final | automated TAP-4 | run fallback tests | inline prompt, no fork, rc=0 | flow fallback | — |
-| A8 | final | automated TAP-5 | run catalog test | explain entry | build_commands_catalog_payload | — |
+| A5 | final | automated TAP-1 + real TAP-11 | run stream tests; inspect 12:08Z stderr | stream flag; incremental agent text on stderr during run | ReviewflowOutput wiring | — |
+| A6 | final | automated TAP-4/5 + real TAP-7/11 | run TAP-4; re-hash base rollout | fork rollout, base sha a3711ee6…, meta.llm.resume unchanged, entry fork ids | fork_codex_session, resume cmd | — |
+| A7 | final | automated TAP-4/9 | run fallback + I/O-failure tests | inline prompt, no fork, rc=0; ReviewflowError conversion | fork fallback | — |
+| A8 | final | automated TAP-5 + selftest TAP-10 | run catalog + smoke tests | explain entry; smoke rc=0 | catalog, story26 smoke | — |
+| A9 | final | automated TAP-8/9 + real TAP-11 | run cmd-shape tests; inspect recorded command | read-only flags, no bypass, filtered sandbox/search, cleanup on failure, probes denied | build_codex_exec_cmd, flow policy | — |
+| A10 | final | automated TAP-10 + reexport test | run story26 smoke; run reexport test | smoke rc=0; rf.explain_flow is cure_commands.explain_flow | exports, selftest | — |
 
 ## Discovery Notes
 - Codex sessions are single rollout JSONL files: `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`; first line `session_meta` carries `payload.id`/`cwd`/`originator`; resume locates by scanning (no index dependency).
@@ -146,6 +166,13 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   unchanged; meta entries recorded.
 - Constraints: fork mode requires codex provider + intact base rollout; env
   `CODEX_HOME` honored (else `~/.codex`).
+- PR #37 review remediation (2026-08-10): RED 9 → GREEN after read-only runtime
+  (sandbox_mode + no bypass + approval None), output-controller streaming, fork
+  I/O fallback, resume flag whitelist + skip-git retry, extended cleanup span +
+  staging rollback, unique artifact names + meta file_lock, story26 smoke catalog,
+  exports, and failure-scoped fork deletion. Suite 762 → 770; selftest smoke rc=0;
+  real-run probes (write + `gh api user`) denied by sandbox, live stderr streaming,
+  base sha unchanged.
 
 ## Locked Decisions
 - D1 (Gate 1): target = `--pr <url>` → most recent completed review session.
@@ -159,6 +186,16 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   inline fallback (review text appended), not an error.
 - D6: explains entries record `resume: {mode, base_session_id, fork_session_id}`;
   `meta.llm.resume`/`meta.codex.resume` are never modified by explain.
+- D7 (PR#37 review): codex runs are read-only — `sandbox_mode="read-only"` always,
+  never `--dangerously-bypass-approvals-and-sandbox`, no `-a`; resume command
+  filters config flags to the `codex exec resume`-compatible subset (`-m`/`-c`)
+  and honors `--skip-git-repo-check` on the retry path.
+- D8 (PR#37 review): staged-credential cleanup spans the whole post-staging span;
+  `_stage_review_auth_support` rolls back partial staging on failure; fork rollouts
+  are deleted when the run fails; artifacts use `explain-<ts>-<uuid8>.md` and the
+  meta append runs under `file_lock` with a fresh reload.
+- D9 (PR#37 review): streaming requires an active output controller — the flow
+  registers `ReviewflowOutput` (ui off) so display lines reach stderr during runs.
 
 ## Plan Review Log
 <!-- Empty; plan review pending operator's checkpoint approval of this draft. -->

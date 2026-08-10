@@ -1359,6 +1359,7 @@ __all__ = [
     "clean_flow",
     "commands_flow",
     "doctor_flow",
+    "explain_flow",
     "followup_flow",
     "interactive_flow",
     "pr_flow",

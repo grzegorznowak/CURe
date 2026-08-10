@@ -2359,23 +2359,27 @@ def _require_provider_command(command: str, *, provider: str) -> str:
 
 def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
-    gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-    if gh_cfg:
-        env["GH_CONFIG_DIR"] = str(gh_cfg)
-        staged_paths["gh_config_dir"] = str(gh_cfg)
-    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-    if jira_cfg:
-        env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-        staged_paths["jira_config_file"] = str(jira_cfg)
-    netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
-    if netrc:
-        env["NETRC"] = str(netrc)
-        staged_paths["netrc"] = str(netrc)
-    env["CURE_WORK_DIR"] = str(work_dir)
-    staged_paths["cure_work_dir"] = str(work_dir)
-    rf_jira = write_rf_jira(repo_dir=repo_dir)
-    staged_paths["rf_jira"] = str(rf_jira)
-    return env, staged_paths
+    try:
+        gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
+        if gh_cfg:
+            env["GH_CONFIG_DIR"] = str(gh_cfg)
+            staged_paths["gh_config_dir"] = str(gh_cfg)
+        jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
+        if jira_cfg:
+            env["JIRA_CONFIG_FILE"] = str(jira_cfg)
+            staged_paths["jira_config_file"] = str(jira_cfg)
+        netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
+        if netrc:
+            env["NETRC"] = str(netrc)
+            staged_paths["netrc"] = str(netrc)
+        env["CURE_WORK_DIR"] = str(work_dir)
+        staged_paths["cure_work_dir"] = str(work_dir)
+        rf_jira = write_rf_jira(repo_dir=repo_dir)
+        staged_paths["rf_jira"] = str(rf_jira)
+        return env, staged_paths
+    except Exception:
+        cleanup_sensitive_staged_paths(staged_paths)
+        raise
 
 
 SENSITIVE_STAGED_PATH_KEYS = (
@@ -13754,6 +13758,9 @@ def _followup_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
+from uuid import uuid4
+
+
 def _recorded_resume_session_id(meta: dict[str, Any]) -> str | None:
     """Return the recorded codex resume session id (llm.resume or codex.resume)."""
     for key in ("llm", "codex"):
@@ -13804,80 +13811,106 @@ def _explain_flow_impl(
     repo_dir = Path(str(meta_paths.get("repo_dir") or (session_dir / "repo"))).resolve()
     work_dir = Path(str(meta_paths.get("work_dir") or (session_dir / "work"))).resolve()
 
+    if not repo_dir.is_dir():
+        raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
+
     review_md_path = session.review_md_path
     if not review_md_path.is_file():
         raise ReviewflowError(f"Review markdown not found: {review_md_path}")
     review_text = review_md_path.read_text(encoding="utf-8")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = work_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env, staged_paths = _stage_review_auth_support(
         work_dir=work_dir, repo_dir=repo_dir, env=env
     )
 
-    user_prompt = str(getattr(args, "explain_prompt", "") or "").strip()
-    llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
-        args,
-        reviewflow_config_path=effective_config_path,
-        base_codex_config_path=effective_codex_base_config_path,
-    )
-
     resume_fork_id: str | None = None
     resume_base_id: str | None = None
-    provider = str(llm_resolved.get("provider") or "").strip().lower()
-    if provider == "codex":
-        resume_base_id = _recorded_resume_session_id(meta)
-        if resume_base_id:
-            try:
-                codex_root = Path(
-                    os.environ.get("CODEX_HOME") or (real_user_home_dir() / ".codex")
-                ).resolve()
-                resume_fork_id, _ = fork_codex_session(
-                    codex_root=codex_root,
-                    session_id=resume_base_id,
-                    created_at=str(meta.get("created_at") or ""),
-                    completed_at=str(meta.get("completed_at") or ""),
-                )
-            except ReviewflowError:
-                # Base codex session unavailable: fall back to inline review-text mode.
-                resume_fork_id = None
-                resume_base_id = None
-
-    if user_prompt:
-        prompt_template = user_prompt
-        prompt_template_id = "user:explain_prompt"
-    else:
-        prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
-        prompt_template_id = builtin_prompt_id(EXPLAIN_PROMPT_TEMPLATE)
-    if resume_fork_id is None:
-        prompt = f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n{review_text.strip()}"
-    else:
-        # Resume mode: the forked session already holds the review in its context.
-        prompt = prompt_template.rstrip()
-
-    explain_dir = session_dir / "explain"
-    explain_dir.mkdir(parents=True, exist_ok=True)
-    explain_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    explain_md_path = explain_dir / f"explain-{explain_ts}.md"
-
-    started_at = _utc_now_iso()
-    progress = SessionProgress(meta_path, quiet=True)
-    progress.meta = meta
+    fork_path: Path | None = None
+    completed = False
     try:
-        with phase("explain", progress=progress, quiet=quiet):
-            result = run_llm_exec(
-                repo_dir=repo_dir,
-                resolved=llm_resolved,
-                resolution_meta=llm_resolution_meta,
-                output_path=explain_md_path,
-                prompt=prompt,
-                env=env,
-                stream=stream,
-                progress=progress,
-                resume_session_id=resume_fork_id,
-            )
-        llm_meta = meta.setdefault("llm", {})
-        record_llm_usage(llm_meta, result.adapter_meta)
+        user_prompt = str(getattr(args, "explain_prompt", "") or "").strip()
+        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+            args,
+            reviewflow_config_path=effective_config_path,
+            base_codex_config_path=effective_codex_base_config_path,
+        )
+
+        provider = str(llm_resolved.get("provider") or "").strip().lower()
+        if provider == "codex":
+            resume_base_id = _recorded_resume_session_id(meta)
+            if resume_base_id:
+                try:
+                    codex_root = Path(
+                        os.environ.get("CODEX_HOME") or (real_user_home_dir() / ".codex")
+                    ).resolve()
+                    resume_fork_id, fork_path = fork_codex_session(
+                        codex_root=codex_root,
+                        session_id=resume_base_id,
+                        created_at=str(meta.get("created_at") or ""),
+                        completed_at=str(meta.get("completed_at") or ""),
+                    )
+                except ReviewflowError:
+                    # Base codex session unavailable: fall back to inline review-text mode.
+                    resume_fork_id = None
+                    resume_base_id = None
+                    fork_path = None
+
+        if user_prompt:
+            prompt_template = user_prompt
+            prompt_template_id = "user:explain_prompt"
+        else:
+            prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
+            prompt_template_id = builtin_prompt_id(EXPLAIN_PROMPT_TEMPLATE)
+        if resume_fork_id is None:
+            prompt = f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n{review_text.strip()}"
+        else:
+            # Resume mode: the forked session already holds the review in its context.
+            prompt = prompt_template.rstrip()
+
+        explain_dir = session_dir / "explain"
+        explain_dir.mkdir(parents=True, exist_ok=True)
+        explain_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        explain_md_path = explain_dir / f"explain-{explain_ts}-{uuid4().hex[:8]}.md"
+
+        started_at = _utc_now_iso()
+        progress = SessionProgress(meta_path, quiet=True)
+        progress.meta = meta
+        out = ReviewflowOutput(
+            ui_enabled=False,
+            no_stream=no_stream,
+            stderr=sys.stderr,
+            meta_path=meta_path,
+            logs_dir=logs_dir,
+            verbosity=verbosity,
+        )
+        set_active_output(out)
+        out.start()
+        try:
+            with phase("explain", progress=progress, quiet=quiet):
+                result = run_llm_exec(
+                    repo_dir=repo_dir,
+                    resolved=llm_resolved,
+                    resolution_meta=llm_resolution_meta,
+                    output_path=explain_md_path,
+                    prompt=prompt,
+                    env=env,
+                    stream=stream,
+                    progress=progress,
+                    resume_session_id=resume_fork_id,
+                    runtime_policy={
+                        "dangerously_bypass_approvals_and_sandbox": False,
+                        "approval_policy": None,
+                    },
+                    sandbox_mode="read-only",
+                )
+        finally:
+            clear_active_output(out)
+            out.stop()
+
         explain_entry: dict[str, Any] = {
             "started_at": started_at,
             "completed_at": _utc_now_iso(),
@@ -13890,10 +13923,20 @@ def _explain_flow_impl(
                 "base_session_id": str(resume_base_id or ""),
                 "fork_session_id": resume_fork_id,
             }
-        meta.setdefault("explains", []).append(explain_entry)
-        write_redacted_json(meta_path, meta)
+        with file_lock(meta_path, quiet=quiet):
+            meta = _load_session_meta(meta_path) or {}
+            llm_meta = meta.setdefault("llm", {})
+            record_llm_usage(llm_meta, result.adapter_meta)
+            meta.setdefault("explains", []).append(explain_entry)
+            write_redacted_json(meta_path, meta)
+        completed = True
     finally:
         cleanup_sensitive_staged_paths(staged_paths)
+        if not completed and fork_path is not None:
+            try:
+                fork_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     if explain_md_path.is_file():
         explanation = explain_md_path.read_text(encoding="utf-8").strip()
@@ -16376,6 +16419,7 @@ from cure_commands import (
     clean_flow,
     commands_flow,
     doctor_flow,
+    explain_flow,
     followup_flow,
     interactive_flow,
     pr_flow,

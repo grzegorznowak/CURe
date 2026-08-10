@@ -367,6 +367,40 @@ def _finalize_codex_live_progress(*, progress: Any, status: str) -> None:
     _flush_progress(progress)
 
 
+_RESUME_SUPPORTED_FLAG_NAMES = {"-m", "-c"}
+
+
+def _resume_compatible_codex_flags(codex_flags: list[str]) -> list[str]:
+    """Keep only flag/value pairs the `codex exec resume` subcommand accepts."""
+    out: list[str] = []
+    i = 0
+    while i < len(codex_flags):
+        flag = codex_flags[i]
+        if flag in _RESUME_SUPPORTED_FLAG_NAMES and i + 1 < len(codex_flags):
+            out.extend([flag, codex_flags[i + 1]])
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _strip_sandbox_search_flags(codex_flags: list[str]) -> list[str]:
+    """Drop `--sandbox <mode>` and `--search` flag/value pairs."""
+    out: list[str] = []
+    i = 0
+    while i < len(codex_flags):
+        flag = codex_flags[i]
+        if flag == "--sandbox":
+            i += 2
+            continue
+        if flag == "--search":
+            i += 1
+            continue
+        out.append(flag)
+        i += 1
+    return out
+
+
 def build_codex_exec_cmd(
     *,
     repo_dir: Path,
@@ -376,20 +410,25 @@ def build_codex_exec_cmd(
     prompt: str,
     add_dirs: list[Path] | None = None,
     skip_git_repo_check: bool = False,
-    approval_policy: str = "never",
+    approval_policy: str | None = "never",
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
     json_output: bool = False,
     resume_session_id: str | None = None,
+    sandbox_mode: str | None = None,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     if resume_session_id:
         cmd = ["codex", "exec", "resume", str(resume_session_id)]
-        cmd.extend(codex_flags)
+        cmd.extend(_resume_compatible_codex_flags(codex_flags))
         for override in overrides:
             cmd.extend(["-c", override])
+        if sandbox_mode:
+            cmd.extend(["-c", f'sandbox_mode="{sandbox_mode}"'])
         if include_shell_environment_inherit_all:
             cmd.extend(["-c", "shell_environment_policy.inherit=all"])
+        if skip_git_repo_check:
+            cmd.append("--skip-git-repo-check")
         if dangerously_bypass_approvals_and_sandbox:
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         if json_output:
@@ -398,11 +437,15 @@ def build_codex_exec_cmd(
         if prompt:
             cmd.append(prompt)
         return cmd
+    if sandbox_mode:
+        codex_flags = _strip_sandbox_search_flags(codex_flags)
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     cmd = ["codex", "-C", str(repo_dir), "--add-dir", "/tmp"]
     for add_dir in add_dirs or []:
         cmd.extend(["--add-dir", str(add_dir)])
     cmd.extend(codex_flags)
+    if sandbox_mode:
+        cmd.extend(["--sandbox", sandbox_mode])
     if approval_policy and (not dangerously_bypass_approvals_and_sandbox) and (not has_explicit_approval_flag):
         cmd.extend(["-a", approval_policy])
     for override in overrides:
@@ -437,6 +480,7 @@ def run_codex_exec(
     include_shell_environment_inherit_all: bool = True,
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
+    sandbox_mode: str | None = None,
 ) -> CodexRunResult:
     owned_role: OwnedProcessRole | None = (
         "review-provider" if owned_processes is not None else None
@@ -476,6 +520,7 @@ def run_codex_exec(
         include_shell_environment_inherit_all=include_shell_environment_inherit_all,
         json_output=True,
         resume_session_id=resume_session_id,
+        sandbox_mode=sandbox_mode,
     )
     progress.record_cmd(cmd)
     try:
@@ -563,6 +608,7 @@ def run_codex_exec(
             include_shell_environment_inherit_all=include_shell_environment_inherit_all,
             json_output=True,
             resume_session_id=resume_session_id,
+            sandbox_mode=sandbox_mode,
         )
         progress.record_cmd(fallback)
         out = active_output()
@@ -785,6 +831,7 @@ def run_llm_exec(
     runtime_policy: dict[str, Any] | None = None,
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
+    sandbox_mode: str | None = None,
 ) -> LlmRunResult:
     rf = _reviewflow()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -794,6 +841,8 @@ def run_llm_exec(
             resolution_meta=resolution_meta,
         )
         policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+        approval_raw = policy.get("approval_policy")
+        approval_policy = str(approval_raw) if approval_raw else None
         codex_flags = list(policy.get("codex_flags") or codex_flags)
         codex_config_overrides = list(policy.get("codex_config_overrides") or codex_config_overrides or [])
         result = rf.run_codex_exec(
@@ -806,11 +855,12 @@ def run_llm_exec(
             stream=stream,
             progress=progress,
             add_dirs=list(policy.get("add_dirs") or add_dirs or []),
-            approval_policy=str(policy.get("approval_policy") or "never"),
+            approval_policy=approval_policy,
             dangerously_bypass_approvals_and_sandbox=bool(policy.get("dangerously_bypass_approvals_and_sandbox", True)),
             include_shell_environment_inherit_all=bool(policy.get("include_shell_environment_inherit_all", False)),
             owned_processes=owned_processes,
             resume_session_id=resume_session_id,
+            sandbox_mode=sandbox_mode,
         )
         resume = None
         if result.resume is not None:
@@ -879,23 +929,27 @@ def _require_provider_command(command: str, *, provider: str) -> str:
 
 def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
-    gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-    if gh_cfg:
-        env["GH_CONFIG_DIR"] = str(gh_cfg)
-        staged_paths["gh_config_dir"] = str(gh_cfg)
-    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-    if jira_cfg:
-        env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-        staged_paths["jira_config_file"] = str(jira_cfg)
-    netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
-    if netrc:
-        env["NETRC"] = str(netrc)
-        staged_paths["netrc"] = str(netrc)
-    env["CURE_WORK_DIR"] = str(work_dir)
-    staged_paths["cure_work_dir"] = str(work_dir)
-    rf_jira = write_rf_jira(repo_dir=repo_dir)
-    staged_paths["rf_jira"] = str(rf_jira)
-    return env, staged_paths
+    try:
+        gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
+        if gh_cfg:
+            env["GH_CONFIG_DIR"] = str(gh_cfg)
+            staged_paths["gh_config_dir"] = str(gh_cfg)
+        jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
+        if jira_cfg:
+            env["JIRA_CONFIG_FILE"] = str(jira_cfg)
+            staged_paths["jira_config_file"] = str(jira_cfg)
+        netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
+        if netrc:
+            env["NETRC"] = str(netrc)
+            staged_paths["netrc"] = str(netrc)
+        env["CURE_WORK_DIR"] = str(work_dir)
+        staged_paths["cure_work_dir"] = str(work_dir)
+        rf_jira = write_rf_jira(repo_dir=repo_dir)
+        staged_paths["rf_jira"] = str(rf_jira)
+        return env, staged_paths
+    except Exception:
+        cleanup_sensitive_staged_paths(staged_paths)
+        raise
 
 
 def write_chunkhound_helper(
@@ -1433,20 +1487,23 @@ def fork_codex_session(
             f"Cannot fork codex session {session_id!r}: not found under "
             f"{codex_root / 'sessions'}."
         )
-    text = base_log.read_text(encoding="utf-8")
-    if session_id not in text:
-        raise ReviewflowError(
-            f"Cannot fork codex session {session_id!r}: session id not present in {base_log}."
+    try:
+        text = base_log.read_text(encoding="utf-8")
+        if session_id not in text:
+            raise ReviewflowError(
+                f"Cannot fork codex session {session_id!r}: session id not present in {base_log}."
+            )
+        now = now or datetime.now(timezone.utc)
+        new_id = str(uuid4())
+        day_dir = (
+            codex_root / "sessions" / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
         )
-    now = now or datetime.now(timezone.utc)
-    new_id = str(uuid4())
-    day_dir = (
-        codex_root / "sessions" / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
-    )
-    day_dir.mkdir(parents=True, exist_ok=True)
-    fork_path = day_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_id}.jsonl"
-    fork_path.write_text(text.replace(session_id, new_id), encoding="utf-8")
-    return new_id, fork_path
+        day_dir.mkdir(parents=True, exist_ok=True)
+        fork_path = day_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_id}.jsonl"
+        fork_path.write_text(text.replace(session_id, new_id), encoding="utf-8")
+        return new_id, fork_path
+    except (OSError, UnicodeError) as e:
+        raise ReviewflowError(f"Cannot fork codex session {session_id!r}: {e}") from e
 
 
 def _load_codex_session_meta(session_log_path: Path) -> dict[str, Any] | None:

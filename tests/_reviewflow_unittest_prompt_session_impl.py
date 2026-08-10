@@ -4612,6 +4612,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIs(rf.pr_flow, cure_commands.pr_flow)
         self.assertIs(rf.resume_flow, cure_commands.resume_flow)
         self.assertIs(rf.followup_flow, cure_commands.followup_flow)
+        self.assertIs(rf.explain_flow, cure_commands.explain_flow)
         self.assertIs(rf.interactive_flow, cure_commands.interactive_flow)
         self.assertIs(rf.clean_flow, cure_commands.clean_flow)
         self.assertFalse(hasattr(rf, "jira_smoke_flow"))

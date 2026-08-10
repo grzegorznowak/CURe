@@ -31,3 +31,16 @@
 - [x] OpenSpec change workspace `openspec/changes/cure-explain-command/` (proposal/story/design/tasks)
 - [ ] Operator decision: commit `feat/explain-command` branch (worktree untouched by openspec artifacts)
 - [ ] Optional follow-ups (not committed): live smoke with other codex versions; `--prompt-file`
+
+## PR #37 Review Remediation (2026-08-10)
+- [x] RED: 9 review-obligation tests failing (read-only cmd shape, runtime policy, cleanup-on-config-failure, unique artifacts, meta lock, fork rollback, fork I/O conversion, reexport)
+- [x] GREEN: read-only runtime — flow passes bypass:False/approval:None + sandbox_mode="read-only"; exec adds `--sandbox read-only`, resume adds `-c sandbox_mode="read-only"`; no `--dangerously-bypass-approvals-and-sandbox`
+- [x] Resume command: whitelist flags to `-m`/`-c` (drop config `--sandbox`/`--search`), honor `--skip-git-repo-check` on retry
+- [x] Streaming: register ReviewflowOutput (ui off) around the LLM run → display lines reach stderr live
+- [x] Fork I/O failures (OSError/UnicodeError) → ReviewflowError → inline fallback
+- [x] Cleanup: whole post-staging span in try/finally; `_stage_review_auth_support` partial-staging rollback (both copies); fork rollout deleted on failure
+- [x] Concurrency: `explain-<ts>-<uuid8>.md` artifact names; meta append under file_lock with fresh reload
+- [x] selftest: story26_cli_smoke catalog now expects 6 commands; smoke passes rc=0 against editable-install venv
+- [x] Exports: `explain_flow` in cure_commands.__all__, cure.py command imports, reexport contract test
+- [x] Full suite 770/770; ruff clean; py_compile OK
+- [x] Real-run proof (PR21 12:08Z): write + `gh api user` probes denied by read-only sandbox; live stderr streaming; base rollout sha unchanged (a3711ee6…); recorded resume cmd shows `-c sandbox_mode="read-only"`, no bypass
