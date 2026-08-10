@@ -11,3 +11,4 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from _reviewflow_unittest_core import *  # noqa: F403, E402
+from _reviewflow_unittest_explain import *  # noqa: F403, E402

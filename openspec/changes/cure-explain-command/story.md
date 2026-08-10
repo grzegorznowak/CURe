@@ -1,0 +1,164 @@
+# Story — Cure Explain Command
+
+Plan: 🟢 PLAN APPROVED
+Status: 🟣 IN REVIEW
+
+> Story scaffolded from the agentic-workflow-cycle protocol run (2026-08-10):
+> planning via Gate 1 human decisions; implementation complete and verified.
+
+## Purpose
+Users can run `cure explain --pr <PR_URL> [--explain-prompt <text>]` to get a
+human-friendly, LLM-generated explanation of the final synthesized review of a
+completed review session — grounded in the review's full context (codex resume-fork
+mode) without disturbing the pristine post-review session state that `interactive`
+gates on.
+
+## Actors
+- Primary: CURe CLI user asking questions about a completed PR review
+- Secondary: PR author reading the explanation
+- Reviewer: CURe maintainer verifying the command contract
+- System: CURe (parser/dispatch/flow), codex CLI (provider), codex session store
+
+## Triggering Need
+Review artifacts are dense; users need plain-language explanations and follow-up
+questions about *why* findings were raised, with the backing knowledge the review
+used. Resuming the original codex session directly would pollute the pristine
+post-review state used by `cure interactive`, so explanations must run on a fork.
+
+## Expected Prerequisites
+None (standalone change; no dependency story workspaces).
+
+## Scope
+- New visible `explain` CLI command: argparse subparser, `main()` dispatch,
+  `explain_flow` wrapper, `cure commands` catalog entry
+- Target selection: `--pr <url>` → most recent completed session
+  (`scan_completed_sessions_for_pr`)
+- Prompt: builtin `prompts/explain.md` default, overridable via `--explain-prompt`
+- Streaming output (unless `--quiet`/`--no-stream`); explanation printed + artifact
+  path; artifact at `<session>/explain/explain-<ts>.md`
+- Codex resume-fork mode: fork base codex session (byte-copy + id rewrite) and
+  `codex exec resume <fork>`; base rollout byte-identical; `meta.llm.resume` untouched
+- Inline fallback (review text appended to prompt) for non-codex providers, missing
+  resume info, or unforkable base session
+- Meta recording: `explains[]` entries (prompt_source, output_path, timestamps,
+  optional `resume: {mode, base_session_id, fork_session_id}`), `llm` usage
+
+## Out of Scope
+- `--prompt-file`, interactive stdin prompt, session-id targeting
+- followup-style chunkhound/review-intelligence/PR-context wiring
+- Non-codex provider resume; codex session store GC/cleanup
+- TUI rendering; changes to `interactive`, `followup`, or the pr flow
+
+## Scenarios / Behavior Examples
+- S1: User runs `cure explain --pr <url>` after a completed review → prints the
+  explanation of the review and the artifact path. Covers: A2
+- S2: User passes `--explain-prompt "Why was X flagged?"` → answer addresses X;
+  builtin prompt not used. Covers: A3
+- S3: User runs explain with no completed session for the PR → clean exit-2 error.
+  Covers: A4
+- S4: Codex provider with recorded resume info → explanation shows backing
+  knowledge; base codex session sha256 unchanged. Covers: A6
+- S5: Non-codex provider (or missing base session) → inline explanation from review
+  text; no fork created; exit 0. Covers: A7
+- S6: `cure commands` lists explain with a recommended invocation. Covers: A8
+
+## Acceptance
+- A1: `cure explain --help` shows `--pr` (required) and `--explain-prompt`.
+- A2: Default-prompt run against a completed session exits 0, prints explanation
+  + artifact path, writes `explain/explain-<ts>.md`, records an `explains` entry
+  with `prompt_source: builtin:explain.md`.
+- A3: `--explain-prompt` overrides the builtin (loader not called; prompt contains
+  the custom text; entry `prompt_source: user:explain_prompt`).
+- A4: No completed session or invalid PR URL → exit 2 with a ReviewflowError message.
+- A5: `stream=True` is passed to the LLM runner unless quiet/no-stream.
+- A6: Codex provider + recorded `meta.llm.resume` → a forked rollout with a new id
+  is created; `codex exec resume <fork>` runs; base rollout is byte-identical;
+  `meta.llm.resume` still names the base; entry records `resume.mode=fork`.
+- A7: Non-codex provider, no resume info, or missing base → inline mode (prompt
+  contains the review text), no fork created, exit 0.
+- A8: `cure commands` catalog contains an `explain` entry.
+
+## Verification
+
+### Verification Commands
+```
+python3 -m unittest tests.test_reviewflow_unittest.ExplainCommandTests -v   # 16 obligations
+python3 -m unittest discover -s tests -p 'test_*.py'                        # full suite (762)
+ruff check cure.py cure_llm.py cure_commands.py tests/_reviewflow_unittest_explain.py
+python3 -m py_compile cure.py cure_llm.py cure_commands.py
+# Real-run evidence (codex-cli, completed PR21 session):
+sha256sum ~/.codex/sessions/2026/08/04/rollout-*019fcb76*.jsonl   # before == after (a3711ee6…)
+cure explain --pr https://github.com/grzegorznowak/CURe/pull/21 \
+  --explain-prompt "In one sentence: what must the author fix, and why?"
+python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explains"][-1])'
+```
+
+### Test Architecture Plan
+| Row ID | Layer / Scope | Behavior / Acceptance Slice | Owning Suite / File(s) | Boundary Exercised | Assertions / Observability | Fixture / Test Data Strategy | CI Lane / Command | Fallback Plan | Split / Merge Rationale |
+|---|---|---|---|---|---|---|---|---|---|
+| TAP-1 | unit / flow | default prompt, stdout, artifact, meta (A2) | tests/_reviewflow_unittest_explain.py::ExplainCommandTests | `_explain_flow_impl` with mocked `run_llm_exec` | rc=0, artifact content, stdout, explains entry | tmp sandbox session + fake LLM writing output file | `unittest` ExplainCommandTests | manual CLI run | core contract in one owner |
+| TAP-2 | unit / flow | custom prompt override (A3) | same owner | prompt assembly | loader not called; prompt startswith custom; entry source | same fixtures | same | — | split from TAP-1 for the branch |
+| TAP-3 | unit / flow | error paths + parser (A1, A4) | same owner | parse_pr_url, scan, subparser | ReviewflowError regexes; SystemExit; args mapping | empty sandbox; bad URL | same | — | CLI surface owner |
+| TAP-4 | unit / flow | resume-fork + fallbacks (A6, A7) | same owner | fork_codex_session + run_llm_exec kwarg | fork rollout exists, ids rewritten, base byte-equal, resume_session_id set/None, prompt mode | tmp CODEX_HOME + fake base rollout | same | — | fork mechanics owner |
+| TAP-5 | unit / helpers | fork helper, catalog, wrapper (A6, A8) | same owner | fork_codex_session; catalog payload; wrapper delegation | raise when base missing; catalog contains explain; delegation rc | tmp codex store; parser | same | — | helper-level proof |
+| TAP-6 | regression / repo | all suites + lint + compile (A2–A8) | full tests/ + ruff + py_compile | whole-repo | 762 tests OK; ruff clean | repo fixtures | full unittest discover | CI selftest.sh | regression gate |
+| TAP-7 | real-run / e2e | live fork + pristine base (A2, A6) | manual evidence (PR21, 2026-08-10) | real codex exec resume | rc=0, answer grounded, base sha unchanged, meta resume block | completed PR21 session + codex 0.144.6 | manual | mocked owners TAP-1/4 | real-provider proof |
+
+### Acceptance Proof Matrix
+| Acceptance ID | Proof Maturity | Proof Method | Reviewer Action | Expected Evidence | Relevant Surfaces | Open Detail |
+|---|---|---|---|---|---|---|
+| A1 | final | automated TAP-3 | run subparser tests | args mapping + required --pr | build_parser | — |
+| A2 | final | automated TAP-1 + real TAP-7 | run TAP-1; inspect 2026-08-10 run log | rc=0, artifact, entry builtin:explain.md | _explain_flow_impl | — |
+| A3 | final | automated TAP-2 | run TAP-2 | loader uncalled, custom prompt, entry source | prompt assembly | — |
+| A4 | final | automated TAP-3 | run TAP-3 | ReviewflowError exit-2 paths | parse_pr_url, scan_completed_sessions_for_pr | — |
+| A5 | final | automated TAP-1 | run stream test | stream flag True/False | flow verbosity | — |
+| A6 | final | automated TAP-4/5 + real TAP-7 | run TAP-4; re-hash base rollout | fork rollout, base sha a3711ee6…, meta.llm.resume unchanged, entry fork ids | fork_codex_session, resume cmd | — |
+| A7 | final | automated TAP-4 | run fallback tests | inline prompt, no fork, rc=0 | flow fallback | — |
+| A8 | final | automated TAP-5 | run catalog test | explain entry | build_commands_catalog_payload | — |
+
+## Discovery Notes
+- Codex sessions are single rollout JSONL files: `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`; first line `session_meta` carries `payload.id`/`cwd`/`originator`; resume locates by scanning (no index dependency).
+- codex 0.144.6 has no `--fork`; a fork is a byte-copy with every occurrence of the base uuid rewritten. `codex exec resume <id> [flags] --json -o <out> <prompt>` works with the prompt as a trailing positional (no `--`, `-C`, or `--add-dir` on the resume subcommand).
+- `run_llm_exec` in cure.py:2256 is a dead local copy shadowed by the bottom-of-file `from cure_llm import run_llm_exec`; the effective implementation lives in cure_llm.py.
+- `load_builtin_prompt_text(name)` joins the name as-is — the prompts package files carry `.md`, so callers must pass `"explain.md"`.
+- The pr flow records resume info at `meta.llm.resume.session_id` (and `meta.codex.resume`); explain must read it but never overwrite it (`interactive` gates on it).
+- `_find_codex_session_log_by_id` (cure_llm.py) already locates base rollouts via created/completed date windows.
+
+## Critical Files
+| Path | Planned role |
+|------|--------------|
+| `cure.py::_explain_flow_impl` + `_recorded_resume_session_id` | command flow: target resolution, fork decision, prompt modes, explains entry |
+| `cure.py::build_parser` / `main()` | explain subparser (`--pr`, `--explain-prompt`, llm overrides) + dispatch |
+| `cure_llm.py::fork_codex_session` | session-store fork (copy + uuid rewrite), ReviewflowError on missing base |
+| `cure_llm.py::{build_codex_exec_cmd,run_codex_exec,run_llm_exec}` | `resume_session_id` plumbing → `codex exec resume` branch |
+| `cure_commands.py::{explain_flow,build_commands_catalog_payload}` | wrapper + catalog entry |
+| `prompts/explain.md` | builtin default prompt (new) |
+| `tests/_reviewflow_unittest_explain.py` | 16 obligations incl. fork/fallback owners (new) |
+
+## Implementation Notes
+- Executed under the agentic-workflow-cycle protocol: A_I (decomposition + research +
+  Gate 1 human decisions), A_R (design + obligations), B (RED 9 → GREEN 10, then
+  fork mode RED 3 → GREEN 16). Full suite 756 → 762; ruff + py_compile clean.
+- Red-first seams: `_explain_flow_impl` tests with mocked `run_llm_exec`; fork tests
+  against a tmp `CODEX_HOME` with a fake base rollout.
+- Real verification: one-shot inline run (07:12, builtin prompt) and resume-fork run
+  (07:56, custom prompt) against the completed PR21 session; base rollout sha256
+  unchanged; meta entries recorded.
+- Constraints: fork mode requires codex provider + intact base rollout; env
+  `CODEX_HOME` honored (else `~/.codex`).
+
+## Locked Decisions
+- D1 (Gate 1): target = `--pr <url>` → most recent completed review session.
+- D2 (Gate 1): builtin default prompt (`prompts/explain.md`), overridable via
+  `--explain-prompt`; prompt optional. Rejected: `--prompt/--prompt-file` mirror of `cure pr`.
+- D3 (Gate 1): output always streams unless `--quiet`/`--no-stream`. Rejected: one-shot print.
+- D4 (human): explain must run on a **fork** of the base codex session, never the
+  base, so `interactive` keeps gating the pristine post-review state. Rejected:
+  direct `codex resume <base>` (would consume the pristine state).
+- D5: fork failure (missing base, non-codex provider, no resume info) → transparent
+  inline fallback (review text appended), not an error.
+- D6: explains entries record `resume: {mode, base_session_id, fork_session_id}`;
+  `meta.llm.resume`/`meta.codex.resume` are never modified by explain.
+
+## Plan Review Log
+<!-- Empty; plan review pending operator's checkpoint approval of this draft. -->

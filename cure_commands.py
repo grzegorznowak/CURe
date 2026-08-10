@@ -226,6 +226,19 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "recommended_invocation": preferred_cli_invocation("watch <session_id|PR_URL>"),
                 "variants": [],
             },
+            {
+                "name": "explain",
+                "summary": "Explain the final synthesized review of a completed PR review session using a custom or builtin prompt.",
+                "targets": ["PR_URL"],
+                "safety": "Read-only; sends the review markdown plus the user prompt to the configured LLM and records the explanation under the session.",
+                "tty": "No TTY required.",
+                "stdout": "Prints the explanation text followed by the explain artifact path.",
+                "exit_codes": {"0": "explanation produced", "2": "usage, lookup, or runtime error"},
+                "recommended_invocation": preferred_cli_invocation(
+                    "explain --pr <PR_URL> --explain-prompt 'Why did you flag X?'"
+                ),
+                "variants": [],
+            },
         ],
     }
 
@@ -1237,6 +1250,22 @@ def followup_flow(
 ) -> int:
     rf = _reviewflow()
     return rf._followup_flow_impl(
+        args,
+        paths=paths,
+        config_path=config_path,
+        codex_base_config_path=codex_base_config_path,
+    )
+
+
+def explain_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
+    rf = _reviewflow()
+    return rf._explain_flow_impl(
         args,
         paths=paths,
         config_path=config_path,

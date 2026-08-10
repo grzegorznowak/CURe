@@ -13754,6 +13754,155 @@ def _followup_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
+def _recorded_resume_session_id(meta: dict[str, Any]) -> str | None:
+    """Return the recorded codex resume session id (llm.resume or codex.resume)."""
+    for key in ("llm", "codex"):
+        block = meta.get(key)
+        if not isinstance(block, dict):
+            continue
+        resume = block.get("resume")
+        if isinstance(resume, dict):
+            session_id = str(resume.get("session_id") or "").strip()
+            if session_id:
+                return session_id
+    return None
+
+
+EXPLAIN_PROMPT_TEMPLATE = "explain.md"
+
+
+def _explain_flow_impl(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
+    verbosity = resolve_verbosity(args)
+    quiet = verbosity is Verbosity.quiet
+    no_stream = bool(getattr(args, "no_stream", False))
+    stream = (not quiet) and (not no_stream)
+
+    pr_url = str(getattr(args, "pr", "") or "").strip()
+    if not pr_url:
+        raise ReviewflowError("explain requires a PR URL (--pr).")
+    pr = parse_pr_url(pr_url)
+
+    sessions = scan_completed_sessions_for_pr(sandbox_root=paths.sandbox_root, pr=pr)
+    if not sessions:
+        raise ReviewflowError(
+            f"No completed review session found for PR {pr_url} under {paths.sandbox_root}."
+        )
+    session = sessions[0]
+    session_dir = session.session_dir
+    meta_path = session_dir / "meta.json"
+    meta = _load_session_meta(meta_path) or {}
+
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    repo_dir = Path(str(meta_paths.get("repo_dir") or (session_dir / "repo"))).resolve()
+    work_dir = Path(str(meta_paths.get("work_dir") or (session_dir / "work"))).resolve()
+
+    review_md_path = session.review_md_path
+    if not review_md_path.is_file():
+        raise ReviewflowError(f"Review markdown not found: {review_md_path}")
+    review_text = review_md_path.read_text(encoding="utf-8")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env, staged_paths = _stage_review_auth_support(
+        work_dir=work_dir, repo_dir=repo_dir, env=env
+    )
+
+    user_prompt = str(getattr(args, "explain_prompt", "") or "").strip()
+    llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+        args,
+        reviewflow_config_path=effective_config_path,
+        base_codex_config_path=effective_codex_base_config_path,
+    )
+
+    resume_fork_id: str | None = None
+    resume_base_id: str | None = None
+    provider = str(llm_resolved.get("provider") or "").strip().lower()
+    if provider == "codex":
+        resume_base_id = _recorded_resume_session_id(meta)
+        if resume_base_id:
+            try:
+                codex_root = Path(
+                    os.environ.get("CODEX_HOME") or (real_user_home_dir() / ".codex")
+                ).resolve()
+                resume_fork_id, _ = fork_codex_session(
+                    codex_root=codex_root,
+                    session_id=resume_base_id,
+                    created_at=str(meta.get("created_at") or ""),
+                    completed_at=str(meta.get("completed_at") or ""),
+                )
+            except ReviewflowError:
+                # Base codex session unavailable: fall back to inline review-text mode.
+                resume_fork_id = None
+                resume_base_id = None
+
+    if user_prompt:
+        prompt_template = user_prompt
+        prompt_template_id = "user:explain_prompt"
+    else:
+        prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
+        prompt_template_id = builtin_prompt_id(EXPLAIN_PROMPT_TEMPLATE)
+    if resume_fork_id is None:
+        prompt = f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n{review_text.strip()}"
+    else:
+        # Resume mode: the forked session already holds the review in its context.
+        prompt = prompt_template.rstrip()
+
+    explain_dir = session_dir / "explain"
+    explain_dir.mkdir(parents=True, exist_ok=True)
+    explain_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    explain_md_path = explain_dir / f"explain-{explain_ts}.md"
+
+    started_at = _utc_now_iso()
+    progress = SessionProgress(meta_path, quiet=True)
+    progress.meta = meta
+    try:
+        with phase("explain", progress=progress, quiet=quiet):
+            result = run_llm_exec(
+                repo_dir=repo_dir,
+                resolved=llm_resolved,
+                resolution_meta=llm_resolution_meta,
+                output_path=explain_md_path,
+                prompt=prompt,
+                env=env,
+                stream=stream,
+                progress=progress,
+                resume_session_id=resume_fork_id,
+            )
+        llm_meta = meta.setdefault("llm", {})
+        record_llm_usage(llm_meta, result.adapter_meta)
+        explain_entry: dict[str, Any] = {
+            "started_at": started_at,
+            "completed_at": _utc_now_iso(),
+            "prompt_source": prompt_template_id,
+            "output_path": str(explain_md_path),
+        }
+        if resume_fork_id is not None:
+            explain_entry["resume"] = {
+                "mode": "fork",
+                "base_session_id": str(resume_base_id or ""),
+                "fork_session_id": resume_fork_id,
+            }
+        meta.setdefault("explains", []).append(explain_entry)
+        write_redacted_json(meta_path, meta)
+    finally:
+        cleanup_sensitive_staged_paths(staged_paths)
+
+    if explain_md_path.is_file():
+        explanation = explain_md_path.read_text(encoding="utf-8").strip()
+        if explanation:
+            print(explanation)
+    print(str(explain_md_path))
+    return 0
+
+
 def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, default: Path) -> Path:
     if raw:
         p = Path(str(raw)).expanduser()
@@ -16212,6 +16361,7 @@ from cure_llm import (
     codex_mcp_overrides_for_reviewflow,
     codex_resume_meta_dict,
     find_codex_resume_info,
+    fork_codex_session,
     llm_resume_meta_dict,
     prepare_review_agent_runtime,
     record_codex_resume,
@@ -16480,6 +16630,36 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     fup.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     fup.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
+    ep = sub.add_parser(
+        "explain",
+        help="Explain the final synthesized review of a completed PR review session",
+        parents=[runtime_parent],
+    )
+    ep.add_argument(
+        "--pr",
+        dest="pr",
+        required=True,
+        help="PR URL whose most recent completed review to explain",
+    )
+    ep.add_argument(
+        "--explain-prompt",
+        dest="explain_prompt",
+        default=None,
+        help="Custom prompt for the explanation (default: builtin explain prompt)",
+    )
+    add_llm_override_args(ep)
+    ep.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    ep.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
+    ep.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    ep.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    ep.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
+    ep.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
     upp = sub.add_parser("ui-preview", help="Render the TUI dashboard from an existing session", parents=[runtime_parent])
     upp.add_argument("session_id", help="Session id (folder name)")
     upp.add_argument("--watch", action="store_true", help="Continuously repaint the dashboard")
@@ -16638,6 +16818,13 @@ def main(
             )
         if args.cmd == "followup":
             return command_surface.followup_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "explain":
+            return command_surface.explain_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,

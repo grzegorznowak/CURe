@@ -380,8 +380,24 @@ def build_codex_exec_cmd(
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
     json_output: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
+    if resume_session_id:
+        cmd = ["codex", "exec", "resume", str(resume_session_id)]
+        cmd.extend(codex_flags)
+        for override in overrides:
+            cmd.extend(["-c", override])
+        if include_shell_environment_inherit_all:
+            cmd.extend(["-c", "shell_environment_policy.inherit=all"])
+        if dangerously_bypass_approvals_and_sandbox:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        if json_output:
+            cmd.append("--json")
+        cmd.extend(["--output-last-message", str(review_md_path)])
+        if prompt:
+            cmd.append(prompt)
+        return cmd
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
     cmd = ["codex", "-C", str(repo_dir), "--add-dir", "/tmp"]
     for add_dir in add_dirs or []:
@@ -420,6 +436,7 @@ def run_codex_exec(
     dangerously_bypass_approvals_and_sandbox: bool = True,
     include_shell_environment_inherit_all: bool = True,
     owned_processes: OwnedProcessRegistry | None = None,
+    resume_session_id: str | None = None,
 ) -> CodexRunResult:
     owned_role: OwnedProcessRole | None = (
         "review-provider" if owned_processes is not None else None
@@ -458,6 +475,7 @@ def run_codex_exec(
         dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
         include_shell_environment_inherit_all=include_shell_environment_inherit_all,
         json_output=True,
+        resume_session_id=resume_session_id,
     )
     progress.record_cmd(cmd)
     try:
@@ -544,6 +562,7 @@ def run_codex_exec(
             dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
             include_shell_environment_inherit_all=include_shell_environment_inherit_all,
             json_output=True,
+            resume_session_id=resume_session_id,
         )
         progress.record_cmd(fallback)
         out = active_output()
@@ -765,6 +784,7 @@ def run_llm_exec(
     codex_config_overrides: list[str] | None = None,
     runtime_policy: dict[str, Any] | None = None,
     owned_processes: OwnedProcessRegistry | None = None,
+    resume_session_id: str | None = None,
 ) -> LlmRunResult:
     rf = _reviewflow()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -790,6 +810,7 @@ def run_llm_exec(
             dangerously_bypass_approvals_and_sandbox=bool(policy.get("dangerously_bypass_approvals_and_sandbox", True)),
             include_shell_environment_inherit_all=bool(policy.get("include_shell_environment_inherit_all", False)),
             owned_processes=owned_processes,
+            resume_session_id=resume_session_id,
         )
         resume = None
         if result.resume is not None:
@@ -1384,6 +1405,48 @@ def _parse_iso_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(text)
     except Exception:
         return None
+
+
+def fork_codex_session(
+    *,
+    codex_root: Path,
+    session_id: str,
+    created_at: str | None = None,
+    completed_at: str | None = None,
+    now: datetime | None = None,
+) -> tuple[str, Path]:
+    """Fork a codex session rollout into a fresh session id, leaving the base untouched.
+
+    Codex sessions are single rollout JSONL files under CODEX_HOME/sessions/YYYY/MM/DD.
+    A fork is a copy of the base rollout with every occurrence of the base session id
+    rewritten to a new id, so `codex exec resume <fork-id>` continues from exactly the
+    state the base had when the fork was taken.
+    """
+    base_log = _find_codex_session_log_by_id(
+        codex_root=codex_root,
+        session_id=session_id,
+        created_at=created_at,
+        completed_at=completed_at,
+    )
+    if base_log is None:
+        raise ReviewflowError(
+            f"Cannot fork codex session {session_id!r}: not found under "
+            f"{codex_root / 'sessions'}."
+        )
+    text = base_log.read_text(encoding="utf-8")
+    if session_id not in text:
+        raise ReviewflowError(
+            f"Cannot fork codex session {session_id!r}: session id not present in {base_log}."
+        )
+    now = now or datetime.now(timezone.utc)
+    new_id = str(uuid4())
+    day_dir = (
+        codex_root / "sessions" / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
+    )
+    day_dir.mkdir(parents=True, exist_ok=True)
+    fork_path = day_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_id}.jsonl"
+    fork_path.write_text(text.replace(session_id, new_id), encoding="utf-8")
+    return new_id, fork_path
 
 
 def _load_codex_session_meta(session_log_path: Path) -> dict[str, Any] | None:
