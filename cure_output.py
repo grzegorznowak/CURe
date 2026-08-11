@@ -340,6 +340,28 @@ class _TextCallbackSink:
         self._sink.flush()
 
 
+class _CodexStderrDiagSink:
+    """Routes codex stderr diagnostics to the display log (and the terminal
+    when live streaming) — never into the JSON event stream."""
+
+    def __init__(self, *, display_file: TextIO, also_to: TextIO | None) -> None:
+        self._display_file = display_file
+        self._also_to = also_to
+
+    def write(self, s: str) -> int:
+        self._display_file.write(s)
+        self._display_file.flush()
+        if self._also_to is not None:
+            self._also_to.write(s)
+            self._also_to.flush()
+        return len(s)
+
+    def flush(self) -> None:
+        self._display_file.flush()
+        if self._also_to is not None:
+            self._also_to.flush()
+
+
 class CodexJsonEventSink:
     """Stream Codex JSONL to a raw log while preserving readable tails for the dashboard."""
 
@@ -652,6 +674,12 @@ class ReviewflowOutput:
                         on_activity=self.state.ping,
                         on_event=codex_event_callback,
                     )
+                    # stderr diagnostics go to the display log + terminal, never
+                    # into the JSON event stream (they would corrupt a large
+                    # event split across pipe reads).
+                    stderr_sink = _CodexStderrDiagSink(
+                        display_file=display_file, also_to=also_to
+                    )
                 if stream_text_callback is not None:
                     sink = _TextCallbackSink(sink, stream_text_callback)
                 return run_cmd(
@@ -661,6 +689,7 @@ class ReviewflowOutput:
                     check=check,
                     stream=True,
                     stream_to=sink,
+                    stderr_stream=stderr_sink if capture_codex_json else None,
                     stream_label=label,
                     lossless_capture=lossless_capture,
                     owned_processes=owned_processes,

@@ -553,6 +553,24 @@ class ExplainCommandTests(unittest.TestCase):
                 completed_at="2026-08-04T06:35:31+00:00",
             )
 
+    def test_fork_codex_session_treats_malformed_rollout_as_missing(self) -> None:
+        """Valid JSON that is not an object (null / []) must behave like a
+        missing base — a normal fork failure — never a programming error."""
+        for malformed in ("null", "[]", '"a string"', "42"):
+            codex_root = self.root / f"codex-home-malformed-{malformed}"
+            shutil.rmtree(codex_root, ignore_errors=True)
+            _write_fake_codex_session(codex_root=codex_root)
+            rollout_name = f"rollout-2026-08-04T06-30-01-{BASE_CODEX_SESSION_ID}.jsonl"
+            rollout = codex_root / "sessions" / "2026" / "08" / "04" / rollout_name
+            rollout.write_text(malformed + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(rf.ReviewflowError, "not found"):
+                rf.fork_codex_session(
+                    codex_root=codex_root,
+                    session_id=BASE_CODEX_SESSION_ID,
+                    created_at="2026-08-04T06:30:00+00:00",
+                    completed_at="2026-08-04T06:35:31+00:00",
+                )
+
     def test_fork_codex_session_rewrites_ids_and_preserves_base(self) -> None:
         codex_root = self.root / "codex-home"
         base_path = _write_fake_codex_session(codex_root=codex_root)

@@ -1900,6 +1900,34 @@ class LlmPresetConfigTests(unittest.TestCase):
         finally:
             cfg.unlink(missing_ok=True)
 
+    def test_load_reviewflow_llm_config_rejects_removed_http_custom_provider_name(self) -> None:
+        """A custom provider name with transport = \"http\" must get the same
+        removal message — not be silently discarded into \"unknown preset\"."""
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_custom_provider.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "custom_http"',
+                        "",
+                        "[llm_presets.custom_http]",
+                        'transport = "http"',
+                        'provider = "my-vendor"',
+                        'endpoint = "chat"',
+                        'base_url = "https://llm.example.com"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("custom_http", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
     def test_resolve_llm_config_rejects_removed_http_builtin_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_removed_http.toml"
         rf_cfg = ROOT / ".tmp_test_reviewflow_llm_removed_http.toml"
@@ -2497,6 +2525,236 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             # survives verbatim and nothing new was written into it.
             self.assertEqual(pre_existing.read_text(encoding="utf-8"), "pre-existing user file\n")
             self.assertEqual(list(repo.iterdir()), [pre_existing])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_uses_private_staging_dir_per_run(self) -> None:
+        """Concurrent runs must never share credential directories: the prepare
+        steps rmtree an existing destination before copying, so a shared dir
+        would let one run delete another run's live credentials."""
+        root = ROOT / ".tmp_test_agent_runtime_private_staging"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_prepare_gh(*, dst_root: Path) -> Path:
+                # Mirrors the real prepare step: rmtree an existing destination,
+                # then copy fresh files into it.
+                dst = dst_root / "gh_config"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                dst_root.mkdir(parents=True, exist_ok=True)
+                dst.mkdir(parents=True, exist_ok=True)
+                (dst / "hosts.yml").write_text("github.com:\n  user: test\n", encoding="utf-8")
+                return dst
+
+            with (
+                mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+                mock.patch("cure_llm.prepare_gh_config_for_codex", side_effect=fake_prepare_gh),
+            ):
+                r1 = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                r2 = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+            p1 = Path(str(r1["staged_paths"]["gh_config_dir"]))
+            p2 = Path(str(r2["staged_paths"]["gh_config_dir"]))
+            # Each run stages into its own private dir under work_dir.
+            self.assertNotEqual(p1.parent, p2.parent)
+            self.assertEqual(p1.parent.parent, work)
+            self.assertTrue(p1.parent.name.startswith(".auth-"))
+            # Run 1's credentials survive run 2's staging untouched.
+            self.assertTrue((p1 / "hosts.yml").is_file())
+            self.assertTrue((p2 / "hosts.yml").is_file())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stage_review_auth_support_cleans_private_dir_on_partial_failure(self) -> None:
+        """A copy that fails halfway must not leave sensitive files behind: the
+        private staging dir is registered before copying, so cleanup removes
+        the whole dir even when no per-key destination was recorded yet."""
+        root = ROOT / ".tmp_test_stage_auth_partial_failure"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            work = root / "work"
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_fail(*, dst_root: Path) -> Path:
+                (dst_root / "partial").mkdir(parents=True, exist_ok=True)
+                (dst_root / "partial" / "secret.yml").write_text("leaked", encoding="utf-8")
+                raise OSError("copy failed halfway")
+
+            with mock.patch("cure.prepare_gh_config_for_codex", side_effect=fake_fail):
+                with self.assertRaises(OSError):
+                    rf._stage_review_auth_support(work_dir=work, env={})
+            self.assertEqual(list(work.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_readonly_runtime_denies_mutation_and_keeps_repo_pristine(self) -> None:
+        """Read-only protection end to end: a fake codex sandbox that enforces
+        read-only receives the read-only flags from CURe's real exec path, an
+        attempted write is denied, the denial surfaces as a run failure, and
+        the repo checkout stays pristine."""
+        import run as run_module
+        import cure_runtime
+
+        root = ROOT / ".tmp_test_readonly_denial"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            fake_bin = root / "bin"
+            fake_bin.mkdir(parents=True, exist_ok=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            logs_dir = work / "logs"
+            repo.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (repo / "existing.txt").write_text("keep me", encoding="utf-8")
+            (root / "home").mkdir(parents=True, exist_ok=True)
+            codex_home = root / "codex-home"
+            codex_home.mkdir(parents=True, exist_ok=True)
+
+            fake = fake_bin / "codex"
+            fake.write_text(
+                r"""#!/usr/bin/env python3
+from __future__ import annotations
+import json
+import sys
+
+argv = sys.argv[1:]
+sandbox_ok = False
+for index, token in enumerate(argv):
+    if token == "--sandbox" and index + 1 < len(argv) and argv[index + 1] == "read-only":
+        sandbox_ok = True
+    if token == "-c" and index + 1 < len(argv) and argv[index + 1] == 'sandbox_mode="read-only"':
+        sandbox_ok = True
+if not sandbox_ok:
+    print("fake-codex: read-only sandbox flag missing", file=sys.stderr)
+    raise SystemExit(2)
+prompt = argv[-1] if argv else ""
+if "probe.txt" in prompt:
+    print(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "error", "message": "EACCES: probe.txt: write denied by read-only sandbox"},
+            }
+        ),
+        flush=True,
+    )
+    print("EACCES: probe.txt: write denied by read-only sandbox", file=sys.stderr)
+    raise SystemExit(1)
+print(
+    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "**Summary**: ok"}}),
+    flush=True,
+)
+raise SystemExit(0)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+
+            base_env = dict(os.environ)
+            base_env["PATH"] = f"{fake_bin}{os.pathsep}{base_env.get('PATH', '')}"
+            base_env["CODEX_HOME"] = str(codex_home)
+            base_env["HOME"] = str(root / "home")
+
+            meta_path = session / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init(
+                {
+                    "session_id": "readonly-denial",
+                    "status": "running",
+                    "phase": "codex_review",
+                    "paths": {
+                        "repo_dir": str(repo),
+                        "work_dir": str(work),
+                        "logs_dir": str(logs_dir),
+                        "review_md": str(work / "review.md"),
+                    },
+                    "logs": {
+                        "cure": str(logs_dir / "cure.log"),
+                        "codex": str(logs_dir / "codex.log"),
+                    },
+                }
+            )
+
+            resolved = dict(cure_runtime.builtin_llm_presets()["codex-cli"])
+            resolved["preset"] = "codex-cli"
+            resolved["command"] = str(fake)
+            resolution_meta: dict[str, Any] = {
+                "base_codex_config": {},
+                "reviewflow_defaults": {},
+                "resolved": {},
+            }
+            runtime = rf.prepare_review_agent_runtime(
+                args=argparse.Namespace(),
+                resolved=resolved,
+                resolution_meta=resolution_meta,
+                repo_dir=repo,
+                session_dir=session,
+                work_dir=work,
+                base_env=base_env,
+                chunkhound_config_path=work / "chunkhound.json",
+                chunkhound_db_path=work / ".chunkhound.db",
+                chunkhound_cwd=work / "chunkhound",
+                enable_mcp=False,
+                interactive=False,
+                paths=rf.DEFAULT_PATHS,
+            )
+            runtime["sandbox_mode"] = "read-only"
+            runtime["dangerously_bypass_approvals_and_sandbox"] = False
+
+            with self.assertRaises(run_module.ReviewflowSubprocessError) as ctx:
+                rf.run_llm_exec(
+                    repo_dir=repo,
+                    resolved=resolved,
+                    resolution_meta=resolution_meta,
+                    output_path=work / "review.md",
+                    prompt="Please create a file named probe.txt in the repo directory.",
+                    env=runtime["env"],
+                    stream=True,
+                    progress=progress,
+                    runtime_policy=runtime,
+                    sandbox_mode="read-only",
+                )
+            self.assertIn("EACCES", str(ctx.exception.stderr))
+            self.assertIn("--sandbox", ctx.exception.cmd)
+            self.assertIn("read-only", ctx.exception.cmd)
+            # The attempted mutation was denied: nothing was written into the
+            # repo checkout.
+            self.assertFalse((repo / "probe.txt").exists())
+            self.assertEqual(sorted(p.name for p in repo.iterdir()), ["existing.txt"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

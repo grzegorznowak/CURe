@@ -2045,6 +2045,66 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(len(display_lines), 1)
         self.assertIn("hello", display_lines[0])
 
+    def test_run_cmd_routes_stderr_away_from_codex_json_sink(self) -> None:
+        """A stderr diagnostic landing between chunks of a large JSON event
+        must not corrupt the JSON stream: stdout feeds the sink, stderr goes
+        to its own diagnostic stream."""
+        import run as run_module
+
+        raw = StringIO()
+        display = StringIO()
+        diag = StringIO()
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=rui.TailBuffer(max_lines=10),
+            on_event=events.append,
+        )
+        long_text = "The main problem is X. " * 400
+        payload = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": long_text},
+            }
+        )
+        half = len(payload) // 2
+        # stdout: first half of the JSON line, then a stderr diagnostic, then
+        # the rest of the line — exactly the interleaving that corrupts a
+        # merged stream. Sleeps keep the pipe ordering deterministic.
+        script = (
+            "import sys, time\n"
+            f"payload = {payload!r}\n"
+            f"sys.stdout.write(payload[:{half}])\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(0.4)\n"
+            "sys.stderr.write('WARNING: jira diagnostic\\n')\n"
+            "sys.stderr.flush()\n"
+            "time.sleep(0.4)\n"
+            f"sys.stdout.write(payload[{half}:] + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        try:
+            run_module.run_cmd(
+                [sys.executable, "-c", script],
+                cwd=Path.cwd(),
+                env=dict(os.environ),
+                check=True,
+                stream=True,
+                stream_to=sink,
+                stderr_stream=diag,
+            )
+        finally:
+            sink.drain()
+        self.assertEqual([e["type"] for e in events], ["agent_message"])
+        # The raw log holds exactly the single JSON event line.
+        self.assertEqual(raw.getvalue().strip(), payload)
+        self.assertIn("WARNING: jira diagnostic", diag.getvalue())
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        self.assertTrue(display_lines[0].startswith("The main problem is X."))
+        self.assertNotIn("WARNING", display_lines[0])
+
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-123",

@@ -1160,9 +1160,7 @@ def load_reviewflow_llm_config(
         if builtin_id == "gemini-cli" or (transport == "cli" and provider == "gemini"):
             removed_gemini_presets.append(name)
             continue
-        if builtin_id in REMOVED_HTTP_LLM_PRESETS or (
-            transport == "http" and provider in REMOVED_HTTP_LLM_PROVIDERS
-        ):
+        if builtin_id in REMOVED_HTTP_LLM_PRESETS or transport == "http":
             removed_http_presets.append(name)
             continue
         if builtin_id:

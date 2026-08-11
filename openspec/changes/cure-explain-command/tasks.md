@@ -159,3 +159,39 @@
   renamed, two new explain tests; MetaJsonWriteTests lives in the impl file
   outside the aggregator's limited class set); direct impl suites green;
   ruff + py_compile clean.
+
+## Remaining PR#37 review points (2026-08-11, findings 3–8)
+- [x] F3 credential staging concurrency: both `_stage_review_auth_support`
+  copies now stage into a private per-run dir `work_dir/.auth-<uuid>`
+  (registered BEFORE any copy), so parallel explains of the same session can
+  no longer rmtree each other's live credentials, and a partial copy is
+  cleaned (SENSITIVE_STAGED_PATH_KEYS + `auth_staging_dir`). RED→GREEN:
+  per-run isolation through `prepare_review_agent_runtime`, partial-failure
+  cleanup through `_stage_review_auth_support`.
+- [x] F4 malformed rollouts: `_load_codex_session_meta` (both copies) and
+  `_codex_session_contains_exact_user_message` treat valid JSON that is not
+  an object (`null`, `[]`, …) as an unusable rollout → normal fork failure,
+  never a programming error. RED→GREEN: fork treats malformed rollouts as
+  missing.
+- [x] F5 stderr/JSON interleaving: `run_cmd` gained `stderr_stream`; codex
+  runs route stderr to a diagnostic stream (`_CodexStderrDiagSink` in
+  run_logged_cmd, display log in run_codex_exec's direct/fallback sinks) so
+  a diagnostic between chunks of a large JSON event can no longer corrupt
+  parsing, lose on_event callbacks, or pollute the events log. RED→GREEN:
+  interleaved stdout/stderr run through run_cmd + CodexJsonEventSink.
+- [x] F6 custom `transport = "http"` blocks: the parse-time removal filter
+  now rejects ANY http transport regardless of provider name (was: only
+  known removed providers; custom names were silently discarded into
+  "unknown preset"). RED→GREEN: custom-provider http block raises the
+  removal message.
+- [x] F7 read-only denial e2e: (a) deterministic — fake codex sandbox through
+  CURe's real exec path asserts read-only flags, surfaces the denial, repo
+  pristine; (b) live — `tests/test_readonly_sandbox_live.py` runs real
+  `codex exec --sandbox read-only` with a write prompt, gated by
+  `CURE_RUN_LIVE_READONLY=1` (verified passing 2026-08-11: probe denied,
+  rc != 0, 11.9s).
+- [x] F8 docs contradiction: story.md remediation section marked SUPERSEDED
+  (HTTP providers one-shot / run_http_response_exec claims vs. 2a47962
+  removal).
+- [x] Full suite 1044 passed + 6 skipped (5 pre-existing + live gate); ruff +
+  py_compile clean.

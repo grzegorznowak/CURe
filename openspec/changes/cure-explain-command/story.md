@@ -235,20 +235,45 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   meta write uses a unique temp file (mkstemp) + atomic os.replace so
   concurrent `explains[]` appends can never truncate each other's pending
   write.
+- D17 (PR#37 review 2026-08-11): credentials are staged per run into a
+  private `work_dir/.auth-<uuid>` dir registered before copying — concurrent
+  explains of the same session cannot delete each other's live credentials
+  (prepare steps rmtree their destination), and partial copies are always
+  cleaned.
+- D18 (PR#37 review 2026-08-11): codex stderr never enters the JSON event
+  stream — `run_cmd(stderr_stream=...)` routes diagnostics to the display
+  log/terminal, so a warning landing between chunks of a large JSON event
+  cannot corrupt parsing, live callbacks, artifact recovery, or the events
+  log.
+- D19 (PR#37 review 2026-08-11): malformed codex rollouts (valid JSON that is
+  not an object) are unusable rollouts — inline fallback, never a
+  programming error; every `transport = "http"` preset block gets the HTTP
+  removal message regardless of provider name; read-only denial is proven by
+  a fake-sandbox unit test through the real exec path plus a live gated
+  proof (`CURE_RUN_LIVE_READONLY=1`) that a real `codex exec --sandbox
+  read-only` blocks a write; the pre-HTTP-removal remediation history is
+  marked superseded.
 
 ## PR #37 Review Remediation (2026-08-11)
+> SUPERSEDED (2026-08-11, 2a47962): this section predates the HTTP provider
+> removal — statements about HTTP providers staying available and about
+> `run_http_response_exec` describe behavior that no longer exists. CURe is
+> codex-only; every HTTP transport block (any provider name) is rejected with
+> the removal message, and `run_http_response_exec` was deleted.
 - Streaming reality: codex `exec --json`/`exec resume --json` emits whole completed
   items, not token deltas — a single-message explain run has nothing to render
   until the answer item completes (observed 5-event run). Amended A5/S8 to
   item-granular wording; sink now renders codex `error` items as `Codex notice:`
-  lines (surfaced the model-mismatch warning live). HTTP providers stay one-shot.
+  lines (surfaced the model-mismatch warning live). HTTP providers stay one-shot
+  (superseded: removed in 2a47962 — see note above).
 - Read-only fix: explain stages auth with `stage_rf_jira=False` — no `rf-jira`
   write into the sandbox repo checkout, no risk of overwriting/deleting a
   pre-existing root `rf-jira` (RED → GREEN).
 - Prose preservation: `run_llm_exec`/`run_codex_exec`/`run_http_response_exec`
   gained `normalize_artifact` (default True for the review pipeline); explain
   passes False so the free-form explanation is never rewritten by the
-  review-shaped normalizer.
+  review-shaped normalizer. (`run_http_response_exec` was later removed in
+  2a47962 — see the superseded note above.)
 - Provenance: each `explains[]` entry records provider/model/preset/transport and
   normalized usage; explain no longer merges usage into the review's top-level
   `meta.llm`.

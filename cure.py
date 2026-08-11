@@ -1705,16 +1705,24 @@ def _stage_review_auth_support(
     stage_rf_jira: bool = True,
 ) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
+    # Private per-run staging root: concurrent runs (e.g. parallel explains of
+    # the same review session) must never share credential directories — the
+    # prepare steps rmtree an existing destination before copying, so one run
+    # would delete another run's live credentials. The root is registered
+    # BEFORE any copy so a partial copy is still cleaned up.
+    staging_root = work_dir / f".auth-{uuid4().hex}"
     try:
-        gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
+        staging_root.mkdir(parents=True, exist_ok=False)
+        staged_paths["auth_staging_dir"] = str(staging_root)
+        gh_cfg = prepare_gh_config_for_codex(dst_root=staging_root)
         if gh_cfg:
             env["GH_CONFIG_DIR"] = str(gh_cfg)
             staged_paths["gh_config_dir"] = str(gh_cfg)
-        jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
+        jira_cfg = prepare_jira_config_for_codex(dst_root=staging_root)
         if jira_cfg:
             env["JIRA_CONFIG_FILE"] = str(jira_cfg)
             staged_paths["jira_config_file"] = str(jira_cfg)
-        netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
+        netrc = prepare_netrc_for_reviewflow(dst_root=staging_root)
         if netrc:
             env["NETRC"] = str(netrc)
             staged_paths["netrc"] = str(netrc)
@@ -1730,6 +1738,7 @@ def _stage_review_auth_support(
 
 
 SENSITIVE_STAGED_PATH_KEYS = (
+    "auth_staging_dir",
     "gh_config_dir",
     "jira_config_file",
     "netrc",
@@ -2031,7 +2040,9 @@ def _load_codex_session_meta(session_log_path: Path) -> dict[str, Any] | None:
         data = json.loads(first_line)
     except Exception:
         return None
-    if data.get("type") != "session_meta":
+    # Valid JSON that is not an object (null, []) must count as an unusable
+    # rollout — a normal not-found — never a programming error.
+    if not isinstance(data, dict) or data.get("type") != "session_meta":
         return None
     payload = data.get("payload")
     return payload if isinstance(payload, dict) else None
@@ -2154,7 +2165,7 @@ def _codex_session_contains_exact_user_message(*, session_log_path: Path, text: 
                     data = json.loads(raw_line)
                 except Exception:
                     continue
-                if data.get("type") != "response_item":
+                if not isinstance(data, dict) or data.get("type") != "response_item":
                     continue
                 payload = data.get("payload")
                 if not isinstance(payload, dict):
