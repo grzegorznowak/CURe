@@ -213,6 +213,13 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   merge-under-lock mode (cross-process safe flushes); `fork_codex_session`
   removes partially written rollouts on I/O failure; codex `error` items render
   as `Codex notice:` live lines.
+- D13 (PR#37 follow-up 2026-08-11): fork-mode prompts are prepended with
+  `EXPLAIN_RESUME_CONTEXT_NOTE` (review already in context; never re-produce it)
+  because the inline template's "below" framing is false in resume mode.
+- D14 (PR#37 follow-up 2026-08-11): `CodexJsonEventSink` never force-consumes
+  partial lines in `flush()` (run.py flushes after every pipe read); the final
+  partial line is consumed by `drain()` when the stream ends — huge single-line
+  JSON events render as compacted text instead of raw-JSON fragments.
 
 ## PR #37 Review Remediation (2026-08-11)
 - Streaming reality: codex `exec --json`/`exec resume --json` emits whole completed
@@ -239,6 +246,11 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   write failure (partial file never left in CODEX_HOME).
 - OpenSpec: `--pr` examples corrected to the positional shape; suite counts
   16 → 31. Suite 770 → 771; ruff + py_compile clean.
+- Follow-up (2026-08-11, second user report): fork-mode prompt now carries
+  `EXPLAIN_RESUME_CONTEXT_NOTE` (review is in context, must not be re-produced —
+  the model had re-emitted the whole review); `CodexJsonEventSink.flush()` no
+  longer force-consumes partial lines so large events split across pipe reads
+  render as compacted text, with `drain()` for the stream tail. Suite 771 → 774.
 
 ## Plan Review Log
 <!-- Empty; plan review pending operator's checkpoint approval of this draft. -->

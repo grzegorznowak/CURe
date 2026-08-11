@@ -12695,6 +12695,22 @@ def _recorded_resume_session_id(meta: dict[str, Any]) -> str | None:
 
 EXPLAIN_PROMPT_TEMPLATE = "explain.md"
 
+# Fork/resume mode cannot embed the review text in the prompt (the forked codex
+# session already holds it in its conversation history), so the inline template's
+# "Below is the final synthesized review ..." framing is false there. Without an
+# explicit instruction the model can treat the explain prompt as a fresh review
+# request and re-produce the whole review instead of answering (observed on a
+# real run, PR#37 report). This note is prepended to the prompt in fork mode.
+EXPLAIN_RESUME_CONTEXT_NOTE = (
+    "You are continuing the exact codex session that produced the review under "
+    "discussion: the final synthesized review and its supporting evidence are "
+    "already in your conversation history above.\n"
+    "Do NOT re-produce, re-write, or re-run the review itself (no review steps, "
+    "no findings list, no verdicts section). Answer the user's question about "
+    "the review in clear, human-friendly language, grounded only in the review "
+    "already present in your context."
+)
+
 
 def _explain_flow_impl(
     args: argparse.Namespace,
@@ -12800,8 +12816,10 @@ def _explain_flow_impl(
         if resume_fork_id is None:
             prompt = f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n{review_text.strip()}"
         else:
-            # Resume mode: the forked session already holds the review in its context.
-            prompt = prompt_template.rstrip()
+            # Resume mode: the forked session already holds the review in its
+            # context, and the model must not re-produce it (see
+            # EXPLAIN_RESUME_CONTEXT_NOTE).
+            prompt = f"{EXPLAIN_RESUME_CONTEXT_NOTE}\n\n{prompt_template.rstrip()}"
 
         explain_dir = session_dir / "explain"
         explain_dir.mkdir(parents=True, exist_ok=True)

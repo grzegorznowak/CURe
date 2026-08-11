@@ -562,6 +562,7 @@ def run_codex_exec(
                     owned_processes=owned_processes,
                     owned_role=owned_role,
                 )
+                sink.drain()
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
         if normalize_artifact:

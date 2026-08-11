@@ -1986,6 +1986,65 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "codex_notice")
         self.assertIn("Codex notice: This session was recorded", events[-1]["text"])
 
+    def test_codex_json_event_sink_handles_large_events_across_flushed_chunks(self) -> None:
+        # run.py's pump reads ~8192-char chunks and calls flush() after every
+        # chunk; a single-line JSON event larger than that arrives split across
+        # several write()/flush() cycles. The sink must not force-consume the
+        # partial fragments (which would dump unparseable JSON to the display).
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            on_event=events.append,
+        )
+        long_text = "The main problem is X. " * 400  # ~8.4KB, forces chunk splits
+        event_line = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": long_text},
+            }
+        )
+        # Feed the event exactly like run.py's pump: 8192-char chunks with a
+        # flush() after every chunk, and a trailing newline at the end.
+        payload = event_line + "\n"
+        for offset in range(0, len(payload), 8192):
+            sink.write(payload[offset : offset + 8192])
+            sink.flush()
+        sink.drain()
+
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        # The display must show the compacted agent text, never raw JSON.
+        self.assertTrue(display_lines[0].startswith("The main problem is X."))
+        self.assertNotIn("item.completed", display_lines[0])
+        self.assertEqual(events[-1]["type"], "agent_message")
+        # The raw log keeps the full single-line JSON event.
+        raw_line = raw.getvalue().strip()
+        self.assertEqual(raw_line, event_line)
+
+    def test_codex_json_event_sink_flush_keeps_partial_line_pending(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=rui.TailBuffer(max_lines=10),
+        )
+        partial = '{"type":"item.completed","item":{"id":"item_1","type":"agent'
+        sink.write(partial)
+        sink.flush()
+        self.assertEqual(display.getvalue(), "")
+        # The rest of the line (with its terminator) completes the event.
+        sink.write('_message","text":"hello"}' + "\n")
+        sink.flush()
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        self.assertIn("hello", display_lines[0])
+
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-123",

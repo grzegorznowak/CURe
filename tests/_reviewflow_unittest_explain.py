@@ -281,6 +281,13 @@ class ExplainCommandTests(unittest.TestCase):
         with self.assertRaisesRegex(rf.ReviewflowError, "review_md.*session dir"):
             rf._explain_flow_impl(_explain_args(), paths=self.paths)
 
+    def test_explain_flow_inline_prompt_has_no_resume_note(self) -> None:
+        _write_completed_session(root=self.root)
+        captured = self._patched_run(_explain_args())
+        prompt = str(captured["prompt"])
+        self.assertIn("## Final synthesized review", prompt)
+        self.assertNotIn("already in your conversation history", prompt)
+
     def test_session_progress_merge_mode_preserves_concurrent_appends(self) -> None:
         session_dir, _ = _write_completed_session(root=self.root)
         meta_path = session_dir / "meta.json"
@@ -429,9 +436,15 @@ class ExplainCommandTests(unittest.TestCase):
         # The base must remain byte-identical.
         self.assertEqual(base_path.read_bytes(), base_before)
 
-        # Resume mode passes the builtin template without appending the review.
+        # Resume mode passes the builtin template WITHOUT appending the review
+        # text, but WITH an explicit instruction that the review is already in
+        # context and must not be re-produced (PR#37 report: the model re-emitted
+        # the whole review when the template referenced 'below' content that does
+        # not exist in fork mode).
         prompt = str(captured["prompt"])
-        self.assertEqual(prompt, DEFAULT_PROMPT_TEXT)
+        self.assertIn(DEFAULT_PROMPT_TEXT, prompt)
+        self.assertIn("already in your conversation history", prompt)
+        self.assertIn("Do NOT re-produce", prompt)
         self.assertNotIn("## Final synthesized review", prompt)
 
         meta = json.loads((self.root / "session-1" / "meta.json").read_text(encoding="utf-8"))

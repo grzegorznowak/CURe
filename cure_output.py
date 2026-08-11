@@ -471,6 +471,18 @@ class CodexJsonEventSink:
         return len(s)
 
     def flush(self) -> None:
+        # Never force-consume a partial line: run.py's pump calls flush() after
+        # every ~8192-char pipe read, so a huge single-line JSON event arrives
+        # split across several writes. Force-consuming the fragments would dump
+        # unparseable raw JSON to the display. A trailing partial line is
+        # consumed explicitly by drain() once the stream has ended.
+        with self._lock:
+            self._raw_file.flush()
+            self._display_file.flush()
+            if self._also_to is not None:
+                self._also_to.flush()
+
+    def drain(self) -> None:
         with self._lock:
             if self._pending.strip():
                 self._consume_line(self._pending)
@@ -659,7 +671,10 @@ class ReviewflowOutput:
                 cleanup_error: Exception | None = None
                 cleanup_actions: list[Callable[[], object]] = []
                 if raw_fh is not None:
-                    cleanup_actions.extend((sink.flush, raw_fh.flush, raw_fh.close))
+                    # Drain any final partial line only once the process stream
+                    # has ended (flush() alone never force-consumes fragments).
+                    sink_finalize = getattr(sink, "drain", None) or sink.flush
+                    cleanup_actions.extend((sink_finalize, raw_fh.flush, raw_fh.close))
                 if display_fh is not None:
                     cleanup_actions.extend((display_fh.flush, display_fh.close))
                 for cleanup in cleanup_actions:

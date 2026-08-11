@@ -64,3 +64,21 @@
   A5/S8 amended to item-granular delivery (codex emits whole completed items)
 - [x] OpenSpec `--pr` examples → positional; suite counts 16 → 31
 - [x] Full suite 771/771; ruff clean; py_compile OK
+
+## PR #37 Re-Review Follow-up (2026-08-11, second user report)
+- [x] Root cause A (explain re-produces the whole review): the builtin explain
+  template is written for inline mode ("Below is the final synthesized review…");
+  in fork/resume mode no review text is embedded, so the model can treat the
+  prompt as a fresh review request and re-run the review (observed 09:02Z run:
+  16KB review-shaped answer vs 2.8KB explanation at 07:25Z with the same base
+  session). Fix: `EXPLAIN_RESUME_CONTEXT_NOTE` prepended in fork mode — the
+  review is already in context, do NOT re-produce it, answer the question.
+- [x] Root cause B (raw JSON garbage on the terminal): run.py's pump reads
+  ~8192-char chunks and calls flush() after every chunk; CodexJsonEventSink.flush()
+  force-consumed the partial `_pending` buffer, splitting single-line JSON events
+  >8KB into parse-failing fragments that were compacted and dumped as raw JSON.
+  Fix: flush() never consumes partial lines; new drain() consumes the final
+  partial line when the stream ends (run_logged_cmd cleanup + run_codex_exec
+  else-branch). Large events now render as compacted agent text.
+- [x] RED: 3 new obligations (fork-prompt note, inline-prompt no-note, chunked
+  flush sink ×2) → GREEN. Suite 771 → 774; ruff + py_compile + mypy clean.
