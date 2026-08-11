@@ -7867,7 +7867,15 @@ def _classify_chunkhound_daemon_route(
     no_review: bool,
     platform: str,
 ) -> _ChunkHoundDaemonRoute:
-    """Classify command routes before assigning daemon keeper authority."""
+    """Classify command routes before assigning daemon keeper authority.
+
+    Only Linux and macOS have a native daemon keeper implementation, so the
+    indexed helper route is SUPPORTED there and UNSUPPORTED everywhere else
+    (Windows and unknown POSIX alike); the route must fail before any helper
+    or model invocation on unsupported platforms. BYPASS is reserved for
+    routes that never take keeper authority: HTTP access modes, no-index,
+    and no-review runs.
+    """
     if no_review or no_index:
         return _ChunkHoundDaemonRoute.BYPASS
     if str(access_mode or "").strip() != "cli_helper_daemon":
@@ -7877,9 +7885,7 @@ def _classify_chunkhound_daemon_route(
     current = str(platform or "").strip().lower()
     if current.startswith(("linux", "darwin")):
         return _ChunkHoundDaemonRoute.SUPPORTED
-    if current.startswith("win"):
-        return _ChunkHoundDaemonRoute.UNSUPPORTED
-    return _ChunkHoundDaemonRoute.BYPASS
+    return _ChunkHoundDaemonRoute.UNSUPPORTED
 
 
 def _run_chunkhound_access_preflight(

@@ -2414,7 +2414,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
     def test_daemon_route_classifier_separates_supported_rejected_and_bypass_routes(
         self,
     ) -> None:
-        """TAP-03 A8/A9: only the fresh Linux indexed helper route owns a keeper."""
+        """TAP-03 A8/A9: only the fresh Linux/macOS indexed helper routes own a keeper."""
         classify = getattr(rf, "_classify_chunkhound_daemon_route", None)
         self.assertIsNotNone(classify, "an explicit production route classifier is required")
         cases = (
@@ -2452,7 +2452,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 "unsupported",
             ),
             (
-                "bypass-other-posix-helper",
+                "rejected-other-posix-helper",
                 {
                     "provider": "codex",
                     "access_mode": "cli_helper_daemon",
@@ -2460,7 +2460,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     "no_review": False,
                     "platform": "freebsd",
                 },
-                "bypass",
+                "unsupported",
             ),
             (
                 "bypass-http-non-helper",
@@ -2501,7 +2501,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 route = classify(**kwargs)
                 self.assertEqual(route.value, expected)
 
-    def test_non_linux_indexed_helper_route_fails_before_helper_or_model(self) -> None:
+    def test_windows_indexed_helper_route_fails_before_helper_or_model(self) -> None:
         """TAP-03 A8: helper-bearing indexed routes reject unsupported platforms."""
         from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
 
@@ -9644,12 +9644,29 @@ class DarwinProcessIdentityTests(unittest.TestCase):
     def test_parse_bsdinfo_extracts_identity(self) -> None:
         from cure_chunkhound_lifecycle import _parse_darwin_bsdinfo
 
-        data = self._pack_bsdinfo(pid=321, ppid=100, status=ord("S"), tvsec=1_700_000_000, tvusec=500_000)
+        # pbi_status is the NUMERIC BSD state from xnu bsd/sys/proc.h
+        # (SSLEEP=3), not an ASCII letter; the parser must normalize it to
+        # the single-letter form shared with the Linux /proc parser.
+        data = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=500_000
+        )
         identity = _parse_darwin_bsdinfo(data)
         self.assertEqual(identity.pid, 321)
         self.assertEqual(identity.parent_pid, 100)
         self.assertEqual(identity.state, "S")
         self.assertEqual(identity.process_started_at, 1_700_000_000.5)
+
+    def test_parse_bsdinfo_keeps_microsecond_start_precision(self) -> None:
+        from cure_chunkhound_lifecycle import _parse_darwin_bsdinfo
+
+        # pbi_start_tvusec is uint64_t (xnu sys/proc_info.h); a 32-bit field
+        # would wrap values above 2**32 and silently corrupt the start time.
+        # 5_000_000_000 us = 5_000 s.
+        data = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=5_000_000_000
+        )
+        identity = _parse_darwin_bsdinfo(data)
+        self.assertEqual(identity.process_started_at, 1_700_005_000.0)
 
     def test_parse_bsdinfo_rejects_truncated_buffer(self) -> None:
         from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
@@ -9657,12 +9674,16 @@ class DarwinProcessIdentityTests(unittest.TestCase):
         with self.assertRaises(DaemonGenerationObservationError):
             _parse_darwin_bsdinfo(b"x" * 8)
 
-    def test_parse_bsdinfo_rejects_zombie_and_invalid_pids(self) -> None:
+    def test_parse_bsdinfo_rejects_zombie_and_invalid_states_and_pids(self) -> None:
         from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
 
+        # SZOMB=5 is the numeric zombie state; it must normalize to "Z" and
+        # be rejected exactly like the Linux "Z"/"X"/"x" states. Unknown
+        # numeric states are not valid BSD states and must fail closed.
         for kwargs in (
-            {"pid": 321, "ppid": 100, "status": ord("Z"), "tvsec": 1, "tvusec": 0},
-            {"pid": 0, "ppid": 100, "status": ord("S"), "tvsec": 1, "tvusec": 0},
+            {"pid": 321, "ppid": 100, "status": 5, "tvsec": 1, "tvusec": 0},
+            {"pid": 321, "ppid": 100, "status": 99, "tvsec": 1, "tvusec": 0},
+            {"pid": 0, "ppid": 100, "status": 3, "tvsec": 1, "tvusec": 0},
         ):
             with self.subTest(**kwargs), self.assertRaises(DaemonGenerationObservationError):
                 _parse_darwin_bsdinfo(self._pack_bsdinfo(**kwargs))
@@ -9670,7 +9691,9 @@ class DarwinProcessIdentityTests(unittest.TestCase):
     def test_read_process_identity_dispatches_to_darwin_backend(self) -> None:
         import cure_chunkhound_lifecycle as lifecycle
 
-        fixture = self._pack_bsdinfo(pid=321, ppid=100, status=ord("S"), tvsec=1_700_000_000, tvusec=250_000)
+        fixture = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=250_000
+        )
         with mock.patch.object(
             lifecycle, "_darwin_proc_pidinfo_bsdinfo", return_value=fixture
         ):

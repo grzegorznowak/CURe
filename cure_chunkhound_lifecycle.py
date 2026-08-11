@@ -399,6 +399,19 @@ def _read_linux_process_identity(
 # PROC_PIDTBSDINFO from macOS sys/proc_info.h.
 _DARWIN_PROC_PIDTBSDINFO = 3
 
+# Numeric pbi_status values are the BSD process states from xnu
+# bsd/sys/proc.h; they are NOT ASCII letters like the Linux /proc
+# <pid>/stat states. Normalize to the single-letter form so the shared
+# zombie rejection stays platform-agnostic and downstream checks
+# (attestation, smoke probes) keep a single-form `state in {"Z", "X", "x"}`.
+_DARWIN_BSD_STATE_TO_ASCII = {
+    1: "I",  # SIDL   - being created by fork
+    2: "R",  # SRUN   - currently runnable
+    3: "S",  # SSLEEP - sleeping on an address
+    4: "T",  # SSTOP  - debugging or suspension
+    5: "Z",  # SZOMB  - awaiting collection by parent
+}
+
 
 class _DarwinProcBsdInfo(ctypes.Structure):
     """proc_bsdinfo layout from macOS sys/proc_info.h.
@@ -429,7 +442,7 @@ class _DarwinProcBsdInfo(ctypes.Structure):
         ("pbi_e_tpgid", ctypes.c_uint32),
         ("pbi_nice", ctypes.c_int32),
         ("pbi_start_tvsec", ctypes.c_uint64),
-        ("pbi_start_tvusec", ctypes.c_uint32),
+        ("pbi_start_tvusec", ctypes.c_uint64),
     ]
 
 
@@ -472,7 +485,14 @@ def _parse_darwin_bsdinfo(data: bytes) -> _ProcessIdentity:
             "native daemon Darwin process identity is truncated"
         )
     info = _DarwinProcBsdInfo.from_buffer_copy(data)
-    state = chr(info.pbi_status) if 0 < info.pbi_status < 256 else "?"
+    # pbi_status is a numeric BSD state (xnu bsd/sys/proc.h); unknown
+    # values are not valid states and must fail closed rather than being
+    # coerced into an ASCII letter that could slip past the zombie check.
+    state = _DARWIN_BSD_STATE_TO_ASCII.get(info.pbi_status)
+    if state is None:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is invalid"
+        )
     if info.pbi_pid <= 0 or info.pbi_ppid < 0:
         raise DaemonGenerationObservationError(
             "native daemon Darwin process identity is invalid"

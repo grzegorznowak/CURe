@@ -37,9 +37,8 @@ jobs:
   # fake MCP chunkhound binary with short deadlines and needs no live daemon,
   # network, or secrets, so it is safe to run on every PR.
   #
-  # macOS (arm64) coverage: tracked by issue #38 (indexed Codex route is
-  # currently gated to Linux). The macOS leg is expected to fail until the
-  # Darwin route work lands; keep fail-fast off so both legs report.
+  # macOS (arm64) coverage: the indexed Codex route is supported on both
+  # Linux and macOS (issue #38); keep fail-fast off so both legs report.
   test:
     name: Test, lint, and verify package
     strategy:
