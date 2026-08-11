@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shlex
 import shutil
+import sys
 import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING, Any
@@ -891,8 +892,7 @@ def write_chunkhound_helper(
     helper_db = (chunkhound_db_path or (repo_root / ".chunkhound.db")).resolve(strict=False)
     helper_path = (work_dir / "bin" / "cure-chunkhound").resolve(strict=False)
     helper_path.parent.mkdir(parents=True, exist_ok=True)
-    script = r"""#!/usr/bin/env python3
-from __future__ import annotations
+    script = f"#!{sys.executable}\n" + r"""from __future__ import annotations
 
 import argparse
 import json

@@ -7867,16 +7867,25 @@ def _classify_chunkhound_daemon_route(
     no_review: bool,
     platform: str,
 ) -> _ChunkHoundDaemonRoute:
-    """Classify command routes before assigning daemon keeper authority."""
+    """Classify command routes before assigning daemon keeper authority.
+
+    Only Linux and macOS have a native daemon keeper implementation, so the
+    indexed helper route is SUPPORTED there and UNSUPPORTED everywhere else
+    (Windows and unknown POSIX alike); the route must fail before any helper
+    or model invocation on unsupported platforms. BYPASS is reserved for
+    routes that never take keeper authority: HTTP access modes, no-index,
+    and no-review runs.
+    """
     if no_review or no_index:
         return _ChunkHoundDaemonRoute.BYPASS
     if str(access_mode or "").strip() != "cli_helper_daemon":
         return _ChunkHoundDaemonRoute.BYPASS
-    if str(provider or "").strip().lower() != "codex" or not str(
-        platform or ""
-    ).startswith("linux"):
+    if str(provider or "").strip().lower() != "codex":
         return _ChunkHoundDaemonRoute.UNSUPPORTED
-    return _ChunkHoundDaemonRoute.SUPPORTED
+    current = str(platform or "").strip().lower()
+    if current.startswith(("linux", "darwin")):
+        return _ChunkHoundDaemonRoute.SUPPORTED
+    return _ChunkHoundDaemonRoute.UNSUPPORTED
 
 
 def _run_chunkhound_access_preflight(
@@ -9662,7 +9671,7 @@ def _pr_flow_impl(
             )
             if daemon_route is _ChunkHoundDaemonRoute.UNSUPPORTED:
                 raise ReviewflowError(
-                    "CURe-managed ChunkHound daemon helper access requires Linux; "
+                    "CURe-managed ChunkHound daemon helper access requires Linux or macOS; "
                     f"the indexed {str(runtime_metadata.get('provider') or 'review')} "
                     f"route is unsupported on {sys.platform}."
                 )

@@ -59,10 +59,10 @@ Keeper and helper MCP children MUST receive the same immutable allowlisted envir
 
 ### Requirement: Supported routes require the keeper
 
-Every fresh indexed Linux Codex helper route in standard, big, or multipass mode MUST acquire the keeper.
+Every fresh indexed Linux or macOS Codex helper route in standard, big, or multipass mode MUST acquire the keeper.
 
 #### Scenario: Supported route is classified
-- **Given** a fresh indexed Linux Codex helper route
+- **Given** a fresh indexed Linux or macOS Codex helper route
 - **When** eligibility resolves
 - **Then** keeper acquisition is mandatory
 

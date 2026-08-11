@@ -78,7 +78,7 @@ def _write_fake_chunkhound(
     daemon_status_no_response: bool = False,
 ) -> None:
     """Write an executable, line-framed stdio JSON-RPC ChunkHound fixture."""
-    script = f"""#!/usr/bin/python3
+    script = f"""#!{sys.executable}
 import json
 import os
 import signal
@@ -226,7 +226,7 @@ def _state_name(value: object) -> str:
 
 
 def _write_owned_process_fixture(path: Path) -> None:
-    script = """#!/usr/bin/python3
+    script = f"#!{sys.executable}\n" + """
 import json
 import os
 import signal
@@ -2414,7 +2414,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
     def test_daemon_route_classifier_separates_supported_rejected_and_bypass_routes(
         self,
     ) -> None:
-        """TAP-03 A8/A9: only the fresh Linux indexed helper route owns a keeper."""
+        """TAP-03 A8/A9: only the fresh Linux/macOS indexed helper routes own a keeper."""
         classify = getattr(rf, "_classify_chunkhound_daemon_route", None)
         self.assertIsNotNone(classify, "an explicit production route classifier is required")
         cases = (
@@ -2430,13 +2430,35 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 "supported",
             ),
             (
-                "rejected-non-linux-helper",
+                "supported-darwin-helper",
                 {
                     "provider": "codex",
                     "access_mode": "cli_helper_daemon",
                     "no_index": False,
                     "no_review": False,
                     "platform": "darwin",
+                },
+                "supported",
+            ),
+            (
+                "rejected-windows-helper",
+                {
+                    "provider": "codex",
+                    "access_mode": "cli_helper_daemon",
+                    "no_index": False,
+                    "no_review": False,
+                    "platform": "win32",
+                },
+                "unsupported",
+            ),
+            (
+                "rejected-other-posix-helper",
+                {
+                    "provider": "codex",
+                    "access_mode": "cli_helper_daemon",
+                    "no_index": False,
+                    "no_review": False,
+                    "platform": "freebsd",
                 },
                 "unsupported",
             ),
@@ -2479,7 +2501,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 route = classify(**kwargs)
                 self.assertEqual(route.value, expected)
 
-    def test_non_linux_indexed_helper_route_fails_before_helper_or_model(self) -> None:
+    def test_windows_indexed_helper_route_fails_before_helper_or_model(self) -> None:
         """TAP-03 A8: helper-bearing indexed routes reject unsupported platforms."""
         from _reviewflow_unittest_grounding_impl import CodexToolProofFlowTests
 
@@ -2493,20 +2515,66 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             events.append("model")
             raise AssertionError("model must not run on an unsupported daemon route")
 
+        # Patching sys.platform to win32 also confuses shutil.which (stdlib
+        # consults _winapi for win32); route the real which through a linux
+        # platform window so capability probing does not crash first.
+        real_which = shutil.which
+
+        def which_with_real_platform(name: str, *args: Any, **kwargs: Any) -> Any:
+            with mock.patch.object(rf.sys, "platform", "linux"):
+                return real_which(name, *args, **kwargs)
+
         with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-            rf.sys, "platform", "darwin"
-        ):
+            rf.sys, "platform", "win32"
+        ), mock.patch("shutil.which", side_effect=which_with_real_platform):
             _, calls = CodexToolProofFlowTests()._run_pr_flow_for_tool_proof(
                 root=Path(raw_root) / "unsupported-route",
                 profile_resolved="normal",
                 multipass_enabled=False,
                 llm_side_effect=forbidden_model,
                 helper_preflight_side_effect=forbidden_helper,
-                expect_error="requires Linux",
+                expect_error="requires Linux or macOS",
             )
 
         self.assertEqual(events, [])
         self.assertEqual(calls, [])
+
+    @unittest.skipUnless(sys.platform.startswith("darwin"), "darwin keeper route is exercised on macOS CI")
+    def test_darwin_indexed_helper_route_runs_keeper_and_model(self) -> None:
+        """The indexed helper route acquires the keeper and completes on macOS."""
+        from _reviewflow_unittest_grounding_impl import (
+            CodexToolProofFlowTests,
+            _sectioned_review_markdown,
+        )
+
+        flow_tests = CodexToolProofFlowTests()
+
+        def llm_side_effect(output_path: Path, work_dir: Path) -> rf.LlmRunResult:
+            output_path.write_text(
+                _sectioned_review_markdown(business="APPROVE", technical="APPROVE"),
+                encoding="utf-8",
+            )
+            adapter_meta = flow_tests._write_helper_command_events(
+                work_dir=work_dir,
+                commands=["search", "research"],
+            )
+            return rf.LlmRunResult(resume=None, adapter_meta=adapter_meta)
+
+        root = Path(tempfile.mkdtemp(prefix=".tmp_test_darwin_keeper_route"))
+        try:
+            root, calls = flow_tests._run_pr_flow_for_tool_proof(
+                root=root,
+                profile_resolved="normal",
+                multipass_enabled=False,
+                llm_side_effect=llm_side_effect,
+            )
+            session_dir = next((root / "sandboxes").iterdir())
+            meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["review.md"])
+            self.assertEqual(meta["status"], "done")
+            self.assertTrue(meta["chunkhound"]["tool_validation"]["valid"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_http_non_helper_and_no_index_routes_remain_keeper_free(self) -> None:
         """TAP-03 A9: bypass routes retain model behavior without keeper authority."""
@@ -5935,8 +6003,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"\(stage=expected_session; category=native_status_timeout\)\."
                 ),
                 adjudication_kwargs={
-                    "readiness_timeout_seconds": 0.5,
-                    "readiness_poll_interval_seconds": 0.2,
+                    "readiness_timeout_seconds": 1.5,
+                    "readiness_poll_interval_seconds": 0.5,
                     "clock": clock,
                     "sleep": sleep,
                 },
@@ -5946,8 +6014,8 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
             result["meta"]["chunkhound_readiness_failure"],
             {"stage": "expected_session", "category": "native_status_timeout"},
         )
-        self.assertEqual(sleeps, [0.2, 0.2, 0.1])
-        self.assertEqual(now, 70.5)
+        self.assertEqual(sleeps, [0.5, 0.5, 0.5])
+        self.assertEqual(now, 71.5)
         self.assertTrue(
             issubclass(
                 lifecycle.ExpectedSessionReadinessTimeoutError,
@@ -6689,6 +6757,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
                                 generation=observed,
                                 expected_parent_pid=proxy_pid,
                                 proc_root=proc_root,
+                                platform="linux",
                             )
                         ),
                     )
@@ -6729,6 +6798,7 @@ class ChunkHoundDaemonLeaseTests(unittest.TestCase):
                         generation=observed,
                         expected_parent_pid=proxy_pid,
                         proc_root=proc_root,
+                        platform="linux",
                     )
                 ),
             )
@@ -8868,8 +8938,8 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                         witness=witness_type(
                             relative_path="src/fixture.py", literal="needle[1]"
                         ),
-                        readiness_timeout_seconds=0.5,
-                        readiness_poll_interval_seconds=0.2,
+                        readiness_timeout_seconds=1.5,
+                        readiness_poll_interval_seconds=0.5,
                         clock=clock,
                         sleep=sleep,
                     )
@@ -8886,8 +8956,8 @@ class ExpectedSessionReadinessTests(unittest.TestCase):
                             }
                         ]
                         * 3,
-                        "timeout_seconds": 0.5,
-                        "elapsed_seconds": 0.5,
+                        "timeout_seconds": 1.5,
+                        "elapsed_seconds": 1.5,
                     },
                 )
             finally:
@@ -9521,7 +9591,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 encoding="ascii",
             )
             executable = root / "chunkhound"
-            executable.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+            executable.write_text(f"#!{sys.executable}\n", encoding="utf-8")
             executable.chmod(0o755)
             env = MappingProxyType({"PATH": "/curated", "MARKER": "exact"})
             with mock.patch.object(
@@ -9536,6 +9606,7 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                     environment=env,
                     timeout=2.5,
                     proc_root=proc_root,
+                    platform="linux",
                 )
             self.assertEqual(
                 generation,
@@ -9551,3 +9622,88 @@ class DaemonLifecycleProductionUtilityTests(unittest.TestCase):
                 env=env,
             )
 
+
+
+class DarwinProcessIdentityTests(unittest.TestCase):
+    """Native daemon process identity observation on macOS (issue #38)."""
+
+    @staticmethod
+    def _pack_bsdinfo(*, pid: int, ppid: int, status: int, tvsec: int, tvusec: int) -> bytes:
+        import ctypes
+
+        from cure_chunkhound_lifecycle import _DarwinProcBsdInfo
+
+        info = _DarwinProcBsdInfo()
+        info.pbi_pid = pid
+        info.pbi_ppid = ppid
+        info.pbi_status = status
+        info.pbi_start_tvsec = tvsec
+        info.pbi_start_tvusec = tvusec
+        return ctypes.string_at(ctypes.byref(info), ctypes.sizeof(_DarwinProcBsdInfo))
+
+    def test_parse_bsdinfo_extracts_identity(self) -> None:
+        from cure_chunkhound_lifecycle import _parse_darwin_bsdinfo
+
+        # pbi_status is the NUMERIC BSD state from xnu bsd/sys/proc.h
+        # (SSLEEP=3), not an ASCII letter; the parser must normalize it to
+        # the single-letter form shared with the Linux /proc parser.
+        data = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=500_000
+        )
+        identity = _parse_darwin_bsdinfo(data)
+        self.assertEqual(identity.pid, 321)
+        self.assertEqual(identity.parent_pid, 100)
+        self.assertEqual(identity.state, "S")
+        self.assertEqual(identity.process_started_at, 1_700_000_000.5)
+
+    def test_parse_bsdinfo_keeps_microsecond_start_precision(self) -> None:
+        from cure_chunkhound_lifecycle import _parse_darwin_bsdinfo
+
+        # pbi_start_tvusec is uint64_t (xnu sys/proc_info.h); a 32-bit field
+        # would wrap values above 2**32 and silently corrupt the start time.
+        # 5_000_000_000 us = 5_000 s.
+        data = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=5_000_000_000
+        )
+        identity = _parse_darwin_bsdinfo(data)
+        self.assertEqual(identity.process_started_at, 1_700_005_000.0)
+
+    def test_parse_bsdinfo_rejects_truncated_buffer(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
+
+        with self.assertRaises(DaemonGenerationObservationError):
+            _parse_darwin_bsdinfo(b"x" * 8)
+
+    def test_parse_bsdinfo_rejects_zombie_and_invalid_states_and_pids(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _parse_darwin_bsdinfo
+
+        # SZOMB=5 is the numeric zombie state; it must normalize to "Z" and
+        # be rejected exactly like the Linux "Z"/"X"/"x" states. Unknown
+        # numeric states are not valid BSD states and must fail closed.
+        for kwargs in (
+            {"pid": 321, "ppid": 100, "status": 5, "tvsec": 1, "tvusec": 0},
+            {"pid": 321, "ppid": 100, "status": 99, "tvsec": 1, "tvusec": 0},
+            {"pid": 0, "ppid": 100, "status": 3, "tvsec": 1, "tvusec": 0},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(DaemonGenerationObservationError):
+                _parse_darwin_bsdinfo(self._pack_bsdinfo(**kwargs))
+
+    def test_read_process_identity_dispatches_to_darwin_backend(self) -> None:
+        import cure_chunkhound_lifecycle as lifecycle
+
+        fixture = self._pack_bsdinfo(
+            pid=321, ppid=100, status=3, tvsec=1_700_000_000, tvusec=250_000
+        )
+        with mock.patch.object(
+            lifecycle, "_darwin_proc_pidinfo_bsdinfo", return_value=fixture
+        ):
+            identity = lifecycle._read_process_identity(321, platform="darwin")
+        self.assertEqual(identity.pid, 321)
+        self.assertEqual(identity.parent_pid, 100)
+        self.assertEqual(identity.process_started_at, 1_700_000_000.25)
+
+    def test_read_process_identity_rejects_unsupported_platform(self) -> None:
+        from cure_chunkhound_lifecycle import DaemonGenerationObservationError, _read_process_identity
+
+        with self.assertRaises(DaemonGenerationObservationError):
+            _read_process_identity(321, platform="freebsd")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+import ctypes
 from dataclasses import dataclass
 from enum import Enum, auto
 import hashlib
@@ -11,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import sys
 import time
 from types import MappingProxyType, TracebackType
 from typing import Any, NoReturn
@@ -341,18 +343,18 @@ def build_launch_identity(
 
 
 @dataclass(frozen=True)
-class _LinuxProcessIdentity:
+class _ProcessIdentity:
     pid: int
     state: str
     parent_pid: int
-    start_ticks: int
+    process_started_at: float
 
 
 def _read_linux_process_identity(
     pid: int,
     *,
     proc_root: str | Path = "/proc",
-) -> _LinuxProcessIdentity:
+) -> _ProcessIdentity:
     stat_path = Path(proc_root) / str(pid) / "stat"
     try:
         proc_stat = stat_path.read_text(encoding="ascii")
@@ -386,11 +388,146 @@ def _read_linux_process_identity(
         raise DaemonGenerationObservationError(
             "native daemon /proc start identity is invalid"
         )
-    return _LinuxProcessIdentity(
+    return _ProcessIdentity(
         pid=stat_pid,
         state=process_state,
         parent_pid=parent_pid,
-        start_ticks=start_ticks,
+        process_started_at=float(start_ticks),
+    )
+
+
+# PROC_PIDTBSDINFO from macOS sys/proc_info.h.
+_DARWIN_PROC_PIDTBSDINFO = 3
+
+# Numeric pbi_status values are the BSD process states from xnu
+# bsd/sys/proc.h; they are NOT ASCII letters like the Linux /proc
+# <pid>/stat states. Normalize to the single-letter form so the shared
+# zombie rejection stays platform-agnostic and downstream checks
+# (attestation, smoke probes) keep a single-form `state in {"Z", "X", "x"}`.
+_DARWIN_BSD_STATE_TO_ASCII = {
+    1: "I",  # SIDL   - being created by fork
+    2: "R",  # SRUN   - currently runnable
+    3: "S",  # SSLEEP - sleeping on an address
+    4: "T",  # SSTOP  - debugging or suspension
+    5: "Z",  # SZOMB  - awaiting collection by parent
+}
+
+
+class _DarwinProcBsdInfo(ctypes.Structure):
+    """proc_bsdinfo layout from macOS sys/proc_info.h.
+
+    Only pbi_status/pbi_pid/pbi_ppid and the start-time tail are read; the full
+    field list keeps the tail offsets correct.
+    """
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("pbi_rfu", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("pbi_e_tdev", ctypes.c_uint32),
+        ("pbi_e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _darwin_proc_pidinfo_bsdinfo(pid: int) -> bytes:
+    """Read proc_bsdinfo via libproc.proc_pidinfo (macOS-only)."""
+    import ctypes.util
+
+    lib_name = ctypes.util.find_library("proc")
+    if not lib_name:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process API (libproc) is unavailable"
+        )
+    libproc = ctypes.CDLL(lib_name)
+    proc_pidinfo = libproc.proc_pidinfo
+    proc_pidinfo.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    proc_pidinfo.restype = ctypes.c_int
+    size = ctypes.sizeof(_DarwinProcBsdInfo)
+    buffer = ctypes.create_string_buffer(size)
+    result = proc_pidinfo(pid, _DARWIN_PROC_PIDTBSDINFO, 0, buffer, size)
+    if result <= 0:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is unavailable"
+        )
+    if result < size:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is truncated"
+        )
+    return buffer.raw
+
+
+def _parse_darwin_bsdinfo(data: bytes) -> _ProcessIdentity:
+    if len(data) < ctypes.sizeof(_DarwinProcBsdInfo):
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is truncated"
+        )
+    info = _DarwinProcBsdInfo.from_buffer_copy(data)
+    # pbi_status is a numeric BSD state (xnu bsd/sys/proc.h); unknown
+    # values are not valid states and must fail closed rather than being
+    # coerced into an ASCII letter that could slip past the zombie check.
+    state = _DARWIN_BSD_STATE_TO_ASCII.get(info.pbi_status)
+    if state is None:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is invalid"
+        )
+    if info.pbi_pid <= 0 or info.pbi_ppid < 0:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is invalid"
+        )
+    if state in {"Z", "X", "x"}:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin process identity is invalid"
+        )
+    started_at = float(info.pbi_start_tvsec) + float(info.pbi_start_tvusec) / 1_000_000.0
+    if started_at < 0:
+        raise DaemonGenerationObservationError(
+            "native daemon Darwin start identity is invalid"
+        )
+    return _ProcessIdentity(
+        pid=int(info.pbi_pid),
+        state=state,
+        parent_pid=int(info.pbi_ppid),
+        process_started_at=started_at,
+    )
+
+
+def _read_process_identity(
+    pid: int,
+    *,
+    proc_root: str | Path = "/proc",
+    platform: str | None = None,
+) -> _ProcessIdentity:
+    """Read a PID-reuse-resistant process identity for the current platform."""
+    current = str(platform or sys.platform).strip().lower()
+    if current.startswith("linux"):
+        return _read_linux_process_identity(pid, proc_root=proc_root)
+    if current.startswith("darwin"):
+        return _parse_darwin_bsdinfo(_darwin_proc_pidinfo_bsdinfo(pid))
+    raise DaemonGenerationObservationError(
+        f"native daemon process identity observation is unsupported on {current or 'this platform'}"
     )
 
 
@@ -399,6 +536,7 @@ def attest_native_daemon_generation_ownership(
     expected_parent_pid: int,
     *,
     proc_root: str | Path = "/proc",
+    platform: str | None = None,
 ) -> None:
     """Require a live generation to be the immediate child of one MCP proxy."""
 
@@ -417,16 +555,17 @@ def attest_native_daemon_generation_ownership(
             "native daemon ownership attestation inputs are invalid"
         )
     try:
-        identity = _read_linux_process_identity(
+        identity = _read_process_identity(
             generation.pid,
             proc_root=proc_root,
+            platform=platform,
         )
     except DaemonGenerationObservationError as exc:
         raise ExpectedSessionReadinessError(
             "native daemon ownership identity cannot be read"
         ) from exc
     if (
-        float(identity.start_ticks) != float(generation.process_started_at)
+        float(identity.process_started_at) != float(generation.process_started_at)
         or identity.parent_pid != expected_parent_pid
     ):
         raise ExpectedSessionReadinessError(
@@ -442,8 +581,9 @@ def observe_native_daemon_generation(
     environment: Mapping[str, str],
     timeout: float = 5.0,
     proc_root: str | Path = "/proc",
+    platform: str | None = None,
 ) -> DaemonGenerationIdentity | None:
-    """Observe a native daemon PID plus Linux PID-reuse-resistant start tick."""
+    """Observe a native daemon PID plus a PID-reuse-resistant start marker."""
 
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(float(timeout)) or timeout <= 0:
         raise DaemonGenerationObservationError("daemon metadata timeout is invalid")
@@ -486,12 +626,12 @@ def observe_native_daemon_generation(
         raise DaemonGenerationObservationError(
             "native daemon metadata returned an invalid PID"
         )
-    identity = _read_linux_process_identity(pid, proc_root=proc_root)
-    # Keep the kernel start tick itself: conversion through wall-clock time loses
+    identity = _read_process_identity(pid, proc_root=proc_root, platform=platform)
+    # Keep the raw start marker itself: conversion through wall-clock time loses
     # precision and weakens PID-reuse detection.
     return DaemonGenerationIdentity(
         pid=identity.pid,
-        process_started_at=float(identity.start_ticks),
+        process_started_at=float(identity.process_started_at),
     )
 
 
