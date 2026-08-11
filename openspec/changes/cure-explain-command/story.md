@@ -223,6 +223,11 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   partial lines in `flush()` (run.py flushes after every pipe read); the final
   partial line is consumed by `drain()` when the stream ends — huge single-line
   JSON events render as compacted text instead of raw-JSON fragments.
+- D15 (PR#37 review 2026-08-11): the read-only flows never touch the repo
+  checkout — the rf-jira helper is staged at `work_dir / "rf-jira"` (it is
+  invoked by absolute path and reads credentials purely from env), never at
+  `<repo>/rf-jira`; `_stage_review_auth_support` no longer takes a `repo_dir`
+  param at all, so a future staging step cannot silently write into the repo.
 
 ## PR #37 Review Remediation (2026-08-11)
 - Streaming reality: codex `exec --json`/`exec resume --json` emits whole completed

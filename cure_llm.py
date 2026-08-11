@@ -63,8 +63,8 @@ def prepare_netrc_for_reviewflow(*, dst_root: Path) -> Path | None:
     return _reviewflow().prepare_netrc_for_reviewflow(dst_root=dst_root)
 
 
-def write_rf_jira(*, repo_dir: Path) -> Path:
-    return _reviewflow().write_rf_jira(repo_dir=repo_dir)
+def write_rf_jira(*, dst_dir: Path) -> Path:
+    return _reviewflow().write_rf_jira(dst_dir=dst_dir)
 
 
 @dataclass(frozen=True)
@@ -814,7 +814,7 @@ def _require_provider_command(command: str, *, provider: str) -> str:
     return name
 
 
-def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _stage_review_auth_support(*, work_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
     try:
         gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
@@ -831,7 +831,7 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
             staged_paths["netrc"] = str(netrc)
         env["CURE_WORK_DIR"] = str(work_dir)
         staged_paths["cure_work_dir"] = str(work_dir)
-        rf_jira = write_rf_jira(repo_dir=repo_dir)
+        rf_jira = write_rf_jira(dst_dir=work_dir)
         staged_paths["rf_jira"] = str(rf_jira)
         return env, staged_paths
     except Exception:
@@ -1220,7 +1220,7 @@ def prepare_review_agent_runtime(
     env = build_curated_subprocess_env(extra_env=base_env)
     env = augment_cli_provider_session_env(env=env, provider=provider)
     env.update(_string_dict(resolved.get("env")))
-    env, staged_paths = _stage_review_auth_support(work_dir=work_dir, repo_dir=repo_dir, env=env)
+    env, staged_paths = _stage_review_auth_support(work_dir=work_dir, env=env)
     chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
     if chunkhound_dry_run:
         env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"

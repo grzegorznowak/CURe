@@ -147,7 +147,7 @@ class ExplainCommandTests(unittest.TestCase):
             return DEFAULT_PROMPT_TEXT
 
         def fake_stage_auth_support(
-            *, work_dir: Path, repo_dir: Path, env: dict[str, str], stage_rf_jira: bool
+            *, work_dir: Path, env: dict[str, str], stage_rf_jira: bool
         ) -> tuple[dict[str, str], dict[str, str]]:
             captured["_stage_rf_jira"] = stage_rf_jira
             return dict(env), (staged_paths_value if staged_paths_value is not None else {})
@@ -355,7 +355,7 @@ class ExplainCommandTests(unittest.TestCase):
         cleaned: list[object] = []
 
         def fake_stage_auth_support(
-            *, work_dir: Path, repo_dir: Path, env: dict[str, str], stage_rf_jira: bool
+            *, work_dir: Path, env: dict[str, str], stage_rf_jira: bool
         ) -> tuple[dict[str, str], dict[str, str]]:
             return dict(env), {"staged": "path"}
 

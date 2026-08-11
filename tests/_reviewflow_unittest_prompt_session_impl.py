@@ -4432,19 +4432,20 @@ class CleanFlowTests(unittest.TestCase):
 
 class RfJiraTests(unittest.TestCase):
     def test_write_rf_jira_creates_executable_helper(self) -> None:
-        repo = ROOT / ".tmp_test_repo_rf_jira"
+        dst = ROOT / ".tmp_test_rf_jira_dst"
         try:
-            shutil.rmtree(repo, ignore_errors=True)
-            repo.mkdir(parents=True, exist_ok=True)
-            path = rf.write_rf_jira(repo_dir=repo)
+            shutil.rmtree(dst, ignore_errors=True)
+            dst.mkdir(parents=True, exist_ok=True)
+            path = rf.write_rf_jira(dst_dir=dst)
             self.assertTrue(path.is_file())
             self.assertTrue(os.access(path, os.X_OK))
             text = path.read_text(encoding="utf-8")
             self.assertIn("JIRA_CONFIG_FILE", text)
             self.assertIn("NETRC", text)
             self.assertIn("pwd.getpwuid", text)
+            self.assertEqual(path.parent, dst)
         finally:
-            shutil.rmtree(repo, ignore_errors=True)
+            shutil.rmtree(dst, ignore_errors=True)
 
 
 class WorkflowContractTests(unittest.TestCase):

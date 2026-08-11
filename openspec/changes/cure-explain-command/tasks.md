@@ -116,3 +116,24 @@
   `test_partial_utility_model_invalid_final_combination_fails_fast` fails
   standalone (expects an obsolete utility-effort rejection); excluded from the
   full-suite aggregator since before this change.
+
+## rf-jira staged outside the repo checkout (2026-08-11, PR#37 review point)
+- [x] Review point: "the read-only command can delete a repository file" — the
+  PR review flow (`prepare_review_agent_runtime`) still staged the rf-jira
+  helper at `<repo>/rf-jira`, overwriting a pre-existing file; cleanup then
+  unlinked it.
+- [x] `write_rf_jira(*, repo_dir)` → `write_rf_jira(*, dst_dir)` (both copies +
+  re-export); both `_stage_review_auth_support` copies stage the helper at
+  `work_dir / "rf-jira"` instead of `repo_dir`. The helper is invoked by
+  absolute path (cure.py:7867) and reads only `JIRA_CONFIG_FILE`/`NETRC` env +
+  the `jira` CLI — it has no repo-relative/cwd assumptions, so it can live in
+  the work dir.
+- [x] Dead `repo_dir` param removed from `_stage_review_auth_support` (both
+  copies, both call sites, explain test fakes); explain keeps
+  `stage_rf_jira=False` (explain stages no Jira at all). Cleanup and the
+  runtime capability check are path-agnostic — unchanged.
+- [x] RED→GREEN: `test_prepare_review_agent_runtime_stages_rf_jira_outside_repo_checkout`
+  — helper lands in work_dir, is executable, a pre-existing `repo/rf-jira`
+  survives verbatim, and the repo dir gains nothing new.
+- [x] Suite 1037 passed + 189 subtests (pre-existing broken test deselected);
+  ruff + py_compile clean.

@@ -1701,7 +1701,6 @@ def _require_provider_command(command: str, *, provider: str) -> str:
 def _stage_review_auth_support(
     *,
     work_dir: Path,
-    repo_dir: Path,
     env: dict[str, str],
     stage_rf_jira: bool = True,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -1722,7 +1721,7 @@ def _stage_review_auth_support(
         env["CURE_WORK_DIR"] = str(work_dir)
         staged_paths["cure_work_dir"] = str(work_dir)
         if stage_rf_jira:
-            rf_jira = write_rf_jira(repo_dir=repo_dir)
+            rf_jira = write_rf_jira(dst_dir=work_dir)
             staged_paths["rf_jira"] = str(rf_jira)
         return env, staged_paths
     except Exception:
@@ -7022,8 +7021,8 @@ def prepare_netrc_for_reviewflow(*, dst_root: Path) -> Path | None:
     return dst if dst.is_file() else None
 
 
-def write_rf_jira(*, repo_dir: Path) -> Path:
-    path = repo_dir / "rf-jira"
+def write_rf_jira(*, dst_dir: Path) -> Path:
+    path = dst_dir / "rf-jira"
     script = """#!/usr/bin/env python3
 import os
 import pwd
@@ -12562,7 +12561,7 @@ def _explain_flow_impl(
     logs_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env, staged_paths = _stage_review_auth_support(
-        work_dir=work_dir, repo_dir=repo_dir, env=env, stage_rf_jira=False
+        work_dir=work_dir, env=env, stage_rf_jira=False
     )
 
     resume_fork_id: str | None = None

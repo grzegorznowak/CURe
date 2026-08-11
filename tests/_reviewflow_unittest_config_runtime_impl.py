@@ -2431,6 +2431,46 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_prepare_review_agent_runtime_stages_rf_jira_outside_repo_checkout(self) -> None:
+        """The read-only review flow must never write the rf-jira helper into the repo checkout."""
+        root = ROOT / ".tmp_test_agent_runtime_rf_jira_outside_repo"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            pre_existing = repo / "rf-jira"
+            pre_existing.write_text("pre-existing user file\n", encoding="utf-8")
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+            helper = Path(str(runtime["staged_paths"]["rf_jira"]))
+            self.assertTrue(helper.is_file())
+            self.assertTrue(os.access(helper, os.X_OK))
+            self.assertEqual(helper.parent, work)
+            # The repo checkout must be untouched: the pre-existing rf-jira file
+            # survives verbatim and nothing new was written into it.
+            self.assertEqual(pre_existing.read_text(encoding="utf-8"), "pre-existing user file\n")
+            self.assertEqual(list(repo.iterdir()), [pre_existing])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_prepare_review_agent_runtime_injects_codex_model_context_window_override(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex_context_window"
         try:
