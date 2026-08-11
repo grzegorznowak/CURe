@@ -392,7 +392,8 @@ class CodexJsonEventSink:
         if event_type == "item.completed":
             item = payload.get("item")
             item = item if isinstance(item, dict) else {}
-            if str(item.get("type") or "").strip() == "agent_message":
+            item_kind = str(item.get("type") or "").strip()
+            if item_kind == "agent_message":
                 raw_text = str(item.get("text") or "")
                 text = _compact_codex_text(raw_text)
                 if text:
@@ -404,6 +405,19 @@ class CodexJsonEventSink:
                             "raw_text": raw_text,
                             "ts": timestamp,
                             "replace_current": True,
+                        },
+                    )
+            if item_kind == "error":
+                message = str(item.get("message") or "").strip()
+                if message:
+                    text = f"Codex notice: {_compact_codex_text(message)}"
+                    return (
+                        [text],
+                        {
+                            "type": "codex_notice",
+                            "text": text,
+                            "ts": timestamp,
+                            "replace_current": False,
                         },
                     )
             return ([], None)

@@ -12,7 +12,7 @@
 ## Core Implementation
 - [x] Add `prompts/explain.md` builtin default prompt template
 - [x] Implement `_explain_flow_impl` + `_recorded_resume_session_id` in cure.py (target resolution, auth staging, fork decision, prompt modes, explains entry)
-- [x] Register `explain` subparser (`--pr` required, `--explain-prompt`, llm/codex overrides, quiet/no-stream/verbosity) and `main()` dispatch
+- [x] Register `explain` subparser (`pr_url` positional required, `--explain-prompt`, llm/codex overrides, quiet/no-stream/verbosity) and `main()` dispatch
 - [x] Add `explain_flow` wrapper + `cure commands` catalog entry in cure_commands.py
 - [x] Add `fork_codex_session` to cure_llm.py (byte-copy + uuid rewrite; ReviewflowError on missing base)
 - [x] Thread `resume_session_id` through `run_llm_exec` / `run_codex_exec` / `build_codex_exec_cmd` (`codex exec resume` branch)
@@ -22,8 +22,8 @@
 - [x] RED: 6 fork-mode obligations (fork+resume, three fallbacks, helper unit tests) → GREEN after fork implementation
 - [x] Update stale closed-world catalog contract test (`test_commands_flow_json_returns_curated_agent_catalog` includes `explain`)
 - [x] Full regression: 762/762 tests OK; ruff clean; py_compile OK
-- [x] Real-run inline proof: `cure explain --pr .../pull/21` (builtin prompt) rc=0, 23.4s, artifact + meta recorded
-- [x] Real-run fork proof: `cure explain --pr .../pull/21 --explain-prompt "..."` rc=0, 82.6s, answer with backing knowledge; base rollout sha256 unchanged (`a3711ee6…`); `meta.llm.resume` still base; fork rollout contains the continuation
+- [x] Real-run inline proof: `cure explain .../pull/21` (builtin prompt) rc=0, 23.4s, artifact + meta recorded
+- [x] Real-run fork proof: `cure explain .../pull/21 --explain-prompt "..."` rc=0, 82.6s, answer with backing knowledge; base rollout sha256 unchanged (`a3711ee6…`); `meta.llm.resume` still base; fork rollout contains the continuation
 - [x] Remove scratch `~/.codex-test` (contained copied auth.json) after feasibility tests
 
 ## Integration & Cleanup
@@ -44,3 +44,23 @@
 - [x] Exports: `explain_flow` in cure_commands.__all__, cure.py command imports, reexport contract test
 - [x] Full suite 770/770; ruff clean; py_compile OK
 - [x] Real-run proof (PR21 12:08Z): write + `gh api user` probes denied by read-only sandbox; live stderr streaming; base rollout sha unchanged (a3711ee6…); recorded resume cmd shows `-c sandbox_mode="read-only"`, no bypass
+
+## PR #37 Re-Review Remediation (2026-08-11)
+- [x] RED: 9 new obligations failing (rf-jira skip, normalize skip, per-entry provenance,
+  path containment ×2, merge-under-lock progress ×2, fork partial-write cleanup, sink
+  error-item notice, codex normalize_artifact skip) → GREEN
+- [x] Read-only checkout: `_stage_review_auth_support(stage_rf_jira=False)` for explain —
+  no `rf-jira` write/delete in the sandbox repo checkout
+- [x] Prose preservation: `normalize_artifact` param through `run_llm_exec` /
+  `run_codex_exec` / `run_http_response_exec` (default True; explain passes False)
+- [x] Provenance: `explains[]` entries carry provider/model/preset/transport + usage;
+  explain no longer writes the review's top-level `meta.llm`
+- [x] Containment: persisted `meta.paths` repo_dir/work_dir/review_md validated inside
+  the session dir before any read/stage
+- [x] Concurrency: `SessionProgress(merge_under_lock=True)` — flushes overlay
+  progress-owned keys on a fresh reload under `file_lock`
+- [x] Fork hygiene: partial rollout unlinked on write failure in `fork_codex_session`
+- [x] Streaming reality: sink renders codex `error` items as `Codex notice:` lines;
+  A5/S8 amended to item-granular delivery (codex emits whole completed items)
+- [x] OpenSpec `--pr` examples → positional; suite counts 16 → 31
+- [x] Full suite 771/771; ruff clean; py_compile OK

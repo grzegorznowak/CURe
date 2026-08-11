@@ -44,9 +44,11 @@ cure explain <PR_URL> [--explain-prompt <TEXT>]
      (no `-C`, no `--add-dir`, prompt as trailing positional — resume subcommand
      surface)
    - inline mode → existing one-shot `codex exec` path (unchanged)
-10. Record `record_llm_usage` + append `explains[]` entry with optional
-    `resume: {mode: "fork", base_session_id, fork_session_id}`; write meta.
-    `meta.llm.resume` / `meta.codex.resume` are read-only for explain.
+10. Append `explains[]` entry with per-explanation provenance
+    (provider/model/preset/transport, normalized usage, timestamps, prompt_source,
+    output_path, optional `resume: {mode: "fork", base_session_id,
+    fork_session_id}`); write meta under `file_lock` with a fresh reload.
+    `meta.llm` / `meta.llm.resume` / `meta.codex.resume` are read-only for explain.
 11. Print explanation text (if artifact non-empty) then the artifact path; return 0.
 
 ## Fork mechanics (`cure_llm.py::fork_codex_session`)
@@ -113,13 +115,18 @@ handles them.
 }]
 ```
 
-- `llm` block gains usage/provider info via `record_llm_usage` (as in other flows).
+- The review's top-level `llm` block is never mutated by explain — each
+  `explains[]` entry records its own provider/model/preset/transport and
+  normalized usage (`usage: {input_tokens, output_tokens, total_tokens}`).
 - `meta.llm.resume` and `meta.codex.resume` are never modified — `interactive`
   continues to resume the pristine base session.
+- Progress flushes use `SessionProgress(merge_under_lock=True)`: overlay only
+  progress-owned keys on a fresh on-disk reload under `file_lock` so concurrent
+  explain runs cannot erase each other's `explains[]` appends.
 
 ## Verification design
 
-- 16 unit obligations in `tests/_reviewflow_unittest_explain.py`:
+- 31 unit obligations in `tests/_reviewflow_unittest_explain.py`:
   inline happy path / custom prompt / streaming / error paths / parser / catalog /
   wrapper / fork+resume (base byte-identical, ids rewritten, no review append,
   resume pointers untouched) / three fallback cases / fork helper unit tests.
@@ -127,6 +134,12 @@ handles them.
   shape (both branches), flow runtime policy, early-failure credential cleanup,
   unique artifact names, meta file_lock usage, fork deletion on LLM failure,
   fork I/O failure → ReviewflowError.
+- PR #37 re-review obligations (9 more): rf-jira staging skipped for explain;
+  `normalize_artifact=False` plumbing (flow + run_codex_exec skip); per-entry
+  provenance (no top-level llm merge); session-path containment (repo_dir,
+  review_md outside session rejected); merge-under-lock progress preserves
+  concurrent explains appends; fork partial-rollout cleanup; sink `Codex notice:`
+  rendering for codex error items.
 - Full suite regression, ruff, py_compile; Story 26 smoke against an editable
   install venv; real-run proof (write/gh probes denied, live stderr streaming,
   base sha unchanged).

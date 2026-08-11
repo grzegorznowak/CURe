@@ -480,6 +480,7 @@ def run_codex_exec(
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
+    normalize_artifact: bool = True,
 ) -> CodexRunResult:
     owned_role: OwnedProcessRole | None = (
         "review-provider" if owned_processes is not None else None
@@ -563,7 +564,8 @@ def run_codex_exec(
                 )
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
-        normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+        if normalize_artifact:
+            normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
         _finalize_codex_live_progress(progress=progress, status="done")
         events_end_offset = _path_size(codex_events_log_path)
         return CodexRunResult(
@@ -655,7 +657,8 @@ def run_codex_exec(
             raise
         if artifact_override["text"]:
             _write_text_artifact(output_path, str(artifact_override["text"]))
-        normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+        if normalize_artifact:
+            normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
         _finalize_codex_live_progress(progress=progress, status="done")
         events_end_offset = _path_size(codex_events_log_path)
         return CodexRunResult(
@@ -768,6 +771,7 @@ def run_http_response_exec(
     output_path: Path,
     prompt: str,
     progress: "SessionProgress",
+    normalize_artifact: bool = True,
 ) -> LlmRunResult:
     request_meta = build_http_response_request(resolved, prompt=prompt)
     cmd_meta = ["http-responses", str(resolved.get("provider") or "?"), str(request_meta["url"])]
@@ -801,7 +805,8 @@ def run_http_response_exec(
         raise ReviewflowError("HTTP llm provider returned non-JSON output.")
     text = _extract_http_response_output_text(payload)
     output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
+    if normalize_artifact:
+        normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
     usage = _extract_usage_from_payload(payload)
     return LlmRunResult(
         resume=None,
@@ -831,6 +836,7 @@ def run_llm_exec(
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
+    normalize_artifact: bool = True,
 ) -> LlmRunResult:
     rf = _reviewflow()
     provider = str(resolved.get("provider") or "").strip().lower()
@@ -860,6 +866,7 @@ def run_llm_exec(
             owned_processes=owned_processes,
             resume_session_id=resume_session_id,
             sandbox_mode=sandbox_mode,
+            normalize_artifact=normalize_artifact,
         )
         resume = None
         if result.resume is not None:
@@ -893,6 +900,7 @@ def run_llm_exec(
             output_path=output_path,
             prompt=prompt,
             progress=progress,
+            normalize_artifact=normalize_artifact,
         )
     raise ReviewflowError(f"Unsupported llm provider: {provider!r}")
 
@@ -1480,7 +1488,16 @@ def fork_codex_session(
         )
         day_dir.mkdir(parents=True, exist_ok=True)
         fork_path = day_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_id}.jsonl"
-        fork_path.write_text(text.replace(session_id, new_id), encoding="utf-8")
+        try:
+            fork_path.write_text(text.replace(session_id, new_id), encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            # Never leave a partially written rollout behind on I/O failure:
+            # the caller cannot clean up a path it never received.
+            try:
+                fork_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ReviewflowError(f"Cannot fork codex session {session_id!r}: {e}") from e
         return new_id, fork_path
     except (OSError, UnicodeError) as e:
         raise ReviewflowError(f"Cannot fork codex session {session_id!r}: {e}") from e

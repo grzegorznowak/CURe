@@ -1901,7 +1901,13 @@ def _require_provider_command(command: str, *, provider: str) -> str:
     return name
 
 
-def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _stage_review_auth_support(
+    *,
+    work_dir: Path,
+    repo_dir: Path,
+    env: dict[str, str],
+    stage_rf_jira: bool = True,
+) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
     try:
         gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
@@ -1918,8 +1924,9 @@ def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str,
             staged_paths["netrc"] = str(netrc)
         env["CURE_WORK_DIR"] = str(work_dir)
         staged_paths["cure_work_dir"] = str(work_dir)
-        rf_jira = write_rf_jira(repo_dir=repo_dir)
-        staged_paths["rf_jira"] = str(rf_jira)
+        if stage_rf_jira:
+            rf_jira = write_rf_jira(repo_dir=repo_dir)
+            staged_paths["rf_jira"] = str(rf_jira)
         return env, staged_paths
     except Exception:
         cleanup_sensitive_staged_paths(staged_paths)
@@ -2000,14 +2007,28 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> Path:
 
 
 class SessionProgress:
-    def __init__(self, meta_path: Path, *, quiet: bool) -> None:
+    def __init__(self, meta_path: Path, *, quiet: bool, merge_under_lock: bool = False) -> None:
         self.meta_path = meta_path
         self.quiet = quiet
+        self.merge_under_lock = merge_under_lock
         self.meta: dict[str, Any] = {}
         self._lock = threading.RLock()
 
     def _flush_locked(self) -> None:
-        write_redacted_json(self.meta_path, self.meta)
+        if not self.merge_under_lock:
+            write_redacted_json(self.meta_path, self.meta)
+            return
+        # Merge mode: overlay only the progress-owned keys on a fresh on-disk
+        # reload under the cross-process lock, so a stale snapshot flush can
+        # never erase entries appended concurrently by another process
+        # (e.g. `explains[]` entries from parallel explain runs).
+        with file_lock(self.meta_path, quiet=self.quiet):
+            on_disk = _load_session_meta(self.meta_path) or {}
+            merged = dict(on_disk)
+            for key in _PROGRESS_MERGE_KEYS:
+                if key in self.meta:
+                    merged[key] = self.meta[key]
+            write_redacted_json(self.meta_path, merged)
 
     def init(self, initial: dict[str, Any]) -> None:
         with self._lock:
@@ -2076,6 +2097,21 @@ class SessionProgress:
             self.meta["failed_at"] = _utc_now_iso()
             self.meta["error"] = info
             self._flush_locked()
+
+
+# Keys SessionProgress itself manages; merge-mode flushes overlay only these on
+# top of a fresh on-disk reload (see SessionProgress._flush_locked).
+_PROGRESS_MERGE_KEYS = (
+    "status",
+    "phase",
+    "phases",
+    "last_cmd",
+    "base_cache",
+    "live_progress",
+    "completed_at",
+    "failed_at",
+    "error",
+)
 
 
 @contextlib.contextmanager
@@ -12692,11 +12728,18 @@ def _explain_flow_impl(
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str(meta_paths.get("repo_dir") or (session_dir / "repo"))).resolve()
     work_dir = Path(str(meta_paths.get("work_dir") or (session_dir / "work"))).resolve()
+    review_md_path = session.review_md_path
+
+    # Persisted session paths are untrusted input: they may have been tampered
+    # with or imported from elsewhere. Keep every read inside the session dir.
+    session_root = session_dir.resolve()
+    for _label, _path in (("repo_dir", repo_dir), ("work_dir", work_dir), ("review_md", review_md_path)):
+        if not _session_path_within(_path, session_root):
+            raise ReviewflowError(f"Session {_label} path escapes session dir: {_path}")
 
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
 
-    review_md_path = session.review_md_path
     if not review_md_path.is_file():
         raise ReviewflowError(f"Review markdown not found: {review_md_path}")
     review_text = review_md_path.read_text(encoding="utf-8")
@@ -12706,7 +12749,7 @@ def _explain_flow_impl(
     logs_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env, staged_paths = _stage_review_auth_support(
-        work_dir=work_dir, repo_dir=repo_dir, env=env
+        work_dir=work_dir, repo_dir=repo_dir, env=env, stage_rf_jira=False
     )
 
     resume_fork_id: str | None = None
@@ -12766,7 +12809,7 @@ def _explain_flow_impl(
         explain_md_path = explain_dir / f"explain-{explain_ts}-{uuid4().hex[:8]}.md"
 
         started_at = _utc_now_iso()
-        progress = SessionProgress(meta_path, quiet=True)
+        progress = SessionProgress(meta_path, quiet=True, merge_under_lock=True)
         progress.meta = meta
         out = ReviewflowOutput(
             ui_enabled=False,
@@ -12790,6 +12833,7 @@ def _explain_flow_impl(
                     stream=stream,
                     progress=progress,
                     resume_session_id=resume_fork_id,
+                    normalize_artifact=False,
                     runtime_policy={
                         "dangerously_bypass_approvals_and_sandbox": False,
                         "approval_policy": None,
@@ -12804,8 +12848,16 @@ def _explain_flow_impl(
             "started_at": started_at,
             "completed_at": _utc_now_iso(),
             "prompt_source": prompt_template_id,
+            "provider": str(llm_resolved.get("provider") or "").strip() or None,
+            "model": str(llm_resolved.get("model") or "").strip() or None,
+            "preset": str(llm_resolved.get("preset") or "").strip() or None,
             "output_path": str(explain_md_path),
         }
+        if isinstance(result.adapter_meta, dict):
+            explain_entry["transport"] = str(result.adapter_meta.get("transport") or "").strip() or None
+            usage = _normalize_llm_usage(result.adapter_meta.get("usage"))
+            if usage is not None:
+                explain_entry["usage"] = usage
         if resume_fork_id is not None:
             explain_entry["resume"] = {
                 "mode": "fork",
@@ -12814,8 +12866,6 @@ def _explain_flow_impl(
             }
         with file_lock(meta_path, quiet=quiet):
             meta = _load_session_meta(meta_path) or {}
-            llm_meta = meta.setdefault("llm", {})
-            record_llm_usage(llm_meta, result.adapter_meta)
             meta.setdefault("explains", []).append(explain_entry)
             write_redacted_json(meta_path, meta)
         completed = True
@@ -12842,6 +12892,14 @@ def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, defaul
             return (session_dir / p).resolve()
         return p.resolve()
     return default.resolve()
+
+
+def _session_path_within(path: Path, session_root: Path) -> bool:
+    """True when ``path`` resolves inside ``session_root`` (containment check)."""
+    try:
+        return path.resolve().is_relative_to(session_root.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _parse_iso_dt(value: str | None) -> datetime | None:

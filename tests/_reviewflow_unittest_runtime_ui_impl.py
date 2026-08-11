@@ -1955,6 +1955,37 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["text"], cure_output._compact_codex_text(long_message))
         self.assertEqual(tail.tail(2)[-1], cure_output._compact_codex_text(long_message))
 
+    def test_codex_json_event_sink_emits_notice_for_error_items(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            on_event=events.append,
+        )
+
+        sink.write(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_0",
+                        "type": "error",
+                        "message": "This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.5`.",
+                    },
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+
+        self.assertIn("Codex notice: This session was recorded", display.getvalue())
+        self.assertEqual(events[-1]["type"], "codex_notice")
+        self.assertIn("Codex notice: This session was recorded", events[-1]["text"])
+
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
             "session_id": "session-123",
@@ -2104,6 +2135,67 @@ class CodexJsonProgressTests(unittest.TestCase):
             rendered = output_path.read_text(encoding="utf-8")
             self.assertIn("**Summary**: Found two regressions.", rendered)
             self.assertNotIn("Subagent shutdown notifications received", rendered)
+
+    def test_run_codex_exec_skips_artifact_normalization_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            output_path = Path(tmp) / "explain.md"
+            output_path.write_text("Some prose.\n", encoding="utf-8")
+
+            class _DummyProgress:
+                def __init__(self, root: Path) -> None:
+                    self.meta = {
+                        "logs": {"codex_events": str(root / "codex.events.jsonl")},
+                        "live_progress": {},
+                    }
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.last_cmd = list(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress(Path(tmp))
+            out = mock.Mock()
+            out.ui_enabled = True
+
+            def fake_run_logged_cmd(*args: object, **kwargs: object) -> None:
+                output_path.write_text("Some prose.\n", encoding="utf-8")
+
+            out.run_logged_cmd.side_effect = fake_run_logged_cmd
+
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                    normalize_artifact=False,
+                )
+            normalize.assert_not_called()
+
+            # The review pipeline keeps the default normalization behavior.
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                )
+            normalize.assert_called_once()
 
     def test_run_codex_exec_json_mode_uses_raw_review_text_for_artifact_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

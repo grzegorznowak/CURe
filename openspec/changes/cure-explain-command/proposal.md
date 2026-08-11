@@ -25,7 +25,7 @@ resume pointers.
 <!-- Single story — this change is the full scope. -->
 
 ## Decisions & Constraints
-- D1 (Gate 1, human): target = `--pr <url>` → most recent completed review session.
+- D1 (Gate 1, human): target = positional `<PR_URL>` (like `cure pr`) → most recent completed review session.
 - D2 (Gate 1, human): builtin default prompt (`prompts/explain.md`), overridable via
   `--explain-prompt`; prompt optional. Rejected: `--prompt/--prompt-file` mirror of `cure pr`.
 - D3 (Gate 1, human): output always streams unless `--quiet`/`--no-stream`.

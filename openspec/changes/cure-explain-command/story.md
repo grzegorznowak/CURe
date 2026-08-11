@@ -31,7 +31,7 @@ None (standalone change; no dependency story workspaces).
 ## Scope
 - New visible `explain` CLI command: argparse subparser, `main()` dispatch,
   `explain_flow` wrapper, `cure commands` catalog entry
-- Target selection: `--pr <url>` → most recent completed session
+- Target selection: positional `<PR_URL>` → most recent completed session
   (`scan_completed_sessions_for_pr`)
 - Prompt: builtin `prompts/explain.md` default, overridable via `--explain-prompt`
 - Streaming output (unless `--quiet`/`--no-stream`); explanation printed + artifact
@@ -63,8 +63,9 @@ None (standalone change; no dependency story workspaces).
 - S6: `cure commands` lists explain with a recommended invocation. Covers: A8
 - S7: User asks explain (codex) to modify a file or call gh → the agent reports the
   sandbox denied the action; the run completes read-only. Covers: A9
-- S8: Non-quiet, non-no-stream run → answer text reaches the terminal during
-  generation. Covers: A5
+- S8: Non-quiet, non-no-stream run → live event lines (session/turn started,
+  codex notices) reach the terminal as they arrive; answer text appears as each
+  codex item is delivered. Covers: A5
 - S9: Fork-mode run prints an explicit resume line (fork id + full-context replay
   notice) before the LLM call. Covers: A5
 
@@ -77,9 +78,12 @@ None (standalone change; no dependency story workspaces).
 - A3: `--explain-prompt` overrides the builtin (loader not called; prompt contains
   the custom text; entry `prompt_source: user:explain_prompt`).
 - A4: No completed session or invalid PR URL → exit 2 with a ReviewflowError message.
-- A5: Answer text streams to the terminal during generation unless `--quiet`/
-  `--no-stream` (active output controller registered; display lines reach stderr
-  while the LLM runs).
+- A5: Live output unless `--quiet`/`--no-stream` (active output controller
+  registered; display lines reach stderr while the LLM runs). Delivery is
+  codex-item-granular, not per-token: codex `exec --json` emits whole completed
+  items, so a single-message answer arrives as one chunk at the end; per-item
+  messages and codex `error` items (rendered as `Codex notice: …`) surface live.
+  HTTP providers are one-shot (`resp.read()`) and deliver on completion.
 - A6: Codex provider + recorded `meta.llm.resume` → a forked rollout with a new id
   is created; `codex exec resume <fork>` runs; base rollout is byte-identical;
   `meta.llm.resume` still names the base; entry records `resume.mode=fork`.
@@ -99,7 +103,7 @@ None (standalone change; no dependency story workspaces).
 
 ### Verification Commands
 ```
-python3 -m unittest tests.test_reviewflow_unittest.ExplainCommandTests -v   # 16 obligations
+python3 -m unittest tests.test_reviewflow_unittest.ExplainCommandTests -v   # 31 obligations
 python3 -m unittest discover -s tests -p 'test_*.py'                        # full suite (762)
 ruff check cure.py cure_llm.py cure_commands.py tests/_reviewflow_unittest_explain.py
 python3 -m py_compile cure.py cure_llm.py cure_commands.py
@@ -121,18 +125,18 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 | TAP-8 | unit / runner | read-only + resume flags (A9) | same owner | build_codex_exec_cmd both branches | `--sandbox read-only` / `-c sandbox_mode=...`; no bypass; `--sandbox`/`--search` filtered; skip-git-repo-check present on retry | direct cmd assertions | same | — | command-shape owner |
 | TAP-9 | unit / flow | cleanup scope, unique artifacts, meta lock, fork rollback (A7, A9) | same owner | early-failure cleanup; same-second runs; file_lock; LLM-failure fork deletion | cleaned staged dict; distinct artifact names; lock on meta path; fork removed on failure | fake staged dict; recorder lock | same | — | lifecycle owners |
 | TAP-10 | selftest / repo | installed-package catalog (A10) | tests/story26_cli_smoke.py + selftest.sh | editable-install venv smoke | smoke rc=0 with 6-command catalog | pip venv install | `python3 tests/story26_cli_smoke.py --cli-bin <venv>/bin/cure` | CI selftest.sh | install-contract gate |
-| TAP-11 | real-run / e2e | read-only + streaming + pristine base (A5, A6, A9) | manual evidence (PR21, 2026-08-10 12:08Z) | real codex resume with sandbox + active output | stderr shows incremental agent text; write/gh probes denied; rc=0; base sha unchanged | PR21 session + codex 0.144.6 | manual | TAP-8/9 | real-provider proof |
+| TAP-11 | real-run / e2e | read-only + streaming + pristine base (A5, A6, A9) | manual evidence (PR21, 2026-08-10 12:08Z) | real codex resume with sandbox + active output | stderr shows live event lines + per-item agent text; write/gh probes denied; rc=0; base sha unchanged | PR21 session + codex 0.144.6 | manual | TAP-8/9 | real-provider proof |
 | TAP-6 | regression / repo | all suites + lint + compile (A2–A8) | full tests/ + ruff + py_compile | whole-repo | 762 tests OK; ruff clean | repo fixtures | full unittest discover | CI selftest.sh | regression gate |
 | TAP-7 | real-run / e2e | live fork + pristine base (A2, A6) | manual evidence (PR21, 2026-08-10) | real codex exec resume | rc=0, answer grounded, base sha unchanged, meta resume block | completed PR21 session + codex 0.144.6 | manual | mocked owners TAP-1/4 | real-provider proof |
 
 ### Acceptance Proof Matrix
 | Acceptance ID | Proof Maturity | Proof Method | Reviewer Action | Expected Evidence | Relevant Surfaces | Open Detail |
 |---|---|---|---|---|---|---|
-| A1 | final | automated TAP-3 | run subparser tests | args mapping + required --pr | build_parser | — |
+| A1 | final | automated TAP-3 | run subparser tests | args mapping + required pr_url positional | build_parser | — |
 | A2 | final | automated TAP-1 + real TAP-7 | run TAP-1; inspect 2026-08-10 run log | rc=0, artifact, entry builtin:explain.md | _explain_flow_impl | — |
 | A3 | final | automated TAP-2 | run TAP-2 | loader uncalled, custom prompt, entry source | prompt assembly | — |
 | A4 | final | automated TAP-3 | run TAP-3 | ReviewflowError exit-2 paths | parse_pr_url, scan_completed_sessions_for_pr | — |
-| A5 | final | automated TAP-1 + real TAP-11 | run stream tests; inspect 12:08Z stderr | stream flag; incremental agent text on stderr during run | ReviewflowOutput wiring | — |
+| A5 | final | automated TAP-1 + real TAP-11 | run stream tests; inspect 12:08Z stderr | stream flag; live event lines + item-complete text on stderr during run | ReviewflowOutput wiring | codex delivers whole items, not tokens |
 | A6 | final | automated TAP-4/5 + real TAP-7/11 | run TAP-4; re-hash base rollout | fork rollout, base sha a3711ee6…, meta.llm.resume unchanged, entry fork ids | fork_codex_session, resume cmd | — |
 | A7 | final | automated TAP-4/9 | run fallback + I/O-failure tests | inline prompt, no fork, rc=0; ReviewflowError conversion | fork fallback | — |
 | A8 | final | automated TAP-5 + selftest TAP-10 | run catalog + smoke tests | explain entry; smoke rc=0 | catalog, story26 smoke | — |
@@ -151,18 +155,17 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 | Path | Planned role |
 |------|--------------|
 | `cure.py::_explain_flow_impl` + `_recorded_resume_session_id` | command flow: target resolution, fork decision, prompt modes, explains entry |
-| `cure.py::build_parser` / `main()` | explain subparser (`--pr`, `--explain-prompt`, llm overrides) + dispatch |
+| `cure.py::build_parser` / `main()` | explain subparser (`pr_url`, `--explain-prompt`, llm overrides) + dispatch |
 | `cure_llm.py::fork_codex_session` | session-store fork (copy + uuid rewrite), ReviewflowError on missing base |
 | `cure_llm.py::{build_codex_exec_cmd,run_codex_exec,run_llm_exec}` | `resume_session_id` plumbing → `codex exec resume` branch |
 | `cure_commands.py::{explain_flow,build_commands_catalog_payload}` | wrapper + catalog entry |
 | `prompts/explain.md` | builtin default prompt (new) |
-| `tests/_reviewflow_unittest_explain.py` | 16 obligations incl. fork/fallback owners (new) |
+| `tests/_reviewflow_unittest_explain.py` | 31 obligations incl. fork/fallback owners (new) |
 
 ## Implementation Notes
 - Executed under the agentic-workflow-cycle protocol: A_I (decomposition + research +
   Gate 1 human decisions), A_R (design + obligations), B (RED 9 → GREEN 10, then
-  fork mode RED 3 → GREEN 16). Full suite 756 → 762; ruff + py_compile clean.
-- Red-first seams: `_explain_flow_impl` tests with mocked `run_llm_exec`; fork tests
+  fork mode RED 3 → GREEN 16). Full suite 756 → 762; ruff + py_compile clean.- Red-first seams: `_explain_flow_impl` tests with mocked `run_llm_exec`; fork tests
   against a tmp `CODEX_HOME` with a fake base rollout.
 - Real verification: one-shot inline run (07:12, builtin prompt) and resume-fork run
   (07:56, custom prompt) against the completed PR21 session; base rollout sha256
@@ -178,7 +181,7 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   base sha unchanged.
 
 ## Locked Decisions
-- D1 (Gate 1): target = `--pr <url>` → most recent completed review session.
+- D1 (Gate 1): target = positional `<PR_URL>` → most recent completed review session.
 - D2 (Gate 1): builtin default prompt (`prompts/explain.md`), overridable via
   `--explain-prompt`; prompt optional. Rejected: `--prompt/--prompt-file` mirror of `cure pr`.
 - D3 (Gate 1): output always streams unless `--quiet`/`--no-stream`. Rejected: one-shot print.
@@ -199,6 +202,44 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   meta append runs under `file_lock` with a fresh reload.
 - D9 (PR#37 review): streaming requires an active output controller — the flow
   registers `ReviewflowOutput` (ui off) so display lines reach stderr during runs.
+- D10 (PR#37 re-review 2026-08-11): explain is checkout-read-only — auth staging
+  skips `rf-jira` (`stage_rf_jira=False`); explanation artifacts bypass the
+  review normalizer (`normalize_artifact=False`); persisted session paths are
+  validated for session-dir containment before any read/stage.
+- D11 (PR#37 re-review 2026-08-11): explanation provenance lives per `explains[]`
+  entry (provider/model/preset/transport/usage); the review's top-level
+  `meta.llm` block is never mutated by explain.
+- D12 (PR#37 re-review 2026-08-11): explain progress uses `SessionProgress`
+  merge-under-lock mode (cross-process safe flushes); `fork_codex_session`
+  removes partially written rollouts on I/O failure; codex `error` items render
+  as `Codex notice:` live lines.
+
+## PR #37 Review Remediation (2026-08-11)
+- Streaming reality: codex `exec --json`/`exec resume --json` emits whole completed
+  items, not token deltas — a single-message explain run has nothing to render
+  until the answer item completes (observed 5-event run). Amended A5/S8 to
+  item-granular wording; sink now renders codex `error` items as `Codex notice:`
+  lines (surfaced the model-mismatch warning live). HTTP providers stay one-shot.
+- Read-only fix: explain stages auth with `stage_rf_jira=False` — no `rf-jira`
+  write into the sandbox repo checkout, no risk of overwriting/deleting a
+  pre-existing root `rf-jira` (RED → GREEN).
+- Prose preservation: `run_llm_exec`/`run_codex_exec`/`run_http_response_exec`
+  gained `normalize_artifact` (default True for the review pipeline); explain
+  passes False so the free-form explanation is never rewritten by the
+  review-shaped normalizer.
+- Provenance: each `explains[]` entry records provider/model/preset/transport and
+  normalized usage; explain no longer merges usage into the review's top-level
+  `meta.llm`.
+- Input containment: persisted `meta.paths` repo_dir/work_dir/review_md must
+  resolve inside the session dir (`_session_path_within`), else ReviewflowError.
+- Concurrency: `SessionProgress(merge_under_lock=True)` for explain — progress
+  flushes overlay only progress-owned keys on a fresh reload under `file_lock`,
+  so a stale snapshot can no longer erase a concurrent `explains[]` append.
+- Fork hygiene: `fork_codex_session` unlinks a partially written rollout on
+  write failure (partial file never left in CODEX_HOME).
+- OpenSpec: `--pr` examples corrected to the positional shape; suite counts
+  16 → 31. Suite 770 → 771; ruff + py_compile clean.
 
 ## Plan Review Log
 <!-- Empty; plan review pending operator's checkpoint approval of this draft. -->
+
