@@ -934,7 +934,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
                     run_cmd.call_args.kwargs["owned_role"], "chunkhound-helper"
                 )
 
-    def test_codex_threads_review_provider_ownership_and_http_stays_untagged(self) -> None:
+    def test_codex_threads_review_provider_ownership_and_http_is_removed(self) -> None:
         registry = mock.Mock(spec=run_module.OwnedProcessRegistry)
         progress = mock.Mock()
         codex_result = cure_llm.CodexRunResult(resume=None)
@@ -961,24 +961,22 @@ class A13TransportOwnershipTests(unittest.TestCase):
             reviewflow.run_codex_exec.call_args.kwargs["owned_processes"], registry
         )
 
-        reviewflow.run_http_response_exec.return_value = cure_llm.LlmRunResult(
-            resume=None
-        )
+        # HTTP providers (openai/openrouter) were removed from CURe: the
+        # dispatch now raises a clear ReviewflowError instead of delegating.
         with mock.patch.object(cure_llm, "_reviewflow", return_value=reviewflow):
-            cure_llm.run_llm_exec(
-                repo_dir=Path("/repo"),
-                resolved={"provider": "openai"},
-                resolution_meta={},
-                output_path=Path("/out.md"),
-                prompt="review",
-                env={},
-                stream=False,
-                progress=progress,
-                owned_processes=registry,
-            )
-        self.assertNotIn(
-            "owned_processes", reviewflow.run_http_response_exec.call_args.kwargs
-        )
+            with self.assertRaisesRegex(rf.ReviewflowError, "removed"):
+                cure_llm.run_llm_exec(
+                    repo_dir=Path("/repo"),
+                    resolved={"provider": "openai"},
+                    resolution_meta={},
+                    output_path=Path("/out.md"),
+                    prompt="review",
+                    env={},
+                    stream=False,
+                    progress=progress,
+                    owned_processes=registry,
+                )
+        reviewflow.run_http_response_exec.assert_not_called()
 
     def test_helper_preflight_uses_helper_role_and_unregisters_only_after_drain(self) -> None:
         registry = mock.Mock(spec=run_module.OwnedProcessRegistry)

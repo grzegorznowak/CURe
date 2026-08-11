@@ -85,7 +85,8 @@ None (standalone change; no dependency story workspaces).
   codex-item-granular, not per-token: codex `exec --json` emits whole completed
   items, so a single-message answer arrives as one chunk at the end; per-item
   messages and codex `error` items (rendered as `Codex notice: …`) surface live.
-  HTTP providers are one-shot (`resp.read()`) and deliver on completion.
+  The codex CLI is the only LLM backend (OpenAI/OpenRouter HTTP providers were
+  removed and are rejected with a clear error).
 - A6: Codex provider + recorded `meta.llm.resume` → a forked rollout with a new id
   is created; `codex exec resume <fork>` runs; base rollout is byte-identical;
   `meta.llm.resume` still names the base; entry records `resume.mode=fork`.

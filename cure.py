@@ -213,7 +213,6 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
-HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex",)
 LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
@@ -222,8 +221,6 @@ IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_PROMPT_PACKAGE = "prompts"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "openai-responses",
-    "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_EMBEDDING__API_KEY",
@@ -1135,58 +1132,16 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "openai-responses": {
-            "transport": "http",
-            "provider": "openai",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://api.openai.com/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
-        "openrouter-responses": {
-            "transport": "http",
-            "provider": "openrouter",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://openrouter.ai/api/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
     }
 
 
 def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | None:
     transport = str(raw_preset.get("transport") or "").strip().lower()
     provider = str(raw_preset.get("provider") or "").strip().lower()
-    endpoint = str(raw_preset.get("endpoint") or "responses").strip().lower()
-    base_url = str(raw_preset.get("base_url") or "").strip().rstrip("/")
     command = str(raw_preset.get("command") or "").strip()
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if (
-        transport == "http"
-        and provider == "openai"
-        and endpoint == "responses"
-        and base_url in {"", "https://api.openai.com/v1"}
-    ):
-        return "openai-responses"
-    if (
-        transport == "http"
-        and provider == "openrouter"
-        and endpoint == "responses"
-        and base_url in {"", "https://openrouter.ai/api/v1"}
-    ):
-        return "openrouter-responses"
     return None
 
 
@@ -1214,6 +1169,10 @@ def _normalized_preset_overrides(raw_preset: dict[str, Any]) -> dict[str, Any]:
 def _merge_builtin_preset(
     *, preset_id: str, raw_preset: dict[str, Any], source_mode: str
 ) -> dict[str, Any]:
+    if preset_id in REMOVED_HTTP_LLM_PRESETS:
+        _raise_removed_http_provider_support(
+            context=f"The built-in preset `{preset_id}` is no longer available."
+        )
     builtins = builtin_llm_presets()
     if preset_id not in builtins:
         raise ReviewflowError(
@@ -1359,52 +1318,6 @@ def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tup
     return None, None
 
 
-
-
-def build_http_response_request(resolved: dict[str, Any], *, prompt: str) -> dict[str, Any]:
-    provider = str(resolved.get("provider") or "").strip().lower()
-    base_url = str(resolved.get("base_url") or "").rstrip("/")
-    endpoint = str(resolved.get("endpoint") or "responses").strip().lower()
-    if provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Unsupported HTTP llm provider: {provider!r}")
-    if endpoint != "responses":
-        raise ReviewflowError(f"Unsupported HTTP endpoint for reviewflow: {endpoint!r}")
-    if not base_url:
-        raise ReviewflowError("HTTP llm preset is missing base_url.")
-    api_key = str(resolved.get("api_key") or "").strip()
-    if not api_key:
-        raise ReviewflowError(f"HTTP llm preset {resolved.get('preset')!r} is missing api_key.")
-
-    url = f"{base_url}/responses"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    extra_headers = _string_dict(resolved.get("headers"))
-    if provider == "openrouter":
-        allowed = {"HTTP-Referer", "X-OpenRouter-Title", "X-OpenRouter-Categories", "X-Title"}
-        extra_headers = {k: v for k, v in extra_headers.items() if k in allowed}
-    headers.update(extra_headers)
-
-    payload: dict[str, Any] = {"model": resolved.get("model"), "input": prompt}
-    reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
-    if reasoning_effort:
-        payload["reasoning"] = {"effort": reasoning_effort}
-    text_verbosity = str(resolved.get("text_verbosity") or "").strip()
-    if text_verbosity:
-        payload["text"] = {"verbosity": text_verbosity}
-    if isinstance(resolved.get("store"), bool):
-        payload["store"] = resolved["store"]
-    include = _string_list(resolved.get("include"))
-    if include:
-        payload["include"] = include
-    metadata = _plain_dict(resolved.get("metadata"))
-    if metadata:
-        payload["metadata"] = metadata
-    if isinstance(resolved.get("max_output_tokens"), int):
-        payload["max_output_tokens"] = int(resolved["max_output_tokens"])
-    payload.update(_plain_dict(resolved.get("request")))
-    return {"url": url, "headers": headers, "json": payload}
 
 
 def resolve_codex_flags(
@@ -1742,122 +1655,6 @@ def build_codex_flags_from_llm_config(
         "flags": list(flags),
     }
     return flags, meta
-
-
-
-
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    candidates = [raw]
-    candidates.extend(line.strip() for line in raw.splitlines() if line.strip())
-    for candidate in reversed(candidates):
-        try:
-            data = json.loads(candidate)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
-
-def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
-    direct = payload.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    outputs = payload.get("output")
-    if not isinstance(outputs, list):
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    chunks: list[str] = []
-    for item in outputs:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = str(part.get("type") or "").strip().lower()
-            if part_type in {"output_text", "text"}:
-                text = str(part.get("text") or "").strip()
-                if text:
-                    chunks.append(text)
-    if not chunks:
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    return "\n\n".join(chunks)
-
-
-
-
-def run_http_response_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    progress: "SessionProgress",
-) -> LlmRunResult:
-    request_meta = build_http_response_request(resolved, prompt=prompt)
-    cmd_meta = [
-        "http-responses",
-        str(resolved.get("provider") or "?"),
-        str(request_meta["url"]),
-    ]
-    progress.record_cmd(cmd_meta)
-    payload_bytes = json.dumps(request_meta["json"]).encode("utf-8")
-    req = urllib.request.Request(
-        str(request_meta["url"]),
-        data=payload_bytes,
-        headers=request_meta["headers"],
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            status_code = int(getattr(resp, "status", 200))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise ReviewflowSubprocessError(
-            cmd=cmd_meta,
-            cwd=repo_dir,
-            exit_code=int(getattr(e, "code", 1) or 1),
-            stdout="",
-            stderr=body,
-        ) from e
-    except urllib.error.URLError as e:
-        raise ReviewflowSubprocessError(
-            cmd=cmd_meta,
-            cwd=repo_dir,
-            exit_code=1,
-            stdout="",
-            stderr=str(e),
-        ) from e
-
-    out = active_output()
-    if out is not None:
-        try:
-            out.stream_sink("codex").write(body)
-        except Exception:
-            pass
-
-    payload = _extract_json_object(body)
-    if payload is None:
-        raise ReviewflowError("HTTP llm provider returned non-JSON output.")
-    text = _extract_http_response_output_text(payload)
-    output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    return LlmRunResult(
-        resume=None,
-        adapter_meta={
-            "transport": "http-responses",
-            "status_code": status_code,
-            "url": request_meta["url"],
-            "response_id": str(payload.get("id") or "").strip() or None,
-        },
-    )
 
 
 
@@ -15146,13 +14943,15 @@ from cure_runtime import (
     DEFAULT_MULTIPASS_MAX_STEPS,
     DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
-    HTTP_LLM_PROVIDERS,
     LOCAL_AGENT_PRESET_BY_NAME,
     LLM_RESUME_PROVIDERS,
     LLM_TRANSPORT_CHOICES,
     MULTIPASS_MAX_STEPS_HARD_CAP,
     MULTIPASS_STEP_WORKERS_HARD_CAP,
+    REMOVED_HTTP_LLM_PRESETS,
+    REMOVED_HTTP_LLM_PROVIDERS,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
+    _raise_removed_http_provider_support,
     _redact_secrets,
     DoctorCheck,
     ReviewIntelligenceConfig,
@@ -15170,7 +14969,6 @@ from cure_runtime import (
     attach_review_intelligence_capabilities,
     apply_llm_env,
     build_curated_subprocess_env,
-    build_http_response_request,
     build_llm_meta,
     build_review_intelligence_guidance,
     build_utility_llm_meta,
@@ -15249,7 +15047,6 @@ from cure_llm import (
     CodexRunResult,
     LlmResumeInfo,
     LlmRunResult,
-    _extract_usage_from_payload,
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
@@ -15262,7 +15059,6 @@ from cure_llm import (
     record_codex_resume,
     record_llm_resume,
     run_codex_exec,
-    run_http_response_exec,
     run_llm_exec,
 )
 from cure_commands import (

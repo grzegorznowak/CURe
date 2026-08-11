@@ -7,8 +7,6 @@ import json
 from pathlib import Path
 import shlex
 import shutil
-import urllib.error
-import urllib.request
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -21,13 +19,13 @@ from cure_output import (
 )
 from cure_runtime import (
     CLI_LLM_PROVIDERS,
-    HTTP_LLM_PROVIDERS,
+    REMOVED_HTTP_LLM_PROVIDERS,
     _dedupe_paths,
     _raise_removed_gemini_support,
+    _raise_removed_http_provider_support,
     _string_dict,
     augment_cli_provider_session_env,
     build_curated_subprocess_env,
-    build_http_response_request,
     toml_string,
 )
 from meta import write_json
@@ -257,21 +255,6 @@ def _merge_usage_totals(
     if "total_tokens" not in merged and "input_tokens" in merged and "output_tokens" in merged:
         merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
     return merged or None
-
-
-def _extract_usage_from_payload(payload: dict[str, Any] | None) -> dict[str, int] | None:
-    if not isinstance(payload, dict):
-        return None
-    candidates: list[object] = [payload.get("usage"), payload.get("usageMetadata")]
-    result = payload.get("result")
-    if isinstance(result, dict):
-        candidates.extend([result.get("usage"), result.get("usageMetadata")])
-    candidates.append(payload)
-    for candidate in candidates:
-        normalized = _normalize_usage_payload(candidate)
-        if normalized is not None:
-            return normalized
-    return None
 
 
 def _extract_codex_usage_from_event_slice(
@@ -720,107 +703,6 @@ def build_codex_flags_from_llm_config(
 
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    candidates = [raw]
-    candidates.extend(line.strip() for line in raw.splitlines() if line.strip())
-    for candidate in reversed(candidates):
-        try:
-            data = json.loads(candidate)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
-def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
-    direct = payload.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    outputs = payload.get("output")
-    if not isinstance(outputs, list):
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    chunks: list[str] = []
-    for item in outputs:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = str(part.get("type") or "").strip().lower()
-            if part_type in {"output_text", "text"}:
-                text = str(part.get("text") or "").strip()
-                if text:
-                    chunks.append(text)
-    if not chunks:
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    return "\n\n".join(chunks)
-
-
-
-
-def run_http_response_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    progress: "SessionProgress",
-    normalize_artifact: bool = True,
-) -> LlmRunResult:
-    request_meta = build_http_response_request(resolved, prompt=prompt)
-    cmd_meta = ["http-responses", str(resolved.get("provider") or "?"), str(request_meta["url"])]
-    progress.record_cmd(cmd_meta)
-    payload_bytes = json.dumps(request_meta["json"]).encode("utf-8")
-    req = urllib.request.Request(
-        str(request_meta["url"]),
-        data=payload_bytes,
-        headers=request_meta["headers"],
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            status_code = int(getattr(resp, "status", 200))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise ReviewflowSubprocessError(cmd=cmd_meta, cwd=repo_dir, exit_code=int(getattr(e, "code", 1) or 1), stdout="", stderr=body) from e
-    except urllib.error.URLError as e:
-        raise ReviewflowSubprocessError(cmd=cmd_meta, cwd=repo_dir, exit_code=1, stdout="", stderr=str(e)) from e
-
-    out = active_output()
-    if out is not None:
-        try:
-            out.stream_sink("codex").write(body)
-        except Exception:
-            pass
-
-    payload = _extract_json_object(body)
-    if payload is None:
-        raise ReviewflowError("HTTP llm provider returned non-JSON output.")
-    text = _extract_http_response_output_text(payload)
-    output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    if normalize_artifact:
-        normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    usage = _extract_usage_from_payload(payload)
-    return LlmRunResult(
-        resume=None,
-        adapter_meta={
-            "transport": "http-responses",
-            "status_code": status_code,
-            "url": request_meta["url"],
-            "response_id": str(payload.get("id") or "").strip() or None,
-            "usage": usage,
-        },
-    )
-
-
 def run_llm_exec(
     *,
     repo_dir: Path,
@@ -894,16 +776,13 @@ def run_llm_exec(
         )
     if provider == "gemini":
         _raise_removed_gemini_support(context="Gemini CLI execution is no longer available.")
-    if provider in HTTP_LLM_PROVIDERS:
-        return rf.run_http_response_exec(
-            repo_dir=repo_dir,
-            resolved=resolved,
-            output_path=output_path,
-            prompt=prompt,
-            progress=progress,
-            normalize_artifact=normalize_artifact,
+    if provider in REMOVED_HTTP_LLM_PROVIDERS:
+        _raise_removed_http_provider_support(
+            context=f"provider {provider!r} is no longer available."
         )
     raise ReviewflowError(f"Unsupported llm provider: {provider!r}")
+
+
 
 
 def codex_mcp_overrides_for_reviewflow(

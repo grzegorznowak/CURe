@@ -6,8 +6,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -85,62 +83,6 @@ for event in events:
     _write_executable(bin_dir / "codex", body)
 
 
-class _ResponseHandler(BaseHTTPRequestHandler):
-    review_text = _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES")
-
-    def do_POST(self) -> None:  # noqa: N802
-        content_length = int(self.headers.get("Content-Length") or "0")
-        body = self.rfile.read(content_length).decode("utf-8", errors="replace")
-        payload = json.loads(body)
-        response = {
-            "id": "resp-smoke",
-            "output": [
-                {
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": self.review_text,
-                        }
-                    ]
-                }
-            ],
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 20,
-                "total_tokens": 30,
-            },
-            "echo_model": payload.get("model"),
-        }
-        response_bytes = json.dumps(response).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response_bytes)))
-        self.end_headers()
-        self.wfile.write(response_bytes)
-
-    def log_message(self, format: str, *args: object) -> None:
-        return None
-
-
-class LocalResponsesServer:
-    def __init__(self) -> None:
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _ResponseHandler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-
-    @property
-    def base_url(self) -> str:
-        host, port = self._server.server_address
-        return f"http://{host}:{port}"
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=2.0)
-
-
 def _init_progress(*, session_dir: Path, logs_dir: Path, review_md: Path, provider: str) -> rf.SessionProgress:
     meta_path = session_dir / "meta.json"
     progress = rf.SessionProgress(meta_path, quiet=True)
@@ -206,7 +148,6 @@ def run_provider_smoke(
     tmp_root: Path,
     fake_bin: Path,
     base_env: dict[str, str],
-    responses_base_url: str,
 ) -> dict[str, Any]:
     session_dir = tmp_root / f"session-{provider}"
     repo_dir = session_dir / "repo"
@@ -248,39 +189,6 @@ def run_provider_smoke(
                 env=base_env,
             )
             env = dict(runtime_policy["env"])
-        elif provider == "openai":
-            resolved = {
-                "preset": "openai-responses",
-                "transport": "http",
-                "provider": "openai",
-                "endpoint": "responses",
-                "base_url": responses_base_url,
-                "api_key": "smoke-openai-key",  # pragma: allowlist secret
-                "model": "gpt-5-mini",
-                "headers": {},
-                "request": {},
-                "metadata": {},
-                "include": [],
-            }
-            env = dict(base_env)
-        elif provider == "openrouter":
-            resolved = {
-                "preset": "openrouter-responses",
-                "transport": "http",
-                "provider": "openrouter",
-                "endpoint": "responses",
-                "base_url": responses_base_url,
-                "api_key": "smoke-openrouter-key",  # pragma: allowlist secret
-                "model": "openai/gpt-5-mini",
-                "headers": {
-                    "HTTP-Referer": "https://example.test",
-                    "X-OpenRouter-Title": "provider-smoke",
-                },
-                "request": {},
-                "metadata": {},
-                "include": [],
-            }
-            env = dict(base_env)
         else:
             raise SystemExit(f"unsupported smoke provider: {provider}")
 
@@ -334,8 +242,6 @@ def run_provider_smoke(
             ensure(summary["live_progress_provider"] == provider, f"{provider}: live progress missing provider tag")
             ensure(summary["dashboard_contains_live_progress"], f"{provider}: dashboard did not render Live Progress")
             ensure(summary["dashboard_contains_current"], f"{provider}: dashboard did not render current provider output")
-        else:
-            ensure(summary["transport"] == "http-responses", f"{provider}: unexpected transport {summary['transport']!r}")
         return summary
     finally:
         cure_output.clear_active_output(output)
@@ -347,7 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--providers",
         nargs="+",
-        default=["codex", "openai", "openrouter"],
+        default=["codex"],
         help="Providers to smoke test.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable output.")
@@ -365,21 +271,15 @@ def main() -> int:
         write_fake_codex(fake_bin, review_text)
         base_env = build_env(tmp_root=tmp_root, fake_bin=fake_bin)
 
-        server = LocalResponsesServer()
-        server.start()
-        try:
-            results = [
-                run_provider_smoke(
-                    provider=provider,
-                    tmp_root=tmp_root,
-                    fake_bin=fake_bin,
-                    base_env=base_env,
-                    responses_base_url=server.base_url,
-                )
-                for provider in args.providers
-            ]
-        finally:
-            server.stop()
+        results = [
+            run_provider_smoke(
+                provider=provider,
+                tmp_root=tmp_root,
+                fake_bin=fake_bin,
+                base_env=base_env,
+            )
+            for provider in args.providers
+        ]
 
     if args.json:
         print(json.dumps({"results": results}, indent=2, sort_keys=True))

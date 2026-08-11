@@ -1272,8 +1272,8 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'default_preset = "fast_router"',
                         "",
                         "[llm_presets.fast_router]",
-                        'preset = "openrouter-responses"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        'preset = "codex-cli"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
                         "max_output_tokens = 9000",
@@ -1293,8 +1293,9 @@ class LlmPresetConfigTests(unittest.TestCase):
             llm_cfg, meta = rf.load_reviewflow_llm_config(config_path=cfg)
             self.assertTrue(meta.get("loaded"))
             self.assertEqual(llm_cfg["default_preset"], "fast_router")
-            self.assertEqual(llm_cfg["presets"]["fast_router"]["preset"], "openrouter-responses")
-            self.assertEqual(llm_cfg["presets"]["fast_router"]["provider"], "openrouter")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["preset"], "codex-cli")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["provider"], "codex")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["transport"], "cli")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["headers"]["X-Test"], "1")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["request"]["service_tier"], "flex")
             self.assertEqual(llm_cfg["presets"]["my_codex"]["transport"], "cli")
@@ -1646,8 +1647,10 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_cli_preset_beats_env_autodetect(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_detect_cli_priority.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_cli_priority.toml"
         try:
             base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
             with mock.patch.dict(
                 os.environ,
                 {
@@ -1658,7 +1661,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             ):
                 resolved, meta = rf.resolve_llm_config(
                     base_codex_config_path=base,
-                    reviewflow_config_path=None,
+                    reviewflow_config_path=rf_cfg,
                     cli_preset="codex-cli",
                     cli_model=None,
                     cli_effort=None,
@@ -1676,6 +1679,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["selected_preset_source"], "cli")
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_resolve_llm_config_codex_cli_builtin_default_effort_is_high(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin_default.toml"
@@ -1708,6 +1712,7 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_allows_direct_builtin_preset_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_builtin.toml"
         try:
             base.write_text(
                 "\n".join(
@@ -1719,9 +1724,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            rf_cfg.write_text("", encoding="utf-8")
             resolved, meta = rf.resolve_llm_config(
                 base_codex_config_path=base,
-                reviewflow_config_path=None,
+                reviewflow_config_path=rf_cfg,
                 cli_preset="codex-cli",
                 cli_model="gpt-5.4",
                 cli_effort="high",
@@ -1741,6 +1747,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["resolved_preset_id"], "codex-cli")
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_load_reviewflow_llm_config_accepts_legacy_explicit_blocks_for_compatibility(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_llm_legacy_compat.toml"
@@ -1752,11 +1759,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'default_preset = "legacy_router"',
                         "",
                         "[llm_presets.legacy_router]",
-                        'transport = "http"',
-                        'provider = "openrouter"',
-                        'endpoint = "responses"',
-                        'base_url = "https://openrouter.ai/api/v1"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        'transport = "cli"',
+                        'provider = "codex"',
+                        'command = "codex"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         "",
                     ]
@@ -1764,7 +1770,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             llm_cfg, meta = rf.load_reviewflow_llm_config(config_path=cfg)
-            self.assertEqual(llm_cfg["presets"]["legacy_router"]["preset"], "openrouter-responses")
+            self.assertEqual(llm_cfg["presets"]["legacy_router"]["preset"], "codex-cli")
             self.assertEqual(meta["deprecated_explicit_presets"], ["legacy_router"])
         finally:
             cfg.unlink(missing_ok=True)
@@ -1819,12 +1825,14 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_rejects_removed_gemini_builtin_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_removed_gemini.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_removed_gemini.toml"
         try:
             base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 rf.resolve_llm_config(
                     base_codex_config_path=base,
-                    reviewflow_config_path=None,
+                    reviewflow_config_path=rf_cfg,
                     cli_preset="gemini-cli",
                     cli_model=None,
                     cli_effort=None,
@@ -1841,6 +1849,86 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertIn("gemini-cli", str(ctx.exception))
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_http_builtin_preset(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_builtin.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "router_default"',
+                        "",
+                        "[llm_presets.router_default]",
+                        'preset = "openrouter-responses"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("router_default", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_http_explicit_provider(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_explicit.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "legacy_router"',
+                        "",
+                        "[llm_presets.legacy_router]",
+                        'transport = "http"',
+                        'provider = "openrouter"',
+                        'endpoint = "responses"',
+                        'base_url = "https://openrouter.ai/api/v1"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("legacy_router", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_removed_http_builtin_selection(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_removed_http.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_removed_http.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
+            for preset in ("openai-responses", "openrouter-responses"):
+                with self.subTest(preset=preset):
+                    with self.assertRaises(rf.ReviewflowError) as ctx:
+                        rf.resolve_llm_config(
+                            base_codex_config_path=base,
+                            reviewflow_config_path=rf_cfg,
+                            cli_preset=preset,
+                            cli_model=None,
+                            cli_effort=None,
+                            cli_plan_effort=None,
+                            cli_verbosity=None,
+                            cli_max_output_tokens=None,
+                            cli_request_overrides={},
+                            cli_header_overrides={},
+                            deprecated_codex_model=None,
+                            deprecated_codex_effort=None,
+                            deprecated_codex_plan_effort=None,
+                        )
+                    self.assertIn("were removed from CURe", str(ctx.exception))
+                    self.assertIn(preset, str(ctx.exception))
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_build_llm_meta_persists_env_keys_not_env_values(self) -> None:
         meta = rf.build_llm_meta(
@@ -1981,10 +2069,12 @@ class UtilityModelConfigTests(unittest.TestCase):
 
     def test_utility_model_inherits_main_llm_when_unset(self) -> None:
         base = self._write_base_config(".tmp_test_utility_inherit_base.toml")
+        cfg = ROOT / ".tmp_test_utility_inherit.toml"
         try:
+            cfg.write_text("", encoding="utf-8")
             main_resolved, main_meta = self._resolve_main(
                 base=base,
-                cfg=None,
+                cfg=cfg,
                 cli_preset="codex-cli",
                 cli_model="gpt-5.4",
                 cli_effort="medium",
@@ -1992,7 +2082,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             utility_resolved, utility_meta = self._resolve_utility(
                 main_resolved=main_resolved,
                 main_meta=main_meta,
-                cfg=None,
+                cfg=cfg,
             )
             self.assertEqual(utility_resolved["provider"], main_resolved["provider"])
             self.assertEqual(utility_resolved["model"], main_resolved["model"])
@@ -2083,13 +2173,13 @@ class UtilityModelConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[llm.utility]",
-                        'preset = "utility_openrouter"',
+                        'preset = "utility_llm"',
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "medium"',
                         "",
-                        "[llm_presets.utility_openrouter]",
-                        'preset = "openrouter-responses"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        "[llm_presets.utility_llm]",
+                        'preset = "codex-cli"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         "",
                     ]
                 ),
@@ -2108,8 +2198,8 @@ class UtilityModelConfigTests(unittest.TestCase):
                 cfg=cfg,
             )
             self.assertEqual(main_resolved["provider"], "codex")
-            self.assertEqual(utility_resolved["provider"], "openrouter")
-            self.assertEqual(utility_resolved["transport"], "http")
+            self.assertEqual(utility_resolved["provider"], "codex")
+            self.assertEqual(utility_resolved["transport"], "cli")
             self.assertEqual(utility_meta["resolved"]["preset_source"], "cure.toml")
         finally:
             base.unlink(missing_ok=True)
@@ -2170,10 +2260,12 @@ class UtilityModelConfigTests(unittest.TestCase):
 
     def test_partial_utility_model_caller_override_inherits_missing_fields(self) -> None:
         base = self._write_base_config(".tmp_test_utility_partial_override_base.toml")
+        cfg = ROOT / ".tmp_test_utility_partial_override.toml"
         try:
+            cfg.write_text("", encoding="utf-8")
             main_resolved, main_meta = self._resolve_main(
                 base=base,
-                cfg=None,
+                cfg=cfg,
                 cli_preset="codex-cli",
                 cli_model="main-model",
                 cli_effort="high",
@@ -2181,7 +2273,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             utility_resolved, utility_meta = self._resolve_utility(
                 main_resolved=main_resolved,
                 main_meta=main_meta,
-                cfg=None,
+                cfg=cfg,
                 utility_llm_effort="medium",
             )
             self.assertEqual(utility_resolved["model"], "main-model")
@@ -2471,36 +2563,8 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_build_http_response_request_openrouter_uses_responses_api_and_headers(self) -> None:
-        request = rf.build_http_response_request(
-            {
-                "preset": "openrouter_grok",
-                "transport": "http",
-                "provider": "openrouter",
-                "endpoint": "responses",
-                "base_url": "https://openrouter.ai/api/v1",
-                "api_key": "test-openrouter-key",  # pragma: allowlist secret
-                "model": "x-ai/grok-4.1-fast",
-                "reasoning_effort": "high",
-                "text_verbosity": None,
-                "max_output_tokens": 9000,
-                "store": None,
-                "include": [],
-                "metadata": {},
-                "headers": {
-                    "HTTP-Referer": "https://example.com",
-                    "X-OpenRouter-Title": "cure",
-                },
-                "request": {"provider": {"sort": "latency"}},
-            },
-            prompt="Review this PR.",
-        )
-        self.assertEqual(request["url"], "https://openrouter.ai/api/v1/responses")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer test-openrouter-key")  # pragma: allowlist secret
-        self.assertEqual(request["headers"]["HTTP-Referer"], "https://example.com")
-        self.assertEqual(request["headers"]["X-OpenRouter-Title"], "cure")
-        self.assertEqual(request["json"]["model"], "x-ai/grok-4.1-fast")
-        self.assertEqual(request["json"]["input"], "Review this PR.")
-        self.assertEqual(request["json"]["reasoning"]["effort"], "high")
-        self.assertEqual(request["json"]["max_output_tokens"], 9000)
-        self.assertEqual(request["json"]["provider"]["sort"], "latency")
+    def test_build_http_response_request_is_removed(self) -> None:
+        self.assertFalse(hasattr(rf, "build_http_response_request"))
+        self.assertFalse(hasattr(rf, "run_http_response_exec"))
+        self.assertNotIn("openai-responses", rf.BUILTIN_LLM_PRESET_IDS)
+        self.assertNotIn("openrouter-responses", rf.BUILTIN_LLM_PRESET_IDS)

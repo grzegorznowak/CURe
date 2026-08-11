@@ -4326,8 +4326,8 @@ class InstallAndDoctorTests(unittest.TestCase):
                 )
         self.assertIn("agent selection still blocked", str(ctx.exception))
 
-    def test_setup_flow_noninteractive_fails_when_saved_default_is_not_local_cli_provider(self) -> None:
-        root = ROOT / ".tmp_test_cure_setup_nonlocal_saved_default"
+    def test_setup_flow_noninteractive_rejects_removed_http_default(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_removed_http_default"
         config_path = root / "config" / "cure.toml"
         runtime = rf.ReviewflowRuntime(
             config_path=config_path,
@@ -4373,7 +4373,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime)
-            self.assertIn("saved default preset `router_default` does not resolve", str(ctx.exception))
+            self.assertIn("were removed from CURe", str(ctx.exception))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

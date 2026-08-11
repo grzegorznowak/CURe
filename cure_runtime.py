@@ -38,7 +38,8 @@ from ui import Verbosity
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
-HTTP_LLM_PROVIDERS = ("openai", "openrouter")
+REMOVED_HTTP_LLM_PROVIDERS = ("openai", "openrouter")
+REMOVED_HTTP_LLM_PRESETS = ("openai-responses", "openrouter-responses")
 CLI_LLM_PROVIDERS = ("codex",)
 LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
@@ -46,8 +47,6 @@ DEFAULT_IMPLICIT_CODEX_PRESET = "codex-cli"
 IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "openai-responses",
-    "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_EMBEDDING__API_KEY",
@@ -653,6 +652,10 @@ def _resolve_named_llm_preset(
 ) -> tuple[dict[str, Any], str]:
     if selected_name == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    if selected_name in REMOVED_HTTP_LLM_PRESETS:
+        _raise_removed_http_provider_support(
+            context=f"The built-in preset `{selected_name}` is no longer available."
+        )
     if selected_name in presets and isinstance(presets[selected_name], dict):
         base_preset = dict(presets[selected_name])
         resolved_preset_id = str(base_preset.get("preset") or selected_name).strip() or selected_name
@@ -671,8 +674,10 @@ def _resolve_named_llm_preset(
     provider = str(base_preset.get("provider") or "").strip().lower()
     if transport not in LLM_TRANSPORT_CHOICES:
         raise ReviewflowError(f"Invalid llm preset transport for {selected_name!r}: {transport!r}")
-    if transport == "http" and provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Invalid HTTP llm provider for {selected_name!r}: {provider!r}")
+    if transport == "http":
+        _raise_removed_http_provider_support(
+            context=f"llm preset {selected_name!r} uses HTTP transport."
+        )
     if transport == "cli" and provider not in CLI_LLM_PROVIDERS:
         raise ReviewflowError(f"Invalid CLI llm provider for {selected_name!r}: {provider!r}")
     return base_preset, resolved_preset_id
@@ -1017,6 +1022,15 @@ def _raise_removed_gemini_support(*, context: str) -> None:
     )
 
 
+def _raise_removed_http_provider_support(*, context: str) -> None:
+    supported = ", ".join(BUILTIN_LLM_PRESET_IDS)
+    raise ReviewflowError(
+        "HTTP LLM providers (openai/openrouter) were removed from CURe; "
+        "the codex CLI is the only supported LLM backend. "
+        f"{context} Use supported presets instead: {supported}."
+    )
+
+
 def builtin_llm_presets() -> dict[str, dict[str, Any]]:
     return {
         "codex-cli": {
@@ -1036,58 +1050,16 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "openai-responses": {
-            "transport": "http",
-            "provider": "openai",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://api.openai.com/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
-        "openrouter-responses": {
-            "transport": "http",
-            "provider": "openrouter",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://openrouter.ai/api/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
     }
 
 
 def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | None:
     transport = str(raw_preset.get("transport") or "").strip().lower()
     provider = str(raw_preset.get("provider") or "").strip().lower()
-    endpoint = str(raw_preset.get("endpoint") or "responses").strip().lower()
-    base_url = str(raw_preset.get("base_url") or "").strip().rstrip("/")
     command = str(raw_preset.get("command") or "").strip()
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if (
-        transport == "http"
-        and provider == "openai"
-        and endpoint == "responses"
-        and base_url in {"", "https://api.openai.com/v1"}
-    ):
-        return "openai-responses"
-    if (
-        transport == "http"
-        and provider == "openrouter"
-        and endpoint == "responses"
-        and base_url in {"", "https://openrouter.ai/api/v1"}
-    ):
-        return "openrouter-responses"
     return None
 
 
@@ -1148,6 +1120,10 @@ def load_reviewflow_llm_config(
     default_preset = str(llm.get("default_preset") or "").strip() or None
     if default_preset == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    if default_preset in REMOVED_HTTP_LLM_PRESETS:
+        _raise_removed_http_provider_support(
+            context=f"The built-in preset `{default_preset}` is no longer available."
+        )
     agent_runtime = raw.get("agent_runtime", {}) if isinstance(raw, dict) else {}
     if isinstance(agent_runtime, dict) and "gemini" in agent_runtime:
         _raise_removed_gemini_support(
@@ -1171,6 +1147,7 @@ def load_reviewflow_llm_config(
     deprecated_explicit_presets: list[str] = []
     invalid_mixed_presets: list[str] = []
     removed_gemini_presets: list[str] = []
+    removed_http_presets: list[str] = []
     for raw_name, raw_preset in presets_raw.items():
         name = str(raw_name or "").strip()
         if not name or not isinstance(raw_preset, dict):
@@ -1182,6 +1159,11 @@ def load_reviewflow_llm_config(
         present_removed = [key for key in removed_keys if key in raw_preset]
         if builtin_id == "gemini-cli" or (transport == "cli" and provider == "gemini"):
             removed_gemini_presets.append(name)
+            continue
+        if builtin_id in REMOVED_HTTP_LLM_PRESETS or (
+            transport == "http" and provider in REMOVED_HTTP_LLM_PROVIDERS
+        ):
+            removed_http_presets.append(name)
             continue
         if builtin_id:
             if present_removed:
@@ -1210,6 +1192,13 @@ def load_reviewflow_llm_config(
             context=(
                 "Remove or migrate Gemini llm preset blocks: "
                 f"{', '.join(sorted(removed_gemini_presets))}."
+            ),
+        )
+    if removed_http_presets:
+        _raise_removed_http_provider_support(
+            context=(
+                "Remove or migrate HTTP llm preset blocks: "
+                f"{', '.join(sorted(removed_http_presets))}."
             ),
         )
 
@@ -1553,6 +1542,10 @@ def resolve_llm_config(
         preset_source = str(detected_source or "").strip()
     if selected_name == "gemini-cli":
         _raise_removed_gemini_support(context="The built-in preset `gemini-cli` is no longer available.")
+    if selected_name in REMOVED_HTTP_LLM_PRESETS:
+        _raise_removed_http_provider_support(
+            context=f"The built-in preset `{selected_name}` is no longer available."
+        )
     if selected_name:
         base_preset, resolved_preset_id = _resolve_named_llm_preset(
             selected_name=selected_name,
@@ -1705,52 +1698,6 @@ def resolve_llm_config(
         },
     }
     return resolved, meta
-
-
-def build_http_response_request(resolved: dict[str, Any], *, prompt: str) -> dict[str, Any]:
-    provider = str(resolved.get("provider") or "").strip().lower()
-    base_url = str(resolved.get("base_url") or "").rstrip("/")
-    endpoint = str(resolved.get("endpoint") or "responses").strip().lower()
-    if provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Unsupported HTTP llm provider: {provider!r}")
-    if endpoint != "responses":
-        raise ReviewflowError(f"Unsupported HTTP endpoint for reviewflow: {endpoint!r}")
-    if not base_url:
-        raise ReviewflowError("HTTP llm preset is missing base_url.")
-    api_key = str(resolved.get("api_key") or "").strip()
-    if not api_key:
-        raise ReviewflowError(f"HTTP llm preset {resolved.get('preset')!r} is missing api_key.")
-
-    url = f"{base_url}/responses"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    extra_headers = _string_dict(resolved.get("headers"))
-    if provider == "openrouter":
-        allowed = {"HTTP-Referer", "X-OpenRouter-Title", "X-OpenRouter-Categories", "X-Title"}
-        extra_headers = {k: v for k, v in extra_headers.items() if k in allowed}
-    headers.update(extra_headers)
-
-    payload: dict[str, Any] = {"model": resolved.get("model"), "input": prompt}
-    reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
-    if reasoning_effort:
-        payload["reasoning"] = {"effort": reasoning_effort}
-    text_verbosity = str(resolved.get("text_verbosity") or "").strip()
-    if text_verbosity:
-        payload["text"] = {"verbosity": text_verbosity}
-    if isinstance(resolved.get("store"), bool):
-        payload["store"] = resolved["store"]
-    include = _string_list(resolved.get("include"))
-    if include:
-        payload["include"] = include
-    metadata = _plain_dict(resolved.get("metadata"))
-    if metadata:
-        payload["metadata"] = metadata
-    if isinstance(resolved.get("max_output_tokens"), int):
-        payload["max_output_tokens"] = int(resolved["max_output_tokens"])
-    payload.update(_plain_dict(resolved.get("request")))
-    return {"url": url, "headers": headers, "json": payload}
 
 
 def resolve_codex_flags(
@@ -3507,7 +3454,8 @@ __all__ = [
     "DEFAULT_MULTIPASS_STEP_WORKERS",
     "DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE",
     "DoctorCheck",
-    "HTTP_LLM_PROVIDERS",
+    "REMOVED_HTTP_LLM_PRESETS",
+    "REMOVED_HTTP_LLM_PROVIDERS",
     "LLM_RESUME_PROVIDERS",
     "LLM_TRANSPORT_CHOICES",
     "MULTIPASS_MAX_STEPS_HARD_CAP",
@@ -3529,7 +3477,6 @@ __all__ = [
     "augment_cli_provider_session_env",
     "apply_llm_env",
     "build_curated_subprocess_env",
-    "build_http_response_request",
     "build_llm_meta",
     "build_review_intelligence_guidance",
     "attach_review_intelligence_capabilities",

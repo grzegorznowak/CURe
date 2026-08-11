@@ -94,3 +94,25 @@
   record the `question` text; `prompt_source: user:explain_prompt` unchanged.
 - [x] RED: 2 new + 1 updated obligation (appended question, no-question default,
   fork-mode question) → GREEN. Suite 774 → 776; ruff + py_compile clean.
+
+## HTTP provider removal — codex-only backend (2026-08-11, PR#37 review point)
+- [x] Decision (operator): remove OpenAI/OpenRouter HTTP providers instead of
+  implementing SSE streaming; codex CLI is the only LLM backend (gemini precedent).
+- [x] Removed: `run_http_response_exec`, `build_http_response_request`,
+  `_extract_http_response_output_text`, `_extract_json_object`,
+  `_extract_usage_from_payload` (cure_llm/cure_runtime/cure.py dead copies),
+  `HTTP_LLM_PROVIDERS`, openai-responses/openrouter-responses presets + compat
+  mapping, provider_exec_smoke HTTP server/branches.
+- [x] Stale configs fail with a clear `_raise_removed_http_provider_support`
+  error (builtin preset, explicit http block, `--llm-preset`, run_llm_exec
+  dispatch) mirroring the gemini removal pattern.
+- [x] RED: 4 new removal tests + updated fixtures (utility/legacy/setup presets
+  → codex; tests now use temp configs instead of the real `~/.config/cure`).
+  Suite 776 → 779; ruff + py_compile clean.
+- [x] User action: `~/.config/cure/cure.toml` still contains an
+  `[llm_presets.openai-responses]` block — must be removed or every CURe run
+  fails with the removal error.
+- NOTE (pre-existing, not in suite): UtilityModelConfigTests
+  `test_partial_utility_model_invalid_final_combination_fails_fast` fails
+  standalone (expects an obsolete utility-effort rejection); excluded from the
+  full-suite aggregator since before this change.
