@@ -137,3 +137,25 @@
   survives verbatim, and the repo dir gains nothing new.
 - [x] Suite 1037 passed + 189 subtests (pre-existing broken test deselected);
   ruff + py_compile clean.
+
+## meta.json sidecar lock + unique tmp (2026-08-11, PR#37 review point)
+- [x] Review point: parallel explanations can lose metadata — CURe locks
+  `meta.json`, but flushing replaces the file with a new filesystem object
+  (fixed `.tmp` name + os.replace), so concurrent processes can lock
+  different versions of the same path and overwrite each other's
+  `explains[]` entries.
+- [x] Both meta.json lock sites now lock a stable sidecar `meta.json.lock`
+  (never replaced): `SessionProgress` merge-under-lock flush (cure.py:1821)
+  and the explain `explains[]` append (cure.py:12688).
+- [x] `write_json` (meta.py) writes a unique temp file per write
+  (mkstemp `meta.json.tmp-*`) + atomic os.replace, unlinking the temp on
+  failure — a fixed `.tmp` name can be truncated by a concurrent writer or
+  crash its os.replace with FileNotFoundError.
+- [x] RED→GREEN: explain flow locks the sidecar (flow-level),
+  `SessionProgress` merge flush locks the sidecar (unit), write_json uses a
+  unique tmp per write (unit); the existing meta-file-lock test updated to
+  the sidecar expectation.
+- [x] Full-suite aggregator 1038 passed + 5 skipped (net +1: lock test
+  renamed, two new explain tests; MetaJsonWriteTests lives in the impl file
+  outside the aggregator's limited class set); direct impl suites green;
+  ruff + py_compile clean.

@@ -228,6 +228,13 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   invoked by absolute path and reads credentials purely from env), never at
   `<repo>/rf-jira`; `_stage_review_auth_support` no longer takes a `repo_dir`
   param at all, so a future staging step cannot silently write into the repo.
+- D16 (PR#37 review 2026-08-11): meta.json cross-process exclusion lives on a
+  stable sidecar `meta.json.lock` (never replaced), because flushing replaces
+  meta.json with a new filesystem object and a lock on the file itself would
+  let concurrent processes lock different versions of the same path; every
+  meta write uses a unique temp file (mkstemp) + atomic os.replace so
+  concurrent `explains[]` appends can never truncate each other's pending
+  write.
 
 ## PR #37 Review Remediation (2026-08-11)
 - Streaming reality: codex `exec --json`/`exec resume --json` emits whole completed

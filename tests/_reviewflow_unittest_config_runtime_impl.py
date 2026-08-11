@@ -1973,6 +1973,35 @@ class LlmPresetConfigTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
 
+class MetaJsonWriteTests(unittest.TestCase):
+    def test_write_json_uses_unique_tmp_per_write(self) -> None:
+        """Concurrent writers must never share a temp file: a fixed `.tmp`
+        name lets one process truncate another's temp write or crash its
+        os.replace with FileNotFoundError."""
+        import meta as meta_mod
+
+        path = ROOT / ".tmp_test_write_json_unique_tmp" / "meta.json"
+        try:
+            shutil.rmtree(path.parent, ignore_errors=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            used: list[str] = []
+            real_replace = meta_mod.os.replace
+
+            def _capture_replace(src: str, dst: str) -> None:
+                used.append(str(src))
+                real_replace(src, dst)
+
+            with mock.patch.object(meta_mod.os, "replace", side_effect=_capture_replace):
+                meta_mod.write_json(path, {"a": 1})
+                meta_mod.write_json(path, {"b": 2})
+            self.assertEqual(len(used), 2)
+            self.assertNotEqual(used[0], used[1])
+            self.assertFalse(any(Path(u).name == "meta.json.tmp" for u in used))
+            self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["meta.json"])
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+
 class UtilityModelConfigTests(unittest.TestCase):
     def _write_base_config(self, name: str = ".tmp_test_utility_base.toml") -> Path:
         base = ROOT / name

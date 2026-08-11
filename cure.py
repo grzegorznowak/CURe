@@ -1817,8 +1817,12 @@ class SessionProgress:
         # Merge mode: overlay only the progress-owned keys on a fresh on-disk
         # reload under the cross-process lock, so a stale snapshot flush can
         # never erase entries appended concurrently by another process
-        # (e.g. `explains[]` entries from parallel explain runs).
-        with file_lock(self.meta_path, quiet=self.quiet):
+        # (e.g. `explains[]` entries from parallel explain runs). The lock
+        # lives on a stable sidecar: flushing replaces meta.json with a new
+        # filesystem object, so locking the file itself would let concurrent
+        # processes lock different versions of the same path.
+        lock_path = self.meta_path.with_name(self.meta_path.name + ".lock")
+        with file_lock(lock_path, quiet=self.quiet):
             on_disk = _load_session_meta(self.meta_path) or {}
             merged = dict(on_disk)
             for key in _PROGRESS_MERGE_KEYS:
@@ -12685,7 +12689,11 @@ def _explain_flow_impl(
                 "base_session_id": str(resume_base_id or ""),
                 "fork_session_id": resume_fork_id,
             }
-        with file_lock(meta_path, quiet=quiet):
+        # The lock lives on a stable sidecar file: flushing replaces meta.json
+        # with a new filesystem object, so a lock on meta.json itself would
+        # let concurrent explain runs lock different versions of the path and
+        # overwrite each other's `explains[]` entries.
+        with file_lock(meta_path.with_name(meta_path.name + ".lock"), quiet=quiet):
             meta = _load_session_meta(meta_path) or {}
             meta.setdefault("explains", []).append(explain_entry)
             write_redacted_json(meta_path, meta)

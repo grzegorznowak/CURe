@@ -665,15 +665,40 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertTrue(first_path.name.startswith("explain-"))
         self.assertEqual(len(first_path.name.rsplit(".", 1)[0].split("-")[-1]), 8)
 
-    def test_explain_flow_uses_meta_file_lock(self) -> None:
+    def test_explain_flow_locks_sidecar_meta_lock_file(self) -> None:
+        """The meta.json lock must live on a stable sidecar, never on meta.json
+        itself: flushing replaces meta.json with a new filesystem object, so a
+        lock on the file would let concurrent processes lock different
+        versions of the same path."""
         _write_completed_session(root=self.root)
         captured = self._patched_run(_explain_args(), record_file_lock=True)
         self.assertEqual(captured["_rc"], 0)
         lock_mock = captured["_file_lock_mock"]
         self.assertTrue(lock_mock.called)
         self.assertEqual(
-            lock_mock.call_args.args[0], self.root / "session-1" / "meta.json"
+            lock_mock.call_args.args[0], self.root / "session-1" / "meta.json.lock"
         )
+
+    def test_session_progress_merge_flush_locks_sidecar_meta_lock_file(self) -> None:
+        meta_path = self.root / "session-1" / "meta.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        captured: dict[str, object] = {}
+
+        class _RecLock:
+            def __init__(self, lock_path: Path, *, quiet: bool) -> None:
+                captured["lock_path"] = lock_path
+
+            def __enter__(self) -> "_RecLock":
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        with mock.patch.object(rf, "file_lock", _RecLock):
+            progress = rf.SessionProgress(meta_path, quiet=True, merge_under_lock=True)
+            progress.flush()
+
+        self.assertEqual(captured["lock_path"], meta_path.with_name("meta.json.lock"))
 
     def test_explain_flow_removes_fork_on_llm_failure(self) -> None:
         codex_root = self.root / "codex-home"

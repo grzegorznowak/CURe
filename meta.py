@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -82,9 +83,21 @@ def json_fingerprint(path: Path) -> str:
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    # Unique temp file per write: concurrent processes must never share a temp
+    # name (a fixed `.tmp` lets one process truncate another's pending write),
+    # and os.replace is atomic — readers always see the old or the new
+    # content, never a torn write.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def write_redacted_json(path: Path, data: dict[str, Any]) -> None:
