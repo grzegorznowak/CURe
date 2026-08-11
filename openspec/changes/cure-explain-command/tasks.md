@@ -82,3 +82,15 @@
   else-branch). Large events now render as compacted agent text.
 - [x] RED: 3 new obligations (fork-prompt note, inline-prompt no-note, chunked
   flush sink ×2) → GREEN. Suite 771 → 774; ruff + py_compile + mypy clean.
+
+## Converged explain prompt + additive question (2026-08-11)
+- [x] `prompts/explain.md` rewritten to ONE converged format: bottom line →
+  complete issue list (most important first, compact what/why/example/action
+  blocks, no cutting issues) → what to do next; plain-language register for
+  domain newcomers with concrete examples; grounding clause unchanged.
+- [x] `--explain-prompt` is now additive: the user's text is appended as a
+  `## User's question` block (landing after the review in inline mode, last in
+  both modes) instead of replacing the builtin template; `explains[]` entries
+  record the `question` text; `prompt_source: user:explain_prompt` unchanged.
+- [x] RED: 2 new + 1 updated obligation (appended question, no-question default,
+  fork-mode question) → GREEN. Suite 774 → 776; ruff + py_compile clean.

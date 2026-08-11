@@ -219,15 +219,50 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertEqual(entry["transport"], "http-openai")
         self.assertEqual(entry["usage"], {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
 
-    def test_explain_flow_custom_prompt_overrides_default(self) -> None:
+    def test_explain_flow_user_question_appended_to_builtin_prompt(self) -> None:
         _write_completed_session(root=self.root)
         captured = self._patched_run(_explain_args(explain_prompt="Why did you flag X?"))
         self.assertEqual(captured["_rc"], 0)
-        self.assertEqual(captured["_builtin_calls"], [])
+        # The builtin template stays the base; the user text is appended as the
+        # question (additive contract, PR#37 follow-up).
+        self.assertEqual(captured["_builtin_calls"], ["explain.md"])
         prompt = str(captured["prompt"])
-        self.assertTrue(prompt.startswith("Why did you flag X?"))
+        self.assertTrue(prompt.startswith(DEFAULT_PROMPT_TEXT))
+        self.assertIn("## User's question\nWhy did you flag X?", prompt)
         self.assertIn("## Final synthesized review", prompt)
         self.assertIn("The PR looks good.", prompt)
+        # The question lands after the review so it is the last user content.
+        self.assertLess(
+            prompt.index("## Final synthesized review"), prompt.index("## User's question")
+        )
+
+        meta = json.loads((self.root / "session-1" / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["explains"][0]["prompt_source"], "user:explain_prompt")
+        self.assertEqual(meta["explains"][0]["question"], "Why did you flag X?")
+
+    def test_explain_flow_default_prompt_has_no_question_block(self) -> None:
+        _write_completed_session(root=self.root)
+        captured = self._patched_run(_explain_args())
+        prompt = str(captured["prompt"])
+        self.assertNotIn("## User's question", prompt)
+        meta = json.loads((self.root / "session-1" / "meta.json").read_text(encoding="utf-8"))
+        self.assertNotIn("question", meta["explains"][0])
+
+    def test_explain_flow_fork_mode_appends_user_question(self) -> None:
+        codex_root = self.root / "codex-home"
+        _write_fake_codex_session(codex_root=codex_root)
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
+            captured = self._patched_run(
+                _explain_args(explain_prompt="Explain in simpler terms with examples."),
+                resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+            )
+        self.assertEqual(captured["_rc"], 0)
+        prompt = str(captured["prompt"])
+        self.assertIn("already in your conversation history", prompt)
+        self.assertIn(DEFAULT_PROMPT_TEXT, prompt)
+        self.assertIn("## User's question\nExplain in simpler terms with examples.", prompt)
+        self.assertNotIn("## Final synthesized review", prompt)
 
     def test_explain_flow_streams_when_not_quiet(self) -> None:
         _write_completed_session(root=self.root)

@@ -12808,18 +12808,23 @@ def _explain_flow_impl(
                     fork_path = None
 
         if user_prompt:
-            prompt_template = user_prompt
+            prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
             prompt_template_id = "user:explain_prompt"
+            question_block = f"\n\n## User's question\n{user_prompt.strip()}"
         else:
             prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
             prompt_template_id = builtin_prompt_id(EXPLAIN_PROMPT_TEMPLATE)
+            question_block = ""
         if resume_fork_id is None:
-            prompt = f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n{review_text.strip()}"
+            prompt = (
+                f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n"
+                f"{review_text.strip()}{question_block}"
+            )
         else:
             # Resume mode: the forked session already holds the review in its
             # context, and the model must not re-produce it (see
-            # EXPLAIN_RESUME_CONTEXT_NOTE).
-            prompt = f"{EXPLAIN_RESUME_CONTEXT_NOTE}\n\n{prompt_template.rstrip()}"
+            # EXPLAIN_RESUME_CONTEXT_NOTE). The question still lands last.
+            prompt = f"{EXPLAIN_RESUME_CONTEXT_NOTE}\n\n{prompt_template.rstrip()}{question_block}"
 
         explain_dir = session_dir / "explain"
         explain_dir.mkdir(parents=True, exist_ok=True)
@@ -12871,6 +12876,8 @@ def _explain_flow_impl(
             "preset": str(llm_resolved.get("preset") or "").strip() or None,
             "output_path": str(explain_md_path),
         }
+        if user_prompt:
+            explain_entry["question"] = str(user_prompt).strip()
         if isinstance(result.adapter_meta, dict):
             explain_entry["transport"] = str(result.adapter_meta.get("transport") or "").strip() or None
             usage = _normalize_llm_usage(result.adapter_meta.get("usage"))
@@ -15482,7 +15489,8 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         "--explain-prompt",
         dest="explain_prompt",
         default=None,
-        help="Custom prompt for the explanation (default: builtin explain prompt)",
+        help="Question for the explanation, appended to the builtin explain prompt"
+        " (default: generic explanation)",
     )
     add_llm_override_args(ep)
     ep.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)

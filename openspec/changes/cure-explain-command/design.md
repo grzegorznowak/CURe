@@ -33,11 +33,16 @@ cure explain <PR_URL> [--explain-prompt <TEXT>]
      base rollout into `CODEX_HOME/sessions/<today>/rollout-<ts>-<new-uuid>.jsonl`
      with every occurrence of the base uuid rewritten to the new uuid.
    - Fork failure → silent inline fallback (resume ids reset to None).
-8. **Prompt assembly**:
+8. **Prompt assembly** (additive contract: the builtin template is always the
+   base; a user question is appended as a `## User's question` block and lands
+   last):
    - inline mode: `template + "\n\n## Final synthesized review\n\n" + review_text`
-   - resume-fork mode: template only (the fork already holds the review in context)
-   - template = `--explain-prompt` text (`user:explain_prompt`) or
-     `load_builtin_prompt_text("explain.md")` (`builtin:explain.md`)
+     `+ question_block`
+   - resume-fork mode: `resume note + template + question_block` (the fork
+     already holds the review in context; the question still lands last)
+   - template = `load_builtin_prompt_text("explain.md")` always
+     (`prompt_source` = `user:explain_prompt` when a question was given,
+     `builtin:explain.md` otherwise)
 9. `run_llm_exec(..., resume_session_id=fork_id)`:
    - fork mode → `build_codex_exec_cmd` emits
      `codex exec resume <fork-id> <flags> --json -o <artifact> <prompt>`

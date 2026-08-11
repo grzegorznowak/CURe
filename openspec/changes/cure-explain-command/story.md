@@ -52,8 +52,8 @@ None (standalone change; no dependency story workspaces).
 ## Scenarios / Behavior Examples
 - S1: User runs `cure explain <url>` after a completed review → prints the
   explanation of the review and the artifact path. Covers: A2
-- S2: User passes `--explain-prompt "Why was X flagged?"` → answer addresses X;
-  builtin prompt not used. Covers: A3
+- S2: User passes `--explain-prompt "Why was X flagged?"` → question appended
+  to the builtin prompt; answer addresses X. Covers: A3
 - S3: User runs explain with no completed session for the PR → clean exit-2 error.
   Covers: A4
 - S4: Codex provider with recorded resume info → explanation shows backing
@@ -75,8 +75,10 @@ None (standalone change; no dependency story workspaces).
 - A2: Default-prompt run against a completed session exits 0, prints explanation
   + artifact path, writes `explain/explain-<ts>.md`, records an `explains` entry
   with `prompt_source: builtin:explain.md`.
-- A3: `--explain-prompt` overrides the builtin (loader not called; prompt contains
-  the custom text; entry `prompt_source: user:explain_prompt`).
+- A3: `--explain-prompt` appends the user's question to the builtin explain
+  prompt (`## User's question` block, landing after the review in inline mode);
+  the builtin loader IS called (template stays the base); entry
+  `prompt_source: user:explain_prompt` and records the `question` text.
 - A4: No completed session or invalid PR URL → exit 2 with a ReviewflowError message.
 - A5: Live output unless `--quiet`/`--no-stream` (active output controller
   registered; display lines reach stderr while the LLM runs). Delivery is
@@ -118,7 +120,7 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 | Row ID | Layer / Scope | Behavior / Acceptance Slice | Owning Suite / File(s) | Boundary Exercised | Assertions / Observability | Fixture / Test Data Strategy | CI Lane / Command | Fallback Plan | Split / Merge Rationale |
 |---|---|---|---|---|---|---|---|---|---|
 | TAP-1 | unit / flow | default prompt, stdout, artifact, meta (A2) | tests/_reviewflow_unittest_explain.py::ExplainCommandTests | `_explain_flow_impl` with mocked `run_llm_exec` | rc=0, artifact content, stdout, explains entry | tmp sandbox session + fake LLM writing output file | `unittest` ExplainCommandTests | manual CLI run | core contract in one owner |
-| TAP-2 | unit / flow | custom prompt override (A3) | same owner | prompt assembly | loader not called; prompt startswith custom; entry source | same fixtures | same | — | split from TAP-1 for the branch |
+| TAP-2 | unit / flow | user question appended (A3) | same owner | prompt assembly | loader called; question block after review; entry source + question | same fixtures | same | — | split from TAP-1 for the branch |
 | TAP-3 | unit / flow | error paths + parser (A1, A4) | same owner | parse_pr_url, scan, subparser | ReviewflowError regexes; SystemExit; args mapping | empty sandbox; bad URL | same | — | CLI surface owner |
 | TAP-4 | unit / flow | resume-fork + fallbacks (A6, A7) | same owner | fork_codex_session + run_llm_exec kwarg | fork rollout exists, ids rewritten, base byte-equal, resume_session_id set/None, prompt mode | tmp CODEX_HOME + fake base rollout | same | — | fork mechanics owner |
 | TAP-5 | unit / helpers | fork helper, catalog, wrapper (A6, A8) | same owner | fork_codex_session; catalog payload; wrapper delegation | raise when base missing; catalog contains explain; delegation rc | tmp codex store; parser | same | — | helper-level proof |
@@ -134,7 +136,7 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
 |---|---|---|---|---|---|---|
 | A1 | final | automated TAP-3 | run subparser tests | args mapping + required pr_url positional | build_parser | — |
 | A2 | final | automated TAP-1 + real TAP-7 | run TAP-1; inspect 2026-08-10 run log | rc=0, artifact, entry builtin:explain.md | _explain_flow_impl | — |
-| A3 | final | automated TAP-2 | run TAP-2 | loader uncalled, custom prompt, entry source | prompt assembly | — |
+| A3 | final | automated TAP-2 | run TAP-2 | loader called, question block after review, entry source + question | prompt assembly | — |
 | A4 | final | automated TAP-3 | run TAP-3 | ReviewflowError exit-2 paths | parse_pr_url, scan_completed_sessions_for_pr | — |
 | A5 | final | automated TAP-1 + real TAP-11 | run stream tests; inspect 12:08Z stderr | stream flag; live event lines + item-complete text on stderr during run | ReviewflowOutput wiring | codex delivers whole items, not tokens |
 | A6 | final | automated TAP-4/5 + real TAP-7/11 | run TAP-4; re-hash base rollout | fork rollout, base sha a3711ee6…, meta.llm.resume unchanged, entry fork ids | fork_codex_session, resume cmd | — |
