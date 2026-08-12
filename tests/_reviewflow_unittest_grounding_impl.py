@@ -3201,7 +3201,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
                 )
-                return rf.LlmRunResult(resume=None, adapter_meta={"transport": "http-openai"})
+                return rf.LlmRunResult(resume=None, adapter_meta={"transport": "cli-codex"})
 
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
@@ -3398,7 +3398,7 @@ class ChunkhoundCacheBuildLiveProgressTests(unittest.TestCase):
                     _sectioned_review_markdown(business="APPROVE", technical="REQUEST CHANGES"),
                     encoding="utf-8",
                 )
-                return rf.LlmRunResult(resume=None, adapter_meta={"transport": "http-openai"})
+                return rf.LlmRunResult(resume=None, adapter_meta={"transport": "cli-codex"})
 
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(rf, "ensure_review_config"))
@@ -3682,7 +3682,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(rf.ReviewflowError, "picker aborted"):
                     rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml")
             ensure_base_cache.assert_not_called()
-            self.assertEqual(list(sandbox_root.iterdir()), [])
+            self.assertEqual([p for p in sandbox_root.iterdir() if p.is_dir()], [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3769,7 +3769,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rf, "_execute_multipass_synth_stage", side_effect=AssertionError("synth should not run")))
                 self.assertEqual(rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml"), 0)
             self.assertEqual(review_md.read_bytes(), before)
-            self.assertEqual(list(sandbox_root.iterdir()), [])
+            self.assertEqual([p for p in sandbox_root.iterdir() if p.is_dir()], [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3814,7 +3814,7 @@ class BaselineSelectionTests(unittest.TestCase):
                 self.assertEqual(rf.pr_flow(args, paths=paths, config_path=config_path, codex_base_config_path=root / "codex.toml"), 0)
             self.assertEqual(stdout.getvalue(), "immutable selected review\n")
             self.assertEqual(review_md.read_bytes(), before)
-            self.assertEqual(list(sandbox_root.iterdir()), [])
+            self.assertEqual([p for p in sandbox_root.iterdir() if p.is_dir()], [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -5980,7 +5980,7 @@ class RefactorRegressionTests(unittest.TestCase):
             self.assertIn("Use local `git` as the authoritative source for code changes.", captured["prompt"])
             self.assertNotIn("GitHub MCP", captured["prompt"])
             self.assertIn("Context: ", captured["prompt"])
-            session_dirs = sorted(sandbox_root.iterdir())
+            session_dirs = sorted(p for p in sandbox_root.iterdir() if p.is_dir())
             self.assertEqual(len(session_dirs), 1)
             meta = json.loads((session_dirs[0] / "meta.json").read_text(encoding="utf-8"))
             capability_sources = {
@@ -6521,7 +6521,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         with mock.patch.object(rf, "_eprint", side_effect=capture):
             root, calls = self._run_pr_flow_with_grounding(grounding_mode="strict")
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             playbook = "\n".join(messages)
@@ -6540,7 +6540,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
     def test_pr_flow_warn_grounding_records_findings_and_completes(self) -> None:
         root, calls = self._run_pr_flow_with_grounding(grounding_mode="warn")
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
@@ -6594,7 +6594,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(rf.ReviewflowError, "Multipass synth grounding validation failed"):
                 self._run_pr_flow_with_synth_grounding(synth_markdown=synth_markdown)
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             playbook = "\n".join(messages)
@@ -6619,7 +6619,7 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
             synth_markdown=self._valid_synth_markdown(primary_citation="work/pr-context.md:1")
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "grounding_report.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
@@ -9087,7 +9087,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             expect_error="ChunkHound tool proof failed for multipass plan",
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md"])
@@ -9135,7 +9135,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             expect_error="ChunkHound tool proof failed for multipass plan",
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md"])
@@ -9235,7 +9235,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
@@ -9273,7 +9273,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
@@ -9365,7 +9365,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             expect_error="Multipass planner/runtime inconsistency",
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md"])
@@ -9418,7 +9418,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.plan.md"])
             self.assertIn("missing required Jira context", review_md)
@@ -9493,7 +9493,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
@@ -9539,7 +9539,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             "ineligible PR context must not perform enrichment I/O"
                         ),
                     )
-                    session_dir = next((root / "sandboxes").iterdir())
+                    session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
                     meta = json.loads(
                         (session_dir / "meta.json").read_text(encoding="utf-8")
                     )
@@ -9580,7 +9580,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 multipass_enabled=False,
                 llm_side_effect=ordinary_review,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["pr_context"]["reason"], "no_remote_context")
             self.assertTrue(meta["pr_context"]["enabled"])
@@ -9636,7 +9636,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     extra_cli_args=["--pr-context"],
                     pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
                 )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(observed_during_reconcile, [None])
             self.assertEqual(
@@ -9709,7 +9709,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         "meta": built_meta,
                     },
                 )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             context_meta = meta["pr_context"]
             self.assertEqual(calls, ["review.md"])
@@ -9861,7 +9861,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             extra_cli_args=["--pr-context"],
                             gh_api_list_side_effect=fetch_side_effect,
                         )
-                    session_dir = next((root / "sandboxes").iterdir())
+                    session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
                     authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
                     context_meta = authoritative["pr_context"]
                     mirror = json.loads((session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8"))
@@ -9997,7 +9997,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                             },
                         },
                     )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             context_meta = authoritative["pr_context"]
             self.assertEqual(calls, ["pr_context_draft.md", "pr_context_reconciled.md"])
@@ -10096,7 +10096,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     extra_cli_args=["--pr-context"],
                     gh_api_list_side_effect=fetch_side_effect,
                 )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             authoritative = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             context_meta = authoritative["pr_context"]
             mirror = json.loads((session_dir / "work" / "pr_context_meta.json").read_text(encoding="utf-8"))
@@ -10151,7 +10151,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 extra_cli_args=["--pr-context"],
                 pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["pr_context"]["reason"], "reconciliation_failed")
             self.assertEqual(meta["pr_context"]["context_mode"], "off")
@@ -10195,7 +10195,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                         },
                     )
                     self.assertEqual(reconcile_calls, 1)
-                    session_dir = next((root / "sandboxes").iterdir())
+                    session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
                     meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
                     self.assertEqual(meta["status"], "error")
                     self.assertNotIn("pr_context", meta)
@@ -10227,7 +10227,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 extra_cli_args=["--pr-context"],
                 pr_context_result_override={"orientation_brief": "singlepass context", "meta": {}},
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             self.assertFalse((session_dir / "review.md").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -10288,7 +10288,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(len(synth_prompts), 1)
             self.assertIn(expected, synth_prompts[0])
             self.assertEqual(synth_prompts[0].count(expected), 1)
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             self.assertEqual(
                 (session_dir / "work" / "pr_context_orientation.md").read_bytes(),
                 expected.encode("utf-8"),
@@ -10365,7 +10365,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertNotIn(sentinel, synth_prompts[1])
             inserted = str(rf.finalize_injected_context(sentinel)["brief"])
             self.assertEqual(synth_prompts[0].replace(inserted, ""), synth_prompts[1])
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["pr_context"]["reason"], "context_synthesis_failed")
             self.assertEqual(meta["pr_context"]["context_mode"], "off")
@@ -10442,7 +10442,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertNotIn(sentinel, synth_prompts[1])
             inserted = str(rf.finalize_injected_context(sentinel)["brief"])
             self.assertEqual(synth_prompts[0].replace(inserted, ""), synth_prompts[1])
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["pr_context"]["reason"], "context_synthesis_failed")
             self.assertEqual(meta["status"], "error")
@@ -10506,7 +10506,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             )
             if llm_fault_path is not None:
                 self.assertEqual(calls_at_fault, [llm_fault_path])
-            session_dirs = list((root / "sandboxes").iterdir())
+            session_dirs = [p for p in (root / "sandboxes").iterdir() if p.is_dir()]
             if session_dirs:
                 meta = json.loads((session_dirs[0] / "meta.json").read_text(encoding="utf-8"))
                 context_meta = meta.get("pr_context")
@@ -10724,7 +10724,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             self.assertEqual(len(synth_prompts), 1)
             self.assertNotIn("$PRIOR_CONTEXT", synth_prompts[0])
             self.assertNotIn(sentinel, synth_prompts[0])
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             self.assertFalse((session_dir / "work" / "pr_context_orientation.md").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -10835,7 +10835,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             },
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             review_md = (session_dir / "review.md").read_text(encoding="utf-8")
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
@@ -10951,7 +10951,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 calls,
@@ -11038,7 +11038,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             expect_error="simulated parallel step failure",
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertNotIn("review.md", calls)
             self.assertEqual(meta["status"], "error")
@@ -11119,7 +11119,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             llm_side_effect=llm_side_effect,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.plan.md", "review.step-01.md", "review.md"])
@@ -11155,7 +11155,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             ),
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, [])
             self.assertEqual(meta["status"], "error")
@@ -11199,7 +11199,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             extra_cli_args=["--dry-run-chunkhound"],
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((session_dir / "work" / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.md"])
@@ -11250,7 +11250,7 @@ class CodexToolProofFlowTests(unittest.TestCase):
             helper_preflight_side_effect=helper_preflight_timeout,
         )
         try:
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, [])
             self.assertEqual(meta["status"], "error")

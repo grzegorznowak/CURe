@@ -124,8 +124,8 @@ class ExplainCommandTests(unittest.TestCase):
         """Run _explain_flow_impl with mocked LLM plumbing; return captured kwargs + stdout."""
         captured: dict[str, object] = {"_builtin_calls": []}
         llm_resolved = resolved or {
-            "provider": "openai",
-            "preset": "test-openai",
+            "provider": "codex",
+            "preset": "codex-cli",
             "model": "gpt-test",
         }
 
@@ -137,7 +137,7 @@ class ExplainCommandTests(unittest.TestCase):
             return rf.LlmRunResult(
                 resume=None,
                 adapter_meta={
-                    "transport": "http-openai",
+                    "transport": "cli-codex",
                     "usage": {"input_tokens": 120, "output_tokens": 30},
                 },
             )
@@ -213,10 +213,10 @@ class ExplainCommandTests(unittest.TestCase):
         entry = meta["explains"][0]
         self.assertEqual(entry["output_path"], str(output_path))
         self.assertEqual(entry["prompt_source"], "builtin:explain.md")
-        self.assertEqual(entry["provider"], "openai")
+        self.assertEqual(entry["provider"], "codex")
         self.assertEqual(entry["model"], "gpt-test")
-        self.assertEqual(entry["preset"], "test-openai")
-        self.assertEqual(entry["transport"], "http-openai")
+        self.assertEqual(entry["preset"], "codex-cli")
+        self.assertEqual(entry["transport"], "cli-codex")
         self.assertEqual(entry["usage"], {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
 
     def test_explain_flow_user_question_appended_to_builtin_prompt(self) -> None:
@@ -367,7 +367,7 @@ class ExplainCommandTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "resolve_llm_config_from_args",
-                    return_value=({"provider": "openai", "preset": "test-openai"}, {}),
+                    return_value=({"provider": "codex", "preset": "codex-cli"}, {}),
                 )
             )
             stack.enter_context(
@@ -569,9 +569,8 @@ class ExplainCommandTests(unittest.TestCase):
         rollouts = list(codex_root.glob("sessions/*/*/*/rollout-*.jsonl"))
         self.assertEqual(len(rollouts), 1)
 
-    def test_explain_flow_inline_when_non_codex_provider_with_resume_info(self) -> None:
+    def test_explain_flow_inline_when_base_codex_session_is_missing(self) -> None:
         codex_root = self.root / "codex-home"
-        _write_fake_codex_session(codex_root=codex_root)
         _write_completed_session(root=self.root, extra_meta=self._codex_meta())
 
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
@@ -580,7 +579,7 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertIsNone(captured.get("resume_session_id"))
         self.assertIn("## Final synthesized review", str(captured["prompt"]))
         rollouts = list(codex_root.glob("sessions/*/*/*/rollout-*.jsonl"))
-        self.assertEqual(len(rollouts), 1)
+        self.assertEqual(rollouts, [])
 
     def test_explain_flow_forks_fallback_inline_when_base_missing(self) -> None:
         codex_root = self.root / "codex-home"
@@ -751,7 +750,7 @@ class ExplainCommandTests(unittest.TestCase):
         lock_mock = captured["_file_lock_mock"]
         self.assertTrue(lock_mock.called)
         self.assertEqual(
-            lock_mock.call_args.args[0], self.root / "session-1" / "meta.json.lock"
+            lock_mock.call_args.args[0], self.root / ".session-1.meta.lock"
         )
 
     def test_session_progress_merge_flush_locks_sidecar_meta_lock_file(self) -> None:
@@ -773,7 +772,7 @@ class ExplainCommandTests(unittest.TestCase):
             progress = rf.SessionProgress(meta_path, quiet=True, merge_under_lock=True)
             progress.flush()
 
-        self.assertEqual(captured["lock_path"], meta_path.with_name("meta.json.lock"))
+        self.assertEqual(captured["lock_path"], self.root / ".session-1.meta.lock")
 
     def test_explain_flow_removes_fork_on_llm_failure(self) -> None:
         codex_root = self.root / "codex-home"

@@ -6,6 +6,7 @@ from chunkhound_summary import parse_chunkhound_index_summary
 
 import argparse
 import contextlib
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -1816,47 +1817,53 @@ class SessionProgress:
         self.meta_path = meta_path
         self.quiet = quiet
         self.merge_under_lock = merge_under_lock
-        self.meta: dict[str, Any] = {}
+        self._meta: dict[str, Any] = {}
+        self._baseline: dict[str, Any] = {}
         self.deleted_keys: set[str] = set()
         self._lock = threading.RLock()
 
-    def _flush_locked(self) -> None:
-        if not self.merge_under_lock:
-            # Non-merge mode: reload the on-disk document fresh under the
-            # cross-process lock and overlay the working copy on top, so a
-            # stale snapshot flush can never erase entries appended
-            # concurrently by another process (e.g. `explains[]` entries from
-            # parallel explain runs). Registry keys this writer does not own
-            # are adopted from disk; deletions are applied via `deleted_keys`
-            # BEFORE the overlay, so done()/error() re-add their keys through
-            # the overlay.
-            lock_path = self.meta_path.with_name(self.meta_path.name + ".lock")
-            with file_lock(lock_path, quiet=self.quiet):
-                on_disk = _load_session_meta(self.meta_path) or {}
-                for key in _PROGRESS_REGISTRY_PRESERVE_KEYS:
-                    if key in on_disk:
-                        self.meta[key] = on_disk[key]
-                merged = dict(on_disk)
-                for key in self.deleted_keys:
-                    merged.pop(key, None)
-                merged.update(self.meta)
-                write_redacted_json(self.meta_path, merged)
-            return
-        # Merge mode: overlay only the progress-owned keys on a fresh on-disk
-        # reload under the cross-process lock, so a stale snapshot flush can
-        # never erase entries appended concurrently by another process
-        # (e.g. `explains[]` entries from parallel explain runs). The lock
-        # lives on a stable sidecar: flushing replaces meta.json with a new
-        # filesystem object, so locking the file itself would let concurrent
-        # processes lock different versions of the same path.
-        lock_path = self.meta_path.with_name(self.meta_path.name + ".lock")
+    @property
+    def meta(self) -> dict[str, Any]:
+        return self._meta
+
+    @meta.setter
+    def meta(self, value: dict[str, Any]) -> None:
+        self._meta = value
+        self._baseline = copy.deepcopy(value)
+
+    def _flush_locked(self, *, full: bool = False) -> None:
+        lock_path = _session_meta_lock_path(self.meta_path)
         with file_lock(lock_path, quiet=self.quiet):
-            on_disk = _load_session_meta(self.meta_path) or {}
+            if full:
+                write_redacted_json(self.meta_path, self.meta)
+                self._baseline = copy.deepcopy(self.meta)
+                self.deleted_keys.clear()
+                return
+            if not self.meta_path.is_file():
+                return
+            on_disk = _load_session_meta(self.meta_path)
+            if on_disk is None:
+                return
+            missing = object()
+            changed = {
+                key for key, value in self.meta.items()
+                if value != self._baseline.get(key, missing)
+            }
+            dropped = ({key for key in self._baseline if key not in self.meta}) | self.deleted_keys
+            if self.merge_under_lock:
+                progress_keys = set(_PROGRESS_MERGE_KEYS)
+                changed &= progress_keys
+                dropped &= progress_keys
+            if not changed and not dropped:
+                return
             merged = dict(on_disk)
-            for key in _PROGRESS_MERGE_KEYS:
-                if key in self.meta:
-                    merged[key] = self.meta[key]
+            for key in dropped:
+                merged.pop(key, None)
+            for key in changed:
+                merged[key] = self.meta[key]
             write_redacted_json(self.meta_path, merged)
+            self._baseline = copy.deepcopy(self.meta)
+            self.deleted_keys.difference_update(dropped)
 
     def init(self, initial: dict[str, Any]) -> None:
         with self._lock:
@@ -1864,7 +1871,7 @@ class SessionProgress:
             self.meta.setdefault("status", "running")
             self.meta.setdefault("phase", "init")
             self.meta.setdefault("phases", {})
-            self._flush_locked()
+            self._flush_locked(full=True)
 
     def flush(self) -> None:
         with self._lock:
@@ -1950,14 +1957,6 @@ _PROGRESS_MERGE_KEYS = (
     "failed_at",
     "error",
 )
-
-# Registry keys owned by OTHER writers that a non-merge progress flush must
-# adopt from the fresh on-disk reload (see SessionProgress._flush_locked).
-_PROGRESS_REGISTRY_PRESERVE_KEYS = (
-    "explains",
-    "followups",
-)
-
 
 @contextlib.contextmanager
 def phase(name: str, *, progress: SessionProgress | None, quiet: bool):
@@ -8711,6 +8710,11 @@ def _pr_flow_impl(
             return 0
         if if_reviewed == "latest":
             latest = completed[0]
+            if latest.review_md_path is None:
+                raise ReviewflowError(
+                    f"Cannot use newest session {latest.session_id} at {latest.session_dir}: "
+                    "review markdown is missing."
+                )
             text = latest.review_md_path.read_text(encoding="utf-8")
             sys.stdout.write(text)
             if not text.endswith("\n"):
@@ -8720,6 +8724,11 @@ def _pr_flow_impl(
         if if_reviewed == "prompt" and sys.stdin.isatty():
             selected = _choose_historical_session_tty(completed)
             if selected is not None:
+                if selected.review_md_path is None:
+                    raise ReviewflowError(
+                        f"Cannot use session {selected.session_id} at {selected.session_dir}: "
+                        "review markdown is missing."
+                    )
                 text = selected.review_md_path.read_text(encoding="utf-8")
                 sys.stdout.write(text)
                 if not text.endswith("\n"):
@@ -12189,6 +12198,10 @@ def _followup_flow_impl(
     ).resolve()
     review_md_path = Path(str((meta_paths or {}).get("review_md") or (session_dir / "review.md"))).resolve()
 
+    if not review_md_path.is_file():
+        raise ReviewflowError(
+            f"Cannot follow up on session {session_id}: review markdown missing at {review_md_path}."
+        )
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
 
@@ -12660,6 +12673,11 @@ def _explain_flow_impl(
         )
     session = sessions[0]
     session_dir = session.session_dir
+    if session.review_md_path is None:
+        raise ReviewflowError(
+            f"Cannot explain newest session {session.session_id} at {session_dir}: "
+            "review markdown is missing."
+        )
     meta_path = session_dir / "meta.json"
     meta = _load_session_meta(meta_path) or {}
 
@@ -12816,8 +12834,10 @@ def _explain_flow_impl(
         # with a new filesystem object, so a lock on meta.json itself would
         # let concurrent explain runs lock different versions of the path and
         # overwrite each other's `explains[]` entries.
-        with file_lock(meta_path.with_name(meta_path.name + ".lock"), quiet=quiet):
-            meta = _load_session_meta(meta_path) or {}
+        with file_lock(_session_meta_lock_path(meta_path), quiet=quiet):
+            meta = _load_session_meta(meta_path)
+            if meta is None:
+                raise ReviewflowError(f"Session meta.json is missing or invalid: {meta_path}")
             meta.setdefault("explains", []).append(explain_entry)
             write_redacted_json(meta_path, meta)
         completed = True
@@ -13535,7 +13555,8 @@ def _print_historical_sessions(sessions: list[HistoricalReviewSession]) -> None:
     for idx, s in enumerate(sessions, start=1):
         when = s.completed_at or s.created_at or ""
         verdicts = format_review_verdicts_compact(s.verdicts)
-        print(f"{idx:02d}  {when}  {verdicts}  {s.codex_summary}  {s.session_id}")
+        marker = "  (no review markdown)" if s.review_md_path is None else ""
+        print(f"{idx:02d}  {when}  {verdicts}  {s.codex_summary}  {s.session_id}{marker}")
 
 
 def _historical_picker_color_enabled(stream: TextIO) -> bool:
@@ -13587,7 +13608,10 @@ def _historical_review_picker_lines(
         for session in bucket:
             when = session.completed_at or session.created_at or ""
             verdicts = format_review_verdicts_compact(session.verdicts)
-            lines.append(f"  {idx}) {when}  {verdicts}  {session.codex_summary}  {session.session_id}")
+            marker = "  (no review markdown)" if session.review_md_path is None else ""
+            lines.append(
+                f"  {idx}) {when}  {verdicts}  {session.codex_summary}  {session.session_id}{marker}"
+            )
             idx += 1
     lines.append("  n) create a NEW sandbox review")
     lines.append("")
@@ -14381,8 +14405,10 @@ def _delete_cleanup_sessions(*, session_ids: list[str], paths: ReviewflowPaths) 
             raise ReviewflowError(f"Refusing to delete outside sandbox root: {target}")
         if not target.is_dir():
             continue
-        shutil.rmtree(target)
-        deleted += 1
+        with file_lock(_session_meta_lock_path(target / "meta.json"), quiet=True):
+            if target.is_dir():
+                shutil.rmtree(target)
+                deleted += 1
     return deleted
 
 
@@ -14799,7 +14825,9 @@ def clean_session(
             deleted=[session_json],
             skipped=[],
         )
-    shutil.rmtree(target)
+    with file_lock(_session_meta_lock_path(target / "meta.json"), quiet=True):
+        if target.is_dir():
+            shutil.rmtree(target)
     if json_output and payload is not None:
         print(json.dumps(payload, indent=2, sort_keys=True), file=(stdout or sys.stdout))
     return 0
@@ -15077,6 +15105,7 @@ from cure_sessions import (
     _resolve_log_path,
     _resolve_session_id_target,
     _resolve_session_relative_path,
+    _session_meta_lock_path,
     _resolve_session_review_head_sha,
     _resolve_session_review_md_path,
     _resolve_session_verdicts,

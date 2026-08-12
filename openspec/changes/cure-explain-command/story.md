@@ -38,8 +38,8 @@ None (standalone change; no dependency story workspaces).
   path; artifact at `<session>/explain/explain-<ts>.md`
 - Codex resume-fork mode: fork base codex session (byte-copy + id rewrite) and
   `codex exec resume <fork>`; base rollout byte-identical; `meta.llm.resume` untouched
-- Inline fallback (review text appended to prompt) for non-codex providers, missing
-  resume info, or unforkable base session
+- Inline fallback (review text appended to prompt) for missing resume info or an
+  unforkable base codex session; non-codex providers are rejected
 - Meta recording: `explains[]` entries (prompt_source, output_path, timestamps,
   optional `resume: {mode, base_session_id, fork_session_id}`), `llm` usage
 
@@ -58,8 +58,8 @@ None (standalone change; no dependency story workspaces).
   Covers: A4
 - S4: Codex provider with recorded resume info → explanation shows backing
   knowledge; base codex session sha256 unchanged. Covers: A6
-- S5: Non-codex provider (or missing base session) → inline explanation from review
-  text; no fork created; exit 0. Covers: A7
+- S5: Missing/unforkable base codex session → inline codex explanation from review
+  text; no fork created; exit 0. A non-codex provider is rejected. Covers: A7
 - S6: `cure commands` lists explain with a recommended invocation. Covers: A8
 - S7: User asks explain (codex) to modify a file or call gh → the agent reports the
   sandbox denied the action; the run completes read-only. Covers: A9
@@ -90,9 +90,9 @@ None (standalone change; no dependency story workspaces).
 - A6: Codex provider + recorded `meta.llm.resume` → a forked rollout with a new id
   is created; `codex exec resume <fork>` runs; base rollout is byte-identical;
   `meta.llm.resume` still names the base; entry records `resume.mode=fork`.
-- A7: Non-codex provider, no resume info, or missing/unforkable base → inline mode
+- A7: Codex with no resume info or a missing/unforkable base → inline mode
   (prompt contains the review text), no fork created, exit 0. Fork I/O failures
-  (unreadable/unwritable store) also fall back inline.
+  also fall back inline. Non-codex providers are rejected at configuration/execution.
 - A8: `cure commands` catalog contains an `explain` entry.
 - A9: Codex runs are read-only: no `--dangerously-bypass-approvals-and-sandbox`;
   `--sandbox read-only` (inline) / `-c sandbox_mode="read-only"` (resume); config
@@ -310,6 +310,18 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   the model had re-emitted the whole review); `CodexJsonEventSink.flush()` no
   longer force-consumes partial lines so large events split across pipe reads
   render as compacted text, with `drain()` for the stream tail. Suite 771 → 774.
+
+## PR #37 Round-4 Locked Decisions (2026-08-12)
+- D22: completed-session discovery sorts all done sessions newest-first, including
+  sessions whose review markdown is missing; consumers report the broken newest.
+- D23: SessionProgress overlays only keys changed from its adopted baseline plus
+  explicit deletions, preserving concurrent status and registry updates.
+- D24: metadata mutation is strict and non-resurrecting; its lock lives outside
+  the deletable session directory and cleanup takes the same lock.
+- D25: explain is codex-only; missing/unforkable codex history falls back inline,
+  while non-codex providers are rejected.
+- D26: the live read-only proof writes outside the checkout and asserts
+  `git status --porcelain` remains empty.
 
 ## Plan Review Log
 <!-- Empty; plan review pending operator's checkpoint approval of this draft. -->

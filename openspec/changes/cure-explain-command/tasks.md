@@ -265,3 +265,11 @@
   (2166 passed + 2 skipped + 431 subtests) with only the known pre-existing
   `UtilityModelConfigTests::test_partial_utility_model_invalid_final_combination_fails_fast`
   failing identically at HEAD; ruff + mypy (1.20.0) + py_compile clean.
+
+## PR#37 round-4 findings 4-8 (2026-08-12)
+- [x] F4 discover all completed sessions newest-first and clearly report missing review markdown.
+- [x] F5 merge SessionProgress writes by baseline diff and explicit deletion in both modes.
+- [x] F6 reject missing/corrupt metadata, prevent resurrection, and coordinate cleanup on an external lock.
+- [x] F7 align explain documentation and positive fixtures with the codex-only runtime.
+- [x] F8 prove the live read-only run leaves a clean checkout.
+- [x] Add RED-first regression coverage and run affected/full quality gates.

@@ -33,8 +33,8 @@ resume pointers.
 - D4 (human): explain runs on a **fork** of the base codex session, never the base,
   so `interactive` keeps gating the pristine post-review state. Rejected: direct
   `codex resume <base>` (would consume the pristine state).
-- D5: fork failure (missing base, non-codex provider, no resume info) → transparent
-  inline fallback (review text appended), not an error.
+- D5: fork failure (missing base or no resume info) → transparent codex inline
+  fallback (review text appended), not an error. Non-codex providers are rejected.
 - D6: explains entries record `resume: {mode, base_session_id, fork_session_id}`;
   `meta.llm.resume`/`meta.codex.resume` are never modified by explain.
 - Scope boundary: deliberately lighter than `followup` — no chunkhound /

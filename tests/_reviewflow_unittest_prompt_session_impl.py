@@ -1924,14 +1924,33 @@ class HistoricalReviewsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            s4 = root / "s4"
+            s4.mkdir()
+            (s4 / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s4",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 1,
+                        "completed_at": "2026-03-06T01:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
             sessions = rf.scan_completed_sessions_for_pr(sandbox_root=root, pr=pr)
-            self.assertEqual([s.session_id for s in sessions], ["s2", "s1"])
-            self.assertEqual(sessions[0].verdicts, _verdicts("APPROVE", "REQUEST CHANGES"))
-            self.assertEqual(sessions[1].verdicts, _verdicts("REJECT"))
-            self.assertEqual(sessions[0].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
-            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.2/medium")
-            self.assertEqual(sessions[0].review_head_sha, "2222222222222222222222222222222222222222")
-            self.assertEqual(sessions[1].review_head_sha, "1111111111111111111111111111111111111111")
+            self.assertEqual([s.session_id for s in sessions], ["s4", "s2", "s1"])
+            self.assertIsNone(sessions[0].review_md_path)
+            self.assertIsNone(sessions[0].verdicts)
+            self.assertEqual(sessions[1].verdicts, _verdicts("APPROVE", "REQUEST CHANGES"))
+            self.assertEqual(sessions[2].verdicts, _verdicts("REJECT"))
+            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
+            self.assertEqual(sessions[2].codex_summary, "llm=codex-cli/gpt-5.2/medium")
+            self.assertEqual(sessions[1].review_head_sha, "2222222222222222222222222222222222222222")
+            self.assertEqual(sessions[2].review_head_sha, "1111111111111111111111111111111111111111")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -3087,6 +3106,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
         work_dir.mkdir(parents=True, exist_ok=True)
         chunkhound_dir.mkdir(parents=True, exist_ok=True)
         (chunkhound_dir / ".chunkhound.db").write_text("db", encoding="utf-8")
+        (session_dir / "review.md").write_text("# Review\n", encoding="utf-8")
         (session_dir / "meta.json").write_text(
             json.dumps(
                 {
@@ -3388,9 +3408,26 @@ class ResumeTargetResolutionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            newest = root / "s_newest_missing_md"
+            newest.mkdir()
+            (newest / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": newest.name,
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 4,
+                        "completed_at": "2026-03-04T01:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
             pr_url = "github.com/acme/repo/pull/4"
             sid, action = rf.resolve_resume_target(pr_url, sandbox_root=root, from_phase="auto")
-            self.assertEqual(sid, "s_done")
+            self.assertEqual(sid, "s_newest_missing_md")
             self.assertEqual(action, "followup")
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -5137,7 +5174,7 @@ class SessionMetaMutationTests(unittest.TestCase):
 
     def _concurrent_explain_append(self, meta_path: Path) -> None:
         # The REAL explain protocol: lock the sidecar, reload fresh, append.
-        with rf.file_lock(meta_path.with_name(meta_path.name + ".lock"), quiet=True):
+        with rf.file_lock(rf._session_meta_lock_path(meta_path), quiet=True):
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta.setdefault("explains", []).append({"output_path": "e2.md"})
             rf.write_redacted_json(meta_path, meta)
@@ -5160,15 +5197,15 @@ class SessionMetaMutationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             meta_path = self._seed_session_meta(Path(tmp))
             progress = rf.SessionProgress(meta_path, quiet=True)
-            progress.meta = {"status": "running", "phase": "followup_review"}
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
             self._concurrent_explain_append(meta_path)
-            progress.flush()
+            progress.set_phase("followup_review")
             on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 [entry["output_path"] for entry in on_disk["explains"]],
                 ["e1.md", "e2.md"],
             )
-            self.assertEqual(on_disk["status"], "running")
+            self.assertEqual(on_disk["status"], "done")
             self.assertEqual(on_disk["phase"], "followup_review")
 
     def test_session_progress_drop_removes_keys_on_full_flush(self) -> None:
@@ -5286,4 +5323,49 @@ class SessionMetaMutationTests(unittest.TestCase):
                 rf.mutate_session_meta(meta_path, fn=_boom)
             on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
             self.assertEqual(on_disk["status"], "done")
-            self.assertTrue(meta_path.with_name(meta_path.name + ".lock").is_file())
+            self.assertTrue(rf._session_meta_lock_path(meta_path).is_file())
+
+    def test_mutate_session_meta_rejects_missing_and_corrupt_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing = root / "sessions" / "missing" / "meta.json"
+            with self.assertRaises(rf.ReviewflowError):
+                rf.mutate_session_meta(missing, fn=lambda fresh: True)
+            self.assertFalse(missing.parent.exists())
+
+            corrupt = root / "sessions" / "bad" / "meta.json"
+            corrupt.parent.mkdir(parents=True)
+            corrupt.write_bytes(b"{bad json")
+            with self.assertRaises(rf.ReviewflowError):
+                rf.mutate_session_meta(corrupt, fn=lambda fresh: True)
+            self.assertEqual(corrupt.read_bytes(), b"{bad json")
+
+    def test_session_progress_does_not_resurrect_deleted_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            shutil.rmtree(meta_path.parent)
+            progress.set_phase("gone")
+            self.assertFalse(meta_path.parent.exists())
+
+    def test_merge_progress_overlays_only_its_changes_and_deletions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            stale = json.loads(meta_path.read_text(encoding="utf-8"))
+            stale["completed_at"] = "old"
+            rf.write_redacted_json(meta_path, stale)
+            explain = rf.SessionProgress(meta_path, quiet=True, merge_under_lock=True)
+            explain.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            resume = rf.SessionProgress(meta_path, quiet=True)
+            resume.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            resume.meta["status"] = "running"
+            resume.drop("completed_at")
+            resume.flush()
+            explain.set_phase("explain")
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "running")
+            self.assertNotIn("completed_at", on_disk)
+            explain.drop("status")
+            explain.flush()
+            self.assertNotIn("status", json.loads(meta_path.read_text(encoding="utf-8")))

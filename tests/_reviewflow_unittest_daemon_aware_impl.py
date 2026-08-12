@@ -2566,7 +2566,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 multipass_enabled=False,
                 llm_side_effect=llm_side_effect,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.md"])
             self.assertEqual(meta["status"], "done")
@@ -3118,7 +3118,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 llm_side_effect=llm,
                 flow_patch=flow_patch,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
 
         self.assertEqual(maximum_overlap, client_count)
@@ -3210,7 +3210,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"dispatched model work was not replayed\."
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             persisted_meta = (session_dir / "meta.json").read_text(encoding="utf-8")
 
         self.assertNotIn(seeded_secret, persisted_meta)
@@ -4388,7 +4388,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expected_exception=primary_failure,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads(
                 (session_dir / "meta.json").read_text(encoding="utf-8")
             )
@@ -4468,7 +4468,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expected_exception=owned_failure,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads(
                 (session_dir / "meta.json").read_text(encoding="utf-8")
             )
@@ -4707,7 +4707,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"\(stage=expected_session; category=expected_session\)\."
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             persisted_meta = (session_dir / "meta.json").read_text(encoding="utf-8")
 
         self.assertNotIn(
@@ -5721,7 +5721,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 )
             else:
                 self.assertNotIn("search", tools)
-        session_dir = next((root / "sandboxes").iterdir())
+        session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
         persisted_meta = json.loads(
             (session_dir / "meta.json").read_text(encoding="utf-8")
         )
@@ -5863,6 +5863,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 with self.subTest(stage=stage):
                     meta_path = root / f"{stage}.json"
                     progress = rf.SessionProgress(meta_path, quiet=True)
+                    progress.init({})
                     with self.assertRaises(rf.ReviewflowError) as caught:
                         rf._raise_chunkhound_readiness_failure(
                             progress=progress,
@@ -6045,7 +6046,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"Evidence written to .*chunkhound_readiness_failure\.json"
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             evidence_path = session_dir / "chunkhound_readiness_failure.json"
             self.assertTrue(evidence_path.is_file())
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))

@@ -56,7 +56,7 @@ def test_live_codex_readonly_sandbox_denies_write(tmp_path: Path) -> None:
             "read-only",
             "exec",
             "--output-last-message",
-            str(repo / "out.md"),
+            str(tmp_path / "out.md"),
             "--",
             "Create a file named probe.txt in this directory, then report what you did.",
         ],
@@ -68,6 +68,14 @@ def test_live_codex_readonly_sandbox_denies_write(tmp_path: Path) -> None:
     # The mutation must have been denied...
     assert not (repo / "probe.txt").exists(), "read-only sandbox allowed a file write"
     assert (repo / "existing.txt").read_text(encoding="utf-8") == "keep me"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert status == "", f"read-only run dirtied checkout: {status}"
     # ...and the denial must be surfaced (non-zero exit or an error/denial notice).
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
     denial_surfaced = (

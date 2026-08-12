@@ -71,7 +71,7 @@ cure explain <PR_URL> [--explain-prompt <TEXT>]
 
 | condition | mode |
 |---|---|
-| provider != codex | inline |
+| provider != codex | rejected by configuration/execution (codex-only) |
 | no `meta.llm.resume`/`codex.resume` session id | inline |
 | base rollout not found / fork read/write/decode failure | inline (silent, entry without `resume` key) |
 
