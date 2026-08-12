@@ -13,7 +13,19 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from typing import Any, BinaryIO, Iterator, Literal, TextIO
+from typing import Any, BinaryIO, Iterator, Literal, Protocol, TextIO
+
+
+class StderrStreamSink(Protocol):
+    """Minimal sink contract for `run_cmd(stderr_stream=...)`.
+
+    Only `write`/`flush` are needed: stderr bytes are routed here instead of
+    the JSON stream when the consumer parses stdout as JSON (codex events).
+    """
+
+    def write(self, s: str) -> int: ...
+
+    def flush(self) -> None: ...
 
 
 class ReviewflowSubprocessError(RuntimeError):
@@ -770,7 +782,7 @@ def run_cmd(
     check: bool = True,
     stream: bool = False,
     stream_to: TextIO | None = None,
-    stderr_stream: TextIO | None = None,
+    stderr_stream: StderrStreamSink | None = None,
     stream_label: str | None = None,
     capture_tail_chars: int = 200_000,
     lossless_capture: LosslessCommandCapture | None = None,
@@ -901,7 +913,7 @@ def run_cmd(
             with failure_lock:
                 pump_failures.append((stream_name, exc))
 
-        def write_live(chunk: str, *, at_line_start: bool, sink: TextIO) -> bool:
+        def write_live(chunk: str, *, at_line_start: bool, sink: StderrStreamSink) -> bool:
             if not prefix:
                 sink.write(chunk)
                 return chunk.endswith("\n")
@@ -919,7 +931,7 @@ def run_cmd(
             stream_name: str,
             tail: _TailBuffer,
             capture_write: Any,
-            sink: TextIO,
+            sink: StderrStreamSink,
         ) -> None:
             at_line_start = True
             failed = False

@@ -4766,6 +4766,9 @@ class WorkflowContractTests(unittest.TestCase):
             helper = repo_dir / "rf-jira"
             helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             helper.chmod(0o755)
+            # The preflight resolves the staged helper (macOS rewrites /var ->
+            # /private/var), so assert against the resolved path.
+            resolved_helper = helper.resolve()
             with mock.patch.object(rf, "run_cmd") as run_cmd, mock.patch.object(
                 rf, "active_output", return_value=None
             ):
@@ -4777,9 +4780,9 @@ class WorkflowContractTests(unittest.TestCase):
                     stream=True,
                     progress=progress,
                 )
-        progress.record_cmd.assert_called_once_with([str(helper), "me"])
+        progress.record_cmd.assert_called_once_with([str(resolved_helper), "me"])
         run_cmd.assert_called_once_with(
-            [str(helper), "me"],
+            [str(resolved_helper), "me"],
             cwd=repo_dir,
             env={"JIRA_CONFIG_FILE": str(repo_dir / "jira.yml")},
             check=True,

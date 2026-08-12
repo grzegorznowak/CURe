@@ -406,6 +406,7 @@ class JsonRpcSession:
                 )
             self.binary = str(Path(resolved_binary).resolve(strict=False))
         self._next_id = 1
+        self._startup_drain_done = False
         self._transport_mode = str(transport_mode or "").strip() or "json_line"
         if self._transport_mode not in _TRANSPORT_MODES:
             raise ValueError(f"unsupported transport mode: {self._transport_mode}")
@@ -646,7 +647,14 @@ class JsonRpcSession:
         if self.proc.poll() is not None:
             raise self._stage_error(stage, self._closed_stream_detail(stage))
         remaining = self._remaining_timeout(stage=stage, timeout_seconds=timeout_seconds, deadline=active_deadline)
-        self._drain_ready_io(timeout_seconds=min(0.05, remaining))
+        if not self._startup_drain_done:
+            # The settle drain gives a freshly spawned daemon a short window to
+            # write early output or exit before the first exchange. Repeating a
+            # blocking 50ms select before every request would burn a large
+            # slice of each caller's budget (readiness polls pass tight
+            # real-time slivers), so only the first check pays for it.
+            self._drain_ready_io(timeout_seconds=min(0.05, remaining))
+            self._startup_drain_done = True
         if self.proc.poll() is not None:
             raise self._stage_error(stage, self._closed_stream_detail(stage))
 

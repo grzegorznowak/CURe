@@ -18,11 +18,13 @@ import run as run_module
 from cure_chunkhound_lifecycle import (
     ChunkHoundDaemonLease,
     DaemonGenerationIdentity,
+    DaemonGenerationObservationError,
     ExpectedGenerationEvidence,
     ExpectedSessionReadinessError,
     ExpectedSessionReadinessTimeoutError,
     ExpectedSessionReceiptV1,
     LeaseState,
+    _read_process_identity,
     build_launch_identity,
 )
 
@@ -176,15 +178,11 @@ def _assert_process_gone(pid: int, scenario: str) -> None:
 def _probe_fake_mcp_generation(runtime: Path) -> DaemonGenerationIdentity | None:
     try:
         pid = int((runtime / "keeper.pid").read_text(encoding="utf-8"))
-        stat_fields = (Path("/proc") / str(pid) / "stat").read_text(
-            encoding="utf-8"
-        ).rsplit(")", 1)[1].split()
-        if stat_fields[0] == "Z":
+        identity = _read_process_identity(pid)
+        if identity.state in {"Z", "X", "x"}:
             return None
-        # Linux proc_pid_stat(5): fields after the command start at state (3),
-        # making process start time (22) index 19 in this suffix.
-        started_at = float(int(stat_fields[19]))
-    except (FileNotFoundError, IndexError, ValueError):
+        started_at = identity.process_started_at
+    except (FileNotFoundError, ValueError, DaemonGenerationObservationError):
         return None
     return DaemonGenerationIdentity(pid=pid, process_started_at=started_at)
 

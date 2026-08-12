@@ -4,6 +4,19 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
+## [0.10.3] - 2026-08-11
+
+### Added
+
+- The indexed Codex ChunkHound daemon route now works on macOS (Darwin): the daemon keeper's generation attestation is platform-dispatched (Linux reads `/proc` start ticks, macOS reads the libproc `proc_pidinfo` identity), so macOS gets the same single-lease daemon flow as Linux instead of the pre-0.10.0 degraded path (issue #38).
+- CI now runs the full test, lint, and package gate on macOS (arm64) alongside Ubuntu, so the Darwin route stays proven.
+
+### Fixed
+
+- Darwin keeper attestation correctness: `pbi_status` is a numeric BSD process state (xnu), not an ASCII letter — zombie states (SZOMB) are now normalized to the shared single-letter form and rejected, unknown states fail closed, and `pbi_start_tvusec` is read as a 64-bit value so microsecond start-time precision is preserved.
+- Route classification now fails closed: the indexed helper route on any platform without a native keeper (Windows, FreeBSD, and other unknown platforms) is rejected before any helper or model invocation instead of silently bypassing keeper authority.
+- macOS daemon-spawn portability: single-level runtime shebangs (macOS kernels do not resolve nested shebang chains), a per-session startup settle drain, wider readiness-poll margins, and resolved-path comparisons in preflight checks; fixture scripts and the wheel smoke probe now use the resolved interpreter and platform-dispatched identity reads.
+
 ## [0.10.2] - 2026-08-07
 
 ### Changed
