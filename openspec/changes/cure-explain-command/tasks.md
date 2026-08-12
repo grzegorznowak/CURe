@@ -195,3 +195,31 @@
   removal).
 - [x] Full suite 1044 passed + 6 skipped (5 pre-existing + live gate); ruff +
   py_compile clean.
+
+## Explain clarity + interactive codex handoff (2026-08-12, user feedback)
+- [x] Prompt rewritten for real newcomer comprehension: explicit reader
+  persona (developer who has NOT seen the PR/codebase/review), mechanics for
+  plain language (short sentences, inline first-use glosses for terms like
+  "sandbox"/"rollout", one-clause "what it is" after every file/module
+  name, product-level consequences).
+- [x] Example tension resolved: an example is required per issue only if one
+  exists in the review/PR; otherwise the answer says "No concrete example
+  appears in the review" and may add an analogy explicitly labeled
+  "Think of it like …" — never invents facts (the old structure demanded an
+  example while the grounding clause forbade inventing one).
+- [x] Question mode made functional: "## User's question" gets a DIRECT
+  plain-terms answer first, then the structure only where it helps — no
+  fresh review, no whole-review summary first (previously one weak tail
+  sentence). Internal-prompting mentions banned with explicit examples
+  ("the prompt"/"the instructions"/"the template").
+- [x] `--open-in-codex` flag + terminal prompt: after a successful fork-mode
+  explanation, CURe hands the terminal to `codex resume <fork_id>` — an
+  interactive codex session whose conversation already contains the full
+  review context plus the explanation exchange. Staged credential pointers
+  are dropped (user's own credentials apply); `explains[].resume` records
+  the `interactive_command`.
+- [x] RED→GREEN: handoff invoked with fork id/repo/env-sans-staged-creds
+  (--open-in-codex), no handoff without the flag, subparser registers the
+  flag, resume-entry assertion updated.
+- [x] Full suite 1046 passed + 7 skipped + 191 subtests; ruff + mypy +
+  py_compile clean.

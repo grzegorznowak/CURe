@@ -253,6 +253,14 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   proof (`CURE_RUN_LIVE_READONLY=1`) that a real `codex exec --sandbox
   read-only` blocks a write; the pre-HTTP-removal remediation history is
   marked superseded.
+- D20 (2026-08-12, user feedback): explain answers a developer who has NOT
+  seen the PR/codebase/review — inline first-use glosses, product-level
+  consequences, examples only when the review/PR provides one (else an
+  explicitly labeled "Think of it like …" analogy), direct answer first for
+  "## User's question", never mention internal prompting. After a
+  fork-mode explanation, `--open-in-codex` (or a terminal prompt) hands the
+  user an interactive `codex resume <fork_id>` session that already
+  contains the full review context and the explanation exchange.
 
 ## PR #37 Review Remediation (2026-08-11)
 > SUPERSEDED (2026-08-11, 2a47962): this section predates the HTTP provider

@@ -12532,6 +12532,43 @@ EXPLAIN_RESUME_CONTEXT_NOTE = (
 )
 
 
+def _confirm_explain_codex_handoff(*, quiet: bool) -> bool:
+    """Ask the user whether to continue in an interactive codex session.
+    Only prompts when stdin is a real terminal and output is not quiet."""
+    if quiet or not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("Continue this explanation in an interactive codex session? [y/N] ").strip().lower()
+    except (EOFError, OSError):
+        return False
+    return answer in {"y", "yes"}
+
+
+def _open_interactive_codex_resume(
+    *, repo_dir: Path, fork_session_id: str, base_env: dict[str, str]
+) -> int:
+    """Hand the terminal over to an interactive `codex resume` of the explanation
+    fork (the fork already holds the full review context plus this explanation).
+
+    Staged credential dirs are cleaned by the time this runs, so the staged
+    GH_CONFIG_DIR/JIRA_CONFIG_FILE/NETRC pointers are dropped and the
+    interactive session uses the user's own credentials. Returns codex's exit
+    code.
+    """
+    spawn_env = {
+        key: value
+        for key, value in base_env.items()
+        if key not in {"GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC"}
+    }
+    proc = subprocess.run(
+        ["codex", "resume", str(fork_session_id)],
+        cwd=str(repo_dir),
+        env=spawn_env,
+        check=False,
+    )
+    return int(proc.returncode)
+
+
 def _explain_flow_impl(
     args: argparse.Namespace,
     *,
@@ -12708,6 +12745,7 @@ def _explain_flow_impl(
                 "mode": "fork",
                 "base_session_id": str(resume_base_id or ""),
                 "fork_session_id": resume_fork_id,
+                "interactive_command": f"codex resume {resume_fork_id}",
             }
         # The lock lives on a stable sidecar file: flushing replaces meta.json
         # with a new filesystem object, so a lock on meta.json itself would
@@ -12731,6 +12769,26 @@ def _explain_flow_impl(
         if explanation:
             print(explanation)
     print(str(explain_md_path))
+
+    # Interactive handoff: continue the explanation fork in a real codex
+    # session (the fork holds the full review context plus this exchange).
+    # Staged credential dirs are already cleaned, so the interactive session
+    # uses the user's own credentials.
+    if completed and resume_fork_id is not None and (
+        bool(getattr(args, "open_in_codex", False))
+        or _confirm_explain_codex_handoff(quiet=quiet)
+    ):
+        log(
+            f"EXPLAIN: continuing in interactive codex session {str(resume_fork_id)[:8]} "
+            "(full review context loaded; exit with Ctrl-C or /quit)",
+            quiet=quiet,
+        )
+        rc = _open_interactive_codex_resume(
+            repo_dir=repo_dir,
+            fork_session_id=resume_fork_id,
+            base_env=env,
+        )
+        log(f"EXPLAIN: interactive codex session ended (rc={rc})", quiet=quiet)
     return 0
 
 
@@ -15314,6 +15372,15 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
         default=None,
         help="Question for the explanation, appended to the builtin explain prompt"
         " (default: generic explanation)",
+    )
+    ep.add_argument(
+        "--open-in-codex",
+        dest="open_in_codex",
+        action="store_true",
+        default=False,
+        help="After the explanation, hand the terminal over to an interactive codex "
+        "session that continues the forked explanation session (full review context "
+        "already loaded; without the flag, prompt when stdin is a terminal)",
     )
     add_llm_override_args(ep)
     ep.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)

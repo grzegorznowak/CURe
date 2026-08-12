@@ -390,11 +390,20 @@ class ExplainCommandTests(unittest.TestCase):
     def test_explain_subparser_registers_arguments(self) -> None:
         parser = rf.build_parser(prog="cure")
         args = parser.parse_args(
-            ["explain", PR_URL, "--explain-prompt", "hello", "--quiet", "--no-stream"]
+            [
+                "explain",
+                PR_URL,
+                "--explain-prompt",
+                "hello",
+                "--open-in-codex",
+                "--quiet",
+                "--no-stream",
+            ]
         )
         self.assertEqual(args.cmd, "explain")
         self.assertEqual(args.pr_url, PR_URL)
         self.assertEqual(args.explain_prompt, "hello")
+        self.assertTrue(args.open_in_codex)
         self.assertTrue(args.quiet)
         self.assertTrue(args.no_stream)
 
@@ -489,12 +498,60 @@ class ExplainCommandTests(unittest.TestCase):
                 "mode": "fork",
                 "base_session_id": BASE_CODEX_SESSION_ID,
                 "fork_session_id": str(fork_id),
+                "interactive_command": f"codex resume {fork_id}",
             },
         )
         # The recorded resume info must NOT be overwritten (interactive gates pristine base).
         self.assertEqual(
             meta["llm"]["resume"]["session_id"], BASE_CODEX_SESSION_ID
         )
+
+    def test_explain_flow_open_in_codex_hands_off_to_interactive_resume(self) -> None:
+        codex_root = self.root / "codex-home"
+        _write_fake_codex_session(codex_root=codex_root)
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+        handoffs: list[dict[str, object]] = []
+
+        def fake_handoff(**kwargs: object) -> int:
+            handoffs.append(kwargs)
+            return 0
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+            rf, "_open_interactive_codex_resume", side_effect=fake_handoff
+        ):
+            captured = self._patched_run(
+                _explain_args(open_in_codex=True),
+                resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+            )
+
+        self.assertEqual(captured["_rc"], 0)
+        self.assertEqual(len(handoffs), 1)
+        fork_id = captured.get("resume_session_id")
+        self.assertIsNotNone(fork_id)
+        self.assertEqual(handoffs[0]["fork_session_id"], str(fork_id))
+        self.assertEqual(handoffs[0]["repo_dir"], self.root / "session-1" / "repo")
+        handoff_env = handoffs[0]["base_env"]
+        assert isinstance(handoff_env, dict)
+        # Staged credential pointers are dropped: the interactive session uses
+        # the user's own credentials.
+        for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC"):
+            self.assertNotIn(key, handoff_env)
+
+    def test_explain_flow_does_not_hand_off_without_flag(self) -> None:
+        codex_root = self.root / "codex-home"
+        _write_fake_codex_session(codex_root=codex_root)
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+            rf, "_open_interactive_codex_resume"
+        ) as handoff_mock:
+            captured = self._patched_run(
+                _explain_args(),
+                resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+            )
+
+        self.assertEqual(captured["_rc"], 0)
+        handoff_mock.assert_not_called()
 
     def test_explain_flow_inline_when_codex_without_resume_info(self) -> None:
         codex_root = self.root / "codex-home"
