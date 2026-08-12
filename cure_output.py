@@ -189,6 +189,12 @@ class ChunkhoundLiveProgressReporter:
                 meta["live_progress"] = live
             else:
                 meta.pop("live_progress", None)
+                drop = getattr(self._progress, "drop", None)
+                if callable(drop):
+                    # Declare the deletion so a fresh-reload merge flush (which
+                    # preserves registry keys appended concurrently) also
+                    # removes the key from the on-disk document.
+                    drop("live_progress")
             _flush_progress(self._progress)
         return summary
 

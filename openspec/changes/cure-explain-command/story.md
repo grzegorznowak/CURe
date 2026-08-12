@@ -261,6 +261,17 @@ python3 -c 'import json;m=json.load(open("<session>/meta.json"));print(m["explai
   fork-mode explanation, `--open-in-codex` (or a terminal prompt) hands the
   user an interactive `codex resume <fork_id>` session that already
   contains the full review context and the explanation exchange.
+- D21 (2026-08-12, PR#37 round 3): ALL session metadata writers share one
+  lock-and-merge protocol. `cure_sessions.mutate_session_meta` (flock on the
+  `meta.json.lock` sidecar + fresh reload + change-gated persist) is the
+  primitive; SessionProgress non-merge flushes lock+reload+overlay with
+  `explains`/`followups` adopted from disk and deletions declared via
+  `drop()`/`deleted_keys` (so resume/follow-up/review writers can never erase
+  a concurrent explains[] entry); follow-up, resume-noop, interactive-resume
+  and verdicts writers persist through mutate_session_meta with re-adoption.
+  Non-merge flush does NOT flip to merge mode (would drop flow-owned keys and
+  cannot propagate deletions); helper callbacks must not nest writers (the
+  sidecar flock is not reentrant).
 
 ## PR #37 Review Remediation (2026-08-11)
 > SUPERSEDED (2026-08-11, 2a47962): this section predates the HTTP provider

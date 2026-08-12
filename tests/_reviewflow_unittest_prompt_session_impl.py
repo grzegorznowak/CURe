@@ -5125,3 +5125,165 @@ class WorkflowContractTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+
+
+class SessionMetaMutationTests(unittest.TestCase):
+    """Lock-and-merge protocol for ALL session meta writers (PR #37 round 3).
+
+    A parallel explain run appends an `explains[]` entry while the writer under
+    test holds a stale working copy; every writer must preserve that entry by
+    locking the sidecar and merging onto a fresh reload.
+    """
+
+    def _concurrent_explain_append(self, meta_path: Path) -> None:
+        # The REAL explain protocol: lock the sidecar, reload fresh, append.
+        with rf.file_lock(meta_path.with_name(meta_path.name + ".lock"), quiet=True):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta.setdefault("explains", []).append({"output_path": "e2.md"})
+            rf.write_redacted_json(meta_path, meta)
+
+    def _seed_session_meta(self, root: Path) -> Path:
+        meta_path = root / "sessions" / "s1" / "meta.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        rf.write_redacted_json(
+            meta_path,
+            {
+                "session_id": "s1",
+                "status": "done",
+                "phase": "review",
+                "explains": [{"output_path": "e1.md"}],
+            },
+        )
+        return meta_path
+
+    def test_session_progress_full_flush_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = {"status": "running", "phase": "followup_review"}
+            self._concurrent_explain_append(meta_path)
+            progress.flush()
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [entry["output_path"] for entry in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["status"], "running")
+            self.assertEqual(on_disk["phase"], "followup_review")
+
+    def test_session_progress_drop_removes_keys_on_full_flush(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = Path(tmp) / "meta.json"
+            rf.write_redacted_json(
+                meta_path,
+                {
+                    "status": "error",
+                    "phase": "init",
+                    "completed_at": "2026-01-01T00:00:00+00:00",
+                    "error": {"kind": "boom"},
+                },
+            )
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            progress.drop("completed_at")
+            progress.drop("error")
+            progress.flush()
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertNotIn("completed_at", on_disk)
+            self.assertNotIn("error", on_disk)
+            self.assertEqual(on_disk["status"], "error")
+            progress.done()
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "done")
+            self.assertIn("completed_at", on_disk)
+            self.assertNotIn("error", on_disk)
+
+    def test_mutate_session_meta_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            self._concurrent_explain_append(meta_path)
+            entry = {"started_at": "2026-01-01T00:00:00+00:00", "output_path": "f1.md"}
+            merged = rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (fresh.setdefault("followups", []).append(entry) or True),
+            )
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["followups"], [entry])
+            self.assertEqual(on_disk, merged)
+
+    def test_mark_resume_noop_completed_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            self._concurrent_explain_append(meta_path)
+            merged = rf._mark_resume_noop_completed(
+                meta_path=meta_path,
+                resumed_at="2026-01-02T00:00:00+00:00",
+            )
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["status"], "done")
+            self.assertEqual(on_disk["resumed_at"], "2026-01-02T00:00:00+00:00")
+            self.assertIn("completed_at", on_disk)
+            self.assertEqual(merged, on_disk)
+
+    def test_resolve_session_verdicts_persist_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "sessions" / "s1"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            meta_path = session_dir / "meta.json"
+            review_md_path = session_dir / "review.md"
+            review_md_path.write_text(
+                "# Review\n\n**Decision:** APPROVE\n",
+                encoding="utf-8",
+            )
+            rf.write_redacted_json(
+                meta_path,
+                {
+                    "session_id": "s1",
+                    "status": "done",
+                    "decision": "approve",
+                    "explains": [{"output_path": "e1.md"}],
+                },
+            )
+            stale = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._concurrent_explain_append(meta_path)
+            verdicts = rf._resolve_session_verdicts(
+                meta_path=meta_path,
+                meta=stale,
+                review_md_path=review_md_path,
+            )
+            self.assertIsNotNone(verdicts)
+            assert verdicts is not None
+            self.assertEqual(verdicts.business, "APPROVE")
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(
+                on_disk["verdicts"],
+                {"business": "APPROVE", "technical": "APPROVE"},
+            )
+
+    def test_mutate_session_meta_rolls_back_when_callback_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+
+            def _boom(fresh: dict[str, Any]) -> bool:
+                fresh["status"] = "hosed"
+                raise RuntimeError("boom")
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                rf.mutate_session_meta(meta_path, fn=_boom)
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "done")
+            self.assertTrue(meta_path.with_name(meta_path.name + ".lock").is_file())

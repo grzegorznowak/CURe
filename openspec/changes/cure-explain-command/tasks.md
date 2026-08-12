@@ -223,3 +223,45 @@
   flag, resume-entry assertion updated.
 - [x] Full suite 1046 passed + 7 skipped + 191 subtests; ruff + mypy +
   py_compile clean.
+
+## Lock-and-merge protocol for ALL session meta writers (2026-08-12, PR#37 round 3)
+- [x] Shared primitives in cure_sessions.py: private `_session_meta_lock`
+  (flock on the stable `meta.json.lock` sidecar, silent) + `mutate_session_meta`
+  (lock → fresh reload → `fn(fresh)` → persist only when `fn` reports a change;
+  returns the merged doc for re-adoption). No log dependency, no cure import
+  cycle; `file_lock` stays in cure.py.
+- [x] SessionProgress non-merge flush is now lock+fresh-reload+overlay: the
+  working copy adopts `explains`/`followups` from disk
+  (`_PROGRESS_REGISTRY_PRESERVE_KEYS`) and deletions propagate via the new
+  `deleted_keys` set + `drop(key)` (applied BEFORE the overlay, so
+  `done()`/`error()` re-add their keys). Fixes resume/follow-up/review
+  progress-backed writers in one place; merge mode unchanged.
+- [x] Resume flow: the three `progress.meta.pop("completed_at"/"failed_at"/"error")`
+  become `progress.drop(...)`.
+- [x] Follow-up flow: paths write, tool-proof finally-persist
+  (`_FOLLOWUP_FLOW_OWNED_META_KEYS` overlay from the working copy — carries
+  llm records + `chunkhound.tool_validation`), and followups append all go
+  through `mutate_session_meta` with re-adoption (footer sees merged meta).
+- [x] `_mark_resume_noop_completed` drops its `meta` param and persists via
+  `mutate_session_meta` (fresh doc: status/resumed_at/completed_at +
+  failed_at/error pops).
+- [x] Interactive-resume builder persists via `mutate_session_meta` with a
+  single `meta_updates` dict (paths/llm/agent_runtime/chunkhound[/codex]);
+  the same dict objects are mutated in place by `record_*`, so both the
+  fallback and final persist see final states.
+- [x] `cure_output.ChunkhoundLiveProgressReporter` clears `live_progress` via
+  `progress.drop()` so the fresh-reload merge flush propagates the deletion.
+- [x] `_resolve_session_verdicts` persistence moved into
+  `_persist_normalized_session_verdicts`: recomputes verdicts on the FRESH doc
+  under the sidecar lock, writes only when changed, refreshes the caller's
+  working copy in place, best-effort (try/except parity with today). The
+  cure.py:13217 copy is dead/shadowed — left untouched.
+- [x] RED→GREEN: `SessionMetaMutationTests` (6 tests) — concurrent explains
+  append preserved across progress full flush, mutate_session_meta,
+  resume-noop, and verdicts persistence; drop() deletion semantics incl.
+  done() re-add; rollback when the callback raises + sidecar created. All RED
+  before implementation, GREEN after.
+- [x] Full suite green: 805 affected-suite tests + full explicit suite
+  (2166 passed + 2 skipped + 431 subtests) with only the known pre-existing
+  `UtilityModelConfigTests::test_partial_utility_model_invalid_final_combination_fails_fast`
+  failing identically at HEAD; ruff + mypy (1.20.0) + py_compile clean.

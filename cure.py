@@ -803,18 +803,18 @@ def _resolve_session_review_elapsed_started_at(*, meta: dict[str, Any]) -> str |
     return str(meta.get("created_at") or "").strip() or None
 
 
-def _mark_resume_noop_completed(
-    *, meta_path: Path, meta: dict[str, Any], resumed_at: str | None = None
-) -> dict[str, Any]:
+def _mark_resume_noop_completed(*, meta_path: Path, resumed_at: str | None = None) -> dict[str, Any]:
     completed_at = _utc_now_iso()
-    updated = dict(meta)
-    updated["status"] = "done"
-    updated["resumed_at"] = str(resumed_at or completed_at).strip() or completed_at
-    updated["completed_at"] = completed_at
-    updated.pop("failed_at", None)
-    updated.pop("error", None)
-    write_redacted_json(meta_path, updated)
-    return updated
+
+    def _apply(fresh: dict[str, Any]) -> bool:
+        fresh["status"] = "done"
+        fresh["resumed_at"] = str(resumed_at or completed_at).strip() or completed_at
+        fresh["completed_at"] = completed_at
+        fresh.pop("failed_at", None)
+        fresh.pop("error", None)
+        return True
+
+    return mutate_session_meta(meta_path, fn=_apply)
 
 
 def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
@@ -1817,11 +1817,30 @@ class SessionProgress:
         self.quiet = quiet
         self.merge_under_lock = merge_under_lock
         self.meta: dict[str, Any] = {}
+        self.deleted_keys: set[str] = set()
         self._lock = threading.RLock()
 
     def _flush_locked(self) -> None:
         if not self.merge_under_lock:
-            write_redacted_json(self.meta_path, self.meta)
+            # Non-merge mode: reload the on-disk document fresh under the
+            # cross-process lock and overlay the working copy on top, so a
+            # stale snapshot flush can never erase entries appended
+            # concurrently by another process (e.g. `explains[]` entries from
+            # parallel explain runs). Registry keys this writer does not own
+            # are adopted from disk; deletions are applied via `deleted_keys`
+            # BEFORE the overlay, so done()/error() re-add their keys through
+            # the overlay.
+            lock_path = self.meta_path.with_name(self.meta_path.name + ".lock")
+            with file_lock(lock_path, quiet=self.quiet):
+                on_disk = _load_session_meta(self.meta_path) or {}
+                for key in _PROGRESS_REGISTRY_PRESERVE_KEYS:
+                    if key in on_disk:
+                        self.meta[key] = on_disk[key]
+                merged = dict(on_disk)
+                for key in self.deleted_keys:
+                    merged.pop(key, None)
+                merged.update(self.meta)
+                write_redacted_json(self.meta_path, merged)
             return
         # Merge mode: overlay only the progress-owned keys on a fresh on-disk
         # reload under the cross-process lock, so a stale snapshot flush can
@@ -1850,6 +1869,16 @@ class SessionProgress:
     def flush(self) -> None:
         with self._lock:
             self._flush_locked()
+
+    def drop(self, key: str) -> None:
+        """Remove `key` from the working copy and from future full flushes.
+
+        Non-merge flushes apply deletions BEFORE overlaying the working copy,
+        so a later done()/error() can re-add the key through the overlay.
+        """
+        with self._lock:
+            self.meta.pop(key, None)
+            self.deleted_keys.add(key)
 
     @contextlib.contextmanager
     def mutate(self) -> "contextlib.AbstractContextManager[dict[str, Any]]":
@@ -1920,6 +1949,13 @@ _PROGRESS_MERGE_KEYS = (
     "completed_at",
     "failed_at",
     "error",
+)
+
+# Registry keys owned by OTHER writers that a non-merge progress flush must
+# adopt from the fresh on-disk reload (see SessionProgress._flush_locked).
+_PROGRESS_REGISTRY_PRESERVE_KEYS = (
+    "explains",
+    "followups",
 )
 
 
@@ -11232,7 +11268,6 @@ def _resume_flow_impl(
                     # Fast no-op for completed sessions that already target the latest PR head.
                     updated_meta = _mark_resume_noop_completed(
                         meta_path=meta_path,
-                        meta=meta,
                         resumed_at=resume_started_at,
                     )
                     _refresh_session_review_footer(meta=updated_meta, markdown_path=review_md_path)
@@ -11299,9 +11334,9 @@ def _resume_flow_impl(
     progress.meta["status"] = "running"
     # Resuming re-opens the session; clear completion/failure markers so the UI can
     # correctly show an active spinner and listings don't treat it as completed.
-    progress.meta.pop("completed_at", None)
-    progress.meta.pop("failed_at", None)
-    progress.meta.pop("error", None)
+    progress.drop("completed_at")
+    progress.drop("failed_at")
+    progress.drop("error")
     progress.meta["resumed_at"] = _utc_now_iso()
     progress.meta.setdefault("options", {})["quiet"] = quiet
     progress.meta.setdefault("options", {})["no_stream"] = no_stream
@@ -12096,6 +12131,19 @@ def _resume_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
+# Keys the follow-up flow owns and overlays onto a fresh reload when
+# persisting (see _persist_followup_meta in _followup_flow_impl). Registry
+# keys owned by other writers (explains/followups) stay on the fresh doc.
+_FOLLOWUP_FLOW_OWNED_META_KEYS = (
+    "paths",
+    "llm",
+    "chunkhound",
+    "review_intelligence",
+    "agent_runtime",
+    "codex",
+)
+
+
 def _followup_flow_impl(
     args: argparse.Namespace,
     *,
@@ -12187,7 +12235,11 @@ def _followup_flow_impl(
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
-    write_redacted_json(meta_path, meta)
+    meta = mutate_session_meta(
+        meta_path,
+        quiet=quiet,
+        fn=lambda fresh: (fresh.__setitem__("paths", dict(meta_paths)) or True),
+    )
 
     out = ReviewflowOutput(
         ui_enabled=ui_enabled,
@@ -12430,6 +12482,16 @@ def _followup_flow_impl(
                 else None
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
+
+        def _persist_followup_meta(fresh: dict[str, Any]) -> bool:
+            # The working copy owns these keys (records + tool proof results
+            # are applied to it); overlay them onto the fresh reload so
+            # concurrently appended registry keys are preserved.
+            for key in _FOLLOWUP_FLOW_OWNED_META_KEYS:
+                if key in meta:
+                    fresh[key] = meta[key]
+            return True
+
         try:
             _enforce_chunkhound_tool_proof(
                 meta=meta,
@@ -12440,7 +12502,7 @@ def _followup_flow_impl(
                 adapter_meta=followup_result.adapter_meta,
             )
         finally:
-            write_redacted_json(meta_path, meta)
+            meta = mutate_session_meta(meta_path, quiet=quiet, fn=_persist_followup_meta)
 
         verdicts = extract_review_verdicts_from_markdown(followup_md_path.read_text(encoding="utf-8"))
         followup_entry: dict[str, Any] = {
@@ -12475,8 +12537,11 @@ def _followup_flow_impl(
             if usage is not None:
                 followup_llm_meta["usage"] = usage
             record_llm_resume(followup_llm_meta, followup_result.resume)
-        meta.setdefault("followups", []).append(followup_entry)
-        write_redacted_json(meta_path, meta)
+        meta = mutate_session_meta(
+            meta_path,
+            quiet=quiet,
+            fn=lambda fresh: (fresh.setdefault("followups", []).append(followup_entry) or True),
+        )
         _refresh_followup_review_footer(
             meta=meta,
             followup_entry=followup_entry,
@@ -13758,6 +13823,12 @@ def build_interactive_resume_command(
     meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
+    meta_updates: dict[str, Any] = {
+        "paths": meta_paths,
+        "llm": llm_meta,
+        "agent_runtime": runtime_policy["metadata"],
+        "chunkhound": chunkhound_meta["chunkhound"],
+    }
     meta["paths"] = meta_paths
     meta["llm"] = llm_meta
     meta["agent_runtime"] = runtime_policy["metadata"]
@@ -13784,6 +13855,7 @@ def build_interactive_resume_command(
             "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
         }
         meta["codex"] = codex_meta
+        meta_updates["codex"] = codex_meta
         if _interactive_session_resume_is_poisoned(session=session):
             raise ReviewflowError(
                 f"Interactive cannot resume {session.session_id}: saved Codex session is corrupted by a stray "
@@ -13797,7 +13869,11 @@ def build_interactive_resume_command(
                 raise ReviewflowError(
                     f"Session {session.session_id} is missing codex.resume and llm.resume metadata."
                 )
-            write_redacted_json(meta_path, meta)
+            meta = mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (fresh.update(meta_updates) or True),
+            )
             return (fallback_command, env)
 
         command = build_codex_resume_command(
@@ -13825,7 +13901,11 @@ def build_interactive_resume_command(
         )
         meta["llm"] = llm_meta
         meta["codex"] = codex_meta
-        write_redacted_json(meta_path, meta)
+        meta = mutate_session_meta(
+            meta_path,
+            quiet=True,
+            fn=lambda fresh: (fresh.update(meta_updates) or True),
+        )
         return (command, env)
 
     raise ReviewflowError(
@@ -15003,6 +15083,7 @@ from cure_sessions import (
     build_status_payload,
     extract_review_verdicts_from_markdown,
     format_review_verdicts_compact,
+    mutate_session_meta,
     normalize_review_verdict,
     normalize_review_verdicts,
     parse_owner_repo,
