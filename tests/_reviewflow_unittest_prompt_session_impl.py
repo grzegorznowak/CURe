@@ -4486,6 +4486,19 @@ class RfJiraTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_aggregate_wrapper_exports_all_ci_required_test_classes(self) -> None:
+        from test_reviewflow_unittest import (
+            ChunkhoundCacheBuildLiveProgressTests,
+            DarwinProcessIdentityTests,
+            SessionMetaMutationTests,
+            UtilityModelProvenanceTests,
+        )
+
+        self.assertTrue(ChunkhoundCacheBuildLiveProgressTests)
+        self.assertTrue(DarwinProcessIdentityTests)
+        self.assertTrue(SessionMetaMutationTests)
+        self.assertTrue(UtilityModelProvenanceTests)
+
     def _make_paths(self, root: Path, *, suffix: str) -> tuple[rf.ReviewflowPaths, Path]:
         cfg = ROOT / f".tmp_test_workflow_contract_{suffix}.json"
         cfg.write_text("{}", encoding="utf-8")

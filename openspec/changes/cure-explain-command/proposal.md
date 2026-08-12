@@ -38,7 +38,9 @@ resume pointers.
 - D6: explains entries record `resume: {mode, base_session_id, fork_session_id}`;
   `meta.llm.resume`/`meta.codex.resume` are never modified by explain.
 - Scope boundary: deliberately lighter than `followup` — no chunkhound /
-  review-intelligence / PR-context / TUI machinery.
+  review-intelligence / PR-context / TUI machinery. The authoritative list of
+  verified, accepted PR #37 findings deliberately deferred from this change is
+  in `story.md` under **Out of Scope**.
 
 ## External Resources
 - Agentic-workflow-cycle protocol run 2026-08-10 (A_I Gate 1 decisions, A_R design,

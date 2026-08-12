@@ -266,6 +266,11 @@
   `UtilityModelConfigTests::test_partial_utility_model_invalid_final_combination_fails_fast`
   failing identically at HEAD; ruff + mypy (1.20.0) + py_compile clean.
 
+## PR#37 round-5 remediation (2026-08-12)
+- [x] Record the verified, accepted findings deliberately deferred from this
+  batch (#1, #4, #5, #6, #7, #8) in `story.md` **Out of Scope**; `proposal.md`
+  points to that authoritative list.
+
 ## PR#37 round-4 findings 4-8 (2026-08-12)
 - [x] F4 discover all completed sessions newest-first and clearly report missing review markdown.
 - [x] F5 merge SessionProgress writes by baseline diff and explicit deletion in both modes.

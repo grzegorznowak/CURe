@@ -48,6 +48,40 @@ None (standalone change; no dependency story workspaces).
 - followup-style chunkhound/review-intelligence/PR-context wiring
 - Non-codex provider resume; codex session store GC/cleanup
 - TUI rendering; changes to `interactive`, `followup`, or the pr flow
+- **Accepted finding #1 — symlink session escape (real; triaged 2026-08-12):** a
+  locally planted session-directory symlink can redirect reads, explain output,
+  and staged credentials outside the sandbox root. This remains deliberately
+  deferred because it requires local write access to CURe's own sandbox root
+  (the previously accepted self-inflicted threat model) and needs a coordinated
+  containment policy for explain and followup rather than a narrow patch.
+- **Accepted finding #4 — rollout-tail validation (real; triaged 2026-08-12):**
+  fork validation checks the first rollout record but not every later nonblank
+  record, so a corrupt tail reaches Codex instead of taking the clean inline
+  fallback. This is deliberately deferred as separate resilience hardening for
+  malformed external session-store data; normal CURe-created rollouts are not
+  affected.
+- **Accepted finding #5 — malformed `explains` metadata (real; triaged
+  2026-08-12):** a pre-existing non-list `explains` value can fail registration
+  after the explanation artifact is written. This is deliberately deferred
+  because it concerns recovery from externally or historically malformed
+  metadata and should be addressed with an explicit repair and artifact
+  rollback policy.
+- **Accepted finding #6 — interactive handoff environment/exit status (real;
+  triaged 2026-08-12):** handoff drops custom GH/Jira/netrc environment values
+  and does not propagate a nonzero interactive Codex exit. This is deliberately
+  deferred because restoring caller credentials and deciding whether a failed
+  optional handoff should overturn an already successful explanation are
+  product-policy choices, not explain-generation correctness fixes.
+- **Accepted finding #7 — concurrent resume-pointer overwrite (real; triaged
+  2026-08-12):** the interactive builder can persist resume fields derived from
+  a stale snapshot over a newer concurrent followup. This is deliberately
+  deferred to a focused ownership-aware metadata merge change so the fix does
+  not destabilize the broader interactive/followup flows.
+- **Accepted finding #8 — dashboard stderr visibility (real; triaged
+  2026-08-12):** Codex stderr diagnostics are retained in the display log but
+  are not fed to the dashboard tail. This is deliberately deferred as TUI-only
+  observability work (already outside this story's scope); diagnostics remain
+  available in logs and provider execution is unaffected.
 
 ## Scenarios / Behavior Examples
 - S1: User runs `cure explain <url>` after a completed review → prints the

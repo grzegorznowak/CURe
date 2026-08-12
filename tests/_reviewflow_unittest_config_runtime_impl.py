@@ -2620,6 +2620,26 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_cure_llm_stage_review_auth_support_cleans_private_dir_on_partial_failure(self) -> None:
+        root = ROOT / ".tmp_test_cure_llm_stage_auth_partial_failure"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            work = root / "work"
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_fail(*, dst_root: Path) -> Path:
+                partial = dst_root / "partial"
+                partial.mkdir(parents=True, exist_ok=True)
+                (partial / "secret.yml").write_text("leaked", encoding="utf-8")
+                raise OSError("copy failed halfway")
+
+            with mock.patch.object(cure_llm, "prepare_gh_config_for_codex", side_effect=fake_fail):
+                with self.assertRaisesRegex(OSError, "copy failed halfway"):
+                    cure_llm._stage_review_auth_support(work_dir=work, env={})
+            self.assertEqual(list(work.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_readonly_runtime_denies_mutation_and_keeps_repo_pristine(self) -> None:
         """Read-only protection end to end: a fake codex sandbox that enforces
         read-only receives the read-only flags from CURe's real exec path, an
@@ -2887,6 +2907,61 @@ raise SystemExit(0)
                     )
             self.assertIn("codex", str(ctx.exception))
             self.assertIn("not found", str(ctx.exception))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_prepare_review_agent_runtime_cleans_credentials_when_provider_binary_missing(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_missing_binary_credentials"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            gh_dir = root / "gh"
+            jira_dir = root / "jira"
+            jira_file = jira_dir / ".config.yml"
+            fake_home = root / "home"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            gh_dir.mkdir(parents=True, exist_ok=True)
+            jira_dir.mkdir(parents=True, exist_ok=True)
+            fake_home.mkdir(parents=True, exist_ok=True)
+            (gh_dir / "hosts.yml").write_text("github.com:\n  oauth_token: secret\n", encoding="utf-8")
+            jira_file.write_text("token: secret\n", encoding="utf-8")
+            (fake_home / ".netrc").write_text("machine example.test password secret\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"GH_CONFIG_DIR": str(gh_dir), "JIRA_CONFIG_FILE": str(jira_file)},
+                ),
+                mock.patch.object(cure, "real_user_home_dir", return_value=fake_home),
+                mock.patch.object(
+                    shutil,
+                    "which",
+                    side_effect=lambda name: None if name == "codex" else f"/usr/bin/{name}",
+                ),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf.prepare_review_agent_runtime(
+                        args=self._runtime_args(),
+                        resolved=self._llm_resolved("codex"),
+                        resolution_meta=self._llm_resolution_meta(),
+                        repo_dir=repo,
+                        session_dir=session,
+                        work_dir=work,
+                        base_env={"PATH": "/usr/bin"},
+                        chunkhound_config_path=work / "chunkhound.json",
+                        chunkhound_db_path=work / ".chunkhound.db",
+                        chunkhound_cwd=work / "chunkhound",
+                        enable_mcp=True,
+                        interactive=False,
+                        paths=rf.DEFAULT_PATHS,
+                    )
+
+            self.assertEqual(list(work.glob(".auth-*")), [])
+            self.assertFalse((work / "rf-jira").exists())
+            self.assertEqual(list(work.iterdir()), [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

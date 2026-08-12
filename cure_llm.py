@@ -470,45 +470,31 @@ def run_codex_exec(
         "review-provider" if owned_processes is not None else None
     )
     started_at = datetime.now(timezone.utc)
-    out = active_output()
-    codex_run_token = uuid4().hex
     codex_events_log_path = _resolve_codex_events_log_path(
         progress=progress,
         repo_dir=repo_dir,
-        run_token=codex_run_token,
+        run_token=uuid4().hex,
     )
     codex_display_log_path = _resolve_codex_display_log_path(progress=progress, repo_dir=repo_dir)
     codex_root = Path(env.get("CODEX_HOME") or (real_user_home_dir() / ".codex")).resolve()
     events_start_offset = _path_size(codex_events_log_path) or 0
-    artifact_override: dict[str, str | None] = {"text": None}
     _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
 
-    def _handle_codex_event(event: dict[str, Any]) -> None:
-        _record_codex_live_event(progress=progress, event=event)
-        artifact_text = str(event.get("raw_text") or event.get("text") or "").strip()
-        if str(event.get("type") or "").strip() == "agent_message" and _looks_like_codex_review_artifact(
-            artifact_text
-        ):
-            artifact_override["text"] = artifact_text
+    def _run_codex_attempt(*, cmd: list[str], events_log_path: Path) -> str | None:
+        artifact_override: dict[str, str | None] = {"text": None}
 
-    cmd = build_codex_exec_cmd(
-        repo_dir=repo_dir,
-        codex_flags=codex_flags,
-        codex_config_overrides=codex_config_overrides,
-        review_md_path=output_path,
-        prompt=prompt,
-        add_dirs=add_dirs,
-        skip_git_repo_check=False,
-        approval_policy=approval_policy,
-        dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
-        include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-        json_output=True,
-        resume_session_id=resume_session_id,
-        sandbox_mode=sandbox_mode,
-    )
-    progress.record_cmd(cmd)
-    try:
+        def _handle_codex_event(event: dict[str, Any]) -> None:
+            _record_codex_live_event(progress=progress, event=event)
+            artifact_text = str(event.get("raw_text") or event.get("text") or "").strip()
+            if (
+                str(event.get("type") or "").strip() == "agent_message"
+                and _looks_like_codex_review_artifact(artifact_text)
+            ):
+                artifact_override["text"] = artifact_text
+
+        out = active_output()
         if out is not None:
+            # ReviewflowOutput owns and drains its JSON sink on every exit.
             out.run_logged_cmd(
                 cmd,
                 kind="codex",
@@ -516,16 +502,16 @@ def run_codex_exec(
                 env=env,
                 check=True,
                 stream_requested=True,
-                codex_json_events_path=codex_events_log_path,
+                codex_json_events_path=events_log_path,
                 codex_display_log_path=codex_display_log_path,
                 codex_event_callback=_handle_codex_event,
                 owned_processes=owned_processes,
                 owned_role=owned_role,
             )
         else:
-            codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
+            events_log_path.parent.mkdir(parents=True, exist_ok=True)
             codex_display_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with codex_events_log_path.open("a", encoding="utf-8", buffering=1) as raw_fh, codex_display_log_path.open(
+            with events_log_path.open("a", encoding="utf-8", buffering=1) as raw_fh, codex_display_log_path.open(
                 "a", encoding="utf-8", buffering=1
             ) as display_fh:
                 sink = CodexJsonEventSink(
@@ -535,103 +521,10 @@ def run_codex_exec(
                     also_to=None,
                     on_event=_handle_codex_event,
                 )
-                run_cmd(
-                    cmd,
-                    cwd=repo_dir,
-                    env=env,
-                    check=True,
-                    stream=True,
-                    stream_to=sink,
-                    # stderr diagnostics go to the display log, never into the
-                    # JSON event stream (they would corrupt a large event
-                    # split across pipe reads).
-                    stderr_stream=display_fh,
-                    stream_label=None,
-                    owned_processes=owned_processes,
-                    owned_role=owned_role,
-                )
-                sink.drain()
-        if artifact_override["text"]:
-            _write_text_artifact(output_path, str(artifact_override["text"]))
-        if normalize_artifact:
-            normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-        _finalize_codex_live_progress(progress=progress, status="done")
-        events_end_offset = _path_size(codex_events_log_path)
-        return CodexRunResult(
-            resume=find_codex_resume_info(
-                repo_dir=repo_dir,
-                started_at=started_at,
-                env=env,
-                codex_flags=codex_flags,
-                codex_config_overrides=codex_config_overrides,
-                add_dirs=add_dirs,
-                codex_root=codex_root,
-            ),
-            events_log_path=codex_events_log_path,
-            events_start_offset=events_start_offset,
-            events_end_offset=events_end_offset,
-        )
-    except ReviewflowSubprocessError as e:
-        msg = (e.stderr or "") + "\n" + (e.stdout or "")
-        if "skip-git-repo-check" not in msg and "trusted directory" not in msg:
-            _finalize_codex_live_progress(progress=progress, status="error")
-            raise
-        _record_codex_live_event(
-            progress=progress,
-            event={
-                "type": "agent_message",
-                "text": "Retrying review with --skip-git-repo-check.",
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "replace_current": True,
-            },
-        )
-        fallback = build_codex_exec_cmd(
-            repo_dir=repo_dir,
-            codex_flags=codex_flags,
-            codex_config_overrides=codex_config_overrides,
-            review_md_path=output_path,
-            prompt=prompt,
-            add_dirs=add_dirs,
-            skip_git_repo_check=True,
-            approval_policy=approval_policy,
-            dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
-            include_shell_environment_inherit_all=include_shell_environment_inherit_all,
-            json_output=True,
-            resume_session_id=resume_session_id,
-            sandbox_mode=sandbox_mode,
-        )
-        progress.record_cmd(fallback)
-        out = active_output()
-        try:
-            if out is not None:
-                out.run_logged_cmd(
-                    fallback,
-                    kind="codex",
-                    cwd=repo_dir,
-                    env=env,
-                    check=True,
-                    stream_requested=True,
-                    codex_json_events_path=codex_events_log_path,
-                    codex_display_log_path=codex_display_log_path,
-                    codex_event_callback=_handle_codex_event,
-                    owned_processes=owned_processes,
-                    owned_role=owned_role,
-                )
-            else:
-                codex_events_log_path.parent.mkdir(parents=True, exist_ok=True)
-                codex_display_log_path.parent.mkdir(parents=True, exist_ok=True)
-                with codex_events_log_path.open("a", encoding="utf-8", buffering=1) as raw_fh, codex_display_log_path.open(
-                    "a", encoding="utf-8", buffering=1
-                ) as display_fh:
-                    sink = CodexJsonEventSink(
-                        raw_file=raw_fh,
-                        display_file=display_fh,
-                        tail=TailBuffer(max_lines=400),
-                        also_to=None,
-                        on_event=_handle_codex_event,
-                    )
+                attempt_error: BaseException | None = None
+                try:
                     run_cmd(
-                        fallback,
+                        cmd,
                         cwd=repo_dir,
                         env=env,
                         check=True,
@@ -644,15 +537,54 @@ def run_codex_exec(
                         owned_processes=owned_processes,
                         owned_role=owned_role,
                     )
-        except ReviewflowSubprocessError:
-            _finalize_codex_live_progress(progress=progress, status="error")
-            raise
-        if artifact_override["text"]:
-            _write_text_artifact(output_path, str(artifact_override["text"]))
+                except BaseException as exc:
+                    attempt_error = exc
+                    raise
+                finally:
+                    try:
+                        sink.drain()
+                    except Exception:
+                        if attempt_error is None:
+                            raise
+        return artifact_override["text"]
+
+    def _build_attempt_cmd(*, skip_git_repo_check: bool) -> list[str]:
+        return build_codex_exec_cmd(
+            repo_dir=repo_dir,
+            codex_flags=codex_flags,
+            codex_config_overrides=codex_config_overrides,
+            review_md_path=output_path,
+            prompt=prompt,
+            add_dirs=add_dirs,
+            skip_git_repo_check=skip_git_repo_check,
+            approval_policy=approval_policy,
+            dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
+            include_shell_environment_inherit_all=include_shell_environment_inherit_all,
+            json_output=True,
+            resume_session_id=resume_session_id,
+            sandbox_mode=sandbox_mode,
+        )
+
+    def _unlink_quietly(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _restore_events_metadata(events_log_path: Path) -> None:
+        meta = _progress_meta_dict(progress)
+        if meta is not None:
+            meta.setdefault("logs", {})["codex_events"] = str(events_log_path)
+        _ensure_codex_live_progress(progress=progress, events_log_path=events_log_path)
+
+    def _successful_result(
+        *, events_log_path: Path, start_offset: int, artifact_override: str | None
+    ) -> CodexRunResult:
+        if artifact_override:
+            _write_text_artifact(output_path, artifact_override)
         if normalize_artifact:
             normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
         _finalize_codex_live_progress(progress=progress, status="done")
-        events_end_offset = _path_size(codex_events_log_path)
         return CodexRunResult(
             resume=find_codex_resume_info(
                 repo_dir=repo_dir,
@@ -663,11 +595,68 @@ def run_codex_exec(
                 add_dirs=add_dirs,
                 codex_root=codex_root,
             ),
-            events_log_path=codex_events_log_path,
-            events_start_offset=events_start_offset,
-            events_end_offset=events_end_offset,
+            events_log_path=events_log_path,
+            events_start_offset=start_offset,
+            events_end_offset=_path_size(events_log_path),
         )
 
+    cmd = _build_attempt_cmd(skip_git_repo_check=False)
+    progress.record_cmd(cmd)
+    try:
+        artifact_override = _run_codex_attempt(cmd=cmd, events_log_path=codex_events_log_path)
+    except ReviewflowSubprocessError as exc:
+        message = (exc.stderr or "") + "\n" + (exc.stdout or "")
+        if "skip-git-repo-check" not in message and "trusted directory" not in message:
+            _finalize_codex_live_progress(progress=progress, status="error")
+            raise
+
+        _record_codex_live_event(
+            progress=progress,
+            event={
+                "type": "agent_message",
+                "text": "Retrying review with --skip-git-repo-check.",
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "replace_current": True,
+            },
+        )
+        failed_events_log_path = codex_events_log_path
+        retry_events_log_path = _resolve_codex_events_log_path(
+            progress=progress,
+            repo_dir=repo_dir,
+            run_token=uuid4().hex,
+        )
+        retry_start_offset = _path_size(retry_events_log_path) or 0
+        _ensure_codex_live_progress(progress=progress, events_log_path=retry_events_log_path)
+        try:
+            output_path.unlink(missing_ok=True)
+            fallback = _build_attempt_cmd(skip_git_repo_check=True)
+            progress.record_cmd(fallback)
+            retry_artifact_override = _run_codex_attempt(
+                cmd=fallback,
+                events_log_path=retry_events_log_path,
+            )
+        except Exception:
+            if retry_events_log_path != failed_events_log_path:
+                _unlink_quietly(retry_events_log_path)
+            _unlink_quietly(output_path)
+            _restore_events_metadata(failed_events_log_path)
+            _finalize_codex_live_progress(progress=progress, status="error")
+            raise
+
+        if retry_events_log_path != failed_events_log_path:
+            _unlink_quietly(failed_events_log_path)
+        _restore_events_metadata(retry_events_log_path)
+        return _successful_result(
+            events_log_path=retry_events_log_path,
+            start_offset=retry_start_offset,
+            artifact_override=retry_artifact_override,
+        )
+
+    return _successful_result(
+        events_log_path=codex_events_log_path,
+        start_offset=events_start_offset,
+        artifact_override=artifact_override,
+    )
 
 def build_codex_flags_from_llm_config(
     *, resolved: dict[str, Any], resolution_meta: dict[str, Any], include_sandbox: bool = True
@@ -851,7 +840,7 @@ def _stage_review_auth_support(*, work_dir: Path, env: dict[str, str]) -> tuple[
         staged_paths["rf_jira"] = str(rf_jira)
         return env, staged_paths
     except Exception:
-        cleanup_sensitive_staged_paths(staged_paths)
+        _reviewflow().cleanup_sensitive_staged_paths(staged_paths)
         raise
 
 
@@ -1236,100 +1225,104 @@ def prepare_review_agent_runtime(
     env = augment_cli_provider_session_env(env=env, provider=provider)
     env.update(_string_dict(resolved.get("env")))
     env, staged_paths = _stage_review_auth_support(work_dir=work_dir, env=env)
-    chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
-    if chunkhound_dry_run:
-        env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
-    add_dirs = _dedupe_paths([session_dir, work_dir])
-    runtime: dict[str, Any] = {
-        "provider": provider,
-        "transport": transport,
-        "command": str(resolved.get("command") or provider).strip() or None,
-        "env": env,
-        "add_dirs": add_dirs,
-        "staged_paths": staged_paths,
-        "dangerously_bypass_approvals_and_sandbox": False,
-        "dangerously_skip_permissions": False,
-        "sandbox_mode": None,
-        "approval_policy": None,
-        "permission_mode": None,
-        "approval_mode": None,
-        "codex_flags": [],
-        "codex_config_overrides": [],
-        "provider_args": [],
-        "config": {
-            "chunkhound_dry_run": chunkhound_dry_run,
-        },
-    }
-    if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
-        runtime["command"] = str(resolved.get("command") or "") or None
-        runtime["metadata"] = {
+    try:
+        chunkhound_dry_run = bool(getattr(args, "dry_run_chunkhound", False))
+        if chunkhound_dry_run:
+            env[_CURE_CHUNKHOUND_DRY_RUN_ENV] = "1"
+        add_dirs = _dedupe_paths([session_dir, work_dir])
+        runtime: dict[str, Any] = {
             "provider": provider,
             "transport": transport,
-            "supported": False,
-            "detail": "agent runtime profiles apply only to CLI coding-agent providers",
+            "command": str(resolved.get("command") or provider).strip() or None,
+            "env": env,
+            "add_dirs": add_dirs,
+            "staged_paths": staged_paths,
+            "dangerously_bypass_approvals_and_sandbox": False,
+            "dangerously_skip_permissions": False,
+            "sandbox_mode": None,
+            "approval_policy": None,
+            "permission_mode": None,
+            "approval_mode": None,
+            "codex_flags": [],
+            "codex_config_overrides": [],
+            "provider_args": [],
+            "config": {
+                "chunkhound_dry_run": chunkhound_dry_run,
+            },
+        }
+        if transport != "cli" or provider not in CLI_LLM_PROVIDERS:
+            runtime["command"] = str(resolved.get("command") or "") or None
+            runtime["metadata"] = {
+                "provider": provider,
+                "transport": transport,
+                "supported": False,
+                "detail": "agent runtime profiles apply only to CLI coding-agent providers",
+                "chunkhound_dry_run": chunkhound_dry_run,
+                "env_keys": sorted(env.keys()),
+                "add_dirs": [str(path) for path in add_dirs],
+                "staged_paths": dict(staged_paths),
+            }
+            return runtime
+
+        command = _require_provider_command(str(resolved.get("command") or provider), provider=provider)
+        runtime["command"] = command
+        if provider == "codex":
+            if enable_mcp:
+                env["PYTHONSAFEPATH"] = "1"
+                chunkhound_helper = write_chunkhound_helper(
+                    work_dir=work_dir,
+                    repo_dir=repo_dir,
+                    chunkhound_config_path=chunkhound_config_path,
+                    chunkhound_db_path=chunkhound_db_path,
+                    chunkhound_cwd=chunkhound_cwd,
+                    provider="codex",
+                )
+                env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
+                runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
+            codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta, include_sandbox=False)
+            runtime["dangerously_bypass_approvals_and_sandbox"] = True
+            if runtime["sandbox_mode"]:
+                codex_flags.extend(["--sandbox", str(runtime["sandbox_mode"])])
+            if runtime["approval_policy"]:
+                codex_flags.extend(["-a", str(runtime["approval_policy"])])
+            runtime["codex_flags"] = codex_flags
+            runtime["codex_config_overrides"] = [
+                _CODEX_MODEL_CONTEXT_WINDOW_OVERRIDE,
+                *codex_mcp_overrides_for_reviewflow(
+                    enable_sandbox_chunkhound=enable_mcp,
+                    sandbox_repo_dir=repo_dir,
+                    chunkhound_db_path=chunkhound_db_path,
+                    chunkhound_cwd=chunkhound_cwd,
+                    chunkhound_config_path=chunkhound_config_path,
+                    paths=paths,
+                ),
+            ]
+        else:
+            raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
+
+        runtime["metadata"] = {
+            "provider": runtime["provider"],
+            "sandbox_mode": runtime["sandbox_mode"],
+            "approval_policy": runtime["approval_policy"],
+            "permission_mode": runtime["permission_mode"],
+            "approval_mode": runtime["approval_mode"],
+            "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
+            "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
             "chunkhound_dry_run": chunkhound_dry_run,
+            "chunkhound_access_mode": (
+                _CURE_CHUNKHOUND_ACCESS_MODE
+                if provider == "codex" and bool(runtime["staged_paths"].get("chunkhound_helper"))
+                else None
+            ),
             "env_keys": sorted(env.keys()),
             "add_dirs": [str(path) for path in add_dirs],
-            "staged_paths": dict(staged_paths),
+            "staged_paths": dict(runtime["staged_paths"]),
+            "codex_config_overrides": list(runtime["codex_config_overrides"]),
         }
         return runtime
-
-    command = _require_provider_command(str(resolved.get("command") or provider), provider=provider)
-    runtime["command"] = command
-    if provider == "codex":
-        if enable_mcp:
-            env["PYTHONSAFEPATH"] = "1"
-            chunkhound_helper = write_chunkhound_helper(
-                work_dir=work_dir,
-                repo_dir=repo_dir,
-                chunkhound_config_path=chunkhound_config_path,
-                chunkhound_db_path=chunkhound_db_path,
-                chunkhound_cwd=chunkhound_cwd,
-                provider="codex",
-            )
-            env[_CURE_CHUNKHOUND_HELPER_ENV] = str(chunkhound_helper)
-            runtime["staged_paths"]["chunkhound_helper"] = str(chunkhound_helper)
-        codex_flags, _ = build_codex_flags_from_llm_config(resolved=resolved, resolution_meta=resolution_meta, include_sandbox=False)
-        runtime["dangerously_bypass_approvals_and_sandbox"] = True
-        if runtime["sandbox_mode"]:
-            codex_flags.extend(["--sandbox", str(runtime["sandbox_mode"])])
-        if runtime["approval_policy"]:
-            codex_flags.extend(["-a", str(runtime["approval_policy"])])
-        runtime["codex_flags"] = codex_flags
-        runtime["codex_config_overrides"] = [
-            _CODEX_MODEL_CONTEXT_WINDOW_OVERRIDE,
-            *codex_mcp_overrides_for_reviewflow(
-                enable_sandbox_chunkhound=enable_mcp,
-                sandbox_repo_dir=repo_dir,
-                chunkhound_db_path=chunkhound_db_path,
-                chunkhound_cwd=chunkhound_cwd,
-                chunkhound_config_path=chunkhound_config_path,
-                paths=paths,
-            ),
-        ]
-    else:
-        raise ReviewflowError(f"Unsupported CLI provider for agent runtime preparation: {provider!r}")
-
-    runtime["metadata"] = {
-        "provider": runtime["provider"],
-        "sandbox_mode": runtime["sandbox_mode"],
-        "approval_policy": runtime["approval_policy"],
-        "permission_mode": runtime["permission_mode"],
-        "approval_mode": runtime["approval_mode"],
-        "dangerously_bypass_approvals_and_sandbox": bool(runtime["dangerously_bypass_approvals_and_sandbox"]),
-        "dangerously_skip_permissions": bool(runtime["dangerously_skip_permissions"]),
-        "chunkhound_dry_run": chunkhound_dry_run,
-        "chunkhound_access_mode": (
-            _CURE_CHUNKHOUND_ACCESS_MODE
-            if provider == "codex" and bool(runtime["staged_paths"].get("chunkhound_helper"))
-            else None
-        ),
-        "env_keys": sorted(env.keys()),
-        "add_dirs": [str(path) for path in add_dirs],
-        "staged_paths": dict(runtime["staged_paths"]),
-        "codex_config_overrides": list(runtime["codex_config_overrides"]),
-    }
-    return runtime
+    except Exception:
+        _reviewflow().cleanup_sensitive_staged_paths(staged_paths)
+        raise
 
 
 def _parse_iso_dt(value: str | None) -> datetime | None:
