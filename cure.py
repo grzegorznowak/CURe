@@ -12623,28 +12623,28 @@ def _confirm_explain_codex_handoff(*, quiet: bool) -> bool:
 
 
 def _open_interactive_codex_resume(
-    *, repo_dir: Path, fork_session_id: str, base_env: dict[str, str]
+    *,
+    repo_dir: Path,
+    fork_session_id: str,
+    base_env: dict[str, str],
+    runtime_policy: dict[str, Any],
 ) -> int:
-    """Hand the terminal over to an interactive `codex resume` of the explanation
-    fork (the fork already holds the full review context plus this explanation).
-
-    Staged credential dirs are cleaned by the time this runs, so the staged
-    GH_CONFIG_DIR/JIRA_CONFIG_FILE/NETRC pointers are dropped and the
-    interactive session uses the user's own credentials. Returns codex's exit
-    code.
-    """
-    spawn_env = {
-        key: value
-        for key, value in base_env.items()
-        if key not in {"GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC"}
-    }
-    proc = subprocess.run(
-        ["codex", "resume", str(fork_session_id)],
-        cwd=str(repo_dir),
-        env=spawn_env,
-        check=False,
+    """Continue an explanation fork with interactive-resume command semantics."""
+    command = build_codex_resume_command(
+        repo_dir=repo_dir,
+        session_id=fork_session_id,
+        env=base_env,
+        codex_flags=list(runtime_policy.get("codex_flags") or []),
+        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+        approval_policy=runtime_policy.get("approval_policy"),
+        dangerously_bypass_approvals_and_sandbox=bool(
+            runtime_policy.get("dangerously_bypass_approvals_and_sandbox", True)
+        ),
+        include_shell_environment_inherit_all=bool(
+            runtime_policy.get("include_shell_environment_inherit_all", False)
+        ),
     )
-    return int(proc.returncode)
+    return run_interactive_resume_command(command, env=base_env)
 
 
 def _explain_flow_impl(
@@ -12721,7 +12721,25 @@ def _explain_flow_impl(
         )
 
         provider = str(llm_resolved.get("provider") or "").strip().lower()
+        explain_runtime_policy: dict[str, Any] = {}
         if provider == "codex":
+            codex_flags, _ = build_codex_flags_from_llm_config(
+                resolved=llm_resolved,
+                resolution_meta=llm_resolution_meta,
+                include_sandbox=False,
+            )
+            explain_runtime_policy = {
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "sandbox_mode": None,
+                "approval_policy": None,
+                "codex_flags": codex_flags,
+                "codex_config_overrides": [],
+                "include_shell_environment_inherit_all": False,
+            }
+            log(
+                "EXPLAIN mode: sandbox=None approval=None bypass=True",
+                quiet=quiet,
+            )
             resume_base_id = _recorded_resume_session_id(meta)
             if resume_base_id:
                 try:
@@ -12797,11 +12815,8 @@ def _explain_flow_impl(
                     progress=progress,
                     resume_session_id=resume_fork_id,
                     normalize_artifact=False,
-                    runtime_policy={
-                        "dangerously_bypass_approvals_and_sandbox": False,
-                        "approval_policy": None,
-                    },
-                    sandbox_mode="read-only",
+                    runtime_policy=explain_runtime_policy,
+                    direct_resume_runtime_flags=True,
                 )
         finally:
             clear_active_output(out)
@@ -12841,6 +12856,32 @@ def _explain_flow_impl(
             meta.setdefault("explains", []).append(explain_entry)
             write_redacted_json(meta_path, meta)
         completed = True
+
+        if explain_md_path.is_file():
+            explanation = explain_md_path.read_text(encoding="utf-8").strip()
+            if explanation:
+                print(explanation)
+        print(str(explain_md_path))
+
+        # Keep staged credentials alive through the optional handoff. The
+        # outer finally removes them after both normal and exceptional exits.
+        if resume_fork_id is not None and (
+            bool(getattr(args, "open_in_codex", False))
+            or _confirm_explain_codex_handoff(quiet=quiet)
+        ):
+            log(
+                f"EXPLAIN: continuing in interactive codex session {str(resume_fork_id)[:8]} "
+                "(full review context loaded; exit with Ctrl-C or /quit)",
+                quiet=quiet,
+            )
+            rc = _open_interactive_codex_resume(
+                repo_dir=repo_dir,
+                fork_session_id=resume_fork_id,
+                base_env=env,
+                runtime_policy=explain_runtime_policy,
+            )
+            log(f"EXPLAIN: interactive codex session ended (rc={rc})", quiet=quiet)
+        return 0
     finally:
         cleanup_sensitive_staged_paths(staged_paths)
         if not completed and fork_path is not None:
@@ -12848,33 +12889,6 @@ def _explain_flow_impl(
                 fork_path.unlink(missing_ok=True)
             except OSError:
                 pass
-
-    if explain_md_path.is_file():
-        explanation = explain_md_path.read_text(encoding="utf-8").strip()
-        if explanation:
-            print(explanation)
-    print(str(explain_md_path))
-
-    # Interactive handoff: continue the explanation fork in a real codex
-    # session (the fork holds the full review context plus this exchange).
-    # Staged credential dirs are already cleaned, so the interactive session
-    # uses the user's own credentials.
-    if completed and resume_fork_id is not None and (
-        bool(getattr(args, "open_in_codex", False))
-        or _confirm_explain_codex_handoff(quiet=quiet)
-    ):
-        log(
-            f"EXPLAIN: continuing in interactive codex session {str(resume_fork_id)[:8]} "
-            "(full review context loaded; exit with Ctrl-C or /quit)",
-            quiet=quiet,
-        )
-        rc = _open_interactive_codex_resume(
-            repo_dir=repo_dir,
-            fork_session_id=resume_fork_id,
-            base_env=env,
-        )
-        log(f"EXPLAIN: interactive codex session ended (rc={rc})", quiet=quiet)
-    return 0
 
 
 def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, default: Path) -> Path:

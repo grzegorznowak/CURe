@@ -116,10 +116,12 @@ class ExplainCommandTests(unittest.TestCase):
         args: argparse.Namespace,
         *,
         resolved: dict[str, object] | None = None,
+        resolution_meta: dict[str, object] | None = None,
         resolve_error: bool = False,
         llm_fail: bool = False,
         record_file_lock: bool = False,
         staged_paths_value: dict[str, object] | None = None,
+        staged_env_value: dict[str, str] | None = None,
     ) -> dict[str, object]:
         """Run _explain_flow_impl with mocked LLM plumbing; return captured kwargs + stdout."""
         captured: dict[str, object] = {"_builtin_calls": []}
@@ -150,7 +152,9 @@ class ExplainCommandTests(unittest.TestCase):
             *, work_dir: Path, env: dict[str, str], stage_rf_jira: bool
         ) -> tuple[dict[str, str], dict[str, str]]:
             captured["_stage_rf_jira"] = stage_rf_jira
-            return dict(env), (staged_paths_value if staged_paths_value is not None else {})
+            staged_env = dict(env)
+            staged_env.update(staged_env_value or {})
+            return staged_env, (staged_paths_value if staged_paths_value is not None else {})
 
         out = StringIO()
         with contextlib.ExitStack() as stack:
@@ -160,7 +164,7 @@ class ExplainCommandTests(unittest.TestCase):
                     "resolve_llm_config_from_args",
                     side_effect=rf.ReviewflowError("bad llm config") if resolve_error else None,
                     return_value=(
-                        None if resolve_error else (llm_resolved, {})
+                        None if resolve_error else (llm_resolved, resolution_meta or {})
                     ),
                 )
             )
@@ -417,6 +421,15 @@ class ExplainCommandTests(unittest.TestCase):
         names = [str(c["name"]) for c in payload["commands"]]
         self.assertIn("explain", names)
 
+    def test_explain_catalog_safety_describes_interactive_policy(self) -> None:
+        payload = cure_commands.build_commands_catalog_payload()
+        explain = next(c for c in payload["commands"] if c["name"] == "explain")
+        self.assertEqual(
+            explain["safety"],
+            "Same runtime-policy permission model as interactive sessions; "
+            "effective sandbox/approval/bypass announced at run start.",
+        )
+
     def test_explain_flow_wrapper_delegates_to_impl(self) -> None:
         _write_completed_session(root=self.root)
         with mock.patch.object(rf, "_explain_flow_impl", return_value=7) as impl:
@@ -532,10 +545,65 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertEqual(handoffs[0]["repo_dir"], self.root / "session-1" / "repo")
         handoff_env = handoffs[0]["base_env"]
         assert isinstance(handoff_env, dict)
-        # Staged credential pointers are dropped: the interactive session uses
-        # the user's own credentials.
-        for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC"):
-            self.assertNotIn(key, handoff_env)
+        self.assertIn("runtime_policy", handoffs[0])
+
+    def test_explain_handoff_keeps_credentials_until_exit_and_cleans_success_or_failure(self) -> None:
+        for should_fail in (False, True):
+            with self.subTest(should_fail=should_fail):
+                codex_root = self.root / f"codex-home-lifecycle-{should_fail}"
+                _write_fake_codex_session(codex_root=codex_root)
+                _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+                auth_root = self.root / f"auth-{should_fail}"
+                gh_dir = auth_root / "gh"
+                jira_file = auth_root / "jira" / "config.yml"
+                netrc = auth_root / "netrc" / ".netrc"
+                gh_dir.mkdir(parents=True)
+                jira_file.parent.mkdir(parents=True)
+                netrc.parent.mkdir(parents=True)
+                jira_file.write_text("jira", encoding="utf-8")
+                netrc.write_text("netrc", encoding="utf-8")
+                staged = {
+                    "auth_staging_dir": str(auth_root),
+                    "gh_config_dir": str(gh_dir),
+                    "jira_config_file": str(jira_file),
+                    "netrc": str(netrc),
+                }
+                staged_env = {
+                    "GH_CONFIG_DIR": str(gh_dir),
+                    "JIRA_CONFIG_FILE": str(jira_file),
+                    "NETRC": str(netrc),
+                }
+
+                def handoff_probe(**kwargs: object) -> int:
+                    handoff_env = kwargs["base_env"]
+                    assert isinstance(handoff_env, dict)
+                    for key, target in staged_env.items():
+                        self.assertEqual(handoff_env[key], target)
+                        self.assertTrue(Path(target).exists())
+                    if should_fail:
+                        raise rf.ReviewflowError("handoff failed")
+                    return 0
+
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+                    rf, "_open_interactive_codex_resume", side_effect=handoff_probe
+                ):
+                    if should_fail:
+                        with self.assertRaisesRegex(rf.ReviewflowError, "handoff failed"):
+                            self._patched_run(
+                                _explain_args(open_in_codex=True),
+                                resolved={"provider": "codex", "preset": "codex-cli"},
+                                staged_paths_value=staged,
+                                staged_env_value=staged_env,
+                            )
+                    else:
+                        self._patched_run(
+                            _explain_args(open_in_codex=True),
+                            resolved={"provider": "codex", "preset": "codex-cli"},
+                            staged_paths_value=staged,
+                            staged_env_value=staged_env,
+                        )
+                self.assertFalse(auth_root.exists())
+                shutil.rmtree(self.root / "session-1", ignore_errors=True)
 
     def test_explain_flow_does_not_hand_off_without_flag(self) -> None:
         codex_root = self.root / "codex-home"
@@ -648,34 +716,30 @@ class ExplainCommandTests(unittest.TestCase):
 
     # -- PR #37 review remediation obligations ------------------------------
 
-    def test_build_codex_exec_cmd_resume_filters_incompatible_flags_and_read_only(self) -> None:
+    def test_build_codex_exec_cmd_explain_resume_forwards_interactive_flags(self) -> None:
+        runtime_flags = [
+            "-m", "gpt-5.6-sol",
+            "--search",
+            "-c", "model_reasoning_effort=high",
+            "--feature", "representative-runtime-flag",
+        ]
         cmd = rf.build_codex_exec_cmd(
             repo_dir=self.root,
-            codex_flags=[
-                "-m", "gpt-5.6-sol",
-                "--sandbox", "workspace-write",
-                "--search",
-                "-c", "model_reasoning_effort=high",
-            ],
+            codex_flags=runtime_flags,
             codex_config_overrides=[],
             review_md_path=self.root / "out.md",
             prompt="why?",
             skip_git_repo_check=True,
-            dangerously_bypass_approvals_and_sandbox=False,
+            dangerously_bypass_approvals_and_sandbox=True,
             json_output=True,
             resume_session_id="fork-1",
-            sandbox_mode="read-only",
+            direct_resume_runtime_flags=True,
         )
         self.assertEqual(cmd[:4], ["codex", "exec", "resume", "fork-1"])
-        self.assertIn("-m", cmd)
-        self.assertIn("gpt-5.6-sol", cmd)
-        self.assertIn("-c", cmd)
-        self.assertIn("model_reasoning_effort=high", cmd)
-        self.assertIn('sandbox_mode="read-only"', cmd)
-        self.assertIn("--skip-git-repo-check", cmd)
-        self.assertNotIn("--sandbox", cmd)
-        self.assertNotIn("--search", cmd)
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+        self.assertEqual(cmd[4 : 4 + len(runtime_flags)], runtime_flags)
+        self.assertIn("--search", cmd)
+        self.assertIn("--feature", cmd)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
 
     def test_build_codex_exec_cmd_exec_read_only_without_bypass(self) -> None:
         cmd = rf.build_codex_exec_cmd(
@@ -696,23 +760,83 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertNotIn("-a", cmd)
         self.assertNotIn("--search", cmd)
 
-    def test_explain_flow_constrains_codex_runtime(self) -> None:
+    def test_explain_flow_uses_interactive_codex_runtime_and_announces_it(self) -> None:
         codex_root = self.root / "codex-home"
         _write_fake_codex_session(codex_root=codex_root)
         _write_completed_session(root=self.root, extra_meta=self._codex_meta())
 
-        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}):
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+            rf, "log"
+        ) as log_mock:
             captured = self._patched_run(
                 _explain_args(),
-                resolved={"provider": "codex", "preset": "codex-cli", "model": "gpt-5.6-sol"},
+                resolved={
+                    "provider": "codex",
+                    "preset": "codex-cli",
+                    "model": "gpt-5.6-sol",
+                },
+                resolution_meta={
+                    "base_codex_config": {
+                        "web_search": "live",
+                        "sandbox_mode": "workspace-write",
+                    }
+                },
             )
 
         self.assertEqual(captured["_rc"], 0)
+        policy = captured["runtime_policy"]
+        assert isinstance(policy, dict)
+        self.assertIs(policy["dangerously_bypass_approvals_and_sandbox"], True)
+        self.assertIsNone(policy["sandbox_mode"])
+        self.assertIsNone(policy["approval_policy"])
+        self.assertNotIn("--sandbox", policy["codex_flags"])
+        self.assertIn("--search", policy["codex_flags"])
+        self.assertNotIn("sandbox_mode", captured)
+        self.assertIs(captured["direct_resume_runtime_flags"], True)
+        mode_lines = [str(call.args[0]) for call in log_mock.call_args_list if "EXPLAIN mode:" in str(call.args[0])]
         self.assertEqual(
-            captured["runtime_policy"],
-            {"dangerously_bypass_approvals_and_sandbox": False, "approval_policy": None},
+            mode_lines,
+            ["EXPLAIN mode: sandbox=None approval=None bypass=True"],
         )
-        self.assertEqual(captured["sandbox_mode"], "read-only")
+
+    def test_open_interactive_codex_resume_uses_interactive_builder_semantics(self) -> None:
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "GH_CONFIG_DIR": "/staged/gh",
+            "JIRA_CONFIG_FILE": "/staged/jira.yml",
+            "NETRC": "/staged/netrc",
+        }
+        runtime_policy = {
+            "codex_flags": ["-m", "gpt-test", "--search", "--feature", "x"],
+            "codex_config_overrides": ["model_reasoning_effort=high"],
+            "approval_policy": None,
+            "dangerously_bypass_approvals_and_sandbox": True,
+            "include_shell_environment_inherit_all": False,
+        }
+        expected = rf.build_codex_resume_command(
+            repo_dir=self.root,
+            session_id="fork-1",
+            env=env,
+            codex_flags=runtime_policy["codex_flags"],
+            codex_config_overrides=runtime_policy["codex_config_overrides"],
+            approval_policy=None,
+            dangerously_bypass_approvals_and_sandbox=True,
+            include_shell_environment_inherit_all=False,
+        )
+        with mock.patch.object(rf, "run_interactive_resume_command", return_value=0) as runner:
+            rc = rf._open_interactive_codex_resume(
+                repo_dir=self.root,
+                fork_session_id="fork-1",
+                base_env=env,
+                runtime_policy=runtime_policy,
+            )
+        self.assertEqual(rc, 0)
+        runner.assert_called_once_with(expected, env=env)
+        self.assertIn("--search", expected)
+        self.assertIn("--feature", expected)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", expected)
+        for key in ("GH_CONFIG_DIR", "JIRA_CONFIG_FILE", "NETRC"):
+            self.assertIn(f"{key}=", expected)
 
     def test_explain_flow_cleans_staged_paths_on_config_failure(self) -> None:
         _write_completed_session(root=self.root)

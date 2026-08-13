@@ -214,7 +214,7 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "name": "explain",
                 "summary": "Explain the final synthesized review of a completed PR review session using a custom or builtin prompt.",
                 "targets": ["PR_URL"],
-                "safety": "Read-only; sends the review markdown plus the user prompt to the configured LLM and records the explanation under the session.",
+                "safety": "Same runtime-policy permission model as interactive sessions; effective sandbox/approval/bypass announced at run start.",
                 "tty": "No TTY required.",
                 "stdout": "Prints the explanation text followed by the explain artifact path.",
                 "exit_codes": {"0": "explanation produced", "2": "usage, lookup, or runtime error"},
@@ -235,6 +235,7 @@ def commands_flow(args: argparse.Namespace, *, stdout: TextIO | None = None) -> 
         return 0
     for command in payload["commands"]:
         print(f"{command['name']}: {command['summary']}", file=out)
+        print(f"  safety: {command['safety']}", file=out)
         print(f"  {command['recommended_invocation']}", file=out)
         for variant in command.get("variants", []):
             if isinstance(variant, dict) and str(variant.get("invocation") or "").strip():

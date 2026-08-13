@@ -399,11 +399,16 @@ def build_codex_exec_cmd(
     json_output: bool = False,
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
+    direct_resume_runtime_flags: bool = False,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     if resume_session_id:
         cmd = ["codex", "exec", "resume", str(resume_session_id)]
-        cmd.extend(_resume_compatible_codex_flags(codex_flags))
+        cmd.extend(
+            codex_flags
+            if direct_resume_runtime_flags
+            else _resume_compatible_codex_flags(codex_flags)
+        )
         for override in overrides:
             cmd.extend(["-c", override])
         if sandbox_mode:
@@ -464,6 +469,7 @@ def run_codex_exec(
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
+    direct_resume_runtime_flags: bool = False,
     normalize_artifact: bool = True,
 ) -> CodexRunResult:
     owned_role: OwnedProcessRole | None = (
@@ -563,6 +569,7 @@ def run_codex_exec(
             json_output=True,
             resume_session_id=resume_session_id,
             sandbox_mode=sandbox_mode,
+            direct_resume_runtime_flags=direct_resume_runtime_flags,
         )
 
     def _unlink_quietly(path: Path) -> None:
@@ -716,6 +723,7 @@ def run_llm_exec(
     owned_processes: OwnedProcessRegistry | None = None,
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
+    direct_resume_runtime_flags: bool = False,
     normalize_artifact: bool = True,
 ) -> LlmRunResult:
     rf = _reviewflow()
@@ -746,6 +754,7 @@ def run_llm_exec(
             owned_processes=owned_processes,
             resume_session_id=resume_session_id,
             sandbox_mode=sandbox_mode,
+            direct_resume_runtime_flags=direct_resume_runtime_flags,
             normalize_artifact=normalize_artifact,
         )
         resume = None

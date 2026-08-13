@@ -4626,7 +4626,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cure clean closed --json", rendered)
         self.assertIn("cure status <session_id|PR_URL> --json", rendered)
         self.assertNotIn("reviewflow", rendered)
-        self.assertNotIn("interactive", rendered)
+        self.assertNotIn("\ninteractive:", rendered)
+        self.assertIn(
+            "Same runtime-policy permission model as interactive sessions; "
+            "effective sandbox/approval/bypass announced at run start.",
+            rendered,
+        )
 
     def test_reviewflow_reexports_active_extracted_module_surfaces(self) -> None:
         self.assertIs(rf.setup_flow, cure_commands.setup_flow)
