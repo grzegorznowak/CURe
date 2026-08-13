@@ -1853,9 +1853,9 @@ class CodexJsonProgressTests(unittest.TestCase):
                         kwargs["run_token"] = "contained"
                     result = resolver(**kwargs)
                     expected = (
-                        session / "logs" / "codex.events.contained.jsonl"
+                        (session / "logs" / "codex.events.contained.jsonl").resolve()
                         if key == "codex_events"
-                        else contained
+                        else contained.resolve()
                     )
                     self.assertEqual(result, expected)
                     if key == "codex_events":
@@ -1887,7 +1887,7 @@ class CodexJsonProgressTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     default_result,
-                    session / "work" / "logs" / "codex.events.default.jsonl",
+                    (session / "work" / "logs" / "codex.events.default.jsonl").resolve(),
                 )
                 self.assertEqual(
                     default_progress.meta["logs"]["codex_events"], str(default_result)
