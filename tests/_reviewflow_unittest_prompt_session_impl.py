@@ -5211,6 +5211,159 @@ class SessionMetaMutationTests(unittest.TestCase):
         )
         return meta_path
 
+    def test_session_progress_deep_merges_concurrent_phase_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            seeded = json.loads(meta_path.read_text(encoding="utf-8"))
+            seeded["phases"] = {}
+            rf.write_redacted_json(meta_path, seeded)
+            first = rf.SessionProgress(meta_path, quiet=True)
+            second = rf.SessionProgress(meta_path, quiet=True)
+            first.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            second.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            first.meta["phases"]["review"] = {"started_at": "first"}
+            second.meta["phases"]["review"] = {"status": "running"}
+            first.flush()
+            second.flush()
+            self.assertEqual(
+                json.loads(meta_path.read_text(encoding="utf-8"))["phases"],
+                {"review": {"started_at": "first", "status": "running"}},
+            )
+
+    def test_session_progress_deep_merges_baseline_absent_top_level_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            first = rf.SessionProgress(meta_path, quiet=True)
+            second = rf.SessionProgress(meta_path, quiet=True)
+            first.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            second.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            first.meta["phases"] = {"review": {"started_at": "first"}}
+            second.meta["phases"] = {"codex": {"started_at": "second"}}
+            first.flush()
+            second.flush()
+            self.assertEqual(
+                json.loads(meta_path.read_text(encoding="utf-8"))["phases"],
+                {
+                    "review": {"started_at": "first"},
+                    "codex": {"started_at": "second"},
+                },
+            )
+
+    def test_followup_persistence_deep_merges_concurrent_nested_members(self) -> None:
+        variants = (
+            ("llm", "usage", {"input_tokens": 10}, {"output_tokens": 3}),
+            ("codex", "capabilities", {"search": True}, {"shell": True}),
+        )
+        for field, nested_key, concurrent_members, working_members in variants:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                meta_path = self._seed_session_meta(Path(tmp))
+                baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+                baseline[field] = {"resume": {"session_id": "old"}}
+                rf.write_redacted_json(meta_path, baseline)
+                working = json.loads(json.dumps(baseline))
+                working[field][nested_key] = working_members
+
+                rf.mutate_session_meta(
+                    meta_path,
+                    quiet=True,
+                    fn=lambda fresh: (
+                        fresh[field].__setitem__(nested_key, concurrent_members) or True
+                    ),
+                )
+                rf._persist_followup_meta(
+                    meta_path,
+                    quiet=True,
+                    baseline=baseline,
+                    working=working,
+                )
+
+                persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    persisted[field][nested_key],
+                    {**concurrent_members, **working_members},
+                )
+
+    def test_followup_persistence_deep_merges_baseline_absent_top_level_mappings(self) -> None:
+        variants = (
+            (
+                "llm",
+                {"usage": {"input_tokens": 10}},
+                {"usage": {"output_tokens": 3}},
+                {"usage": {"input_tokens": 10, "output_tokens": 3}},
+            ),
+            (
+                "codex",
+                {"capabilities": {"search": True}},
+                {"capabilities": {"shell": True}},
+                {"capabilities": {"search": True, "shell": True}},
+            ),
+        )
+        for field, concurrent_value, working_value, expected in variants:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                meta_path = self._seed_session_meta(Path(tmp))
+                baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+                working = json.loads(json.dumps(baseline))
+                working[field] = working_value
+
+                rf.mutate_session_meta(
+                    meta_path,
+                    quiet=True,
+                    fn=lambda fresh: (fresh.__setitem__(field, concurrent_value) or True),
+                )
+                rf._persist_followup_meta(
+                    meta_path,
+                    quiet=True,
+                    baseline=baseline,
+                    working=working,
+                )
+
+                persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(persisted[field], expected)
+
+    def test_followup_persistence_writer_wins_same_added_nested_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["llm"] = {"resume": {"session_id": "old"}}
+            rf.write_redacted_json(meta_path, baseline)
+            working = json.loads(json.dumps(baseline))
+            working["llm"]["usage"] = {"input_tokens": 20}
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["llm"].__setitem__("usage", {"input_tokens": 10}) or True
+                ),
+            )
+            rf._persist_followup_meta(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                working=working,
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["llm"]["usage"], {"input_tokens": 20})
+
+    def test_session_progress_completion_requires_persistence(self) -> None:
+        for method, args in (("done", ()), ("error", ({"message": "boom"},))):
+            for meta_state in ("missing", "corrupt"):
+                with (
+                    self.subTest(method=method, meta_state=meta_state),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
+                    meta_path = Path(tmp) / "meta.json"
+                    rf.write_redacted_json(meta_path, {"status": "running"})
+                    progress = rf.SessionProgress(meta_path, quiet=True)
+                    progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if meta_state == "missing":
+                        meta_path.unlink()
+                    else:
+                        meta_path.write_text("{not-json", encoding="utf-8")
+                    with self.assertRaisesRegex(rf.ReviewflowError, "persist"):
+                        getattr(progress, method)(*args)
+
     def test_session_progress_full_flush_preserves_concurrent_explains_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             meta_path = self._seed_session_meta(Path(tmp))

@@ -14578,6 +14578,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 success_resume_command = rf._execute_multipass_synth_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     repo_dir=root / "repo",
                     work_dir=root / "work",
                     session_id="session-1",
@@ -14795,6 +14796,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 resume_command, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-1",
@@ -14896,6 +14898,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 resume_command, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-1",
@@ -15009,6 +15012,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 resume_command, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-cap",
@@ -15089,6 +15093,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 resume_command, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-tty-loss",
@@ -15165,6 +15170,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 resume_command, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-1",
@@ -15250,6 +15256,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 )
                 _, skipped = rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-1",
@@ -16825,6 +16832,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=root / "repo",
                         work_dir=root / "work",
                         session_id="session-cap",
@@ -16908,6 +16916,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 success_resume_command = rf._execute_multipass_synth_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     repo_dir=root / "repo",
                     work_dir=root / "work",
                     session_id="session-cap-finalize",
@@ -16989,6 +16998,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 success_resume_command = rf._execute_multipass_synth_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     repo_dir=root / "repo",
                     work_dir=root / "work",
                     session_id="session-finalize",
@@ -17073,6 +17083,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=root / "repo",
                         work_dir=root / "work",
                         session_id="session-non-ui",
@@ -17152,6 +17163,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=root / "repo",
                         work_dir=root / "work",
                         session_id="session-ui-lost-tty",
@@ -17227,6 +17239,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaisesRegex(rf.ReviewflowError, "synth failed"):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=repo_dir,
                         work_dir=work_dir,
                         session_id="session-preserve",
@@ -17326,6 +17339,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 rf._execute_multipass_synth_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     repo_dir=root / "repo",
                     work_dir=root / "work",
                     session_id="session-none",
@@ -17500,6 +17514,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
             ):
                 rf._execute_multipass_step_stage(
                     progress=progress,
+                    session_dir=progress.meta_path.parent,
                     work_dir=root / "work",
                     repo_dir=root / "repo",
                     session_id="session-default",
@@ -17587,6 +17602,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=root / "repo",
                         work_dir=root / "work",
                         session_id="session-pre-final",
@@ -17668,6 +17684,7 @@ class MultipassGroundingRecoveryUnitTests(unittest.TestCase):
                 with self.assertRaises(rf.ReviewflowError):
                     rf._execute_multipass_synth_stage(
                         progress=progress,
+                        session_dir=progress.meta_path.parent,
                         repo_dir=root / "repo",
                         work_dir=root / "work",
                         session_id="session-candidate",

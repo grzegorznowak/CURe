@@ -194,6 +194,7 @@ def run_provider_smoke(
 
         result = rf.run_llm_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             resolved=resolved,
             resolution_meta=resolution_meta,
             output_path=output_path,

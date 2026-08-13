@@ -948,6 +948,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
         ):
             cure_llm.run_llm_exec(
                 repo_dir=Path("/repo"),
+                session_dir=Path("/session"),
                 resolved={"provider": "codex"},
                 resolution_meta={},
                 output_path=Path("/out.md"),
@@ -967,6 +968,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(rf.ReviewflowError, "removed"):
                 cure_llm.run_llm_exec(
                     repo_dir=Path("/repo"),
+                    session_dir=Path("/session"),
                     resolved={"provider": "openai"},
                     resolution_meta={},
                     output_path=Path("/out.md"),
@@ -1570,6 +1572,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
             ) as run_cmd:
                 cure_llm.run_codex_exec(
                     repo_dir=root,
+                    session_dir=root,
                     codex_flags=[],
                     codex_config_overrides=None,
                     output_path=root / "review.md",

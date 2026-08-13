@@ -41,6 +41,7 @@ def _synth_stage_kwargs(
     return {
         "progress": progress,
         "repo_dir": root / "repo",
+        "session_dir": root,
         "work_dir": root / "work",
         "session_id": "session-boundary",
         "review_md_path": root / "review.md",
@@ -134,6 +135,7 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
                 orientation_output_path = output_path
                 codex_result = cure_llm.run_codex_exec(
                     repo_dir=Path(str(kwargs["repo_dir"])),
+                    session_dir=Path(str(kwargs["session_dir"])),
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=output_path,

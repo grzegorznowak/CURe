@@ -1819,6 +1819,107 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
 
 class CodexJsonProgressTests(unittest.TestCase):
+    def test_codex_log_resolvers_use_authoritative_session_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            session = root / "session"
+            session.mkdir()
+            sibling = root / "sibling"
+
+            for repo_shape, repo in (
+                ("session_root", session),
+                ("nested", session / "nested" / "repo"),
+            ):
+                repo.mkdir(parents=True, exist_ok=True)
+                for key, resolver in (
+                    ("codex", cure_llm._resolve_codex_display_log_path),
+                    ("codex_events", cure_llm._resolve_codex_events_log_path),
+                ):
+                    for form in (str(sibling / "log"), "../sibling/log"):
+                        with self.subTest(repo_shape=repo_shape, key=key, form=form):
+                            progress = mock.Mock(meta={"logs": {key: form}})
+                            kwargs = {"progress": progress, "session_dir": session}
+                            if key == "codex_events":
+                                kwargs["run_token"] = "rejected"
+                            with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                                resolver(**kwargs)
+                            progress.flush.assert_not_called()
+                            self.assertFalse(sibling.exists())
+
+                    contained = session / "logs" / f"{key}.log"
+                    progress = mock.Mock(meta={"logs": {key: str(contained)}})
+                    kwargs = {"progress": progress, "session_dir": session}
+                    if key == "codex_events":
+                        kwargs["run_token"] = "contained"
+                    result = resolver(**kwargs)
+                    expected = (
+                        session / "logs" / "codex.events.contained.jsonl"
+                        if key == "codex_events"
+                        else contained
+                    )
+                    self.assertEqual(result, expected)
+                    if key == "codex_events":
+                        self.assertEqual(progress.meta["logs"][key], str(result))
+                        progress.flush.assert_called_once_with()
+
+                for form in (".", str(session)):
+                    with self.subTest(
+                        repo_shape=repo_shape,
+                        key="codex_events",
+                        form=form,
+                        boundary="effective_write_target",
+                    ):
+                        progress = mock.Mock(meta={"logs": {"codex_events": form}})
+                        with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                            cure_llm._resolve_codex_events_log_path(
+                                progress=progress,
+                                session_dir=session,
+                                run_token="raw-boundary",
+                            )
+                        progress.flush.assert_not_called()
+                        self.assertFalse((root / "codex.events.raw-boundary.jsonl").exists())
+
+                default_progress = mock.Mock(meta={"logs": {}})
+                default_result = cure_llm._resolve_codex_events_log_path(
+                    progress=default_progress,
+                    session_dir=session,
+                    run_token="default",
+                )
+                self.assertEqual(
+                    default_result,
+                    session / "work" / "logs" / "codex.events.default.jsonl",
+                )
+                self.assertEqual(
+                    default_progress.meta["logs"]["codex_events"], str(default_result)
+                )
+                default_progress.flush.assert_called_once_with()
+
+    def test_streaming_run_cmd_terminates_real_process_group_on_baseexception(self) -> None:
+        import run as run_module
+        import time
+
+        real_popen = subprocess.Popen
+        spawned: list[subprocess.Popen[str]] = []
+
+        def spawn_then_interrupt_wait(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            proc.wait = mock.Mock(side_effect=KeyboardInterrupt())  # type: ignore[method-assign]
+            return proc
+
+        with mock.patch.object(run_module.subprocess, "Popen", side_effect=spawn_then_interrupt_wait):
+            with self.assertRaises(KeyboardInterrupt):
+                run_module.run_cmd(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stream=True,
+                    stream_to=StringIO(),
+                )
+        self.assertEqual(len(spawned), 1)
+        deadline = time.monotonic() + 3
+        while spawned[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIsNotNone(spawned[0].poll())
+
     @staticmethod
     def _review_artifact(marker: str) -> str:
         return "\n".join(
@@ -1900,6 +2001,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ):
                 result = cure_llm.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -1964,6 +2066,7 @@ class CodexJsonProgressTests(unittest.TestCase):
                 with self.assertRaises(cure_llm.ReviewflowSubprocessError) as ctx:
                     cure_llm.run_codex_exec(
                         repo_dir=repo_dir,
+                        session_dir=repo_dir.parent,
                         codex_flags=[],
                         codex_config_overrides=[],
                         output_path=output_path,
@@ -1975,6 +2078,51 @@ class CodexJsonProgressTests(unittest.TestCase):
 
             self.assertEqual(ctx.exception.stderr, "retry failed")
             self.assertEqual(len(event_paths), 2)
+            self.assertTrue(event_paths[0].is_file())
+            self.assertFalse(event_paths[1].exists())
+            self.assertFalse(output_path.exists())
+            self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[0]))
+            self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[0]))
+
+    def test_trust_retry_keyboardinterrupt_restores_first_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            output_path = root / "review.md"
+            event_paths: list[Path] = []
+
+            class _DummyProgress:
+                def __init__(self) -> None:
+                    self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+                def record_cmd(self, cmd: list[str]) -> None:
+                    return None
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress()
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                sink = kwargs["stream_to"]
+                event_paths.append(Path(sink._raw_file.name))
+                output_path.write_text("partial\n", encoding="utf-8")
+                if len(event_paths) == 1:
+                    raise cure_llm.ReviewflowSubprocessError(
+                        cmd=cmd, cwd=repo_dir, exit_code=1, stdout="",
+                        stderr="not a trusted directory",
+                    )
+                raise KeyboardInterrupt()
+
+            with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                cure_llm, "run_cmd", side_effect=fake_run_cmd
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    cure_llm.run_codex_exec(
+                        repo_dir=repo_dir,
+                        session_dir=repo_dir.parent, codex_flags=[], codex_config_overrides=[],
+                        output_path=output_path, prompt="review", env={}, stream=False,
+                        progress=progress,
+                    )
             self.assertTrue(event_paths[0].is_file())
             self.assertFalse(event_paths[1].exists())
             self.assertFalse(output_path.exists())
@@ -2018,6 +2166,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             try:
                 results[marker] = cure_llm.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=root / f"{marker}.md",
@@ -2413,6 +2562,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ):
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=["-m", "gpt-5.2"],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -2460,6 +2610,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -2477,6 +2628,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -2551,6 +2703,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ):
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=["-m", "gpt-5.2"],
                     codex_config_overrides=[],
                     output_path=output_path,

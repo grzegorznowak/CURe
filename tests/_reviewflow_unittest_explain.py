@@ -122,6 +122,7 @@ class ExplainCommandTests(unittest.TestCase):
         record_file_lock: bool = False,
         staged_paths_value: dict[str, object] | None = None,
         staged_env_value: dict[str, str] | None = None,
+        artifact_text: str | None = EXPLAIN_ARTIFACT_TEXT,
     ) -> dict[str, object]:
         """Run _explain_flow_impl with mocked LLM plumbing; return captured kwargs + stdout."""
         captured: dict[str, object] = {"_builtin_calls": []}
@@ -135,7 +136,8 @@ class ExplainCommandTests(unittest.TestCase):
             captured.update(kwargs)
             if llm_fail:
                 raise rf.ReviewflowError("llm exploded")
-            Path(str(kwargs["output_path"])).write_text(EXPLAIN_ARTIFACT_TEXT, encoding="utf-8")
+            if artifact_text is not None:
+                Path(str(kwargs["output_path"])).write_text(artifact_text, encoding="utf-8")
             return rf.LlmRunResult(
                 resume=None,
                 adapter_meta={
@@ -222,6 +224,109 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertEqual(entry["preset"], "codex-cli")
         self.assertEqual(entry["transport"], "cli-codex")
         self.assertEqual(entry["usage"], {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
+
+    def test_explain_flow_rejects_missing_or_empty_artifact_before_registration(self) -> None:
+        for label, artifact_text in (("missing", None), ("empty", " \n\t")):
+            with self.subTest(label=label):
+                shutil.rmtree(self.root, ignore_errors=True)
+                self.root.mkdir(parents=True)
+                _write_completed_session(root=self.root)
+                stdout = StringIO()
+                with self.assertRaisesRegex(rf.ReviewflowError, "explanation artifact"):
+                    with contextlib.redirect_stdout(stdout):
+                        self._patched_run(_explain_args(), artifact_text=artifact_text)
+                meta = json.loads((self.root / "session-1" / "meta.json").read_text(encoding="utf-8"))
+                self.assertNotIn("explains", meta)
+                self.assertEqual(stdout.getvalue(), "")
+
+    def test_log_resolvers_use_authoritative_session_boundary(self) -> None:
+        session = self.root / "session"
+        session.mkdir(parents=True)
+        sibling = self.root / "sibling"
+        for repo_shape, repo in (
+            ("session_root", session),
+            ("nested", session / "nested" / "repo"),
+        ):
+            repo.mkdir(parents=True, exist_ok=True)
+            for key, resolver in (
+                ("codex", cure_llm._resolve_codex_display_log_path),
+                ("codex_events", cure_llm._resolve_codex_events_log_path),
+            ):
+                for form in (str(sibling / "log"), "../sibling/log"):
+                    with self.subTest(repo_shape=repo_shape, key=key, form=form):
+                        progress = mock.Mock(meta={"logs": {key: form}})
+                        kwargs = {"progress": progress, "session_dir": session}
+                        if key == "codex_events":
+                            kwargs["run_token"] = "rejected"
+                        with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                            resolver(**kwargs)
+                        progress.flush.assert_not_called()
+                        self.assertFalse(sibling.exists())
+
+                contained = session / "logs" / f"{key}.log"
+                progress = mock.Mock(meta={"logs": {key: str(contained)}})
+                kwargs = {"progress": progress, "session_dir": session}
+                if key == "codex_events":
+                    kwargs["run_token"] = "contained"
+                result = resolver(**kwargs)
+                expected = (
+                    session / "logs" / "codex.events.contained.jsonl"
+                    if key == "codex_events"
+                    else contained
+                )
+                self.assertEqual(result, expected)
+
+            effective_outside = self.root / "codex.events.raw-boundary.jsonl"
+            for form in (".", str(session)):
+                with self.subTest(
+                    repo_shape=repo_shape,
+                    key="codex_events",
+                    form=form,
+                    boundary="effective_write_target",
+                ):
+                    progress = mock.Mock(meta={"logs": {"codex_events": form}})
+                    with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                        cure_llm._resolve_codex_events_log_path(
+                            progress=progress,
+                            session_dir=session,
+                            run_token="raw-boundary",
+                        )
+                    progress.flush.assert_not_called()
+                    self.assertFalse(effective_outside.exists())
+
+    def test_explain_flow_threads_selected_session_dir_independent_of_repo_shape(self) -> None:
+        session = self.root / "session-1"
+        for repo_shape, repo in (
+            ("session_root", session),
+            ("nested", session / "nested" / "repo"),
+        ):
+            with self.subTest(repo_shape=repo_shape):
+                shutil.rmtree(self.root, ignore_errors=True)
+                self.root.mkdir(parents=True)
+                repo.mkdir(parents=True, exist_ok=True)
+                work = session / "work"
+                review_md = session / "review.md"
+                _write_completed_session(
+                    root=self.root,
+                    extra_meta={
+                        "paths": {
+                            "session_dir": str(session),
+                            "repo_dir": str(repo),
+                            "work_dir": str(work),
+                            "review_md": str(review_md),
+                        }
+                    },
+                )
+                captured = self._patched_run(_explain_args())
+                self.assertEqual(captured["repo_dir"], repo.resolve())
+                self.assertEqual(captured["session_dir"], session.resolve())
+
+    def test_explain_rollout_discovery_oserror_falls_back_inline(self) -> None:
+        _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+        with mock.patch.object(rf, "fork_codex_session", side_effect=OSError("damaged codex home")):
+            captured = self._patched_run(_explain_args())
+        self.assertIsNone(captured["resume_session_id"])
+        self.assertIn("## Final synthesized review", str(captured["prompt"]))
 
     def test_explain_flow_user_question_appended_to_builtin_prompt(self) -> None:
         _write_completed_session(root=self.root)

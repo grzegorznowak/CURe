@@ -1036,6 +1036,11 @@ def run_cmd(
         except BaseException:
             # Pumps remain the sole pipe readers. A tagged process stays registered,
             # transferring bounded reaping/drain ownership to command teardown.
+            # Untagged subprocesses have no later owner, so terminate their group
+            # before cancellation unwinds the caller.
+            if pipe_coordinator is None:
+                _terminate_pipe_holder_group(proc)
+                _drain_readers_bounded((t_out, t_err), deadline_seconds=2.0)
             raise
 
         if pump_failures:

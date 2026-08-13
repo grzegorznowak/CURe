@@ -1730,8 +1730,9 @@ def _stage_review_auth_support(
         env["CURE_WORK_DIR"] = str(work_dir)
         staged_paths["cure_work_dir"] = str(work_dir)
         if stage_rf_jira:
-            rf_jira = write_rf_jira(dst_dir=work_dir)
+            rf_jira = staging_root / "rf-jira"
             staged_paths["rf_jira"] = str(rf_jira)
+            write_rf_jira(dst_dir=staging_root)
         return env, staged_paths
     except Exception:
         cleanup_sensitive_staged_paths(staged_paths)
@@ -1831,19 +1832,19 @@ class SessionProgress:
         self._meta = value
         self._baseline = copy.deepcopy(value)
 
-    def _flush_locked(self, *, full: bool = False) -> None:
+    def _flush_locked(self, *, full: bool = False) -> bool:
         lock_path = _session_meta_lock_path(self.meta_path)
         with file_lock(lock_path, quiet=self.quiet):
             if full:
                 write_redacted_json(self.meta_path, self.meta)
                 self._baseline = copy.deepcopy(self.meta)
                 self.deleted_keys.clear()
-                return
+                return True
             if not self.meta_path.is_file():
-                return
+                return False
             on_disk = _load_session_meta(self.meta_path)
             if on_disk is None:
-                return
+                return False
             missing = object()
             changed = {
                 key for key, value in self.meta.items()
@@ -1855,15 +1856,29 @@ class SessionProgress:
                 changed &= progress_keys
                 dropped &= progress_keys
             if not changed and not dropped:
-                return
+                return True
             merged = dict(on_disk)
             for key in dropped:
                 merged.pop(key, None)
             for key in changed:
-                merged[key] = self.meta[key]
+                baseline_value = self._baseline.get(key, missing)
+                working_value = self.meta[key]
+                if (
+                    isinstance(merged.get(key), dict)
+                    and isinstance(working_value, dict)
+                    and (isinstance(baseline_value, dict) or baseline_value is missing)
+                ):
+                    _merge_meta_changes(
+                        merged[key],
+                        baseline_value if isinstance(baseline_value, dict) else {},
+                        working_value,
+                    )
+                else:
+                    merged[key] = working_value
             write_redacted_json(self.meta_path, merged)
             self._baseline = copy.deepcopy(self.meta)
             self.deleted_keys.difference_update(dropped)
+            return True
 
     def init(self, initial: dict[str, Any]) -> None:
         with self._lock:
@@ -1873,9 +1888,9 @@ class SessionProgress:
             self.meta.setdefault("phases", {})
             self._flush_locked(full=True)
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
         with self._lock:
-            self._flush_locked()
+            return self._flush_locked()
 
     def drop(self, key: str) -> None:
         """Remove `key` from the working copy and from future full flushes.
@@ -1934,18 +1949,39 @@ class SessionProgress:
         with self._lock:
             self.meta["status"] = "done"
             self.meta["completed_at"] = _utc_now_iso()
-            self._flush_locked()
+            if not self._flush_locked():
+                raise ReviewflowError(f"Failed to persist completed session progress: {self.meta_path}")
 
     def error(self, info: dict[str, Any]) -> None:
         with self._lock:
             self.meta["status"] = "error"
             self.meta["failed_at"] = _utc_now_iso()
             self.meta["error"] = info
-            self._flush_locked()
+            if not self._flush_locked():
+                raise ReviewflowError(f"Failed to persist errored session progress: {self.meta_path}")
 
 
 # Keys SessionProgress itself manages; merge-mode flushes overlay only these on
 # top of a fresh on-disk reload (see SessionProgress._flush_locked).
+def _merge_meta_changes(
+    fresh: dict[str, Any], baseline: dict[str, Any], working: dict[str, Any]
+) -> None:
+    """Recursively apply writer changes, including concurrent mapping add/adds."""
+    missing = object()
+    for key in baseline.keys() - working.keys():
+        fresh.pop(key, None)
+    for key, value in working.items():
+        old = baseline.get(key, missing)
+        if value == old:
+            continue
+        if isinstance(value, dict) and isinstance(fresh.get(key), dict) and (
+            isinstance(old, dict) or old is missing
+        ):
+            _merge_meta_changes(fresh[key], old if isinstance(old, dict) else {}, value)
+        else:
+            fresh[key] = copy.deepcopy(value)
+
+
 _PROGRESS_MERGE_KEYS = (
     "status",
     "phase",
@@ -4066,6 +4102,7 @@ def _execute_multipass_synth_stage(
     *,
     progress: SessionProgress,
     repo_dir: Path,
+    session_dir: Path,
     work_dir: Path,
     session_id: str,
     review_md_path: Path,
@@ -4152,6 +4189,7 @@ def _execute_multipass_synth_stage(
                 daemon_continuity_check()
             synth_result = run_llm_exec(
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 resolved=synth_llm["resolved"],
                 resolution_meta=synth_llm["resolution_meta"],
                 output_path=current_review_md_path,
@@ -5334,6 +5372,7 @@ def _run_multipass_step_llm(
     entry: MultipassStepEntry,
     progress: SessionProgress,
     repo_dir: Path,
+    session_dir: Path,
     llm_resolved: dict[str, Any],
     llm_resolution_meta: dict[str, Any],
     env: dict[str, str],
@@ -5360,6 +5399,7 @@ def _run_multipass_step_llm(
             daemon_continuity_check()
         llm_result = run_llm_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
             output_path=entry.output_path,
@@ -5513,6 +5553,7 @@ def _execute_multipass_step_stage(
     progress: SessionProgress,
     work_dir: Path,
     repo_dir: Path,
+    session_dir: Path,
     session_id: str,
     grounding_mode: str,
     step_entries: list[MultipassStepEntry],
@@ -5613,6 +5654,7 @@ def _execute_multipass_step_stage(
                     entry=entry,
                     progress=progress,
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     llm_resolved=llm_resolved,
                     llm_resolution_meta=llm_resolution_meta,
                     env=env,
@@ -5786,6 +5828,7 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         llm_resolved=current_llm_resolved,
                         llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
@@ -5820,6 +5863,7 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         llm_resolved=current_llm_resolved,
                         llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
@@ -7123,7 +7167,8 @@ def main() -> int:
     real_home = _real_home()
     env["HOME"] = str(real_home)
     netrc = real_home / ".netrc"
-    if netrc.is_file():
+    staged_netrc = env.get("NETRC", "").strip()
+    if not staged_netrc and netrc.is_file():
         env["NETRC"] = str(netrc)
 
     cmd = ["jira", "--config", str(cfg), *sys.argv[1:]]
@@ -7157,10 +7202,10 @@ def main() -> int:
             time.sleep(backoff)
             backoff = min(4.0, backoff * 2)
             retry_env = dict(env)
-            if attempt % 2 == 1:
-                retry_env.pop("NETRC", None)
-            else:
-                if netrc.is_file():
+            if not staged_netrc:
+                if attempt % 2 == 1:
+                    retry_env.pop("NETRC", None)
+                elif netrc.is_file():
                     retry_env["NETRC"] = str(netrc)
             _debug(retry_env, cfg=cfg)
             rc2, out2, err2 = _run(cmd, retry_env)
@@ -9213,6 +9258,7 @@ def _pr_flow_impl(
                         _assert_daemon_continuity()
                         orientation_result = run_llm_exec(
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             resolved=llm_resolved,
                             resolution_meta=llm_resolution_meta,
                             output_path=raw_orientation_path,
@@ -9902,6 +9948,7 @@ def _pr_flow_impl(
                     _assert_daemon_continuity()
                     plan_result = run_llm_exec(
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         resolved=plan_llm["resolved"],
                         resolution_meta=plan_llm["resolution_meta"],
                         output_path=plan_md_path,
@@ -10088,6 +10135,7 @@ def _pr_flow_impl(
                             progress=progress,
                             work_dir=work_dir,
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             session_id=session_id,
                             grounding_mode=grounding_mode,
                             step_entries=step_entries,
@@ -10171,6 +10219,7 @@ def _pr_flow_impl(
                             return _execute_multipass_synth_stage(
                                 progress=progress,
                                 repo_dir=repo_dir,
+                                session_dir=session_dir,
                                 work_dir=work_dir,
                                 session_id=session_id,
                                 review_md_path=review_md_path,
@@ -10354,6 +10403,7 @@ def _pr_flow_impl(
                     _assert_daemon_continuity()
                     review_result = run_llm_exec(
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         resolved=llm_resolved,
                         resolution_meta=llm_resolution_meta,
                         output_path=singlepass_output_path,
@@ -10449,6 +10499,7 @@ def _pr_flow_impl(
                         _assert_daemon_continuity()
                         reconcile_result = run_llm_exec(
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             resolved=llm_resolved,
                             resolution_meta=llm_resolution_meta,
                             output_path=reconciled_output_path,
@@ -10790,6 +10841,7 @@ def _run_incremental_completed_multipass_resume(
         )
         plan_result = run_llm_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             resolved=plan_llm["resolved"],
             resolution_meta=plan_llm["resolution_meta"],
             output_path=resume_plan_md_path,
@@ -10988,6 +11040,7 @@ def _run_incremental_completed_multipass_resume(
             progress=progress,
             work_dir=work_dir,
             repo_dir=repo_dir,
+            session_dir=session_dir,
             session_id=session_id,
             grounding_mode=grounding_mode,
             step_entries=step_entries,
@@ -11097,6 +11150,7 @@ def _run_incremental_completed_multipass_resume(
             return _execute_multipass_synth_stage(
                 progress=progress,
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 work_dir=work_dir,
                 session_id=session_id,
                 review_md_path=review_md_path,
@@ -11711,6 +11765,7 @@ def _resume_flow_impl(
                 )
                 plan_result = run_llm_exec(
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     resolved=plan_llm["resolved"],
                     resolution_meta=plan_llm["resolution_meta"],
                     output_path=plan_md_path,
@@ -11925,6 +11980,7 @@ def _resume_flow_impl(
                     progress=progress,
                     work_dir=work_dir,
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     session_id=session_id,
                     grounding_mode=grounding_mode,
                     step_entries=step_entries,
@@ -12059,6 +12115,7 @@ def _resume_flow_impl(
                     return _execute_multipass_synth_stage(
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         work_dir=work_dir,
                         session_id=session_id,
                         review_md_path=review_md_path,
@@ -12153,6 +12210,42 @@ _FOLLOWUP_FLOW_OWNED_META_KEYS = (
 )
 
 
+def _merge_followup_owned_meta(
+    fresh: dict[str, Any], baseline: dict[str, Any], working: dict[str, Any]
+) -> None:
+    missing = object()
+    for key in _FOLLOWUP_FLOW_OWNED_META_KEYS:
+        if key not in working:
+            continue
+        baseline_value = baseline.get(key, missing)
+        if (
+            isinstance(fresh.get(key), dict)
+            and isinstance(working[key], dict)
+            and (isinstance(baseline_value, dict) or baseline_value is missing)
+        ):
+            _merge_meta_changes(
+                fresh[key],
+                baseline_value if isinstance(baseline_value, dict) else {},
+                working[key],
+            )
+        else:
+            fresh[key] = working[key]
+
+
+def _persist_followup_meta(
+    meta_path: Path,
+    *,
+    quiet: bool,
+    baseline: dict[str, Any],
+    working: dict[str, Any],
+) -> dict[str, Any]:
+    def merge_owned_fields(fresh: dict[str, Any]) -> bool:
+        _merge_followup_owned_meta(fresh, baseline, working)
+        return True
+
+    return mutate_session_meta(meta_path, quiet=quiet, fn=merge_owned_fields)
+
+
 def _followup_flow_impl(
     args: argparse.Namespace,
     *,
@@ -12180,6 +12273,7 @@ def _followup_flow_impl(
     meta = _load_session_meta(meta_path)
     if not meta:
         raise ReviewflowError(f"Failed to parse meta.json: {meta_path}")
+    followup_meta_baseline = copy.deepcopy(meta)
 
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str((meta_paths or {}).get("repo_dir") or (session_dir / "repo"))).resolve()
@@ -12471,6 +12565,7 @@ def _followup_flow_impl(
         with phase("followup_review", progress=None, quiet=quiet):
             followup_result = run_llm_exec(
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
                 output_path=followup_md_path,
@@ -12496,15 +12591,6 @@ def _followup_flow_impl(
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
 
-        def _persist_followup_meta(fresh: dict[str, Any]) -> bool:
-            # The working copy owns these keys (records + tool proof results
-            # are applied to it); overlay them onto the fresh reload so
-            # concurrently appended registry keys are preserved.
-            for key in _FOLLOWUP_FLOW_OWNED_META_KEYS:
-                if key in meta:
-                    fresh[key] = meta[key]
-            return True
-
         try:
             _enforce_chunkhound_tool_proof(
                 meta=meta,
@@ -12515,7 +12601,14 @@ def _followup_flow_impl(
                 adapter_meta=followup_result.adapter_meta,
             )
         finally:
-            meta = mutate_session_meta(meta_path, quiet=quiet, fn=_persist_followup_meta)
+            # Overlay follow-up-owned fields onto a fresh reload so concurrent
+            # registry and nested llm/codex members survive this persistence.
+            meta = _persist_followup_meta(
+                meta_path,
+                quiet=quiet,
+                baseline=followup_meta_baseline,
+                working=meta,
+            )
 
         verdicts = extract_review_verdicts_from_markdown(followup_md_path.read_text(encoding="utf-8"))
         followup_entry: dict[str, Any] = {
@@ -12759,7 +12852,7 @@ def _explain_flow_impl(
                             "context, first output may take a minute",
                             quiet=quiet,
                         )
-                except ReviewflowError:
+                except (ReviewflowError, OSError):
                     # Base codex session unavailable: fall back to inline review-text mode.
                     resume_fork_id = None
                     resume_base_id = None
@@ -12806,6 +12899,7 @@ def _explain_flow_impl(
             with phase("explain", progress=progress, quiet=quiet):
                 result = run_llm_exec(
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     resolved=llm_resolved,
                     resolution_meta=llm_resolution_meta,
                     output_path=explain_md_path,
@@ -12821,6 +12915,12 @@ def _explain_flow_impl(
         finally:
             clear_active_output(out)
             out.stop()
+
+        if not explain_md_path.is_file():
+            raise ReviewflowError(f"Codex did not create the explanation artifact: {explain_md_path}")
+        explanation = explain_md_path.read_text(encoding="utf-8").strip()
+        if not explanation:
+            raise ReviewflowError(f"Codex created an empty explanation artifact: {explain_md_path}")
 
         explain_entry: dict[str, Any] = {
             "started_at": started_at,
@@ -12857,10 +12957,7 @@ def _explain_flow_impl(
             write_redacted_json(meta_path, meta)
         completed = True
 
-        if explain_md_path.is_file():
-            explanation = explain_md_path.read_text(encoding="utf-8").strip()
-            if explanation:
-                print(explanation)
+        print(explanation)
         print(str(explain_md_path))
 
         # Keep staged credentials alive through the optional handoff. The

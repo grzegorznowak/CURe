@@ -1351,7 +1351,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "preset-model"',
                         'reasoning_effort = "medium"',
-                        'request = { "temperature" = 0.1 }',
                         "",
                         "[codex]",
                         'model = "legacy-model"',
@@ -1368,10 +1367,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_model="cli-model",
                 cli_effort="xhigh",
                 cli_plan_effort=None,
-                cli_verbosity="low",
+                cli_verbosity=None,
                 cli_max_output_tokens=None,
-                cli_request_overrides={"temperature": 0.3, "top_p": 0.9},
-                cli_header_overrides={"X-Test": "2"},
+                cli_request_overrides={},
+                cli_header_overrides={},
                 deprecated_codex_model="deprecated-model",
                 deprecated_codex_effort=None,
                 deprecated_codex_plan_effort=None,
@@ -1381,15 +1380,79 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(resolved["provider"], "codex")
             self.assertEqual(resolved["model"], "cli-model")
             self.assertEqual(resolved["reasoning_effort"], "xhigh")
-            self.assertEqual(resolved["text_verbosity"], "low")
-            self.assertEqual(resolved["request"]["temperature"], 0.3)
-            self.assertEqual(resolved["request"]["top_p"], 0.9)
-            self.assertEqual(resolved["headers"]["X-Test"], "2")
             self.assertEqual(meta["resolved"]["model_source"], "cli")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "cli")
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_codex_ignored_cli_controls(self) -> None:
+        base = ROOT / ".tmp_test_codex_ignored_cli.toml"
+        try:
+            base.write_text('model = "gpt-test"\n', encoding="utf-8")
+            variants = (
+                {"cli_verbosity": "low"},
+                {"cli_max_output_tokens": 100},
+                {"cli_request_overrides": {"temperature": 0.2}},
+                {"cli_header_overrides": {"X-Test": "yes"}},
+            )
+            defaults = {
+                "base_codex_config_path": base,
+                "reviewflow_config_path": None,
+                "cli_preset": None,
+                "cli_model": None,
+                "cli_effort": None,
+                "cli_plan_effort": None,
+                "cli_verbosity": None,
+                "cli_max_output_tokens": None,
+                "cli_request_overrides": {},
+                "cli_header_overrides": {},
+                "deprecated_codex_model": None,
+                "deprecated_codex_effort": None,
+                "deprecated_codex_plan_effort": None,
+            }
+            for override in variants:
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    rf.ReviewflowError, "Codex.*ignored|ignored.*Codex"
+                ):
+                    rf.resolve_llm_config(**(defaults | override))
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_codex_ignored_preset_fields(self) -> None:
+        base = ROOT / ".tmp_test_codex_ignored_preset_base.toml"
+        cfg = ROOT / ".tmp_test_codex_ignored_preset.toml"
+        try:
+            base.write_text('model = "gpt-test"\n', encoding="utf-8")
+            values = {
+                "request": '{ temperature = 0.2 }',
+                "metadata": '{ team = "review" }',
+                "headers": '{ X_Test = "yes" }',
+                "api_key": '"secret"',
+                "store": "true",
+                "include": '["usage"]',
+            }
+            for field, value in values.items():
+                with self.subTest(field=field):
+                    cfg.write_text(
+                        '[llm]\ndefault_preset = "custom"\n[llm_presets.custom]\n'
+                        f'preset = "codex-cli"\n{field} = {value}\n',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rf.ReviewflowError, field):
+                        rf.resolve_llm_config(
+                            base_codex_config_path=base,
+                            reviewflow_config_path=cfg,
+                            cli_preset=None, cli_model=None, cli_effort=None,
+                            cli_plan_effort=None, cli_verbosity=None,
+                            cli_max_output_tokens=None, cli_request_overrides={},
+                            cli_header_overrides={}, deprecated_codex_model=None,
+                            deprecated_codex_effort=None,
+                            deprecated_codex_plan_effort=None,
+                        )
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
 
     def test_resolve_llm_config_rejects_legacy_codex_plan_mode_reasoning_effort(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_invalid_plan.toml"
@@ -2520,13 +2583,64 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             helper = Path(str(runtime["staged_paths"]["rf_jira"]))
             self.assertTrue(helper.is_file())
             self.assertTrue(os.access(helper, os.X_OK))
-            self.assertEqual(helper.parent, work)
+            auth_root = Path(str(runtime["staged_paths"]["auth_staging_dir"]))
+            self.assertEqual(helper.parent, auth_root)
+            self.assertNotEqual(helper, work / "rf-jira")
             # The repo checkout must be untouched: the pre-existing rf-jira file
             # survives verbatim and nothing new was written into it.
             self.assertEqual(pre_existing.read_text(encoding="utf-8"), "pre-existing user file\n")
             self.assertEqual(list(repo.iterdir()), [pre_existing])
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_rf_jira_helper_preserves_pre_staged_netrc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = rf.write_rf_jira(dst_dir=root)
+            staged_netrc = root / "staged.netrc"
+            staged_netrc.write_text("machine staged.invalid login staged\n", encoding="utf-8")
+            real_home = root / "real-home"
+            real_home.mkdir()
+            real_netrc = real_home / ".netrc"
+            real_netrc.write_text("machine real.invalid login real\n", encoding="utf-8")
+            real_netrc.chmod(0)
+            jira_config = root / "jira.yml"
+            jira_config.write_text("server: https://jira.invalid\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            jira = bin_dir / "jira"
+            jira.write_text("#!/bin/sh\nprintf '%s\\n' \"$NETRC\"\n", encoding="utf-8")
+            jira.chmod(0o755)
+
+            bootstrap = f"""
+import pwd
+import runpy
+import sys
+class _Pw:
+    pw_dir = {str(real_home)!r}
+pwd.getpwuid = lambda uid: _Pw()
+sys.argv = [{str(helper)!r}, "issue", "list"]
+runpy.run_path({str(helper)!r}, run_name="__main__")
+"""
+            env = dict(os.environ)
+            env.update(
+                {
+                    "JIRA_CONFIG_FILE": str(jira_config),
+                    "NETRC": str(staged_netrc),
+                    "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", bootstrap],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(staged_netrc))
 
     def test_prepare_review_agent_runtime_uses_private_staging_dir_per_run(self) -> None:
         """Concurrent runs must never share credential directories: the prepare
@@ -2588,6 +2702,8 @@ class AgentRuntimePolicyTests(unittest.TestCase):
                 )
             p1 = Path(str(r1["staged_paths"]["gh_config_dir"]))
             p2 = Path(str(r2["staged_paths"]["gh_config_dir"]))
+            rf_jira1 = Path(str(r1["staged_paths"]["rf_jira"]))
+            rf_jira2 = Path(str(r2["staged_paths"]["rf_jira"]))
             # Each run stages into its own private dir under work_dir.
             self.assertNotEqual(p1.parent, p2.parent)
             self.assertEqual(p1.parent.parent, work)
@@ -2595,6 +2711,11 @@ class AgentRuntimePolicyTests(unittest.TestCase):
             # Run 1's credentials survive run 2's staging untouched.
             self.assertTrue((p1 / "hosts.yml").is_file())
             self.assertTrue((p2 / "hosts.yml").is_file())
+            self.assertNotEqual(rf_jira1, rf_jira2)
+            self.assertEqual(rf_jira1.parent, p1.parent)
+            self.assertEqual(rf_jira2.parent, p2.parent)
+            self.assertTrue(rf_jira1.is_file())
+            self.assertTrue(rf_jira2.is_file())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -2758,6 +2879,7 @@ raise SystemExit(0)
             with self.assertRaises(run_module.ReviewflowSubprocessError) as ctx:
                 rf.run_llm_exec(
                     repo_dir=repo,
+                    session_dir=session,
                     resolved=resolved,
                     resolution_meta=resolution_meta,
                     output_path=work / "review.md",

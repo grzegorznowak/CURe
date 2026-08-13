@@ -1574,6 +1574,23 @@ def resolve_llm_config(
         )
         if str(item).strip()
     }
+    ignored_cli_controls = {
+        "--llm-verbosity": cli_verbosity,
+        "--llm-max-output-tokens": cli_max_output_tokens,
+        "--llm-set": cli_request_overrides,
+        "--llm-header": cli_header_overrides,
+    }
+    configured_ignored_cli = [
+        name for name, value in ignored_cli_controls.items() if value not in (None, "", [], {})
+    ]
+    ignored_preset_fields = explicit_preset_fields & {
+        "request", "metadata", "headers", "api_key", "store", "include"
+    }
+    if provider == "codex" and (configured_ignored_cli or ignored_preset_fields):
+        controls = sorted((*configured_ignored_cli, *ignored_preset_fields))
+        raise ReviewflowError(
+            "Codex does not support these ignored LLM controls: " + ", ".join(controls)
+        )
     preset_source_mode = str(base_preset.get("_source_mode") or "").strip()
 
     def _preset_source_detail(field: str) -> str:

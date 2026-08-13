@@ -140,8 +140,20 @@ def _flush_progress(progress: Any) -> None:
         except Exception:
             pass
 
+def _require_session_log_path(*, path: Path, session_dir: Path, key: str) -> Path:
+    session_root = session_dir.resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(session_root)
+    except ValueError as exc:
+        raise ReviewflowError(
+            f"Persisted meta.logs.{key} path must stay within the session dir: {resolved}"
+        ) from exc
+    return resolved
+
+
 def _resolve_codex_events_log_path(
-    *, progress: Any, repo_dir: Path, run_token: str | None = None
+    *, progress: Any, session_dir: Path, run_token: str | None = None
 ) -> Path:
     meta = _progress_meta_dict(progress)
     logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
@@ -149,15 +161,19 @@ def _resolve_codex_events_log_path(
     if raw_path:
         configured_path = Path(raw_path)
         configured_path = (
-            (repo_dir.parent / configured_path).resolve()
+            session_dir / configured_path
             if not configured_path.is_absolute()
-            else configured_path.resolve()
-        )
+            else configured_path
+        ).resolve()
         logs_dir = configured_path.parent
     else:
-        logs_dir = (repo_dir.parent / "work" / "logs").resolve()
+        logs_dir = (session_dir / "work" / "logs").resolve()
     token = str(run_token or uuid4().hex).strip()
-    path = (logs_dir / f"codex.events.{token}.jsonl").resolve()
+    path = _require_session_log_path(
+        path=logs_dir / f"codex.events.{token}.jsonl",
+        session_dir=session_dir,
+        key="codex_events",
+    )
     if isinstance(meta, dict):
         meta.setdefault("logs", {})["codex_events"] = str(path)
         _flush_progress(progress)
@@ -166,14 +182,18 @@ def _resolve_codex_events_log_path(
 
 
 
-def _resolve_codex_display_log_path(*, progress: Any, repo_dir: Path) -> Path:
+def _resolve_codex_display_log_path(*, progress: Any, session_dir: Path) -> Path:
     meta = _progress_meta_dict(progress)
     logs = (meta.get("logs") if isinstance(meta, dict) and isinstance(meta.get("logs"), dict) else {})
     raw_path = str(logs.get("codex") or "").strip()
     if raw_path:
         path = Path(raw_path)
-        return ((repo_dir.parent / path).resolve() if not path.is_absolute() else path.resolve())
-    path = (repo_dir.parent / "work" / "logs" / "codex.log").resolve()
+        return _require_session_log_path(
+            path=(session_dir / path if not path.is_absolute() else path),
+            session_dir=session_dir,
+            key="codex",
+        )
+    path = (session_dir / "work" / "logs" / "codex.log").resolve()
     if isinstance(meta, dict):
         meta.setdefault("logs", {})["codex"] = str(path)
         _flush_progress(progress)
@@ -454,6 +474,7 @@ def build_codex_exec_cmd(
 def run_codex_exec(
     *,
     repo_dir: Path,
+    session_dir: Path,
     codex_flags: list[str],
     codex_config_overrides: list[str] | None,
     output_path: Path,
@@ -478,10 +499,12 @@ def run_codex_exec(
     started_at = datetime.now(timezone.utc)
     codex_events_log_path = _resolve_codex_events_log_path(
         progress=progress,
-        repo_dir=repo_dir,
+        session_dir=session_dir,
         run_token=uuid4().hex,
     )
-    codex_display_log_path = _resolve_codex_display_log_path(progress=progress, repo_dir=repo_dir)
+    codex_display_log_path = _resolve_codex_display_log_path(
+        progress=progress, session_dir=session_dir
+    )
     codex_root = Path(env.get("CODEX_HOME") or (real_user_home_dir() / ".codex")).resolve()
     events_start_offset = _path_size(codex_events_log_path) or 0
     _ensure_codex_live_progress(progress=progress, events_log_path=codex_events_log_path)
@@ -629,7 +652,7 @@ def run_codex_exec(
         failed_events_log_path = codex_events_log_path
         retry_events_log_path = _resolve_codex_events_log_path(
             progress=progress,
-            repo_dir=repo_dir,
+            session_dir=session_dir,
             run_token=uuid4().hex,
         )
         retry_start_offset = _path_size(retry_events_log_path) or 0
@@ -642,7 +665,7 @@ def run_codex_exec(
                 cmd=fallback,
                 events_log_path=retry_events_log_path,
             )
-        except Exception:
+        except BaseException:
             if retry_events_log_path != failed_events_log_path:
                 _unlink_quietly(retry_events_log_path)
             _unlink_quietly(output_path)
@@ -710,6 +733,7 @@ def build_codex_flags_from_llm_config(
 def run_llm_exec(
     *,
     repo_dir: Path,
+    session_dir: Path,
     resolved: dict[str, Any],
     resolution_meta: dict[str, Any],
     output_path: Path,
@@ -740,6 +764,7 @@ def run_llm_exec(
         codex_config_overrides = list(policy.get("codex_config_overrides") or codex_config_overrides or [])
         result = rf.run_codex_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             codex_flags=codex_flags,
             codex_config_overrides=codex_config_overrides,
             output_path=output_path,
@@ -845,8 +870,9 @@ def _stage_review_auth_support(*, work_dir: Path, env: dict[str, str]) -> tuple[
             staged_paths["netrc"] = str(netrc)
         env["CURE_WORK_DIR"] = str(work_dir)
         staged_paths["cure_work_dir"] = str(work_dir)
-        rf_jira = write_rf_jira(dst_dir=work_dir)
+        rf_jira = staging_root / "rf-jira"
         staged_paths["rf_jira"] = str(rf_jira)
+        write_rf_jira(dst_dir=staging_root)
         return env, staged_paths
     except Exception:
         _reviewflow().cleanup_sensitive_staged_paths(staged_paths)
