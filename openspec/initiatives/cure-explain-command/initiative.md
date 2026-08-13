@@ -1,0 +1,28 @@
+# Explain command — human-friendly PR review explanations
+
+source_of_truth: internal
+
+## Goal / Context
+
+`cure explain` gives developers a newcomer-first, plain-language explanation of a completed PR review — inline from review text, or forked from the original Codex session with full context replay, an optional `--open-in-codex` interactive handoff, and a built-in additive question mode. The initiative also covers the review-flow hardening required to make concurrent explain/resume/follow-up safe: a shared lock-and-merge protocol for every session-metadata writer, strict metadata mutation, newest-first session discovery, codex-only backend enforcement, and CI that actually collects the concurrency tests. Done = explain ships in a release with the same permissive-by-default runtime-policy construction as delivered interactive sessions and a loud truthful mode line, while all session-meta writers remain safe under the documented concurrency contract; known findings are fixed within this story (round-6 F1–F4/F6–F9 absorbed) or explicitly accepted (D27 exclusions).
+
+### Risks / unknowns
+- PR #37 review round-6 findings (F1–F9, triaged 2026-08-12, verified real) are absorbed into Story 1 for remediation (operator decision 2026-08-13, story A18–A25): persisted `meta.logs` path containment, zero-exit-with-missing-artifact registration, accepted-but-ignored config controls, rollout-discovery OSError fallback, Ctrl-C process-group orphaning, nested-metadata deep-merge semantics, silent no-op progress persistence, and rf-jira/NETRC credential isolation.
+- PR #37 (branch `feat/explain-command`) is not yet merged and carries the delivered code plus its own absorbed workspace copy. The MAIN-TREE `openspec/changes/cure-explain-command` workspace is the authoritative governance location for D29 and future work; the branch copy is reconciled with that authority at merge.
+- Deliberately deferred items are documented in the story's Out of Scope section (symlink session escape, rollout-tail validation, malformed-`explains` recovery, handoff env semantics, interactive-resume race, dashboard stderr) — future reviews may re-raise them.
+
+## Story Candidates
+1. **Explain command feature** — absorb the delivered feature work from the existing change workspace `openspec/changes/cure-explain-command` and implement the operator-directed permission delta: newcomer-first prompt design, inline and fork modes, question mode, `--open-in-codex` interactive handoff, command registration and catalog entry, an interactive-consistent permission model with a loud mode line, and the codex-only backend transition.
+2. **Review-flow reliability hardening** — absorb the PR #37 remediation rounds delivered alongside the feature: the lock-and-merge protocol for ALL session-meta writers, SessionProgress baseline-diff merging with explicit deletions, strict metadata mutation (no resurrection, no corrupt-data replacement), newest-first session discovery with clear unusable-artifact errors, codex retry isolation and guaranteed event draining, credential staging cleanup, CI test-collection repair, and the live read-only proof.
+3. ~~Round-6 findings follow-up (future)~~ — superseded 2026-08-13: findings F1–F4 and F6–F9 are absorbed into Story 1 (story A18–A25) by operator decision; no separate story is planned.
+
+## Decisions & Constraints
+- **Codex-only backend**: HTTP/gemini providers and transports are rejected at parse/exec time (`REMOVED_HTTP_LLM_PRESETS`/`_raise_removed_http_provider_support`); positive fixtures and docs are codex-only.
+- **Explain permission model (operator decision 2026-08-13)**: explain runs and the `--open-in-codex` handoff follow delivered interactive construction exactly — bypass on, sandbox mode and approval policy `None`, and configured sandbox flags suppressed through `include_sandbox=False`; no new sandbox/approval/bypass config surface is part of this decision. Every explain run prints a loud mode line naming those effective values; the handoff carries the same staged credentials as the review run. This is a trusted, human-supervised permission model even though the automated explain run is headless. `normalize_artifact=False` and per-run private credential staging, cleaned on every exit path, remain.
+- **One lock-and-merge protocol for all session-meta writers**: `mutate_session_meta` (sidecar flock OUTSIDE the session dir + fresh reload + change-gated persist) and SessionProgress baseline-diff flushes with explicit `drop()`/`deleted_keys`; follow-up, resume, interactive-resume, resume-noop, verdicts and progress writers all participate.
+- **Persisted session metadata is untrusted input**: `meta.paths` and `meta.logs` resolve inside the session dir or are rejected (F1/A18); session discovery selects the newest completed session first and reports unusable artifacts clearly instead of silently falling back.
+- **Deliberately deferred (documented in story Out of Scope)**: symlink session-directory escape (requires local sandbox-root write access — accepted threat model), per-record rollout-tail validation, recovery from malformed `explains` fields, interactive-handoff env/exit semantics, interactive-resume vs follow-up resume-pointer race, dashboard stderr diagnostics.
+- **Delivery vehicle**: PR #37, branch `feat/explain-command`; every fix round lands with RED→GREEN tests, full-suite verification, ruff/mypy/py_compile clean, and green CI.
+
+## External Resources
+- PR #37 (feature branch + review rounds): https://github.com/grzegorznowak/CURe/pull/37
