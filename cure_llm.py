@@ -612,6 +612,12 @@ def run_codex_exec(
             meta.setdefault("logs", {})["codex_events"] = str(events_log_path)
         _ensure_codex_live_progress(progress=progress, events_log_path=events_log_path)
 
+    def _rollback_attempt(*, events_log_path: Path, restore_events_log_path: Path) -> None:
+        _unlink_quietly(events_log_path)
+        _unlink_quietly(output_path)
+        _restore_events_metadata(restore_events_log_path)
+        _finalize_codex_live_progress(progress=progress, status="error")
+
     def _successful_result(
         *, events_log_path: Path, start_offset: int, artifact_override: str | None
     ) -> CodexRunResult:
@@ -642,7 +648,10 @@ def run_codex_exec(
     except ReviewflowSubprocessError as exc:
         message = (exc.stderr or "") + "\n" + (exc.stdout or "")
         if "skip-git-repo-check" not in message and "trusted directory" not in message:
-            _finalize_codex_live_progress(progress=progress, status="error")
+            _rollback_attempt(
+                events_log_path=codex_events_log_path,
+                restore_events_log_path=codex_events_log_path,
+            )
             raise
 
         _record_codex_live_event(
@@ -671,11 +680,10 @@ def run_codex_exec(
                 events_log_path=retry_events_log_path,
             )
         except BaseException:
-            if retry_events_log_path != failed_events_log_path:
-                _unlink_quietly(retry_events_log_path)
-            _unlink_quietly(output_path)
-            _restore_events_metadata(failed_events_log_path)
-            _finalize_codex_live_progress(progress=progress, status="error")
+            _rollback_attempt(
+                events_log_path=retry_events_log_path,
+                restore_events_log_path=failed_events_log_path,
+            )
             raise
 
         if retry_events_log_path != failed_events_log_path:
@@ -686,6 +694,12 @@ def run_codex_exec(
             start_offset=retry_start_offset,
             artifact_override=retry_artifact_override,
         )
+    except BaseException:
+        _rollback_attempt(
+            events_log_path=codex_events_log_path,
+            restore_events_log_path=codex_events_log_path,
+        )
+        raise
 
     return _successful_result(
         events_log_path=codex_events_log_path,

@@ -347,19 +347,31 @@ class _TextCallbackSink:
 
 
 class _CodexStderrDiagSink:
-    """Routes codex stderr diagnostics to the display log (and the terminal
-    when live streaming) — never into the JSON event stream."""
+    """Route Codex stderr to display destinations, never the JSON stream."""
 
-    def __init__(self, *, display_file: TextIO, also_to: TextIO | None) -> None:
+    def __init__(
+        self,
+        *,
+        display_file: TextIO,
+        also_to: TextIO | None,
+        dashboard_tail: TailBuffer | None = None,
+        on_activity: Callable[[], None] | None = None,
+    ) -> None:
         self._display_file = display_file
         self._also_to = also_to
+        self._dashboard_tail = dashboard_tail
+        self._on_activity = on_activity
 
     def write(self, s: str) -> int:
         self._display_file.write(s)
         self._display_file.flush()
+        if self._dashboard_tail is not None:
+            self._dashboard_tail.append_text(s)
         if self._also_to is not None:
             self._also_to.write(s)
             self._also_to.flush()
+        if self._on_activity is not None:
+            self._on_activity()
         return len(s)
 
     def flush(self) -> None:
@@ -684,7 +696,10 @@ class ReviewflowOutput:
                     # into the JSON event stream (they would corrupt a large
                     # event split across pipe reads).
                     stderr_sink = _CodexStderrDiagSink(
-                        display_file=display_file, also_to=also_to
+                        display_file=display_file,
+                        also_to=also_to,
+                        dashboard_tail=self.tails["codex"] if self.ui_enabled else None,
+                        on_activity=self.state.ping if self.ui_enabled else None,
                     )
                 if stream_text_callback is not None:
                     sink = _TextCallbackSink(sink, stream_text_callback)

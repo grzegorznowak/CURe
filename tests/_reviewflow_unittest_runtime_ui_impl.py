@@ -1937,6 +1937,58 @@ class CodexJsonProgressTests(unittest.TestCase):
             ]
         )
 
+    def test_first_attempt_failures_roll_back_partial_artifact_and_events(self) -> None:
+        for failure in (OSError("sink failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                repo_dir = root / "repo"
+                repo_dir.mkdir()
+                output_path = root / "review.md"
+                event_paths: list[Path] = []
+
+                class _DummyProgress:
+                    def __init__(self) -> None:
+                        self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+
+                    def record_cmd(self, cmd: list[str]) -> None:
+                        return None
+
+                    def flush(self) -> None:
+                        return None
+
+                progress = _DummyProgress()
+
+                def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                    sink = kwargs["stream_to"]
+                    assert sink is not None
+                    event_paths.append(Path(sink._raw_file.name))
+                    sink.write('{"type":"partial"')
+                    output_path.write_text("partial output\n", encoding="utf-8")
+                    raise failure
+
+                with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                    cure_llm, "run_cmd", side_effect=fake_run_cmd
+                ):
+                    with self.assertRaises(type(failure)):
+                        cure_llm.run_codex_exec(
+                            repo_dir=repo_dir,
+                            session_dir=repo_dir.parent,
+                            codex_flags=[],
+                            codex_config_overrides=[],
+                            output_path=output_path,
+                            prompt="review",
+                            env={},
+                            stream=False,
+                            progress=progress,
+                        )
+
+                self.assertEqual(len(event_paths), 1)
+                self.assertFalse(event_paths[0].exists())
+                self.assertFalse(output_path.exists())
+                self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[0]))
+                self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[0]))
+                self.assertEqual(progress.meta["live_progress"]["status"], "error")
+
     def test_trust_retry_uses_fresh_events_artifact_state_and_drains_final_event(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -2720,6 +2772,55 @@ class CodexJsonProgressTests(unittest.TestCase):
             assert verdicts is not None
             self.assertEqual(verdicts.business, "APPROVE")
             self.assertEqual(verdicts.technical, "REQUEST CHANGES")
+
+    def test_run_logged_cmd_routes_codex_stderr_to_dashboard_tail_only_in_ui_mode(self) -> None:
+        for ui_enabled in (True, False):
+            with self.subTest(ui_enabled=ui_enabled), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                meta_path = root / "meta.json"
+                meta_path.write_text("{}", encoding="utf-8")
+                logs_dir = root / "logs"
+                events_path = logs_dir / "codex.events.jsonl"
+                display_path = logs_dir / "codex.display.log"
+                terminal = StringIO()
+                output = cure_output.ReviewflowOutput(
+                    ui_enabled=ui_enabled,
+                    no_stream=False,
+                    stderr=terminal,
+                    meta_path=meta_path,
+                    logs_dir=logs_dir,
+                    verbosity=rui.Verbosity.normal,
+                )
+                try:
+                    def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                        stderr_sink = kwargs["stderr_stream"]
+                        assert stderr_sink is not None
+                        stderr_sink.write("WARNING: codex diagnostic\n")
+                        stderr_sink.flush()
+                        return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0)
+
+                    with mock.patch.object(cure_output, "run_cmd", side_effect=fake_run_cmd):
+                        output.run_logged_cmd(
+                            ["codex", "exec", "--json", "hello"],
+                            kind="codex",
+                            cwd=root,
+                            env={},
+                            check=True,
+                            stream_requested=True,
+                            codex_json_events_path=events_path,
+                            codex_display_log_path=display_path,
+                        )
+                finally:
+                    output.stop()
+
+                self.assertIn("WARNING: codex diagnostic", display_path.read_text(encoding="utf-8"))
+                dashboard_lines = output.tails["codex"].tail(20)
+                if ui_enabled:
+                    self.assertIn("WARNING: codex diagnostic", dashboard_lines)
+                    self.assertNotIn("WARNING: codex diagnostic", terminal.getvalue())
+                else:
+                    self.assertNotIn("WARNING: codex diagnostic", dashboard_lines)
+                    self.assertIn("WARNING: codex diagnostic", terminal.getvalue())
 
     def test_run_logged_cmd_persists_codex_events_even_when_ui_off_and_no_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
