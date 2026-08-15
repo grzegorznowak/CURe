@@ -2350,6 +2350,37 @@ class UtilityModelConfigTests(unittest.TestCase):
         finally:
             base.unlink(missing_ok=True)
 
+    def test_saved_interactive_llm_rejects_ignored_control_from_referenced_preset(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_preset_reject_base.toml")
+        cfg = ROOT / ".tmp_test_saved_interactive_preset_reject.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm_presets.custom]",
+                        'preset = "codex-cli"',
+                        'api_key = "secret"',  # pragma: allowlist secret
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(rf.ReviewflowError, r"Codex.*api_key"):
+                rf.resolve_saved_interactive_llm_config(
+                    saved_llm_meta={
+                        "preset": "custom",
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                    },
+                    saved_resolution_meta={},
+                    base_codex_config_path=base,
+                    reviewflow_config_path=cfg,
+                )
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
     def test_saved_interactive_llm_resolves_legitimate_model_and_effort(self) -> None:
         base = self._write_base_config(".tmp_test_saved_interactive_positive_base.toml")
         try:

@@ -13899,6 +13899,8 @@ def resolve_saved_interactive_llm_config(
             deprecated_codex_effort=None,
             deprecated_codex_plan_effort=None,
         )
+    except CodexControlValidationError:
+        raise
     except ReviewflowError:
         llm_meta = dict(saved_llm_meta)
         llm_resolution_meta = dict(saved_resolution_meta)
@@ -15300,6 +15302,7 @@ from cure_runtime import (
     CLI_LLM_PROVIDERS,
     CODEX_IGNORED_LLM_CONTROLS,
     CODEX_REASONING_EFFORT_CHOICES,
+    CodexControlValidationError,
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
     DEFAULT_MULTIPASS_MAX_STEPS,

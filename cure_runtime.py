@@ -48,6 +48,10 @@ IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
 )
+class CodexControlValidationError(ReviewflowError):
+    """A Codex configuration includes controls that execution ignores."""
+
+
 CODEX_IGNORED_LLM_CONTROLS = frozenset(
     {
         "--llm-header",
@@ -709,7 +713,7 @@ def validate_codex_controls(
         return
     ignored_controls = sorted(configured_controls & CODEX_IGNORED_LLM_CONTROLS)
     if ignored_controls:
-        raise ReviewflowError(
+        raise CodexControlValidationError(
             "Codex does not support these ignored LLM controls: " + ", ".join(ignored_controls)
         )
 
