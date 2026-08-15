@@ -6,6 +6,7 @@ from chunkhound_summary import parse_chunkhound_index_summary
 
 import argparse
 import contextlib
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -213,7 +214,6 @@ def codex_flags_from_base_config(*, base_config_path: Path) -> tuple[list[str], 
 DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE = "cure_first_unrestricted"
 CODEX_REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 LLM_TRANSPORT_CHOICES = ("http", "cli")
-HTTP_LLM_PROVIDERS = ("openai", "openrouter")
 CLI_LLM_PROVIDERS = ("codex",)
 LLM_RESUME_PROVIDERS = ("codex",)
 DEFAULT_LEGACY_CODEX_PRESET = "legacy_codex"
@@ -222,8 +222,6 @@ IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_PROMPT_PACKAGE = "prompts"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
-    "openai-responses",
-    "openrouter-responses",
 )
 CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_EMBEDDING__API_KEY",
@@ -806,18 +804,18 @@ def _resolve_session_review_elapsed_started_at(*, meta: dict[str, Any]) -> str |
     return str(meta.get("created_at") or "").strip() or None
 
 
-def _mark_resume_noop_completed(
-    *, meta_path: Path, meta: dict[str, Any], resumed_at: str | None = None
-) -> dict[str, Any]:
+def _mark_resume_noop_completed(*, meta_path: Path, resumed_at: str | None = None) -> dict[str, Any]:
     completed_at = _utc_now_iso()
-    updated = dict(meta)
-    updated["status"] = "done"
-    updated["resumed_at"] = str(resumed_at or completed_at).strip() or completed_at
-    updated["completed_at"] = completed_at
-    updated.pop("failed_at", None)
-    updated.pop("error", None)
-    write_redacted_json(meta_path, updated)
-    return updated
+
+    def _apply(fresh: dict[str, Any]) -> bool:
+        fresh["status"] = "done"
+        fresh["resumed_at"] = str(resumed_at or completed_at).strip() or completed_at
+        fresh["completed_at"] = completed_at
+        fresh.pop("failed_at", None)
+        fresh.pop("error", None)
+        return True
+
+    return mutate_session_meta(meta_path, fn=_apply)
 
 
 def _resolve_session_review_artifact_llm_meta(*, meta: dict[str, Any]) -> dict[str, Any] | None:
@@ -1135,58 +1133,16 @@ def builtin_llm_presets() -> dict[str, dict[str, Any]]:
             "text_verbosity": None,
             "max_output_tokens": None,
         },
-        "openai-responses": {
-            "transport": "http",
-            "provider": "openai",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://api.openai.com/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
-        "openrouter-responses": {
-            "transport": "http",
-            "provider": "openrouter",
-            "command": None,
-            "endpoint": "responses",
-            "base_url": "https://openrouter.ai/api/v1",
-            "store": None,
-            "include": [],
-            "metadata": {},
-            "headers": {},
-            "request": {},
-            "env": {},
-        },
     }
 
 
 def _preset_compat_id_from_explicit_block(raw_preset: dict[str, Any]) -> str | None:
     transport = str(raw_preset.get("transport") or "").strip().lower()
     provider = str(raw_preset.get("provider") or "").strip().lower()
-    endpoint = str(raw_preset.get("endpoint") or "responses").strip().lower()
-    base_url = str(raw_preset.get("base_url") or "").strip().rstrip("/")
     command = str(raw_preset.get("command") or "").strip()
 
     if transport == "cli" and provider == "codex" and command in {"", "codex"}:
         return "codex-cli"
-    if (
-        transport == "http"
-        and provider == "openai"
-        and endpoint == "responses"
-        and base_url in {"", "https://api.openai.com/v1"}
-    ):
-        return "openai-responses"
-    if (
-        transport == "http"
-        and provider == "openrouter"
-        and endpoint == "responses"
-        and base_url in {"", "https://openrouter.ai/api/v1"}
-    ):
-        return "openrouter-responses"
     return None
 
 
@@ -1214,6 +1170,10 @@ def _normalized_preset_overrides(raw_preset: dict[str, Any]) -> dict[str, Any]:
 def _merge_builtin_preset(
     *, preset_id: str, raw_preset: dict[str, Any], source_mode: str
 ) -> dict[str, Any]:
+    if preset_id in REMOVED_HTTP_LLM_PRESETS:
+        _raise_removed_http_provider_support(
+            context=f"The built-in preset `{preset_id}` is no longer available."
+        )
     builtins = builtin_llm_presets()
     if preset_id not in builtins:
         raise ReviewflowError(
@@ -1359,52 +1319,6 @@ def _autodetect_cli_preset_from_env(env: Mapping[str, str] | None = None) -> tup
     return None, None
 
 
-
-
-def build_http_response_request(resolved: dict[str, Any], *, prompt: str) -> dict[str, Any]:
-    provider = str(resolved.get("provider") or "").strip().lower()
-    base_url = str(resolved.get("base_url") or "").rstrip("/")
-    endpoint = str(resolved.get("endpoint") or "responses").strip().lower()
-    if provider not in HTTP_LLM_PROVIDERS:
-        raise ReviewflowError(f"Unsupported HTTP llm provider: {provider!r}")
-    if endpoint != "responses":
-        raise ReviewflowError(f"Unsupported HTTP endpoint for reviewflow: {endpoint!r}")
-    if not base_url:
-        raise ReviewflowError("HTTP llm preset is missing base_url.")
-    api_key = str(resolved.get("api_key") or "").strip()
-    if not api_key:
-        raise ReviewflowError(f"HTTP llm preset {resolved.get('preset')!r} is missing api_key.")
-
-    url = f"{base_url}/responses"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    extra_headers = _string_dict(resolved.get("headers"))
-    if provider == "openrouter":
-        allowed = {"HTTP-Referer", "X-OpenRouter-Title", "X-OpenRouter-Categories", "X-Title"}
-        extra_headers = {k: v for k, v in extra_headers.items() if k in allowed}
-    headers.update(extra_headers)
-
-    payload: dict[str, Any] = {"model": resolved.get("model"), "input": prompt}
-    reasoning_effort = str(resolved.get("reasoning_effort") or "").strip()
-    if reasoning_effort:
-        payload["reasoning"] = {"effort": reasoning_effort}
-    text_verbosity = str(resolved.get("text_verbosity") or "").strip()
-    if text_verbosity:
-        payload["text"] = {"verbosity": text_verbosity}
-    if isinstance(resolved.get("store"), bool):
-        payload["store"] = resolved["store"]
-    include = _string_list(resolved.get("include"))
-    if include:
-        payload["include"] = include
-    metadata = _plain_dict(resolved.get("metadata"))
-    if metadata:
-        payload["metadata"] = metadata
-    if isinstance(resolved.get("max_output_tokens"), int):
-        payload["max_output_tokens"] = int(resolved["max_output_tokens"])
-    payload.update(_plain_dict(resolved.get("request")))
-    return {"url": url, "headers": headers, "json": payload}
 
 
 def resolve_codex_flags(
@@ -1746,122 +1660,6 @@ def build_codex_flags_from_llm_config(
 
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    candidates = [raw]
-    candidates.extend(line.strip() for line in raw.splitlines() if line.strip())
-    for candidate in reversed(candidates):
-        try:
-            data = json.loads(candidate)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
-
-def _extract_http_response_output_text(payload: dict[str, Any]) -> str:
-    direct = payload.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    outputs = payload.get("output")
-    if not isinstance(outputs, list):
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    chunks: list[str] = []
-    for item in outputs:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = str(part.get("type") or "").strip().lower()
-            if part_type in {"output_text", "text"}:
-                text = str(part.get("text") or "").strip()
-                if text:
-                    chunks.append(text)
-    if not chunks:
-        raise ReviewflowError("HTTP response payload did not contain output text.")
-    return "\n\n".join(chunks)
-
-
-
-
-def run_http_response_exec(
-    *,
-    repo_dir: Path,
-    resolved: dict[str, Any],
-    output_path: Path,
-    prompt: str,
-    progress: "SessionProgress",
-) -> LlmRunResult:
-    request_meta = build_http_response_request(resolved, prompt=prompt)
-    cmd_meta = [
-        "http-responses",
-        str(resolved.get("provider") or "?"),
-        str(request_meta["url"]),
-    ]
-    progress.record_cmd(cmd_meta)
-    payload_bytes = json.dumps(request_meta["json"]).encode("utf-8")
-    req = urllib.request.Request(
-        str(request_meta["url"]),
-        data=payload_bytes,
-        headers=request_meta["headers"],
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            status_code = int(getattr(resp, "status", 200))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise ReviewflowSubprocessError(
-            cmd=cmd_meta,
-            cwd=repo_dir,
-            exit_code=int(getattr(e, "code", 1) or 1),
-            stdout="",
-            stderr=body,
-        ) from e
-    except urllib.error.URLError as e:
-        raise ReviewflowSubprocessError(
-            cmd=cmd_meta,
-            cwd=repo_dir,
-            exit_code=1,
-            stdout="",
-            stderr=str(e),
-        ) from e
-
-    out = active_output()
-    if out is not None:
-        try:
-            out.stream_sink("codex").write(body)
-        except Exception:
-            pass
-
-    payload = _extract_json_object(body)
-    if payload is None:
-        raise ReviewflowError("HTTP llm provider returned non-JSON output.")
-    text = _extract_http_response_output_text(payload)
-    output_path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-    normalize_markdown_artifact(markdown_path=output_path, session_dir=repo_dir.parent)
-    return LlmRunResult(
-        resume=None,
-        adapter_meta={
-            "transport": "http-responses",
-            "status_code": status_code,
-            "url": request_meta["url"],
-            "response_id": str(payload.get("id") or "").strip() or None,
-        },
-    )
-
-
-
-
 def codex_mcp_overrides_for_reviewflow(
     *,
     enable_sandbox_chunkhound: bool,
@@ -1901,28 +1699,48 @@ def _require_provider_command(command: str, *, provider: str) -> str:
     return name
 
 
-def _stage_review_auth_support(*, work_dir: Path, repo_dir: Path, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+def _stage_review_auth_support(
+    *,
+    work_dir: Path,
+    env: dict[str, str],
+    stage_rf_jira: bool = True,
+) -> tuple[dict[str, str], dict[str, str]]:
     staged_paths: dict[str, str] = {}
-    gh_cfg = prepare_gh_config_for_codex(dst_root=work_dir)
-    if gh_cfg:
-        env["GH_CONFIG_DIR"] = str(gh_cfg)
-        staged_paths["gh_config_dir"] = str(gh_cfg)
-    jira_cfg = prepare_jira_config_for_codex(dst_root=work_dir)
-    if jira_cfg:
-        env["JIRA_CONFIG_FILE"] = str(jira_cfg)
-        staged_paths["jira_config_file"] = str(jira_cfg)
-    netrc = prepare_netrc_for_reviewflow(dst_root=work_dir)
-    if netrc:
-        env["NETRC"] = str(netrc)
-        staged_paths["netrc"] = str(netrc)
-    env["CURE_WORK_DIR"] = str(work_dir)
-    staged_paths["cure_work_dir"] = str(work_dir)
-    rf_jira = write_rf_jira(repo_dir=repo_dir)
-    staged_paths["rf_jira"] = str(rf_jira)
-    return env, staged_paths
+    # Private per-run staging root: concurrent runs (e.g. parallel explains of
+    # the same review session) must never share credential directories — the
+    # prepare steps rmtree an existing destination before copying, so one run
+    # would delete another run's live credentials. The root is registered
+    # BEFORE any copy so a partial copy is still cleaned up.
+    staging_root = work_dir / f".auth-{uuid4().hex}"
+    try:
+        staging_root.mkdir(parents=True, exist_ok=False)
+        staged_paths["auth_staging_dir"] = str(staging_root)
+        gh_cfg = prepare_gh_config_for_codex(dst_root=staging_root)
+        if gh_cfg:
+            env["GH_CONFIG_DIR"] = str(gh_cfg)
+            staged_paths["gh_config_dir"] = str(gh_cfg)
+        jira_cfg = prepare_jira_config_for_codex(dst_root=staging_root)
+        if jira_cfg:
+            env["JIRA_CONFIG_FILE"] = str(jira_cfg)
+            staged_paths["jira_config_file"] = str(jira_cfg)
+        netrc = prepare_netrc_for_reviewflow(dst_root=staging_root)
+        if netrc:
+            env["NETRC"] = str(netrc)
+            staged_paths["netrc"] = str(netrc)
+        env["CURE_WORK_DIR"] = str(work_dir)
+        staged_paths["cure_work_dir"] = str(work_dir)
+        if stage_rf_jira:
+            rf_jira = staging_root / "rf-jira"
+            staged_paths["rf_jira"] = str(rf_jira)
+            write_rf_jira(dst_dir=staging_root)
+        return env, staged_paths
+    except Exception:
+        cleanup_sensitive_staged_paths(staged_paths)
+        raise
 
 
 SENSITIVE_STAGED_PATH_KEYS = (
+    "auth_staging_dir",
     "gh_config_dir",
     "jira_config_file",
     "netrc",
@@ -1996,14 +1814,71 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> Path:
 
 
 class SessionProgress:
-    def __init__(self, meta_path: Path, *, quiet: bool) -> None:
+    def __init__(self, meta_path: Path, *, quiet: bool, merge_under_lock: bool = False) -> None:
         self.meta_path = meta_path
         self.quiet = quiet
-        self.meta: dict[str, Any] = {}
+        self.merge_under_lock = merge_under_lock
+        self._meta: dict[str, Any] = {}
+        self._baseline: dict[str, Any] = {}
+        self.deleted_keys: set[str] = set()
         self._lock = threading.RLock()
 
-    def _flush_locked(self) -> None:
-        write_redacted_json(self.meta_path, self.meta)
+    @property
+    def meta(self) -> dict[str, Any]:
+        return self._meta
+
+    @meta.setter
+    def meta(self, value: dict[str, Any]) -> None:
+        self._meta = value
+        self._baseline = copy.deepcopy(value)
+
+    def _flush_locked(self, *, full: bool = False) -> bool:
+        lock_path = _session_meta_lock_path(self.meta_path)
+        with file_lock(lock_path, quiet=self.quiet):
+            if full:
+                write_redacted_json(self.meta_path, self.meta)
+                self._baseline = copy.deepcopy(self.meta)
+                self.deleted_keys.clear()
+                return True
+            if not self.meta_path.is_file():
+                return False
+            on_disk = _load_session_meta(self.meta_path)
+            if on_disk is None:
+                return False
+            missing = object()
+            changed = {
+                key for key, value in self.meta.items()
+                if value != self._baseline.get(key, missing)
+            }
+            dropped = ({key for key in self._baseline if key not in self.meta}) | self.deleted_keys
+            if self.merge_under_lock:
+                progress_keys = set(_PROGRESS_MERGE_KEYS)
+                changed &= progress_keys
+                dropped &= progress_keys
+            if not changed and not dropped:
+                return True
+            merged = dict(on_disk)
+            for key in dropped:
+                merged.pop(key, None)
+            for key in changed:
+                baseline_value = self._baseline.get(key, missing)
+                working_value = self.meta[key]
+                if (
+                    isinstance(merged.get(key), dict)
+                    and isinstance(working_value, dict)
+                    and (isinstance(baseline_value, dict) or baseline_value is missing)
+                ):
+                    _merge_meta_changes(
+                        merged[key],
+                        baseline_value if isinstance(baseline_value, dict) else {},
+                        working_value,
+                    )
+                else:
+                    merged[key] = working_value
+            write_redacted_json(self.meta_path, merged)
+            self._baseline = copy.deepcopy(self.meta)
+            self.deleted_keys.difference_update(dropped)
+            return True
 
     def init(self, initial: dict[str, Any]) -> None:
         with self._lock:
@@ -2011,11 +1886,21 @@ class SessionProgress:
             self.meta.setdefault("status", "running")
             self.meta.setdefault("phase", "init")
             self.meta.setdefault("phases", {})
-            self._flush_locked()
+            self._flush_locked(full=True)
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
         with self._lock:
-            self._flush_locked()
+            return self._flush_locked()
+
+    def drop(self, key: str) -> None:
+        """Remove `key` from the working copy and from future full flushes.
+
+        Non-merge flushes apply deletions BEFORE overlaying the working copy,
+        so a later done()/error() can re-add the key through the overlay.
+        """
+        with self._lock:
+            self.meta.pop(key, None)
+            self.deleted_keys.add(key)
 
     @contextlib.contextmanager
     def mutate(self) -> "contextlib.AbstractContextManager[dict[str, Any]]":
@@ -2064,15 +1949,67 @@ class SessionProgress:
         with self._lock:
             self.meta["status"] = "done"
             self.meta["completed_at"] = _utc_now_iso()
-            self._flush_locked()
+            if not self._flush_locked():
+                raise ReviewflowError(f"Failed to persist completed session progress: {self.meta_path}")
 
     def error(self, info: dict[str, Any]) -> None:
         with self._lock:
             self.meta["status"] = "error"
             self.meta["failed_at"] = _utc_now_iso()
             self.meta["error"] = info
-            self._flush_locked()
+            if not self._flush_locked():
+                raise ReviewflowError(f"Failed to persist errored session progress: {self.meta_path}")
 
+
+# Keys SessionProgress itself manages; merge-mode flushes overlay only these on
+# top of a fresh on-disk reload (see SessionProgress._flush_locked).
+def _merge_meta_changes(
+    fresh: dict[str, Any], baseline: dict[str, Any], working: dict[str, Any]
+) -> None:
+    """Recursively apply writer changes, including concurrent mapping add/adds."""
+    missing = object()
+    for key in baseline.keys() - working.keys():
+        fresh.pop(key, None)
+    for key, value in working.items():
+        old = baseline.get(key, missing)
+        if value == old:
+            continue
+        if isinstance(value, dict) and isinstance(fresh.get(key), dict) and (
+            isinstance(old, dict) or old is missing
+        ):
+            _merge_meta_changes(fresh[key], old if isinstance(old, dict) else {}, value)
+        else:
+            fresh[key] = copy.deepcopy(value)
+
+
+def _persist_session_meta_mapping_updates(
+    meta_path: Path,
+    *,
+    quiet: bool,
+    baseline: dict[str, Any],
+    updates: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply owned mapping updates to a fresh locked session-meta reload."""
+    owned_baseline = {key: baseline[key] for key in updates if key in baseline}
+
+    def merge_owned_updates(fresh: dict[str, Any]) -> bool:
+        _merge_meta_changes(fresh, owned_baseline, updates)
+        return True
+
+    return mutate_session_meta(meta_path, quiet=quiet, fn=merge_owned_updates)
+
+
+_PROGRESS_MERGE_KEYS = (
+    "status",
+    "phase",
+    "phases",
+    "last_cmd",
+    "base_cache",
+    "live_progress",
+    "completed_at",
+    "failed_at",
+    "error",
+)
 
 @contextlib.contextmanager
 def phase(name: str, *, progress: SessionProgress | None, quiet: bool):
@@ -2191,7 +2128,9 @@ def _load_codex_session_meta(session_log_path: Path) -> dict[str, Any] | None:
         data = json.loads(first_line)
     except Exception:
         return None
-    if data.get("type") != "session_meta":
+    # Valid JSON that is not an object (null, []) must count as an unusable
+    # rollout — a normal not-found — never a programming error.
+    if not isinstance(data, dict) or data.get("type") != "session_meta":
         return None
     payload = data.get("payload")
     return payload if isinstance(payload, dict) else None
@@ -2314,7 +2253,7 @@ def _codex_session_contains_exact_user_message(*, session_log_path: Path, text: 
                     data = json.loads(raw_line)
                 except Exception:
                     continue
-                if data.get("type") != "response_item":
+                if not isinstance(data, dict) or data.get("type") != "response_item":
                     continue
                 payload = data.get("payload")
                 if not isinstance(payload, dict):
@@ -4180,6 +4119,7 @@ def _execute_multipass_synth_stage(
     *,
     progress: SessionProgress,
     repo_dir: Path,
+    session_dir: Path,
     work_dir: Path,
     session_id: str,
     review_md_path: Path,
@@ -4266,6 +4206,7 @@ def _execute_multipass_synth_stage(
                 daemon_continuity_check()
             synth_result = run_llm_exec(
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 resolved=synth_llm["resolved"],
                 resolution_meta=synth_llm["resolution_meta"],
                 output_path=current_review_md_path,
@@ -5448,6 +5389,7 @@ def _run_multipass_step_llm(
     entry: MultipassStepEntry,
     progress: SessionProgress,
     repo_dir: Path,
+    session_dir: Path,
     llm_resolved: dict[str, Any],
     llm_resolution_meta: dict[str, Any],
     env: dict[str, str],
@@ -5474,6 +5416,7 @@ def _run_multipass_step_llm(
             daemon_continuity_check()
         llm_result = run_llm_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             resolved=llm_resolved,
             resolution_meta=llm_resolution_meta,
             output_path=entry.output_path,
@@ -5627,6 +5570,7 @@ def _execute_multipass_step_stage(
     progress: SessionProgress,
     work_dir: Path,
     repo_dir: Path,
+    session_dir: Path,
     session_id: str,
     grounding_mode: str,
     step_entries: list[MultipassStepEntry],
@@ -5727,6 +5671,7 @@ def _execute_multipass_step_stage(
                     entry=entry,
                     progress=progress,
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     llm_resolved=llm_resolved,
                     llm_resolution_meta=llm_resolution_meta,
                     env=env,
@@ -5900,6 +5845,7 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         llm_resolved=current_llm_resolved,
                         llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
@@ -5934,6 +5880,7 @@ def _execute_multipass_step_stage(
                         entry=entry,
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         llm_resolved=current_llm_resolved,
                         llm_resolution_meta=current_llm_resolution_meta,
                         env=env,
@@ -7185,8 +7132,8 @@ def prepare_netrc_for_reviewflow(*, dst_root: Path) -> Path | None:
     return dst if dst.is_file() else None
 
 
-def write_rf_jira(*, repo_dir: Path) -> Path:
-    path = repo_dir / "rf-jira"
+def write_rf_jira(*, dst_dir: Path) -> Path:
+    path = dst_dir / "rf-jira"
     script = """#!/usr/bin/env python3
 import os
 import pwd
@@ -7237,7 +7184,8 @@ def main() -> int:
     real_home = _real_home()
     env["HOME"] = str(real_home)
     netrc = real_home / ".netrc"
-    if netrc.is_file():
+    staged_netrc = env.get("NETRC", "").strip()
+    if not staged_netrc and netrc.is_file():
         env["NETRC"] = str(netrc)
 
     cmd = ["jira", "--config", str(cfg), *sys.argv[1:]]
@@ -7271,10 +7219,10 @@ def main() -> int:
             time.sleep(backoff)
             backoff = min(4.0, backoff * 2)
             retry_env = dict(env)
-            if attempt % 2 == 1:
-                retry_env.pop("NETRC", None)
-            else:
-                if netrc.is_file():
+            if not staged_netrc:
+                if attempt % 2 == 1:
+                    retry_env.pop("NETRC", None)
+                elif netrc.is_file():
                     retry_env["NETRC"] = str(netrc)
             _debug(retry_env, cfg=cfg)
             rc2, out2, err2 = _run(cmd, retry_env)
@@ -8824,6 +8772,11 @@ def _pr_flow_impl(
             return 0
         if if_reviewed == "latest":
             latest = completed[0]
+            if latest.review_md_path is None:
+                raise ReviewflowError(
+                    f"Cannot use newest session {latest.session_id} at {latest.session_dir}: "
+                    "review markdown is missing."
+                )
             text = latest.review_md_path.read_text(encoding="utf-8")
             sys.stdout.write(text)
             if not text.endswith("\n"):
@@ -8833,6 +8786,11 @@ def _pr_flow_impl(
         if if_reviewed == "prompt" and sys.stdin.isatty():
             selected = _choose_historical_session_tty(completed)
             if selected is not None:
+                if selected.review_md_path is None:
+                    raise ReviewflowError(
+                        f"Cannot use session {selected.session_id} at {selected.session_dir}: "
+                        "review markdown is missing."
+                    )
                 text = selected.review_md_path.read_text(encoding="utf-8")
                 sys.stdout.write(text)
                 if not text.endswith("\n"):
@@ -9317,6 +9275,7 @@ def _pr_flow_impl(
                         _assert_daemon_continuity()
                         orientation_result = run_llm_exec(
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             resolved=llm_resolved,
                             resolution_meta=llm_resolution_meta,
                             output_path=raw_orientation_path,
@@ -10006,6 +9965,7 @@ def _pr_flow_impl(
                     _assert_daemon_continuity()
                     plan_result = run_llm_exec(
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         resolved=plan_llm["resolved"],
                         resolution_meta=plan_llm["resolution_meta"],
                         output_path=plan_md_path,
@@ -10192,6 +10152,7 @@ def _pr_flow_impl(
                             progress=progress,
                             work_dir=work_dir,
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             session_id=session_id,
                             grounding_mode=grounding_mode,
                             step_entries=step_entries,
@@ -10275,6 +10236,7 @@ def _pr_flow_impl(
                             return _execute_multipass_synth_stage(
                                 progress=progress,
                                 repo_dir=repo_dir,
+                                session_dir=session_dir,
                                 work_dir=work_dir,
                                 session_id=session_id,
                                 review_md_path=review_md_path,
@@ -10458,6 +10420,7 @@ def _pr_flow_impl(
                     _assert_daemon_continuity()
                     review_result = run_llm_exec(
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         resolved=llm_resolved,
                         resolution_meta=llm_resolution_meta,
                         output_path=singlepass_output_path,
@@ -10553,6 +10516,7 @@ def _pr_flow_impl(
                         _assert_daemon_continuity()
                         reconcile_result = run_llm_exec(
                             repo_dir=repo_dir,
+                            session_dir=session_dir,
                             resolved=llm_resolved,
                             resolution_meta=llm_resolution_meta,
                             output_path=reconciled_output_path,
@@ -10894,6 +10858,7 @@ def _run_incremental_completed_multipass_resume(
         )
         plan_result = run_llm_exec(
             repo_dir=repo_dir,
+            session_dir=session_dir,
             resolved=plan_llm["resolved"],
             resolution_meta=plan_llm["resolution_meta"],
             output_path=resume_plan_md_path,
@@ -11092,6 +11057,7 @@ def _run_incremental_completed_multipass_resume(
             progress=progress,
             work_dir=work_dir,
             repo_dir=repo_dir,
+            session_dir=session_dir,
             session_id=session_id,
             grounding_mode=grounding_mode,
             step_entries=step_entries,
@@ -11201,6 +11167,7 @@ def _run_incremental_completed_multipass_resume(
             return _execute_multipass_synth_stage(
                 progress=progress,
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 work_dir=work_dir,
                 session_id=session_id,
                 review_md_path=review_md_path,
@@ -11381,7 +11348,6 @@ def _resume_flow_impl(
                     # Fast no-op for completed sessions that already target the latest PR head.
                     updated_meta = _mark_resume_noop_completed(
                         meta_path=meta_path,
-                        meta=meta,
                         resumed_at=resume_started_at,
                     )
                     _refresh_session_review_footer(meta=updated_meta, markdown_path=review_md_path)
@@ -11448,9 +11414,9 @@ def _resume_flow_impl(
     progress.meta["status"] = "running"
     # Resuming re-opens the session; clear completion/failure markers so the UI can
     # correctly show an active spinner and listings don't treat it as completed.
-    progress.meta.pop("completed_at", None)
-    progress.meta.pop("failed_at", None)
-    progress.meta.pop("error", None)
+    progress.drop("completed_at")
+    progress.drop("failed_at")
+    progress.drop("error")
     progress.meta["resumed_at"] = _utc_now_iso()
     progress.meta.setdefault("options", {})["quiet"] = quiet
     progress.meta.setdefault("options", {})["no_stream"] = no_stream
@@ -11816,6 +11782,7 @@ def _resume_flow_impl(
                 )
                 plan_result = run_llm_exec(
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     resolved=plan_llm["resolved"],
                     resolution_meta=plan_llm["resolution_meta"],
                     output_path=plan_md_path,
@@ -12030,6 +11997,7 @@ def _resume_flow_impl(
                     progress=progress,
                     work_dir=work_dir,
                     repo_dir=repo_dir,
+                    session_dir=session_dir,
                     session_id=session_id,
                     grounding_mode=grounding_mode,
                     step_entries=step_entries,
@@ -12164,6 +12132,7 @@ def _resume_flow_impl(
                     return _execute_multipass_synth_stage(
                         progress=progress,
                         repo_dir=repo_dir,
+                        session_dir=session_dir,
                         work_dir=work_dir,
                         session_id=session_id,
                         review_md_path=review_md_path,
@@ -12245,6 +12214,55 @@ def _resume_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
+# Keys the follow-up flow owns and overlays onto a fresh reload when
+# persisting (see _persist_followup_meta in _followup_flow_impl). Registry
+# keys owned by other writers (explains/followups) stay on the fresh doc.
+_FOLLOWUP_FLOW_OWNED_META_KEYS = (
+    "paths",
+    "llm",
+    "chunkhound",
+    "review_intelligence",
+    "agent_runtime",
+    "codex",
+)
+
+
+def _merge_followup_owned_meta(
+    fresh: dict[str, Any], baseline: dict[str, Any], working: dict[str, Any]
+) -> None:
+    missing = object()
+    for key in _FOLLOWUP_FLOW_OWNED_META_KEYS:
+        if key not in working:
+            continue
+        baseline_value = baseline.get(key, missing)
+        if (
+            isinstance(fresh.get(key), dict)
+            and isinstance(working[key], dict)
+            and (isinstance(baseline_value, dict) or baseline_value is missing)
+        ):
+            _merge_meta_changes(
+                fresh[key],
+                baseline_value if isinstance(baseline_value, dict) else {},
+                working[key],
+            )
+        else:
+            fresh[key] = working[key]
+
+
+def _persist_followup_meta(
+    meta_path: Path,
+    *,
+    quiet: bool,
+    baseline: dict[str, Any],
+    working: dict[str, Any],
+) -> dict[str, Any]:
+    def merge_owned_fields(fresh: dict[str, Any]) -> bool:
+        _merge_followup_owned_meta(fresh, baseline, working)
+        return True
+
+    return mutate_session_meta(meta_path, quiet=quiet, fn=merge_owned_fields)
+
+
 def _followup_flow_impl(
     args: argparse.Namespace,
     *,
@@ -12272,6 +12290,7 @@ def _followup_flow_impl(
     meta = _load_session_meta(meta_path)
     if not meta:
         raise ReviewflowError(f"Failed to parse meta.json: {meta_path}")
+    followup_meta_baseline = copy.deepcopy(meta)
 
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str((meta_paths or {}).get("repo_dir") or (session_dir / "repo"))).resolve()
@@ -12290,6 +12309,10 @@ def _followup_flow_impl(
     ).resolve()
     review_md_path = Path(str((meta_paths or {}).get("review_md") or (session_dir / "review.md"))).resolve()
 
+    if not review_md_path.is_file():
+        raise ReviewflowError(
+            f"Cannot follow up on session {session_id}: review markdown missing at {review_md_path}."
+        )
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
 
@@ -12336,7 +12359,12 @@ def _followup_flow_impl(
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
-    write_redacted_json(meta_path, meta)
+    meta = _persist_session_meta_mapping_updates(
+        meta_path,
+        quiet=quiet,
+        baseline=followup_meta_baseline,
+        updates={"paths": meta_paths},
+    )
 
     out = ReviewflowOutput(
         ui_enabled=ui_enabled,
@@ -12555,6 +12583,7 @@ def _followup_flow_impl(
         with phase("followup_review", progress=None, quiet=quiet):
             followup_result = run_llm_exec(
                 repo_dir=repo_dir,
+                session_dir=session_dir,
                 resolved=llm_resolved,
                 resolution_meta=llm_resolution_meta,
                 output_path=followup_md_path,
@@ -12579,6 +12608,7 @@ def _followup_flow_impl(
                 else None
             )
             record_codex_resume(meta.setdefault("codex", {}), codex_resume)
+
         try:
             _enforce_chunkhound_tool_proof(
                 meta=meta,
@@ -12589,7 +12619,14 @@ def _followup_flow_impl(
                 adapter_meta=followup_result.adapter_meta,
             )
         finally:
-            write_redacted_json(meta_path, meta)
+            # Overlay follow-up-owned fields onto a fresh reload so concurrent
+            # registry and nested llm/codex members survive this persistence.
+            meta = _persist_followup_meta(
+                meta_path,
+                quiet=quiet,
+                baseline=followup_meta_baseline,
+                working=meta,
+            )
 
         verdicts = extract_review_verdicts_from_markdown(followup_md_path.read_text(encoding="utf-8"))
         followup_entry: dict[str, Any] = {
@@ -12624,8 +12661,11 @@ def _followup_flow_impl(
             if usage is not None:
                 followup_llm_meta["usage"] = usage
             record_llm_resume(followup_llm_meta, followup_result.resume)
-        meta.setdefault("followups", []).append(followup_entry)
-        write_redacted_json(meta_path, meta)
+        meta = mutate_session_meta(
+            meta_path,
+            quiet=quiet,
+            fn=lambda fresh: (fresh.setdefault("followups", []).append(followup_entry) or True),
+        )
         _refresh_followup_review_footer(
             meta=meta,
             followup_entry=followup_entry,
@@ -12645,6 +12685,334 @@ def _followup_flow_impl(
         maybe_print_codex_resume_command(stderr=out.stderr, command=success_resume_command)
 
 
+from uuid import uuid4
+
+
+def _recorded_resume_session_id(meta: dict[str, Any]) -> str | None:
+    """Return the recorded codex resume session id (llm.resume or codex.resume)."""
+    for key in ("llm", "codex"):
+        block = meta.get(key)
+        if not isinstance(block, dict):
+            continue
+        resume = block.get("resume")
+        if isinstance(resume, dict):
+            session_id = str(resume.get("session_id") or "").strip()
+            if session_id:
+                return session_id
+    return None
+
+
+EXPLAIN_PROMPT_TEMPLATE = "explain.md"
+
+# Fork/resume mode cannot embed the review text in the prompt (the forked codex
+# session already holds it in its conversation history), so the inline template's
+# "Below is the final synthesized review ..." framing is false there. Without an
+# explicit instruction the model can treat the explain prompt as a fresh review
+# request and re-produce the whole review instead of answering (observed on a
+# real run, PR#37 report). This note is prepended to the prompt in fork mode.
+EXPLAIN_RESUME_CONTEXT_NOTE = (
+    "You are continuing the exact codex session that produced the review under "
+    "discussion: the final synthesized review and its supporting evidence are "
+    "already in your conversation history above.\n"
+    "Do NOT re-produce, re-write, or re-run the review itself (no review steps, "
+    "no findings list, no verdicts section). Answer the user's question about "
+    "the review in clear, human-friendly language, grounded only in the review "
+    "already present in your context."
+)
+
+
+def _confirm_explain_codex_handoff(*, quiet: bool) -> bool:
+    """Ask the user whether to continue in an interactive codex session.
+    Only prompts when stdin is a real terminal and output is not quiet."""
+    if quiet or not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("Continue this explanation in an interactive codex session? [y/N] ").strip().lower()
+    except (EOFError, OSError):
+        return False
+    return answer in {"y", "yes"}
+
+
+def _open_interactive_codex_resume(
+    *,
+    repo_dir: Path,
+    fork_session_id: str,
+    base_env: dict[str, str],
+    runtime_policy: dict[str, Any],
+) -> int:
+    """Continue an explanation fork with interactive-resume command semantics."""
+    command = build_codex_resume_command(
+        repo_dir=repo_dir,
+        session_id=fork_session_id,
+        env=base_env,
+        codex_flags=list(runtime_policy.get("codex_flags") or []),
+        codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
+        approval_policy=runtime_policy.get("approval_policy"),
+        dangerously_bypass_approvals_and_sandbox=bool(
+            runtime_policy.get("dangerously_bypass_approvals_and_sandbox", True)
+        ),
+        include_shell_environment_inherit_all=bool(
+            runtime_policy.get("include_shell_environment_inherit_all", False)
+        ),
+    )
+    return run_interactive_resume_command(command, env=base_env)
+
+
+def _explain_flow_impl(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
+    effective_config_path = config_path or default_reviewflow_config_path()
+    effective_codex_base_config_path = codex_base_config_path or default_codex_base_config_path()
+    verbosity = resolve_verbosity(args)
+    quiet = verbosity is Verbosity.quiet
+    no_stream = bool(getattr(args, "no_stream", False))
+    stream = (not quiet) and (not no_stream)
+
+    pr_url = str(getattr(args, "pr_url", "") or "").strip()
+    if not pr_url:
+        raise ReviewflowError("explain requires a PR URL.")
+    pr = parse_pr_url(pr_url)
+
+    sessions = scan_completed_sessions_for_pr(sandbox_root=paths.sandbox_root, pr=pr)
+    if not sessions:
+        raise ReviewflowError(
+            f"No completed review session found for PR {pr_url} under {paths.sandbox_root}."
+        )
+    session = sessions[0]
+    session_dir = session.session_dir
+    if session.review_md_path is None:
+        raise ReviewflowError(
+            f"Cannot explain newest session {session.session_id} at {session_dir}: "
+            "review markdown is missing."
+        )
+    meta_path = session_dir / "meta.json"
+    meta = _load_session_meta(meta_path) or {}
+
+    meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+    repo_dir = Path(str(meta_paths.get("repo_dir") or (session_dir / "repo"))).resolve()
+    work_dir = Path(str(meta_paths.get("work_dir") or (session_dir / "work"))).resolve()
+    review_md_path = session.review_md_path
+
+    # Persisted session paths are untrusted input: they may have been tampered
+    # with or imported from elsewhere. Keep every read inside the session dir.
+    session_root = session_dir.resolve()
+    for _label, _path in (("repo_dir", repo_dir), ("work_dir", work_dir), ("review_md", review_md_path)):
+        if not _session_path_within(_path, session_root):
+            raise ReviewflowError(f"Session {_label} path escapes session dir: {_path}")
+
+    if not repo_dir.is_dir():
+        raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
+
+    if not review_md_path.is_file():
+        raise ReviewflowError(f"Review markdown not found: {review_md_path}")
+    review_text = review_md_path.read_text(encoding="utf-8")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = work_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env, staged_paths = _stage_review_auth_support(
+        work_dir=work_dir, env=env, stage_rf_jira=False
+    )
+
+    resume_fork_id: str | None = None
+    resume_base_id: str | None = None
+    fork_path: Path | None = None
+    completed = False
+    try:
+        user_prompt = str(getattr(args, "explain_prompt", "") or "").strip()
+        llm_resolved, llm_resolution_meta = resolve_llm_config_from_args(
+            args,
+            reviewflow_config_path=effective_config_path,
+            base_codex_config_path=effective_codex_base_config_path,
+        )
+
+        provider = str(llm_resolved.get("provider") or "").strip().lower()
+        explain_runtime_policy: dict[str, Any] = {}
+        if provider == "codex":
+            codex_flags, _ = build_codex_flags_from_llm_config(
+                resolved=llm_resolved,
+                resolution_meta=llm_resolution_meta,
+                include_sandbox=False,
+            )
+            explain_runtime_policy = {
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "sandbox_mode": None,
+                "approval_policy": None,
+                "codex_flags": codex_flags,
+                "codex_config_overrides": [],
+                "include_shell_environment_inherit_all": False,
+            }
+            log(
+                "EXPLAIN mode: sandbox=None approval=None bypass=True",
+                quiet=quiet,
+            )
+            resume_base_id = _recorded_resume_session_id(meta)
+            if resume_base_id:
+                try:
+                    codex_root = Path(
+                        os.environ.get("CODEX_HOME") or (real_user_home_dir() / ".codex")
+                    ).resolve()
+                    resume_fork_id, fork_path = fork_codex_session(
+                        codex_root=codex_root,
+                        session_id=resume_base_id,
+                        created_at=str(meta.get("created_at") or ""),
+                        completed_at=str(meta.get("completed_at") or ""),
+                    )
+                    if resume_fork_id is not None:
+                        log(
+                            f"EXPLAIN resume: forked codex session {str(resume_fork_id)[:8]} "
+                            f"from base {str(resume_base_id)[:8]} — replaying the full review "
+                            "context, first output may take a minute",
+                            quiet=quiet,
+                        )
+                        if "--search" in codex_flags:
+                            log(
+                                "EXPLAIN mode: live search is unavailable on the resumed path; "
+                                "--search will be dropped",
+                                quiet=quiet,
+                            )
+                except (ReviewflowError, OSError):
+                    # Base codex session unavailable: fall back to inline review-text mode.
+                    resume_fork_id = None
+                    resume_base_id = None
+                    fork_path = None
+
+        if user_prompt:
+            prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
+            prompt_template_id = "user:explain_prompt"
+            question_block = f"\n\n## User's question\n{user_prompt.strip()}"
+        else:
+            prompt_template = load_builtin_prompt_text(EXPLAIN_PROMPT_TEMPLATE)
+            prompt_template_id = builtin_prompt_id(EXPLAIN_PROMPT_TEMPLATE)
+            question_block = ""
+        if resume_fork_id is None:
+            prompt = (
+                f"{prompt_template.rstrip()}\n\n## Final synthesized review\n\n"
+                f"{review_text.strip()}{question_block}"
+            )
+        else:
+            # Resume mode: the forked session already holds the review in its
+            # context, and the model must not re-produce it (see
+            # EXPLAIN_RESUME_CONTEXT_NOTE). The question still lands last.
+            prompt = f"{EXPLAIN_RESUME_CONTEXT_NOTE}\n\n{prompt_template.rstrip()}{question_block}"
+
+        explain_dir = session_dir / "explain"
+        explain_dir.mkdir(parents=True, exist_ok=True)
+        explain_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        explain_md_path = explain_dir / f"explain-{explain_ts}-{uuid4().hex[:8]}.md"
+
+        started_at = _utc_now_iso()
+        progress = SessionProgress(meta_path, quiet=True, merge_under_lock=True)
+        progress.meta = meta
+        out = ReviewflowOutput(
+            ui_enabled=False,
+            no_stream=no_stream,
+            stderr=sys.stderr,
+            meta_path=meta_path,
+            logs_dir=logs_dir,
+            verbosity=verbosity,
+        )
+        set_active_output(out)
+        out.start()
+        try:
+            with phase("explain", progress=progress, quiet=quiet):
+                result = run_llm_exec(
+                    repo_dir=repo_dir,
+                    session_dir=session_dir,
+                    resolved=llm_resolved,
+                    resolution_meta=llm_resolution_meta,
+                    output_path=explain_md_path,
+                    prompt=prompt,
+                    env=env,
+                    stream=stream,
+                    progress=progress,
+                    resume_session_id=resume_fork_id,
+                    normalize_artifact=False,
+                    runtime_policy=explain_runtime_policy,
+                    direct_resume_runtime_flags=True,
+                )
+        finally:
+            clear_active_output(out)
+            out.stop()
+
+        if not explain_md_path.is_file():
+            raise ReviewflowError(f"Codex did not create the explanation artifact: {explain_md_path}")
+        explanation = explain_md_path.read_text(encoding="utf-8").strip()
+        if not explanation:
+            raise ReviewflowError(f"Codex created an empty explanation artifact: {explain_md_path}")
+
+        explain_entry: dict[str, Any] = {
+            "started_at": started_at,
+            "completed_at": _utc_now_iso(),
+            "prompt_source": prompt_template_id,
+            "provider": str(llm_resolved.get("provider") or "").strip() or None,
+            "model": str(llm_resolved.get("model") or "").strip() or None,
+            "preset": str(llm_resolved.get("preset") or "").strip() or None,
+            "output_path": str(explain_md_path),
+        }
+        if user_prompt:
+            explain_entry["question"] = str(user_prompt).strip()
+        if isinstance(result.adapter_meta, dict):
+            explain_entry["transport"] = str(result.adapter_meta.get("transport") or "").strip() or None
+            usage = _normalize_llm_usage(result.adapter_meta.get("usage"))
+            if usage is not None:
+                explain_entry["usage"] = usage
+        if resume_fork_id is not None:
+            explain_entry["resume"] = {
+                "mode": "fork",
+                "base_session_id": str(resume_base_id or ""),
+                "fork_session_id": resume_fork_id,
+                "interactive_command": f"codex resume {resume_fork_id}",
+            }
+        # The lock lives on a stable sidecar file: flushing replaces meta.json
+        # with a new filesystem object, so a lock on meta.json itself would
+        # let concurrent explain runs lock different versions of the path and
+        # overwrite each other's `explains[]` entries.
+        with file_lock(_session_meta_lock_path(meta_path), quiet=quiet):
+            meta = _load_session_meta(meta_path)
+            if meta is None:
+                raise ReviewflowError(f"Session meta.json is missing or invalid: {meta_path}")
+            meta.setdefault("explains", []).append(explain_entry)
+            write_redacted_json(meta_path, meta)
+        completed = True
+
+        print(explanation)
+        print(str(explain_md_path))
+
+        # Keep staged credentials alive through the optional handoff. The
+        # outer finally removes them after both normal and exceptional exits.
+        if resume_fork_id is not None and (
+            bool(getattr(args, "open_in_codex", False))
+            or _confirm_explain_codex_handoff(quiet=quiet)
+        ):
+            log(
+                f"EXPLAIN: continuing in interactive codex session {str(resume_fork_id)[:8]} "
+                "(full review context loaded; exit with Ctrl-C or /quit)",
+                quiet=quiet,
+            )
+            rc = _open_interactive_codex_resume(
+                repo_dir=repo_dir,
+                fork_session_id=resume_fork_id,
+                base_env=env,
+                runtime_policy=explain_runtime_policy,
+            )
+            log(f"EXPLAIN: interactive codex session ended (rc={rc})", quiet=quiet)
+            return rc
+        return 0
+    finally:
+        cleanup_sensitive_staged_paths(staged_paths)
+        if not completed and fork_path is not None:
+            try:
+                fork_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, default: Path) -> Path:
     if raw:
         p = Path(str(raw)).expanduser()
@@ -12652,6 +13020,14 @@ def _resolve_session_relative_path(*, session_dir: Path, raw: str | None, defaul
             return (session_dir / p).resolve()
         return p.resolve()
     return default.resolve()
+
+
+def _session_path_within(path: Path, session_root: Path) -> bool:
+    """True when ``path`` resolves inside ``session_root`` (containment check)."""
+    try:
+        return path.resolve().is_relative_to(session_root.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _parse_iso_dt(value: str | None) -> datetime | None:
@@ -13315,7 +13691,8 @@ def _print_historical_sessions(sessions: list[HistoricalReviewSession]) -> None:
     for idx, s in enumerate(sessions, start=1):
         when = s.completed_at or s.created_at or ""
         verdicts = format_review_verdicts_compact(s.verdicts)
-        print(f"{idx:02d}  {when}  {verdicts}  {s.codex_summary}  {s.session_id}")
+        marker = "  (no review markdown)" if s.review_md_path is None else ""
+        print(f"{idx:02d}  {when}  {verdicts}  {s.codex_summary}  {s.session_id}{marker}")
 
 
 def _historical_picker_color_enabled(stream: TextIO) -> bool:
@@ -13367,7 +13744,10 @@ def _historical_review_picker_lines(
         for session in bucket:
             when = session.completed_at or session.created_at or ""
             verdicts = format_review_verdicts_compact(session.verdicts)
-            lines.append(f"  {idx}) {when}  {verdicts}  {session.codex_summary}  {session.session_id}")
+            marker = "  (no review markdown)" if session.review_md_path is None else ""
+            lines.append(
+                f"  {idx}) {when}  {verdicts}  {session.codex_summary}  {session.session_id}{marker}"
+            )
             idx += 1
     lines.append("  n) create a NEW sandbox review")
     lines.append("")
@@ -13479,17 +13859,79 @@ def _interactive_session_resume_is_poisoned(
         text=session_dir_text,
     )
 
+def resolve_saved_interactive_llm_config(
+    *,
+    saved_llm_meta: dict[str, Any],
+    saved_resolution_meta: dict[str, Any],
+    base_codex_config_path: Path,
+    reviewflow_config_path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    provider = str(saved_llm_meta.get("provider") or "").strip().lower()
+    configured_controls = {
+        name
+        for name in CODEX_IGNORED_LLM_CONTROLS
+        if not name.startswith("--")
+        if saved_llm_meta.get(name) not in (None, "", [], {})
+    }
+    validate_codex_controls(
+        provider=provider,
+        configured_controls=configured_controls,
+    )
+
+    saved_preset_name = (
+        str(saved_llm_meta.get("selected_name") or "").strip()
+        or str(saved_llm_meta.get("preset") or "").strip()
+        or None
+    )
+    try:
+        llm_meta, llm_resolution_meta = resolve_llm_config(
+            base_codex_config_path=base_codex_config_path,
+            reviewflow_config_path=reviewflow_config_path,
+            cli_preset=saved_preset_name,
+            cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
+            cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
+            cli_plan_effort=None,
+            cli_verbosity=None,
+            cli_max_output_tokens=None,
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+    except CodexControlValidationError:
+        raise
+    except ReviewflowError:
+        llm_meta = dict(saved_llm_meta)
+        llm_resolution_meta = dict(saved_resolution_meta)
+
+    resolved_saved = (
+        llm_resolution_meta.get("resolved")
+        if isinstance(llm_resolution_meta.get("resolved"), dict)
+        else None
+    )
+    if isinstance(resolved_saved, dict):
+        if str(saved_llm_meta.get("model") or "").strip():
+            resolved_saved["model_source"] = "session_reuse"
+        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
+            resolved_saved["reasoning_effort_source"] = "session_reuse"
+        llm_resolution_meta["resolved"] = resolved_saved
+    return llm_meta, llm_resolution_meta
+
+
 def build_interactive_resume_command(
     *,
     session: InteractiveReviewSession,
     paths: ReviewflowPaths,
+    staged_paths_out: dict[str, Any],
     config_path: Path | None = None,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], dict[str, Any]]:
     effective_config_path = config_path or default_reviewflow_config_path()
     meta_path = session.session_dir / "meta.json"
     meta = _load_session_meta(meta_path)
     if not meta:
         raise ReviewflowError(f"Failed to parse meta.json: {meta_path}")
+    meta_baseline = copy.deepcopy(meta)
 
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str((meta_paths or {}).get("repo_dir") or (session.session_dir / "repo"))).resolve()
@@ -13536,43 +13978,12 @@ def build_interactive_resume_command(
     saved_resolution_meta = (
         saved_llm_meta.get("config") if isinstance(saved_llm_meta.get("config"), dict) else {}
     )
-    llm_meta = dict(saved_llm_meta)
-    llm_resolution_meta = dict(saved_resolution_meta)
-    saved_preset_name = (
-        str(saved_llm_meta.get("selected_name") or "").strip()
-        or str(saved_llm_meta.get("preset") or "").strip()
-        or None
+    llm_meta, llm_resolution_meta = resolve_saved_interactive_llm_config(
+        saved_llm_meta=saved_llm_meta,
+        saved_resolution_meta=saved_resolution_meta,
+        base_codex_config_path=default_codex_base_config_path(),
+        reviewflow_config_path=effective_config_path,
     )
-    try:
-        llm_meta, llm_resolution_meta = resolve_llm_config(
-            base_codex_config_path=default_codex_base_config_path(),
-            reviewflow_config_path=effective_config_path,
-            cli_preset=saved_preset_name,
-            cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
-            cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
-            cli_plan_effort=None,
-            cli_verbosity=(str(saved_llm_meta.get("text_verbosity") or "").strip() or None),
-            cli_max_output_tokens=(
-                int(saved_llm_meta.get("max_output_tokens"))
-                if isinstance(saved_llm_meta.get("max_output_tokens"), int)
-                else None
-            ),
-            cli_request_overrides={},
-            cli_header_overrides={},
-            deprecated_codex_model=None,
-            deprecated_codex_effort=None,
-            deprecated_codex_plan_effort=None,
-        )
-    except ReviewflowError:
-        llm_meta = dict(saved_llm_meta)
-        llm_resolution_meta = dict(saved_resolution_meta)
-    resolved_saved = llm_resolution_meta.get("resolved") if isinstance(llm_resolution_meta.get("resolved"), dict) else None
-    if isinstance(resolved_saved, dict):
-        if str(saved_llm_meta.get("model") or "").strip():
-            resolved_saved["model_source"] = "session_reuse"
-        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
-            resolved_saved["reasoning_effort_source"] = "session_reuse"
-        llm_resolution_meta["resolved"] = resolved_saved
 
     runtime_policy = prepare_review_agent_runtime(
         args=argparse.Namespace(),
@@ -13589,6 +14000,9 @@ def build_interactive_resume_command(
         interactive=True,
         paths=paths,
     )
+    runtime_staged_paths = runtime_policy.get("staged_paths")
+    if isinstance(runtime_staged_paths, dict):
+        staged_paths_out.update(runtime_staged_paths)
     env = dict(runtime_policy["env"])
 
     llm_resume = llm_meta.get("resume") if isinstance(llm_meta.get("resume"), dict) else {}
@@ -13603,6 +14017,12 @@ def build_interactive_resume_command(
     meta_paths["chunkhound_cwd"] = str(chunkhound_work_dir)
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
+    meta_updates: dict[str, Any] = {
+        "paths": meta_paths,
+        "llm": llm_meta,
+        "agent_runtime": runtime_policy["metadata"],
+        "chunkhound": chunkhound_meta["chunkhound"],
+    }
     meta["paths"] = meta_paths
     meta["llm"] = llm_meta
     meta["agent_runtime"] = runtime_policy["metadata"]
@@ -13629,6 +14049,7 @@ def build_interactive_resume_command(
             "CURE_WORK_DIR": env.get("CURE_WORK_DIR"),
         }
         meta["codex"] = codex_meta
+        meta_updates["codex"] = codex_meta
         if _interactive_session_resume_is_poisoned(session=session):
             raise ReviewflowError(
                 f"Interactive cannot resume {session.session_id}: saved Codex session is corrupted by a stray "
@@ -13642,8 +14063,13 @@ def build_interactive_resume_command(
                 raise ReviewflowError(
                     f"Session {session.session_id} is missing codex.resume and llm.resume metadata."
                 )
-            write_redacted_json(meta_path, meta)
-            return (fallback_command, env)
+            meta = _persist_session_meta_mapping_updates(
+                meta_path,
+                quiet=True,
+                baseline=meta_baseline,
+                updates=meta_updates,
+            )
+            return (fallback_command, env, dict(staged_paths_out))
 
         command = build_codex_resume_command(
             repo_dir=repo_dir,
@@ -13670,8 +14096,13 @@ def build_interactive_resume_command(
         )
         meta["llm"] = llm_meta
         meta["codex"] = codex_meta
-        write_redacted_json(meta_path, meta)
-        return (command, env)
+        meta = _persist_session_meta_mapping_updates(
+            meta_path,
+            quiet=True,
+            baseline=meta_baseline,
+            updates=meta_updates,
+        )
+        return (command, env, dict(staged_paths_out))
 
     raise ReviewflowError(
         f"interactive is not supported for provider {provider} in v1. This session is execution-only."
@@ -13723,27 +14154,23 @@ def _interactive_flow_impl(
             "This session is execution-only."
         )
 
-    resume_command, resume_env = build_interactive_resume_command(
-        session=selected,
-        paths=paths,
-        config_path=config_path,
-    )
+    staged_paths: dict[str, Any] = {}
     try:
-        err_stream.write(f"\nLatest review artifact: {selected.latest_artifact_path}\n")
-        err_stream.write(f"\nContinuing {selected.repo_slug} ({selected.session_id})...\n")
-        err_stream.flush()
-    except Exception:
-        pass
-    try:
+        resume_command, resume_env, staged_paths = build_interactive_resume_command(
+            session=selected,
+            paths=paths,
+            staged_paths_out=staged_paths,
+            config_path=config_path,
+        )
+        try:
+            err_stream.write(f"\nLatest review artifact: {selected.latest_artifact_path}\n")
+            err_stream.write(f"\nContinuing {selected.repo_slug} ({selected.session_id})...\n")
+            err_stream.flush()
+        except Exception:
+            pass
         return run_interactive_resume_command(resume_command, env=resume_env)
     finally:
-        cleanup_sensitive_staged_paths(
-            {
-                "gh_config_dir": resume_env.get("GH_CONFIG_DIR"),
-                "jira_config_file": resume_env.get("JIRA_CONFIG_FILE"),
-                "netrc": resume_env.get("NETRC"),
-            }
-        )
+        cleanup_sensitive_staged_paths(staged_paths)
 
 
 def list_sessions(*, paths: ReviewflowPaths) -> int:
@@ -14146,8 +14573,10 @@ def _delete_cleanup_sessions(*, session_ids: list[str], paths: ReviewflowPaths) 
             raise ReviewflowError(f"Refusing to delete outside sandbox root: {target}")
         if not target.is_dir():
             continue
-        shutil.rmtree(target)
-        deleted += 1
+        with file_lock(_session_meta_lock_path(target / "meta.json"), quiet=True):
+            if target.is_dir():
+                shutil.rmtree(target)
+                deleted += 1
     return deleted
 
 
@@ -14564,7 +14993,9 @@ def clean_session(
             deleted=[session_json],
             skipped=[],
         )
-    shutil.rmtree(target)
+    with file_lock(_session_meta_lock_path(target / "meta.json"), quiet=True):
+        if target.is_dir():
+            shutil.rmtree(target)
     if json_output and payload is not None:
         print(json.dumps(payload, indent=2, sort_keys=True), file=(stdout or sys.stdout))
     return 0
@@ -14842,12 +15273,14 @@ from cure_sessions import (
     _resolve_log_path,
     _resolve_session_id_target,
     _resolve_session_relative_path,
+    _session_meta_lock_path,
     _resolve_session_review_head_sha,
     _resolve_session_review_md_path,
     _resolve_session_verdicts,
     build_status_payload,
     extract_review_verdicts_from_markdown,
     format_review_verdicts_compact,
+    mutate_session_meta,
     normalize_review_verdict,
     normalize_review_verdicts,
     parse_owner_repo,
@@ -14867,19 +15300,23 @@ from cure_runtime import (
     BUILTIN_LLM_PRESET_IDS,
     CHUNKHOUND_CONFIG_EXAMPLE,
     CLI_LLM_PROVIDERS,
+    CODEX_IGNORED_LLM_CONTROLS,
     CODEX_REASONING_EFFORT_CHOICES,
+    CodexControlValidationError,
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
     DEFAULT_MULTIPASS_MAX_STEPS,
     DEFAULT_MULTIPASS_STEP_WORKERS,
     DEFAULT_REVIEW_INTELLIGENCE_POLICY_MODE,
-    HTTP_LLM_PROVIDERS,
     LOCAL_AGENT_PRESET_BY_NAME,
     LLM_RESUME_PROVIDERS,
     LLM_TRANSPORT_CHOICES,
     MULTIPASS_MAX_STEPS_HARD_CAP,
     MULTIPASS_STEP_WORKERS_HARD_CAP,
+    REMOVED_HTTP_LLM_PRESETS,
+    REMOVED_HTTP_LLM_PROVIDERS,
     REVIEW_INTELLIGENCE_CONFIG_EXAMPLE,
+    _raise_removed_http_provider_support,
     _redact_secrets,
     DoctorCheck,
     ReviewIntelligenceConfig,
@@ -14897,7 +15334,6 @@ from cure_runtime import (
     attach_review_intelligence_capabilities,
     apply_llm_env,
     build_curated_subprocess_env,
-    build_http_response_request,
     build_llm_meta,
     build_review_intelligence_guidance,
     build_utility_llm_meta,
@@ -14931,6 +15367,7 @@ from cure_runtime import (
     resolve_ui_enabled,
     resolve_verbosity,
     toml_string,
+    validate_codex_controls,
 )
 from cure_pr_context import (
     OrientationProviderExecutionFailure,
@@ -14976,19 +15413,18 @@ from cure_llm import (
     CodexRunResult,
     LlmResumeInfo,
     LlmRunResult,
-    _extract_usage_from_payload,
     build_codex_exec_cmd,
     build_codex_flags_from_llm_config,
     build_codex_resume_command,
     codex_mcp_overrides_for_reviewflow,
     codex_resume_meta_dict,
     find_codex_resume_info,
+    fork_codex_session,
     llm_resume_meta_dict,
     prepare_review_agent_runtime,
     record_codex_resume,
     record_llm_resume,
     run_codex_exec,
-    run_http_response_exec,
     run_llm_exec,
 )
 from cure_commands import (
@@ -14997,6 +15433,7 @@ from cure_commands import (
     clean_flow,
     commands_flow,
     doctor_flow,
+    explain_flow,
     followup_flow,
     interactive_flow,
     pr_flow,
@@ -15204,6 +15641,41 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     rp.add_argument("--ui", choices=["auto", "on", "off"], default="auto")
     rp.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
 
+    ep = sub.add_parser(
+        "explain",
+        help="Explain the final synthesized review of a completed PR review session",
+        parents=[runtime_parent],
+    )
+    ep.add_argument("pr_url", help="GitHub PR URL whose most recent completed review to explain")
+    ep.add_argument(
+        "--explain-prompt",
+        dest="explain_prompt",
+        default=None,
+        help="Question for the explanation, appended to the builtin explain prompt"
+        " (default: generic explanation)",
+    )
+    ep.add_argument(
+        "--open-in-codex",
+        dest="open_in_codex",
+        action="store_true",
+        default=False,
+        help="After the explanation, hand the terminal over to an interactive codex "
+        "session that continues the forked explanation session (full review context "
+        "already loaded; without the flag, prompt when stdin is a terminal)",
+    )
+    add_llm_override_args(ep)
+    ep.add_argument("--codex-model", dest="codex_model", default=None, help=codex_help)
+    ep.add_argument("--codex-effort", dest="codex_effort", default=None, help=argparse.SUPPRESS)
+    ep.add_argument(
+        "--codex-plan-effort",
+        dest="codex_plan_effort",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    ep.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    ep.add_argument("--no-stream", action="store_true", help="Do not stream review-agent output")
+    ep.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default="normal")
+
     sp = sub.add_parser("status", help="Show run status for a session id or PR URL", parents=[runtime_parent])
     sp.add_argument("target", help="Session id (folder name) or PR URL")
     sp.add_argument("--json", dest="json_output", action="store_true", help="Print structured status JSON")
@@ -15319,6 +15791,13 @@ def main(
             return command_surface.clean_flow(args, paths=paths)
         if args.cmd == "resume":
             return command_surface.resume_flow(
+                args,
+                paths=paths,
+                config_path=runtime.config_path,
+                codex_base_config_path=runtime.codex_base_config_path,
+            )
+        if args.cmd == "explain":
+            return command_surface.explain_flow(
                 args,
                 paths=paths,
                 config_path=runtime.config_path,

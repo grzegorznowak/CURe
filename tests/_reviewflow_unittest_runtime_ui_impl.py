@@ -1819,6 +1819,368 @@ class ChunkHoundAccessPreflightTests(unittest.TestCase):
 
 
 class CodexJsonProgressTests(unittest.TestCase):
+    def test_codex_log_resolvers_use_authoritative_session_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            session = root / "session"
+            session.mkdir()
+            sibling = root / "sibling"
+
+            for repo_shape, repo in (
+                ("session_root", session),
+                ("nested", session / "nested" / "repo"),
+            ):
+                repo.mkdir(parents=True, exist_ok=True)
+                for key, resolver in (
+                    ("codex", cure_llm._resolve_codex_display_log_path),
+                    ("codex_events", cure_llm._resolve_codex_events_log_path),
+                ):
+                    for form in (str(sibling / "log"), "../sibling/log"):
+                        with self.subTest(repo_shape=repo_shape, key=key, form=form):
+                            progress = mock.Mock(meta={"logs": {key: form}})
+                            kwargs = {"progress": progress, "session_dir": session}
+                            if key == "codex_events":
+                                kwargs["run_token"] = "rejected"
+                            with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                                resolver(**kwargs)
+                            progress.flush.assert_not_called()
+                            self.assertFalse(sibling.exists())
+
+                    contained = session / "logs" / f"{key}.log"
+                    progress = mock.Mock(meta={"logs": {key: str(contained)}})
+                    kwargs = {"progress": progress, "session_dir": session}
+                    if key == "codex_events":
+                        kwargs["run_token"] = "contained"
+                    result = resolver(**kwargs)
+                    expected = (
+                        (session / "logs" / "codex.events.contained.jsonl").resolve()
+                        if key == "codex_events"
+                        else contained.resolve()
+                    )
+                    self.assertEqual(result, expected)
+                    if key == "codex_events":
+                        self.assertEqual(progress.meta["logs"][key], str(result))
+                        progress.flush.assert_called_once_with()
+
+                for form in (".", str(session)):
+                    with self.subTest(
+                        repo_shape=repo_shape,
+                        key="codex_events",
+                        form=form,
+                        boundary="effective_write_target",
+                    ):
+                        progress = mock.Mock(meta={"logs": {"codex_events": form}})
+                        with self.assertRaisesRegex(rf.ReviewflowError, "logs.*session"):
+                            cure_llm._resolve_codex_events_log_path(
+                                progress=progress,
+                                session_dir=session,
+                                run_token="raw-boundary",
+                            )
+                        progress.flush.assert_not_called()
+                        self.assertFalse((root / "codex.events.raw-boundary.jsonl").exists())
+
+                default_progress = mock.Mock(meta={"logs": {}})
+                default_result = cure_llm._resolve_codex_events_log_path(
+                    progress=default_progress,
+                    session_dir=session,
+                    run_token="default",
+                )
+                self.assertEqual(
+                    default_result,
+                    (session / "work" / "logs" / "codex.events.default.jsonl").resolve(),
+                )
+                self.assertEqual(
+                    default_progress.meta["logs"]["codex_events"], str(default_result)
+                )
+                default_progress.flush.assert_called_once_with()
+
+    def test_streaming_run_cmd_terminates_real_process_group_on_baseexception(self) -> None:
+        import run as run_module
+        import time
+
+        real_popen = subprocess.Popen
+        spawned: list[subprocess.Popen[str]] = []
+
+        def spawn_then_interrupt_wait(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            proc.wait = mock.Mock(side_effect=KeyboardInterrupt())  # type: ignore[method-assign]
+            return proc
+
+        with mock.patch.object(run_module.subprocess, "Popen", side_effect=spawn_then_interrupt_wait):
+            with self.assertRaises(KeyboardInterrupt):
+                run_module.run_cmd(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stream=True,
+                    stream_to=StringIO(),
+                )
+        self.assertEqual(len(spawned), 1)
+        deadline = time.monotonic() + 3
+        while spawned[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIsNotNone(spawned[0].poll())
+
+    @staticmethod
+    def _review_artifact(marker: str) -> str:
+        return "\n".join(
+            [
+                "### Steps taken",
+                f"- {marker}",
+                "",
+                f"**Summary**: {marker}",
+                "",
+                "## Business / Product Assessment",
+                "**Verdict**: APPROVE",
+                "",
+                "## Technical Assessment",
+                "**Verdict**: APPROVE",
+            ]
+        )
+
+    def test_first_attempt_failures_roll_back_partial_artifact_and_events(self) -> None:
+        for failure in (OSError("sink failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                repo_dir = root / "repo"
+                repo_dir.mkdir()
+                output_path = root / "review.md"
+                event_paths: list[Path] = []
+
+                class _DummyProgress:
+                    def __init__(self) -> None:
+                        self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+
+                    def record_cmd(self, cmd: list[str]) -> None:
+                        return None
+
+                    def flush(self) -> None:
+                        return None
+
+                progress = _DummyProgress()
+
+                def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                    sink = kwargs["stream_to"]
+                    assert sink is not None
+                    event_paths.append(Path(sink._raw_file.name))
+                    sink.write('{"type":"partial"')
+                    output_path.write_text("partial output\n", encoding="utf-8")
+                    raise failure
+
+                with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                    cure_llm, "run_cmd", side_effect=fake_run_cmd
+                ):
+                    with self.assertRaises(type(failure)):
+                        cure_llm.run_codex_exec(
+                            repo_dir=repo_dir,
+                            session_dir=repo_dir.parent,
+                            codex_flags=[],
+                            codex_config_overrides=[],
+                            output_path=output_path,
+                            prompt="review",
+                            env={},
+                            stream=False,
+                            progress=progress,
+                        )
+
+                self.assertEqual(len(event_paths), 1)
+                self.assertFalse(event_paths[0].exists())
+                self.assertFalse(output_path.exists())
+                self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[0]))
+                self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[0]))
+                self.assertEqual(progress.meta["live_progress"]["status"], "error")
+
+    def test_trust_retry_uses_fresh_events_artifact_state_and_drains_final_event(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            output_path = root / "review.md"
+            stale_review = self._review_artifact("failed attempt")
+            retry_review = self._review_artifact("successful retry")
+            event_paths: list[Path] = []
+
+            class _DummyProgress:
+                def __init__(self) -> None:
+                    self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+                    self.commands: list[list[str]] = []
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.commands.append(list(cmd))
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress()
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                sink = kwargs["stream_to"]
+                assert sink is not None
+                event_paths.append(Path(sink._raw_file.name))
+                attempt_output = Path(cmd[cmd.index("--output-last-message") + 1])
+                if len(event_paths) == 1:
+                    sink.write(
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {"type": "agent_message", "text": stale_review},
+                            }
+                        )
+                        + "\n"
+                    )
+                    sink.write('{"type":"item.completed"')
+                    attempt_output.write_text("stale output\n", encoding="utf-8")
+                    raise cure_llm.ReviewflowSubprocessError(
+                        cmd=cmd,
+                        cwd=repo_dir,
+                        exit_code=1,
+                        stdout="",
+                        stderr="not a trusted directory",
+                    )
+                sink.write(
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": retry_review},
+                        }
+                    )
+                )
+                return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0)
+
+            with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                cure_llm, "run_cmd", side_effect=fake_run_cmd
+            ), mock.patch.object(cure_llm, "normalize_markdown_artifact"), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ):
+                result = cure_llm.run_codex_exec(
+                    repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="review",
+                    env={},
+                    stream=False,
+                    progress=progress,
+                )
+
+            self.assertEqual(len(event_paths), 2)
+            self.assertNotEqual(event_paths[0], event_paths[1])
+            self.assertEqual(output_path.read_text(encoding="utf-8"), retry_review + "\n")
+            self.assertEqual(result.events_log_path, event_paths[1])
+            self.assertEqual(result.events_start_offset, 0)
+            self.assertEqual(result.events_end_offset, event_paths[1].stat().st_size)
+            self.assertNotIn("failed attempt", event_paths[1].read_text(encoding="utf-8"))
+            self.assertFalse(event_paths[0].exists())
+            self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[1]))
+            self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[1]))
+            self.assertIn("--skip-git-repo-check", progress.commands[1])
+
+    def test_trust_retry_failure_removes_retry_files_and_restores_first_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            output_path = root / "review.md"
+            event_paths: list[Path] = []
+
+            class _DummyProgress:
+                def __init__(self) -> None:
+                    self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+                    self.commands: list[list[str]] = []
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.commands.append(list(cmd))
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress()
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                sink = kwargs["stream_to"]
+                assert sink is not None
+                event_paths.append(Path(sink._raw_file.name))
+                attempt_output = Path(cmd[cmd.index("--output-last-message") + 1])
+                sink.write('{"type":"partial"')
+                attempt_output.write_text(f"partial {len(event_paths)}\n", encoding="utf-8")
+                message = "not a trusted directory" if len(event_paths) == 1 else "retry failed"
+                raise cure_llm.ReviewflowSubprocessError(
+                    cmd=cmd,
+                    cwd=repo_dir,
+                    exit_code=1,
+                    stdout="",
+                    stderr=message,
+                )
+
+            with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                cure_llm, "run_cmd", side_effect=fake_run_cmd
+            ):
+                with self.assertRaises(cure_llm.ReviewflowSubprocessError) as ctx:
+                    cure_llm.run_codex_exec(
+                        repo_dir=repo_dir,
+                        session_dir=repo_dir.parent,
+                        codex_flags=[],
+                        codex_config_overrides=[],
+                        output_path=output_path,
+                        prompt="review",
+                        env={},
+                        stream=False,
+                        progress=progress,
+                    )
+
+            self.assertEqual(ctx.exception.stderr, "retry failed")
+            self.assertEqual(len(event_paths), 2)
+            self.assertTrue(event_paths[0].is_file())
+            self.assertFalse(event_paths[1].exists())
+            self.assertFalse(output_path.exists())
+            self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[0]))
+            self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[0]))
+
+    def test_trust_retry_keyboardinterrupt_restores_first_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            output_path = root / "review.md"
+            event_paths: list[Path] = []
+
+            class _DummyProgress:
+                def __init__(self) -> None:
+                    self.meta: dict[str, object] = {"logs": {}, "live_progress": {}}
+                def record_cmd(self, cmd: list[str]) -> None:
+                    return None
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress()
+
+            def fake_run_cmd(cmd: list[str], **kwargs: object) -> object:
+                sink = kwargs["stream_to"]
+                event_paths.append(Path(sink._raw_file.name))
+                output_path.write_text("partial\n", encoding="utf-8")
+                if len(event_paths) == 1:
+                    raise cure_llm.ReviewflowSubprocessError(
+                        cmd=cmd, cwd=repo_dir, exit_code=1, stdout="",
+                        stderr="not a trusted directory",
+                    )
+                raise KeyboardInterrupt()
+
+            with mock.patch.object(cure_llm, "active_output", return_value=None), mock.patch.object(
+                cure_llm, "run_cmd", side_effect=fake_run_cmd
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    cure_llm.run_codex_exec(
+                        repo_dir=repo_dir,
+                        session_dir=repo_dir.parent, codex_flags=[], codex_config_overrides=[],
+                        output_path=output_path, prompt="review", env={}, stream=False,
+                        progress=progress,
+                    )
+            self.assertTrue(event_paths[0].is_file())
+            self.assertFalse(event_paths[1].exists())
+            self.assertFalse(output_path.exists())
+            self.assertEqual(progress.meta["logs"]["codex_events"], str(event_paths[0]))
+            self.assertEqual(progress.meta["live_progress"]["events_log"], str(event_paths[0]))
+
     def _run_parallel_codex_invocations(
         self, *, root: Path
     ) -> tuple[dict[str, cure_llm.CodexRunResult], object]:
@@ -1856,6 +2218,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             try:
                 results[marker] = cure_llm.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=root / f"{marker}.md",
@@ -1963,6 +2326,156 @@ class CodexJsonProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["raw_text"], long_message)
         self.assertEqual(events[-1]["text"], cure_output._compact_codex_text(long_message))
         self.assertEqual(tail.tail(2)[-1], cure_output._compact_codex_text(long_message))
+
+    def test_codex_json_event_sink_emits_notice_for_error_items(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            on_event=events.append,
+        )
+
+        sink.write(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_0",
+                        "type": "error",
+                        "message": "This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.5`.",
+                    },
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+
+        self.assertIn("Codex notice: This session was recorded", display.getvalue())
+        self.assertEqual(events[-1]["type"], "codex_notice")
+        self.assertIn("Codex notice: This session was recorded", events[-1]["text"])
+
+    def test_codex_json_event_sink_handles_large_events_across_flushed_chunks(self) -> None:
+        # run.py's pump reads ~8192-char chunks and calls flush() after every
+        # chunk; a single-line JSON event larger than that arrives split across
+        # several write()/flush() cycles. The sink must not force-consume the
+        # partial fragments (which would dump unparseable JSON to the display).
+        raw = StringIO()
+        display = StringIO()
+        tail = rui.TailBuffer(max_lines=10)
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=tail,
+            on_event=events.append,
+        )
+        long_text = "The main problem is X. " * 400  # ~8.4KB, forces chunk splits
+        event_line = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": long_text},
+            }
+        )
+        # Feed the event exactly like run.py's pump: 8192-char chunks with a
+        # flush() after every chunk, and a trailing newline at the end.
+        payload = event_line + "\n"
+        for offset in range(0, len(payload), 8192):
+            sink.write(payload[offset : offset + 8192])
+            sink.flush()
+        sink.drain()
+
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        # The display must show the compacted agent text, never raw JSON.
+        self.assertTrue(display_lines[0].startswith("The main problem is X."))
+        self.assertNotIn("item.completed", display_lines[0])
+        self.assertEqual(events[-1]["type"], "agent_message")
+        # The raw log keeps the full single-line JSON event.
+        raw_line = raw.getvalue().strip()
+        self.assertEqual(raw_line, event_line)
+
+    def test_codex_json_event_sink_flush_keeps_partial_line_pending(self) -> None:
+        raw = StringIO()
+        display = StringIO()
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=rui.TailBuffer(max_lines=10),
+        )
+        partial = '{"type":"item.completed","item":{"id":"item_1","type":"agent'
+        sink.write(partial)
+        sink.flush()
+        self.assertEqual(display.getvalue(), "")
+        # The rest of the line (with its terminator) completes the event.
+        sink.write('_message","text":"hello"}' + "\n")
+        sink.flush()
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        self.assertIn("hello", display_lines[0])
+
+    def test_run_cmd_routes_stderr_away_from_codex_json_sink(self) -> None:
+        """A stderr diagnostic landing between chunks of a large JSON event
+        must not corrupt the JSON stream: stdout feeds the sink, stderr goes
+        to its own diagnostic stream."""
+        import run as run_module
+
+        raw = StringIO()
+        display = StringIO()
+        diag = StringIO()
+        events: list[dict[str, object]] = []
+        sink = cure_output.CodexJsonEventSink(
+            raw_file=raw,
+            display_file=display,
+            tail=rui.TailBuffer(max_lines=10),
+            on_event=events.append,
+        )
+        long_text = "The main problem is X. " * 400
+        payload = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": long_text},
+            }
+        )
+        half = len(payload) // 2
+        # stdout: first half of the JSON line, then a stderr diagnostic, then
+        # the rest of the line — exactly the interleaving that corrupts a
+        # merged stream. Sleeps keep the pipe ordering deterministic.
+        script = (
+            "import sys, time\n"
+            f"payload = {payload!r}\n"
+            f"sys.stdout.write(payload[:{half}])\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(0.4)\n"
+            "sys.stderr.write('WARNING: jira diagnostic\\n')\n"
+            "sys.stderr.flush()\n"
+            "time.sleep(0.4)\n"
+            f"sys.stdout.write(payload[{half}:] + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        try:
+            run_module.run_cmd(
+                [sys.executable, "-c", script],
+                cwd=Path.cwd(),
+                env=dict(os.environ),
+                check=True,
+                stream=True,
+                stream_to=sink,
+                stderr_stream=diag,
+            )
+        finally:
+            sink.drain()
+        self.assertEqual([e["type"] for e in events], ["agent_message"])
+        # The raw log holds exactly the single JSON event line.
+        self.assertEqual(raw.getvalue().strip(), payload)
+        self.assertIn("WARNING: jira diagnostic", diag.getvalue())
+        display_lines = display.getvalue().splitlines()
+        self.assertEqual(len(display_lines), 1)
+        self.assertTrue(display_lines[0].startswith("The main problem is X."))
+        self.assertNotIn("WARNING", display_lines[0])
 
     def test_watch_line_for_payload_appends_live_progress_summary(self) -> None:
         payload = {
@@ -2101,6 +2614,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ):
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=["-m", "gpt-5.2"],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -2113,6 +2627,69 @@ class CodexJsonProgressTests(unittest.TestCase):
             rendered = output_path.read_text(encoding="utf-8")
             self.assertIn("**Summary**: Found two regressions.", rendered)
             self.assertNotIn("Subagent shutdown notifications received", rendered)
+
+    def test_run_codex_exec_skips_artifact_normalization_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            output_path = Path(tmp) / "explain.md"
+            output_path.write_text("Some prose.\n", encoding="utf-8")
+
+            class _DummyProgress:
+                def __init__(self, root: Path) -> None:
+                    self.meta = {
+                        "logs": {"codex_events": str(root / "codex.events.jsonl")},
+                        "live_progress": {},
+                    }
+
+                def record_cmd(self, cmd: list[str]) -> None:
+                    self.last_cmd = list(cmd)
+
+                def flush(self) -> None:
+                    return None
+
+            progress = _DummyProgress(Path(tmp))
+            out = mock.Mock()
+            out.ui_enabled = True
+
+            def fake_run_logged_cmd(*args: object, **kwargs: object) -> None:
+                output_path.write_text("Some prose.\n", encoding="utf-8")
+
+            out.run_logged_cmd.side_effect = fake_run_logged_cmd
+
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                    normalize_artifact=False,
+                )
+            normalize.assert_not_called()
+
+            # The review pipeline keeps the default normalization behavior.
+            with mock.patch.object(cure_llm, "active_output", return_value=out), mock.patch.object(
+                cure_llm, "find_codex_resume_info", return_value=None
+            ), mock.patch.object(cure_llm, "normalize_markdown_artifact") as normalize:
+                rf.run_codex_exec(
+                    repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
+                    codex_flags=[],
+                    codex_config_overrides=[],
+                    output_path=output_path,
+                    prompt="hello",
+                    env={},
+                    stream=True,
+                    progress=progress,
+                )
+            normalize.assert_called_once()
 
     def test_run_codex_exec_json_mode_uses_raw_review_text_for_artifact_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2178,6 +2755,7 @@ class CodexJsonProgressTests(unittest.TestCase):
             ):
                 rf.run_codex_exec(
                     repo_dir=repo_dir,
+                    session_dir=repo_dir.parent,
                     codex_flags=["-m", "gpt-5.2"],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -2194,6 +2772,55 @@ class CodexJsonProgressTests(unittest.TestCase):
             assert verdicts is not None
             self.assertEqual(verdicts.business, "APPROVE")
             self.assertEqual(verdicts.technical, "REQUEST CHANGES")
+
+    def test_run_logged_cmd_routes_codex_stderr_to_dashboard_tail_only_in_ui_mode(self) -> None:
+        for ui_enabled in (True, False):
+            with self.subTest(ui_enabled=ui_enabled), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                meta_path = root / "meta.json"
+                meta_path.write_text("{}", encoding="utf-8")
+                logs_dir = root / "logs"
+                events_path = logs_dir / "codex.events.jsonl"
+                display_path = logs_dir / "codex.display.log"
+                terminal = StringIO()
+                output = cure_output.ReviewflowOutput(
+                    ui_enabled=ui_enabled,
+                    no_stream=False,
+                    stderr=terminal,
+                    meta_path=meta_path,
+                    logs_dir=logs_dir,
+                    verbosity=rui.Verbosity.normal,
+                )
+                try:
+                    def fake_run_cmd(cmd: list[str], **kwargs: object) -> mock.Mock:
+                        stderr_sink = kwargs["stderr_stream"]
+                        assert stderr_sink is not None
+                        stderr_sink.write("WARNING: codex diagnostic\n")
+                        stderr_sink.flush()
+                        return mock.Mock(stdout="", stderr="", exit_code=0, duration_seconds=0.0)
+
+                    with mock.patch.object(cure_output, "run_cmd", side_effect=fake_run_cmd):
+                        output.run_logged_cmd(
+                            ["codex", "exec", "--json", "hello"],
+                            kind="codex",
+                            cwd=root,
+                            env={},
+                            check=True,
+                            stream_requested=True,
+                            codex_json_events_path=events_path,
+                            codex_display_log_path=display_path,
+                        )
+                finally:
+                    output.stop()
+
+                self.assertIn("WARNING: codex diagnostic", display_path.read_text(encoding="utf-8"))
+                dashboard_lines = output.tails["codex"].tail(20)
+                if ui_enabled:
+                    self.assertIn("WARNING: codex diagnostic", dashboard_lines)
+                    self.assertNotIn("WARNING: codex diagnostic", terminal.getvalue())
+                else:
+                    self.assertNotIn("WARNING: codex diagnostic", dashboard_lines)
+                    self.assertIn("WARNING: codex diagnostic", terminal.getvalue())
 
     def test_run_logged_cmd_persists_codex_events_even_when_ui_off_and_no_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4189,8 +4816,8 @@ class InstallAndDoctorTests(unittest.TestCase):
                 )
         self.assertIn("agent selection still blocked", str(ctx.exception))
 
-    def test_setup_flow_noninteractive_fails_when_saved_default_is_not_local_cli_provider(self) -> None:
-        root = ROOT / ".tmp_test_cure_setup_nonlocal_saved_default"
+    def test_setup_flow_noninteractive_rejects_removed_http_default(self) -> None:
+        root = ROOT / ".tmp_test_cure_setup_removed_http_default"
         config_path = root / "config" / "cure.toml"
         runtime = rf.ReviewflowRuntime(
             config_path=config_path,
@@ -4236,7 +4863,7 @@ class InstallAndDoctorTests(unittest.TestCase):
             ):
                 with self.assertRaises(rf.ReviewflowError) as ctx:
                     rf.setup_flow(argparse.Namespace(force=False, agent=None, cmd="setup"), runtime=runtime)
-            self.assertIn("saved default preset `router_default` does not resolve", str(ctx.exception))
+            self.assertIn("were removed from CURe", str(ctx.exception))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

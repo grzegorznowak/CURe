@@ -1924,14 +1924,33 @@ class HistoricalReviewsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            s4 = root / "s4"
+            s4.mkdir()
+            (s4 / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s4",
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 1,
+                        "completed_at": "2026-03-06T01:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
             sessions = rf.scan_completed_sessions_for_pr(sandbox_root=root, pr=pr)
-            self.assertEqual([s.session_id for s in sessions], ["s2", "s1"])
-            self.assertEqual(sessions[0].verdicts, _verdicts("APPROVE", "REQUEST CHANGES"))
-            self.assertEqual(sessions[1].verdicts, _verdicts("REJECT"))
-            self.assertEqual(sessions[0].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
-            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.2/medium")
-            self.assertEqual(sessions[0].review_head_sha, "2222222222222222222222222222222222222222")
-            self.assertEqual(sessions[1].review_head_sha, "1111111111111111111111111111111111111111")
+            self.assertEqual([s.session_id for s in sessions], ["s4", "s2", "s1"])
+            self.assertIsNone(sessions[0].review_md_path)
+            self.assertIsNone(sessions[0].verdicts)
+            self.assertEqual(sessions[1].verdicts, _verdicts("APPROVE", "REQUEST CHANGES"))
+            self.assertEqual(sessions[2].verdicts, _verdicts("REJECT"))
+            self.assertEqual(sessions[1].codex_summary, "llm=codex-cli/gpt-5.3-codex/high")
+            self.assertEqual(sessions[2].codex_summary, "llm=codex-cli/gpt-5.2/medium")
+            self.assertEqual(sessions[1].review_head_sha, "2222222222222222222222222222222222222222")
+            self.assertEqual(sessions[2].review_head_sha, "1111111111111111111111111111111111111111")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -2219,6 +2238,40 @@ class InteractiveFlowTests(unittest.TestCase):
         def isatty(self) -> bool:
             return True
 
+    def _stage_interactive_credentials(
+        self, work_dir: Path
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        auth_root = work_dir / ".auth-test"
+        gh_config = auth_root / "gh_config"
+        jira_config = auth_root / "jira_config" / ".config.yml"
+        netrc = auth_root / "netrc" / ".netrc"
+        rf_jira = auth_root / "rf-jira"
+        gh_config.mkdir(parents=True)
+        (gh_config / "hosts.yml").write_text("oauth_token: secret\n", encoding="utf-8")
+        jira_config.parent.mkdir()
+        jira_config.write_text("token: secret\n", encoding="utf-8")
+        netrc.parent.mkdir()
+        netrc.write_text("machine example.test password secret\n", encoding="utf-8")
+        rf_jira.write_text("#!/bin/sh\n", encoding="utf-8")
+        staged_paths = {
+            "auth_staging_dir": str(auth_root),
+            "rf_jira": str(rf_jira),
+            "gh_config_dir": str(gh_config),
+            "jira_config_file": str(jira_config),
+            "netrc": str(netrc),
+        }
+        env = {
+            "GH_CONFIG_DIR": str(gh_config),
+            "JIRA_CONFIG_FILE": str(jira_config),
+            "NETRC": str(netrc),
+        }
+        return env, staged_paths
+
+    def assert_staged_credentials_absent(self, staged_paths: dict[str, str]) -> None:
+        for key, raw_path in staged_paths.items():
+            with self.subTest(staged_path=key):
+                self.assertFalse(Path(raw_path).exists())
+
     def test_interactive_session_resume_is_poisoned_when_log_contains_session_dir_message(self) -> None:
         root = ROOT / ".tmp_test_interactive_poisoned_detect"
         fake_home = ROOT / ".tmp_test_interactive_poisoned_detect_home"
@@ -2301,7 +2354,7 @@ class InteractiveFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(fake_home, ignore_errors=True)
 
-    def test_interactive_flow_runs_selected_resume_command(self) -> None:
+    def test_interactive_flow_success_cleans_complete_staging_manifest(self) -> None:
         root = ROOT / ".tmp_test_interactive_flow_root"
         cfg = ROOT / ".tmp_test_interactive_flow_cfg.json"
         try:
@@ -2353,6 +2406,11 @@ class InteractiveFlowTests(unittest.TestCase):
             )
             stdin = self._FakeTty("1\n")
             stderr = self._FakeTty()
+            staged_env, staged_paths = self._stage_interactive_credentials(s1 / "work")
+            runtime_env = {
+                "CHUNKHOUND_EMBEDDING__API_KEY": "test-key",  # pragma: allowlist secret
+                **staged_env,
+            }
 
             with (
                 mock.patch.object(rf, "ensure_review_config"),
@@ -2373,7 +2431,11 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
+                    return_value={
+                        "env": runtime_env,
+                        "metadata": {"provider": "codex"},
+                        "staged_paths": staged_paths,
+                    },
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
@@ -2387,6 +2449,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertEqual(runner.call_args.kwargs["env"]["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")  # pragma: allowlist secret
             self.assertIn("llm=codex-cli/gpt-5.3-codex/high", stderr.getvalue())
             self.assertIn(str(s1 / "review.md"), stderr.getvalue())
+            self.assert_staged_credentials_absent(staged_paths)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -2817,7 +2880,7 @@ class InteractiveFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_interactive_flow_errors_for_poisoned_resume(self) -> None:
+    def test_interactive_flow_poisoned_resume_cleans_complete_staging_manifest(self) -> None:
         root = ROOT / ".tmp_test_interactive_poisoned_error_root"
         cfg = ROOT / ".tmp_test_interactive_poisoned_error_cfg.json"
         fake_home = ROOT / ".tmp_test_interactive_poisoned_error_home"
@@ -2906,6 +2969,11 @@ class InteractiveFlowTests(unittest.TestCase):
             )
             stdin = self._FakeTty("1\n")
             stderr = self._FakeTty()
+            staged_env, staged_paths = self._stage_interactive_credentials(s1 / "work")
+            runtime_env = {
+                "CHUNKHOUND_EMBEDDING__API_KEY": "test-key",  # pragma: allowlist secret
+                **staged_env,
+            }
 
             with (
                 mock.patch.object(rf, "ensure_review_config"),
@@ -2927,7 +2995,11 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
+                    return_value={
+                        "env": runtime_env,
+                        "metadata": {"provider": "codex"},
+                        "staged_paths": staged_paths,
+                    },
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -2938,6 +3010,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertIn(str(review_md), str(ctx.exception))
             resume_runner.assert_not_called()
             self.assertNotIn("Continuing", stderr.getvalue())
+            self.assert_staged_credentials_absent(staged_paths)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(fake_home, ignore_errors=True)
@@ -3087,6 +3160,7 @@ class FollowupAndResumeAuthPolicyTests(unittest.TestCase):
         work_dir.mkdir(parents=True, exist_ok=True)
         chunkhound_dir.mkdir(parents=True, exist_ok=True)
         (chunkhound_dir / ".chunkhound.db").write_text("db", encoding="utf-8")
+        (session_dir / "review.md").write_text("# Review\n", encoding="utf-8")
         (session_dir / "meta.json").write_text(
             json.dumps(
                 {
@@ -3388,9 +3462,26 @@ class ResumeTargetResolutionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            newest = root / "s_newest_missing_md"
+            newest.mkdir()
+            (newest / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": newest.name,
+                        "status": "done",
+                        "host": "github.com",
+                        "owner": "acme",
+                        "repo": "repo",
+                        "number": 4,
+                        "completed_at": "2026-03-04T01:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
             pr_url = "github.com/acme/repo/pull/4"
             sid, action = rf.resolve_resume_target(pr_url, sandbox_root=root, from_phase="auto")
-            self.assertEqual(sid, "s_done")
+            self.assertEqual(sid, "s_newest_missing_md")
             self.assertEqual(action, "followup")
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -4432,22 +4523,36 @@ class CleanFlowTests(unittest.TestCase):
 
 class RfJiraTests(unittest.TestCase):
     def test_write_rf_jira_creates_executable_helper(self) -> None:
-        repo = ROOT / ".tmp_test_repo_rf_jira"
+        dst = ROOT / ".tmp_test_rf_jira_dst"
         try:
-            shutil.rmtree(repo, ignore_errors=True)
-            repo.mkdir(parents=True, exist_ok=True)
-            path = rf.write_rf_jira(repo_dir=repo)
+            shutil.rmtree(dst, ignore_errors=True)
+            dst.mkdir(parents=True, exist_ok=True)
+            path = rf.write_rf_jira(dst_dir=dst)
             self.assertTrue(path.is_file())
             self.assertTrue(os.access(path, os.X_OK))
             text = path.read_text(encoding="utf-8")
             self.assertIn("JIRA_CONFIG_FILE", text)
             self.assertIn("NETRC", text)
             self.assertIn("pwd.getpwuid", text)
+            self.assertEqual(path.parent, dst)
         finally:
-            shutil.rmtree(repo, ignore_errors=True)
+            shutil.rmtree(dst, ignore_errors=True)
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_aggregate_wrapper_exports_all_ci_required_test_classes(self) -> None:
+        from test_reviewflow_unittest import (
+            ChunkhoundCacheBuildLiveProgressTests,
+            DarwinProcessIdentityTests,
+            SessionMetaMutationTests,
+            UtilityModelProvenanceTests,
+        )
+
+        self.assertTrue(ChunkhoundCacheBuildLiveProgressTests)
+        self.assertTrue(DarwinProcessIdentityTests)
+        self.assertTrue(SessionMetaMutationTests)
+        self.assertTrue(UtilityModelProvenanceTests)
+
     def _make_paths(self, root: Path, *, suffix: str) -> tuple[rf.ReviewflowPaths, Path]:
         cfg = ROOT / f".tmp_test_workflow_contract_{suffix}.json"
         cfg.write_text("{}", encoding="utf-8")
@@ -4558,7 +4663,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["kind"], "cure.commands")
         names = [entry["name"] for entry in payload["commands"]]
-        self.assertEqual(names, ["pr", "resume", "clean", "status"])
+        self.assertEqual(names, ["pr", "resume", "clean", "status", "explain"])
         pr_entry = next(entry for entry in payload["commands"] if entry["name"] == "pr")
         self.assertEqual(pr_entry["recommended_invocation"], "cure pr <PR_URL> --if-reviewed new")
         self.assertIn("variants", pr_entry)
@@ -4575,7 +4680,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cure clean closed --json", rendered)
         self.assertIn("cure status <session_id|PR_URL> --json", rendered)
         self.assertNotIn("reviewflow", rendered)
-        self.assertNotIn("interactive", rendered)
+        self.assertNotIn("\ninteractive:", rendered)
+        self.assertIn(
+            "Same runtime-policy permission model as interactive sessions; "
+            "effective sandbox/approval/bypass announced at run start.",
+            rendered,
+        )
 
     def test_reviewflow_reexports_active_extracted_module_surfaces(self) -> None:
         self.assertIs(rf.setup_flow, cure_commands.setup_flow)
@@ -4587,6 +4697,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIs(rf.pr_flow, cure_commands.pr_flow)
         self.assertIs(rf.resume_flow, cure_commands.resume_flow)
         self.assertIs(rf.followup_flow, cure_commands.followup_flow)
+        self.assertIs(rf.explain_flow, cure_commands.explain_flow)
         self.assertIs(rf.interactive_flow, cure_commands.interactive_flow)
         self.assertIs(rf.clean_flow, cure_commands.clean_flow)
         self.assertFalse(hasattr(rf, "jira_smoke_flow"))
@@ -5123,3 +5234,433 @@ class WorkflowContractTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
+
+
+class SessionMetaMutationTests(unittest.TestCase):
+    """Lock-and-merge protocol for ALL session meta writers (PR #37 round 3).
+
+    A parallel explain run appends an `explains[]` entry while the writer under
+    test holds a stale working copy; every writer must preserve that entry by
+    locking the sidecar and merging onto a fresh reload.
+    """
+
+    def _concurrent_explain_append(self, meta_path: Path) -> None:
+        # The REAL explain protocol: lock the sidecar, reload fresh, append.
+        with rf.file_lock(rf._session_meta_lock_path(meta_path), quiet=True):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta.setdefault("explains", []).append({"output_path": "e2.md"})
+            rf.write_redacted_json(meta_path, meta)
+
+    def _seed_session_meta(self, root: Path) -> Path:
+        meta_path = root / "sessions" / "s1" / "meta.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        rf.write_redacted_json(
+            meta_path,
+            {
+                "session_id": "s1",
+                "status": "done",
+                "phase": "review",
+                "explains": [{"output_path": "e1.md"}],
+            },
+        )
+        return meta_path
+
+    def test_session_progress_deep_merges_concurrent_phase_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            seeded = json.loads(meta_path.read_text(encoding="utf-8"))
+            seeded["phases"] = {}
+            rf.write_redacted_json(meta_path, seeded)
+            first = rf.SessionProgress(meta_path, quiet=True)
+            second = rf.SessionProgress(meta_path, quiet=True)
+            first.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            second.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            first.meta["phases"]["review"] = {"started_at": "first"}
+            second.meta["phases"]["review"] = {"status": "running"}
+            first.flush()
+            second.flush()
+            self.assertEqual(
+                json.loads(meta_path.read_text(encoding="utf-8"))["phases"],
+                {"review": {"started_at": "first", "status": "running"}},
+            )
+
+    def test_session_progress_deep_merges_baseline_absent_top_level_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            first = rf.SessionProgress(meta_path, quiet=True)
+            second = rf.SessionProgress(meta_path, quiet=True)
+            first.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            second.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            first.meta["phases"] = {"review": {"started_at": "first"}}
+            second.meta["phases"] = {"codex": {"started_at": "second"}}
+            first.flush()
+            second.flush()
+            self.assertEqual(
+                json.loads(meta_path.read_text(encoding="utf-8"))["phases"],
+                {
+                    "review": {"started_at": "first"},
+                    "codex": {"started_at": "second"},
+                },
+            )
+
+    def test_interactive_meta_updates_preserve_concurrent_nested_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["paths"] = {"repo_dir": "/repo", "work_dir": "/old-work"}
+            baseline["llm"] = {"provider": "codex"}
+            rf.write_redacted_json(meta_path, baseline)
+            meta_updates = {
+                "paths": {**baseline["paths"], "work_dir": "/new-work"},
+                "llm": {**baseline["llm"], "model": "gpt-5"},
+            }
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["paths"].__setitem__("concurrent_cache", "/cache")
+                    or fresh["llm"].__setitem__(
+                        "resume", {"session_id": "concurrent-session"}
+                    )
+                    or True
+                ),
+            )
+            rf._persist_session_meta_mapping_updates(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                updates=meta_updates,
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["paths"]["work_dir"], "/new-work")
+            self.assertEqual(persisted["paths"]["concurrent_cache"], "/cache")
+            self.assertEqual(persisted["llm"]["model"], "gpt-5")
+            self.assertEqual(
+                persisted["llm"]["resume"], {"session_id": "concurrent-session"}
+            )
+
+    def test_followup_early_paths_persist_preserves_concurrent_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["paths"] = {"repo_dir": "/repo", "work_dir": "/old-work"}
+            rf.write_redacted_json(meta_path, baseline)
+            meta_paths = {**baseline["paths"], "work_dir": "/new-work"}
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["paths"].__setitem__("concurrent_cache", "/cache") or True
+                ),
+            )
+            rf._persist_session_meta_mapping_updates(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                updates={"paths": meta_paths},
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["paths"],
+                {
+                    "repo_dir": "/repo",
+                    "work_dir": "/new-work",
+                    "concurrent_cache": "/cache",
+                },
+            )
+
+    def test_followup_persistence_deep_merges_concurrent_nested_members(self) -> None:
+        variants = (
+            ("llm", "usage", {"input_tokens": 10}, {"output_tokens": 3}),
+            ("codex", "capabilities", {"search": True}, {"shell": True}),
+        )
+        for field, nested_key, concurrent_members, working_members in variants:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                meta_path = self._seed_session_meta(Path(tmp))
+                baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+                baseline[field] = {"resume": {"session_id": "old"}}
+                rf.write_redacted_json(meta_path, baseline)
+                working = json.loads(json.dumps(baseline))
+                working[field][nested_key] = working_members
+
+                rf.mutate_session_meta(
+                    meta_path,
+                    quiet=True,
+                    fn=lambda fresh: (
+                        fresh[field].__setitem__(nested_key, concurrent_members) or True
+                    ),
+                )
+                rf._persist_followup_meta(
+                    meta_path,
+                    quiet=True,
+                    baseline=baseline,
+                    working=working,
+                )
+
+                persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    persisted[field][nested_key],
+                    {**concurrent_members, **working_members},
+                )
+
+    def test_followup_persistence_deep_merges_baseline_absent_top_level_mappings(self) -> None:
+        variants = (
+            (
+                "llm",
+                {"usage": {"input_tokens": 10}},
+                {"usage": {"output_tokens": 3}},
+                {"usage": {"input_tokens": 10, "output_tokens": 3}},
+            ),
+            (
+                "codex",
+                {"capabilities": {"search": True}},
+                {"capabilities": {"shell": True}},
+                {"capabilities": {"search": True, "shell": True}},
+            ),
+        )
+        for field, concurrent_value, working_value, expected in variants:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                meta_path = self._seed_session_meta(Path(tmp))
+                baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+                working = json.loads(json.dumps(baseline))
+                working[field] = working_value
+
+                rf.mutate_session_meta(
+                    meta_path,
+                    quiet=True,
+                    fn=lambda fresh: (fresh.__setitem__(field, concurrent_value) or True),
+                )
+                rf._persist_followup_meta(
+                    meta_path,
+                    quiet=True,
+                    baseline=baseline,
+                    working=working,
+                )
+
+                persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+                self.assertEqual(persisted[field], expected)
+
+    def test_followup_persistence_writer_wins_same_added_nested_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["llm"] = {"resume": {"session_id": "old"}}
+            rf.write_redacted_json(meta_path, baseline)
+            working = json.loads(json.dumps(baseline))
+            working["llm"]["usage"] = {"input_tokens": 20}
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["llm"].__setitem__("usage", {"input_tokens": 10}) or True
+                ),
+            )
+            rf._persist_followup_meta(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                working=working,
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["llm"]["usage"], {"input_tokens": 20})
+
+    def test_session_progress_completion_requires_persistence(self) -> None:
+        for method, args in (("done", ()), ("error", ({"message": "boom"},))):
+            for meta_state in ("missing", "corrupt"):
+                with (
+                    self.subTest(method=method, meta_state=meta_state),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
+                    meta_path = Path(tmp) / "meta.json"
+                    rf.write_redacted_json(meta_path, {"status": "running"})
+                    progress = rf.SessionProgress(meta_path, quiet=True)
+                    progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if meta_state == "missing":
+                        meta_path.unlink()
+                    else:
+                        meta_path.write_text("{not-json", encoding="utf-8")
+                    with self.assertRaisesRegex(rf.ReviewflowError, "persist"):
+                        getattr(progress, method)(*args)
+
+    def test_session_progress_full_flush_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._concurrent_explain_append(meta_path)
+            progress.set_phase("followup_review")
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [entry["output_path"] for entry in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["status"], "done")
+            self.assertEqual(on_disk["phase"], "followup_review")
+
+    def test_session_progress_drop_removes_keys_on_full_flush(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = Path(tmp) / "meta.json"
+            rf.write_redacted_json(
+                meta_path,
+                {
+                    "status": "error",
+                    "phase": "init",
+                    "completed_at": "2026-01-01T00:00:00+00:00",
+                    "error": {"kind": "boom"},
+                },
+            )
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            progress.drop("completed_at")
+            progress.drop("error")
+            progress.flush()
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertNotIn("completed_at", on_disk)
+            self.assertNotIn("error", on_disk)
+            self.assertEqual(on_disk["status"], "error")
+            progress.done()
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "done")
+            self.assertIn("completed_at", on_disk)
+            self.assertNotIn("error", on_disk)
+
+    def test_mutate_session_meta_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            self._concurrent_explain_append(meta_path)
+            entry = {"started_at": "2026-01-01T00:00:00+00:00", "output_path": "f1.md"}
+            merged = rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (fresh.setdefault("followups", []).append(entry) or True),
+            )
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["followups"], [entry])
+            self.assertEqual(on_disk, merged)
+
+    def test_mark_resume_noop_completed_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            self._concurrent_explain_append(meta_path)
+            merged = rf._mark_resume_noop_completed(
+                meta_path=meta_path,
+                resumed_at="2026-01-02T00:00:00+00:00",
+            )
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(on_disk["status"], "done")
+            self.assertEqual(on_disk["resumed_at"], "2026-01-02T00:00:00+00:00")
+            self.assertIn("completed_at", on_disk)
+            self.assertEqual(merged, on_disk)
+
+    def test_resolve_session_verdicts_persist_preserves_concurrent_explains_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "sessions" / "s1"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            meta_path = session_dir / "meta.json"
+            review_md_path = session_dir / "review.md"
+            review_md_path.write_text(
+                "# Review\n\n**Decision:** APPROVE\n",
+                encoding="utf-8",
+            )
+            rf.write_redacted_json(
+                meta_path,
+                {
+                    "session_id": "s1",
+                    "status": "done",
+                    "decision": "approve",
+                    "explains": [{"output_path": "e1.md"}],
+                },
+            )
+            stale = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._concurrent_explain_append(meta_path)
+            verdicts = rf._resolve_session_verdicts(
+                meta_path=meta_path,
+                meta=stale,
+                review_md_path=review_md_path,
+            )
+            self.assertIsNotNone(verdicts)
+            assert verdicts is not None
+            self.assertEqual(verdicts.business, "APPROVE")
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["output_path"] for item in on_disk["explains"]],
+                ["e1.md", "e2.md"],
+            )
+            self.assertEqual(
+                on_disk["verdicts"],
+                {"business": "APPROVE", "technical": "APPROVE"},
+            )
+
+    def test_mutate_session_meta_rolls_back_when_callback_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+
+            def _boom(fresh: dict[str, Any]) -> bool:
+                fresh["status"] = "hosed"
+                raise RuntimeError("boom")
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                rf.mutate_session_meta(meta_path, fn=_boom)
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "done")
+            self.assertTrue(rf._session_meta_lock_path(meta_path).is_file())
+
+    def test_mutate_session_meta_rejects_missing_and_corrupt_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing = root / "sessions" / "missing" / "meta.json"
+            with self.assertRaises(rf.ReviewflowError):
+                rf.mutate_session_meta(missing, fn=lambda fresh: True)
+            self.assertFalse(missing.parent.exists())
+
+            corrupt = root / "sessions" / "bad" / "meta.json"
+            corrupt.parent.mkdir(parents=True)
+            corrupt.write_bytes(b"{bad json")
+            with self.assertRaises(rf.ReviewflowError):
+                rf.mutate_session_meta(corrupt, fn=lambda fresh: True)
+            self.assertEqual(corrupt.read_bytes(), b"{bad json")
+
+    def test_session_progress_does_not_resurrect_deleted_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            shutil.rmtree(meta_path.parent)
+            progress.set_phase("gone")
+            self.assertFalse(meta_path.parent.exists())
+
+    def test_merge_progress_overlays_only_its_changes_and_deletions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            stale = json.loads(meta_path.read_text(encoding="utf-8"))
+            stale["completed_at"] = "old"
+            rf.write_redacted_json(meta_path, stale)
+            explain = rf.SessionProgress(meta_path, quiet=True, merge_under_lock=True)
+            explain.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            resume = rf.SessionProgress(meta_path, quiet=True)
+            resume.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            resume.meta["status"] = "running"
+            resume.drop("completed_at")
+            resume.flush()
+            explain.set_phase("explain")
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["status"], "running")
+            self.assertNotIn("completed_at", on_disk)
+            explain.drop("status")
+            explain.flush()
+            self.assertNotIn("status", json.loads(meta_path.read_text(encoding="utf-8")))

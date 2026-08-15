@@ -41,6 +41,7 @@ def _synth_stage_kwargs(
     return {
         "progress": progress,
         "repo_dir": root / "repo",
+        "session_dir": root,
         "work_dir": root / "work",
         "session_id": "session-boundary",
         "review_md_path": root / "review.md",
@@ -134,6 +135,7 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
                 orientation_output_path = output_path
                 codex_result = cure_llm.run_codex_exec(
                     repo_dir=Path(str(kwargs["repo_dir"])),
+                    session_dir=Path(str(kwargs["session_dir"])),
                     codex_flags=[],
                     codex_config_overrides=[],
                     output_path=output_path,
@@ -248,7 +250,7 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
         return root, review_calls
 
     success_root, success_review_calls = run_integrated_orientation_flow("success")
-    success_session = next((success_root / "sandboxes").iterdir())
+    success_session = next(p for p in (success_root / "sandboxes").iterdir() if p.is_dir())
     assert success_review_calls == ["pr_context_draft.md", "pr_context_reconciled.md"]
     assert not list(success_session.glob(".pr-context-orientation-runtime-*"))
     assert sentinel not in (success_session / "meta.json").read_text(encoding="utf-8")
@@ -325,7 +327,7 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
                 "meta": {},
             },
         )
-        session_dir = next((abort_root / "sandboxes").iterdir())
+        session_dir = next(p for p in (abort_root / "sandboxes").iterdir() if p.is_dir())
         work_dir = session_dir / "work"
         meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
         assert abort_calls == ["review.plan.md"]
@@ -442,7 +444,7 @@ def test_public_fallback_pagination_failure_degrades_context_free_without_partia
             extra_cli_args=["--pr-context"],
             gh_api_list_side_effect=gh_list,
         )
-        session_dir = next((root / "sandboxes").iterdir())
+        session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
         meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
         assert calls == ["review.md"]
         assert meta["pr_context"]["outcome"] == "degraded"

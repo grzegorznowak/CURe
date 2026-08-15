@@ -934,7 +934,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
                     run_cmd.call_args.kwargs["owned_role"], "chunkhound-helper"
                 )
 
-    def test_codex_threads_review_provider_ownership_and_http_stays_untagged(self) -> None:
+    def test_codex_threads_review_provider_ownership_and_http_is_removed(self) -> None:
         registry = mock.Mock(spec=run_module.OwnedProcessRegistry)
         progress = mock.Mock()
         codex_result = cure_llm.CodexRunResult(resume=None)
@@ -948,6 +948,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
         ):
             cure_llm.run_llm_exec(
                 repo_dir=Path("/repo"),
+                session_dir=Path("/session"),
                 resolved={"provider": "codex"},
                 resolution_meta={},
                 output_path=Path("/out.md"),
@@ -961,24 +962,23 @@ class A13TransportOwnershipTests(unittest.TestCase):
             reviewflow.run_codex_exec.call_args.kwargs["owned_processes"], registry
         )
 
-        reviewflow.run_http_response_exec.return_value = cure_llm.LlmRunResult(
-            resume=None
-        )
+        # HTTP providers (openai/openrouter) were removed from CURe: the
+        # dispatch now raises a clear ReviewflowError instead of delegating.
         with mock.patch.object(cure_llm, "_reviewflow", return_value=reviewflow):
-            cure_llm.run_llm_exec(
-                repo_dir=Path("/repo"),
-                resolved={"provider": "openai"},
-                resolution_meta={},
-                output_path=Path("/out.md"),
-                prompt="review",
-                env={},
-                stream=False,
-                progress=progress,
-                owned_processes=registry,
-            )
-        self.assertNotIn(
-            "owned_processes", reviewflow.run_http_response_exec.call_args.kwargs
-        )
+            with self.assertRaisesRegex(rf.ReviewflowError, "removed"):
+                cure_llm.run_llm_exec(
+                    repo_dir=Path("/repo"),
+                    session_dir=Path("/session"),
+                    resolved={"provider": "openai"},
+                    resolution_meta={},
+                    output_path=Path("/out.md"),
+                    prompt="review",
+                    env={},
+                    stream=False,
+                    progress=progress,
+                    owned_processes=registry,
+                )
+        reviewflow.run_http_response_exec.assert_not_called()
 
     def test_helper_preflight_uses_helper_role_and_unregisters_only_after_drain(self) -> None:
         registry = mock.Mock(spec=run_module.OwnedProcessRegistry)
@@ -1572,6 +1572,7 @@ class A13TransportOwnershipTests(unittest.TestCase):
             ) as run_cmd:
                 cure_llm.run_codex_exec(
                     repo_dir=root,
+                    session_dir=root,
                     codex_flags=[],
                     codex_config_overrides=None,
                     output_path=root / "review.md",
@@ -2568,7 +2569,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 multipass_enabled=False,
                 llm_side_effect=llm_side_effect,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(calls, ["review.md"])
             self.assertEqual(meta["status"], "done")
@@ -3120,7 +3121,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 llm_side_effect=llm,
                 flow_patch=flow_patch,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
 
         self.assertEqual(maximum_overlap, client_count)
@@ -3212,7 +3213,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"dispatched model work was not replayed\."
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             persisted_meta = (session_dir / "meta.json").read_text(encoding="utf-8")
 
         self.assertNotIn(seeded_secret, persisted_meta)
@@ -4390,7 +4391,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expected_exception=primary_failure,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads(
                 (session_dir / "meta.json").read_text(encoding="utf-8")
             )
@@ -4470,7 +4471,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 flow_patch=flow_patch,
                 expected_exception=owned_failure,
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             meta = json.loads(
                 (session_dir / "meta.json").read_text(encoding="utf-8")
             )
@@ -4709,7 +4710,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"\(stage=expected_session; category=expected_session\)\."
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             persisted_meta = (session_dir / "meta.json").read_text(encoding="utf-8")
 
         self.assertNotIn(
@@ -5723,7 +5724,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 )
             else:
                 self.assertNotIn("search", tools)
-        session_dir = next((root / "sandboxes").iterdir())
+        session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
         persisted_meta = json.loads(
             (session_dir / "meta.json").read_text(encoding="utf-8")
         )
@@ -5865,6 +5866,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                 with self.subTest(stage=stage):
                     meta_path = root / f"{stage}.json"
                     progress = rf.SessionProgress(meta_path, quiet=True)
+                    progress.init({})
                     with self.assertRaises(rf.ReviewflowError) as caught:
                         rf._raise_chunkhound_readiness_failure(
                             progress=progress,
@@ -6047,7 +6049,7 @@ class DaemonAwareResearchCallFlowTests(unittest.TestCase):
                     r"Evidence written to .*chunkhound_readiness_failure\.json"
                 ),
             )
-            session_dir = next((root / "sandboxes").iterdir())
+            session_dir = next(p for p in (root / "sandboxes").iterdir() if p.is_dir())
             evidence_path = session_dir / "chunkhound_readiness_failure.json"
             self.assertTrue(evidence_path.is_file())
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))

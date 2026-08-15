@@ -238,7 +238,7 @@ def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str]
     ensure(payload["schema_version"] == 2, "commands schema_version mismatch")
     ensure(payload["kind"] == "cure.commands", "commands kind mismatch")
     names = [entry["name"] for entry in payload["commands"]]
-    ensure(names == ["pr", "resume", "clean", "status"], "commands order mismatch")
+    ensure(names == ["pr", "resume", "clean", "status", "explain"], "commands order mismatch")
     ensure("interactive" not in names, "interactive should be absent from curated catalog")
     for entry in payload["commands"]:
         for key in (
@@ -252,8 +252,15 @@ def test_commands(primary_bin: Path, alias_bin: Path | None, env: dict[str, str]
             "recommended_invocation",
         ):
             ensure(key in entry, f"missing commands key {key!r}")
+    explain_safety = (
+        "Same runtime-policy permission model as interactive sessions; "
+        "effective sandbox/approval/bypass announced at run start."
+    )
+    explain = next(entry for entry in payload["commands"] if entry["name"] == "explain")
+    ensure(explain["safety"] == explain_safety, "explain JSON safety copy mismatch")
 
     human = run_cmd(cli_cmd(primary_bin, sandbox_root, "commands"), env=env)
+    ensure(explain_safety in human.stdout, "commands human output missing explain safety copy")
     ensure("cure clean closed --json" in human.stdout, "commands human output missing clean")
     ensure("cure status <session_id|PR_URL> --json" in human.stdout, "commands human output missing status")
     ensure("reviewflow" not in human.stdout, "commands human output should not advertise deprecated alias")

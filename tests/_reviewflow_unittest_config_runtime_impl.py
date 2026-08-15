@@ -1272,8 +1272,8 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'default_preset = "fast_router"',
                         "",
                         "[llm_presets.fast_router]",
-                        'preset = "openrouter-responses"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        'preset = "codex-cli"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "high"',
                         "max_output_tokens = 9000",
@@ -1293,8 +1293,9 @@ class LlmPresetConfigTests(unittest.TestCase):
             llm_cfg, meta = rf.load_reviewflow_llm_config(config_path=cfg)
             self.assertTrue(meta.get("loaded"))
             self.assertEqual(llm_cfg["default_preset"], "fast_router")
-            self.assertEqual(llm_cfg["presets"]["fast_router"]["preset"], "openrouter-responses")
-            self.assertEqual(llm_cfg["presets"]["fast_router"]["provider"], "openrouter")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["preset"], "codex-cli")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["provider"], "codex")
+            self.assertEqual(llm_cfg["presets"]["fast_router"]["transport"], "cli")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["headers"]["X-Test"], "1")
             self.assertEqual(llm_cfg["presets"]["fast_router"]["request"]["service_tier"], "flex")
             self.assertEqual(llm_cfg["presets"]["my_codex"]["transport"], "cli")
@@ -1350,7 +1351,6 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'preset = "codex-cli"',
                         'model = "preset-model"',
                         'reasoning_effort = "medium"',
-                        'request = { "temperature" = 0.1 }',
                         "",
                         "[codex]",
                         'model = "legacy-model"',
@@ -1367,10 +1367,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                 cli_model="cli-model",
                 cli_effort="xhigh",
                 cli_plan_effort=None,
-                cli_verbosity="low",
+                cli_verbosity=None,
                 cli_max_output_tokens=None,
-                cli_request_overrides={"temperature": 0.3, "top_p": 0.9},
-                cli_header_overrides={"X-Test": "2"},
+                cli_request_overrides={},
+                cli_header_overrides={},
                 deprecated_codex_model="deprecated-model",
                 deprecated_codex_effort=None,
                 deprecated_codex_plan_effort=None,
@@ -1380,15 +1380,81 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(resolved["provider"], "codex")
             self.assertEqual(resolved["model"], "cli-model")
             self.assertEqual(resolved["reasoning_effort"], "xhigh")
-            self.assertEqual(resolved["text_verbosity"], "low")
-            self.assertEqual(resolved["request"]["temperature"], 0.3)
-            self.assertEqual(resolved["request"]["top_p"], 0.9)
-            self.assertEqual(resolved["headers"]["X-Test"], "2")
             self.assertEqual(meta["resolved"]["model_source"], "cli")
             self.assertEqual(meta["resolved"]["reasoning_effort_source"], "cli")
         finally:
             base.unlink(missing_ok=True)
             rf_cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_codex_ignored_cli_controls(self) -> None:
+        base = ROOT / ".tmp_test_codex_ignored_cli.toml"
+        try:
+            base.write_text('model = "gpt-test"\n', encoding="utf-8")
+            variants = (
+                {"cli_verbosity": "low"},
+                {"cli_max_output_tokens": 100},
+                {"cli_request_overrides": {"temperature": 0.2}},
+                {"cli_header_overrides": {"X-Test": "yes"}},
+            )
+            defaults = {
+                "base_codex_config_path": base,
+                "reviewflow_config_path": None,
+                "cli_preset": None,
+                "cli_model": None,
+                "cli_effort": None,
+                "cli_plan_effort": None,
+                "cli_verbosity": None,
+                "cli_max_output_tokens": None,
+                "cli_request_overrides": {},
+                "cli_header_overrides": {},
+                "deprecated_codex_model": None,
+                "deprecated_codex_effort": None,
+                "deprecated_codex_plan_effort": None,
+            }
+            for override in variants:
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    rf.ReviewflowError, "Codex.*ignored|ignored.*Codex"
+                ):
+                    rf.resolve_llm_config(**(defaults | override))
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_codex_ignored_preset_fields(self) -> None:
+        base = ROOT / ".tmp_test_codex_ignored_preset_base.toml"
+        cfg = ROOT / ".tmp_test_codex_ignored_preset.toml"
+        try:
+            base.write_text('model = "gpt-test"\n', encoding="utf-8")
+            values = {
+                "request": '{ temperature = 0.2 }',
+                "metadata": '{ team = "review" }',
+                "headers": '{ X_Test = "yes" }',
+                "api_key": '"secret"',
+                "store": "true",
+                "include": '["usage"]',
+                "text_verbosity": '"high"',
+                "max_output_tokens": "9000",
+            }
+            for field, value in values.items():
+                with self.subTest(field=field):
+                    cfg.write_text(
+                        '[llm]\ndefault_preset = "custom"\n[llm_presets.custom]\n'
+                        f'preset = "codex-cli"\n{field} = {value}\n',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rf.ReviewflowError, field):
+                        rf.resolve_llm_config(
+                            base_codex_config_path=base,
+                            reviewflow_config_path=cfg,
+                            cli_preset=None, cli_model=None, cli_effort=None,
+                            cli_plan_effort=None, cli_verbosity=None,
+                            cli_max_output_tokens=None, cli_request_overrides={},
+                            cli_header_overrides={}, deprecated_codex_model=None,
+                            deprecated_codex_effort=None,
+                            deprecated_codex_plan_effort=None,
+                        )
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
 
     def test_resolve_llm_config_rejects_legacy_codex_plan_mode_reasoning_effort(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_invalid_plan.toml"
@@ -1646,8 +1712,10 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_cli_preset_beats_env_autodetect(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_detect_cli_priority.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_detect_cli_priority.toml"
         try:
             base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
             with mock.patch.dict(
                 os.environ,
                 {
@@ -1658,7 +1726,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             ):
                 resolved, meta = rf.resolve_llm_config(
                     base_codex_config_path=base,
-                    reviewflow_config_path=None,
+                    reviewflow_config_path=rf_cfg,
                     cli_preset="codex-cli",
                     cli_model=None,
                     cli_effort=None,
@@ -1676,6 +1744,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["selected_preset_source"], "cli")
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_resolve_llm_config_codex_cli_builtin_default_effort_is_high(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin_default.toml"
@@ -1708,6 +1777,7 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_allows_direct_builtin_preset_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_builtin.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_builtin.toml"
         try:
             base.write_text(
                 "\n".join(
@@ -1719,9 +1789,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            rf_cfg.write_text("", encoding="utf-8")
             resolved, meta = rf.resolve_llm_config(
                 base_codex_config_path=base,
-                reviewflow_config_path=None,
+                reviewflow_config_path=rf_cfg,
                 cli_preset="codex-cli",
                 cli_model="gpt-5.4",
                 cli_effort="high",
@@ -1741,6 +1812,7 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(meta["resolved_preset_id"], "codex-cli")
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_load_reviewflow_llm_config_accepts_legacy_explicit_blocks_for_compatibility(self) -> None:
         cfg = ROOT / ".tmp_test_reviewflow_llm_legacy_compat.toml"
@@ -1752,11 +1824,10 @@ class LlmPresetConfigTests(unittest.TestCase):
                         'default_preset = "legacy_router"',
                         "",
                         "[llm_presets.legacy_router]",
-                        'transport = "http"',
-                        'provider = "openrouter"',
-                        'endpoint = "responses"',
-                        'base_url = "https://openrouter.ai/api/v1"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        'transport = "cli"',
+                        'provider = "codex"',
+                        'command = "codex"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         'model = "x-ai/grok-4.1-fast"',
                         "",
                     ]
@@ -1764,7 +1835,7 @@ class LlmPresetConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             llm_cfg, meta = rf.load_reviewflow_llm_config(config_path=cfg)
-            self.assertEqual(llm_cfg["presets"]["legacy_router"]["preset"], "openrouter-responses")
+            self.assertEqual(llm_cfg["presets"]["legacy_router"]["preset"], "codex-cli")
             self.assertEqual(meta["deprecated_explicit_presets"], ["legacy_router"])
         finally:
             cfg.unlink(missing_ok=True)
@@ -1819,12 +1890,14 @@ class LlmPresetConfigTests(unittest.TestCase):
 
     def test_resolve_llm_config_rejects_removed_gemini_builtin_selection(self) -> None:
         base = ROOT / ".tmp_test_base_codex_llm_removed_gemini.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_removed_gemini.toml"
         try:
             base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
             with self.assertRaises(rf.ReviewflowError) as ctx:
                 rf.resolve_llm_config(
                     base_codex_config_path=base,
-                    reviewflow_config_path=None,
+                    reviewflow_config_path=rf_cfg,
                     cli_preset="gemini-cli",
                     cli_model=None,
                     cli_effort=None,
@@ -1841,6 +1914,114 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertIn("gemini-cli", str(ctx.exception))
         finally:
             base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_http_builtin_preset(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_builtin.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "router_default"',
+                        "",
+                        "[llm_presets.router_default]",
+                        'preset = "openrouter-responses"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("router_default", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_http_explicit_provider(self) -> None:
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_explicit.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "legacy_router"',
+                        "",
+                        "[llm_presets.legacy_router]",
+                        'transport = "http"',
+                        'provider = "openrouter"',
+                        'endpoint = "responses"',
+                        'base_url = "https://openrouter.ai/api/v1"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("legacy_router", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_load_reviewflow_llm_config_rejects_removed_http_custom_provider_name(self) -> None:
+        """A custom provider name with transport = \"http\" must get the same
+        removal message — not be silently discarded into \"unknown preset\"."""
+        cfg = ROOT / ".tmp_test_reviewflow_llm_http_custom_provider.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'default_preset = "custom_http"',
+                        "",
+                        "[llm_presets.custom_http]",
+                        'transport = "http"',
+                        'provider = "my-vendor"',
+                        'endpoint = "chat"',
+                        'base_url = "https://llm.example.com"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(rf.ReviewflowError) as ctx:
+                rf.load_reviewflow_llm_config(config_path=cfg)
+            self.assertIn("were removed from CURe", str(ctx.exception))
+            self.assertIn("custom_http", str(ctx.exception))
+        finally:
+            cfg.unlink(missing_ok=True)
+
+    def test_resolve_llm_config_rejects_removed_http_builtin_selection(self) -> None:
+        base = ROOT / ".tmp_test_base_codex_llm_removed_http.toml"
+        rf_cfg = ROOT / ".tmp_test_reviewflow_llm_removed_http.toml"
+        try:
+            base.write_text('model = "base-codex-model"\n', encoding="utf-8")
+            rf_cfg.write_text("", encoding="utf-8")
+            for preset in ("openai-responses", "openrouter-responses"):
+                with self.subTest(preset=preset):
+                    with self.assertRaises(rf.ReviewflowError) as ctx:
+                        rf.resolve_llm_config(
+                            base_codex_config_path=base,
+                            reviewflow_config_path=rf_cfg,
+                            cli_preset=preset,
+                            cli_model=None,
+                            cli_effort=None,
+                            cli_plan_effort=None,
+                            cli_verbosity=None,
+                            cli_max_output_tokens=None,
+                            cli_request_overrides={},
+                            cli_header_overrides={},
+                            deprecated_codex_model=None,
+                            deprecated_codex_effort=None,
+                            deprecated_codex_plan_effort=None,
+                        )
+                    self.assertIn("were removed from CURe", str(ctx.exception))
+                    self.assertIn(preset, str(ctx.exception))
+        finally:
+            base.unlink(missing_ok=True)
+            rf_cfg.unlink(missing_ok=True)
 
     def test_build_llm_meta_persists_env_keys_not_env_values(self) -> None:
         meta = rf.build_llm_meta(
@@ -1883,6 +2064,35 @@ class LlmPresetConfigTests(unittest.TestCase):
             self.assertEqual(payload["headers"]["HTTP-Referer"], "https://example.com")
         finally:
             path.unlink(missing_ok=True)
+
+
+class MetaJsonWriteTests(unittest.TestCase):
+    def test_write_json_uses_unique_tmp_per_write(self) -> None:
+        """Concurrent writers must never share a temp file: a fixed `.tmp`
+        name lets one process truncate another's temp write or crash its
+        os.replace with FileNotFoundError."""
+        import meta as meta_mod
+
+        path = ROOT / ".tmp_test_write_json_unique_tmp" / "meta.json"
+        try:
+            shutil.rmtree(path.parent, ignore_errors=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            used: list[str] = []
+            real_replace = meta_mod.os.replace
+
+            def _capture_replace(src: str, dst: str) -> None:
+                used.append(str(src))
+                real_replace(src, dst)
+
+            with mock.patch.object(meta_mod.os, "replace", side_effect=_capture_replace):
+                meta_mod.write_json(path, {"a": 1})
+                meta_mod.write_json(path, {"b": 2})
+            self.assertEqual(len(used), 2)
+            self.assertNotEqual(used[0], used[1])
+            self.assertFalse(any(Path(u).name == "meta.json.tmp" for u in used))
+            self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["meta.json"])
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
 
 
 class UtilityModelConfigTests(unittest.TestCase):
@@ -1981,10 +2191,12 @@ class UtilityModelConfigTests(unittest.TestCase):
 
     def test_utility_model_inherits_main_llm_when_unset(self) -> None:
         base = self._write_base_config(".tmp_test_utility_inherit_base.toml")
+        cfg = ROOT / ".tmp_test_utility_inherit.toml"
         try:
+            cfg.write_text("", encoding="utf-8")
             main_resolved, main_meta = self._resolve_main(
                 base=base,
-                cfg=None,
+                cfg=cfg,
                 cli_preset="codex-cli",
                 cli_model="gpt-5.4",
                 cli_effort="medium",
@@ -1992,7 +2204,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             utility_resolved, utility_meta = self._resolve_utility(
                 main_resolved=main_resolved,
                 main_meta=main_meta,
-                cfg=None,
+                cfg=cfg,
             )
             self.assertEqual(utility_resolved["provider"], main_resolved["provider"])
             self.assertEqual(utility_resolved["model"], main_resolved["model"])
@@ -2075,7 +2287,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             base.unlink(missing_ok=True)
             cfg.unlink(missing_ok=True)
 
-    def test_utility_model_can_use_different_supported_provider_preset(self) -> None:
+    def test_utility_model_rejects_codex_api_key_with_shared_validator(self) -> None:
         base = self._write_base_config(".tmp_test_utility_provider_base.toml")
         cfg = ROOT / ".tmp_test_utility_provider.toml"
         try:
@@ -2083,13 +2295,13 @@ class UtilityModelConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "[llm.utility]",
-                        'preset = "utility_openrouter"',
+                        'preset = "utility_llm"',
                         'model = "x-ai/grok-4.1-fast"',
                         'reasoning_effort = "medium"',
                         "",
-                        "[llm_presets.utility_openrouter]",
-                        'preset = "openrouter-responses"',
-                        'api_key = "test-openrouter-key"',  # pragma: allowlist secret
+                        "[llm_presets.utility_llm]",
+                        'preset = "codex-cli"',
+                        'api_key = "test-codex-key"',  # pragma: allowlist secret
                         "",
                     ]
                 ),
@@ -2102,18 +2314,95 @@ class UtilityModelConfigTests(unittest.TestCase):
                 cli_model="gpt-5.4",
                 cli_effort="high",
             )
-            utility_resolved, utility_meta = self._resolve_utility(
-                main_resolved=main_resolved,
-                main_meta=main_meta,
-                cfg=cfg,
-            )
-            self.assertEqual(main_resolved["provider"], "codex")
-            self.assertEqual(utility_resolved["provider"], "openrouter")
-            self.assertEqual(utility_resolved["transport"], "http")
-            self.assertEqual(utility_meta["resolved"]["preset_source"], "cure.toml")
+            with self.assertRaisesRegex(rf.ReviewflowError, "Codex.*api_key"):
+                self._resolve_utility(
+                    main_resolved=main_resolved,
+                    main_meta=main_meta,
+                    cfg=cfg,
+                )
         finally:
             base.unlink(missing_ok=True)
             cfg.unlink(missing_ok=True)
+
+    def test_saved_interactive_llm_rejects_ignored_controls_instead_of_reusing_raw_meta(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_reject_base.toml")
+        try:
+            for field, value in (
+                ("api_key", "test-codex-key"),  # pragma: allowlist secret
+                ("text_verbosity", "high"),
+                ("max_output_tokens", 9000),
+            ):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    rf.ReviewflowError, rf"Codex.*{field}"
+                ):
+                    rf.resolve_saved_interactive_llm_config(
+                        saved_llm_meta={
+                            "preset": "codex-cli",
+                            "provider": "codex",
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            field: value,
+                        },
+                        saved_resolution_meta={},
+                        base_codex_config_path=base,
+                        reviewflow_config_path=None,
+                    )
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_saved_interactive_llm_rejects_ignored_control_from_referenced_preset(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_preset_reject_base.toml")
+        cfg = ROOT / ".tmp_test_saved_interactive_preset_reject.toml"
+        try:
+            cfg.write_text(
+                "\n".join(
+                    [
+                        "[llm_presets.custom]",
+                        'preset = "codex-cli"',
+                        'api_key = "secret"',  # pragma: allowlist secret
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(rf.ReviewflowError, r"Codex.*api_key"):
+                rf.resolve_saved_interactive_llm_config(
+                    saved_llm_meta={
+                        "preset": "custom",
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                    },
+                    saved_resolution_meta={},
+                    base_codex_config_path=base,
+                    reviewflow_config_path=cfg,
+                )
+        finally:
+            base.unlink(missing_ok=True)
+            cfg.unlink(missing_ok=True)
+
+    def test_saved_interactive_llm_resolves_legitimate_model_and_effort(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_positive_base.toml")
+        try:
+            resolved, resolution_meta = rf.resolve_saved_interactive_llm_config(
+                saved_llm_meta={
+                    "preset": "codex-cli",
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                },
+                saved_resolution_meta={},
+                base_codex_config_path=base,
+                reviewflow_config_path=None,
+            )
+            self.assertEqual(resolved["model"], "gpt-5.4")
+            self.assertEqual(resolved["reasoning_effort"], "high")
+            self.assertEqual(resolution_meta["resolved"]["model_source"], "session_reuse")
+            self.assertEqual(
+                resolution_meta["resolved"]["reasoning_effort_source"], "session_reuse"
+            )
+        finally:
+            base.unlink(missing_ok=True)
 
     def test_utility_model_fields_resolve_override_then_toml_then_inherited_default(self) -> None:
         base = self._write_base_config(".tmp_test_utility_precedence_base.toml")
@@ -2170,10 +2459,12 @@ class UtilityModelConfigTests(unittest.TestCase):
 
     def test_partial_utility_model_caller_override_inherits_missing_fields(self) -> None:
         base = self._write_base_config(".tmp_test_utility_partial_override_base.toml")
+        cfg = ROOT / ".tmp_test_utility_partial_override.toml"
         try:
+            cfg.write_text("", encoding="utf-8")
             main_resolved, main_meta = self._resolve_main(
                 base=base,
-                cfg=None,
+                cfg=cfg,
                 cli_preset="codex-cli",
                 cli_model="main-model",
                 cli_effort="high",
@@ -2181,7 +2472,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             utility_resolved, utility_meta = self._resolve_utility(
                 main_resolved=main_resolved,
                 main_meta=main_meta,
-                cfg=None,
+                cfg=cfg,
                 utility_llm_effort="medium",
             )
             self.assertEqual(utility_resolved["model"], "main-model")
@@ -2339,6 +2630,355 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_prepare_review_agent_runtime_stages_rf_jira_outside_repo_checkout(self) -> None:
+        """The read-only review flow must never write the rf-jira helper into the repo checkout."""
+        root = ROOT / ".tmp_test_agent_runtime_rf_jira_outside_repo"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            pre_existing = repo / "rf-jira"
+            pre_existing.write_text("pre-existing user file\n", encoding="utf-8")
+
+            with mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                runtime = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+            helper = Path(str(runtime["staged_paths"]["rf_jira"]))
+            self.assertTrue(helper.is_file())
+            self.assertTrue(os.access(helper, os.X_OK))
+            auth_root = Path(str(runtime["staged_paths"]["auth_staging_dir"]))
+            self.assertEqual(helper.parent, auth_root)
+            self.assertNotEqual(helper, work / "rf-jira")
+            # The repo checkout must be untouched: the pre-existing rf-jira file
+            # survives verbatim and nothing new was written into it.
+            self.assertEqual(pre_existing.read_text(encoding="utf-8"), "pre-existing user file\n")
+            self.assertEqual(list(repo.iterdir()), [pre_existing])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rf_jira_helper_preserves_pre_staged_netrc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = rf.write_rf_jira(dst_dir=root)
+            staged_netrc = root / "staged.netrc"
+            staged_netrc.write_text("machine staged.invalid login staged\n", encoding="utf-8")
+            real_home = root / "real-home"
+            real_home.mkdir()
+            real_netrc = real_home / ".netrc"
+            real_netrc.write_text("machine real.invalid login real\n", encoding="utf-8")
+            real_netrc.chmod(0)
+            jira_config = root / "jira.yml"
+            jira_config.write_text("server: https://jira.invalid\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            jira = bin_dir / "jira"
+            jira.write_text("#!/bin/sh\nprintf '%s\\n' \"$NETRC\"\n", encoding="utf-8")
+            jira.chmod(0o755)
+
+            bootstrap = f"""
+import pwd
+import runpy
+import sys
+class _Pw:
+    pw_dir = {str(real_home)!r}
+pwd.getpwuid = lambda uid: _Pw()
+sys.argv = [{str(helper)!r}, "issue", "list"]
+runpy.run_path({str(helper)!r}, run_name="__main__")
+"""
+            env = dict(os.environ)
+            env.update(
+                {
+                    "JIRA_CONFIG_FILE": str(jira_config),
+                    "NETRC": str(staged_netrc),
+                    "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", bootstrap],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(staged_netrc))
+
+    def test_prepare_review_agent_runtime_uses_private_staging_dir_per_run(self) -> None:
+        """Concurrent runs must never share credential directories: the prepare
+        steps rmtree an existing destination before copying, so a shared dir
+        would let one run delete another run's live credentials."""
+        root = ROOT / ".tmp_test_agent_runtime_private_staging"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_prepare_gh(*, dst_root: Path) -> Path:
+                # Mirrors the real prepare step: rmtree an existing destination,
+                # then copy fresh files into it.
+                dst = dst_root / "gh_config"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                dst_root.mkdir(parents=True, exist_ok=True)
+                dst.mkdir(parents=True, exist_ok=True)
+                (dst / "hosts.yml").write_text("github.com:\n  user: test\n", encoding="utf-8")
+                return dst
+
+            with (
+                mock.patch.object(shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+                mock.patch("cure_llm.prepare_gh_config_for_codex", side_effect=fake_prepare_gh),
+            ):
+                r1 = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+                r2 = rf.prepare_review_agent_runtime(
+                    args=self._runtime_args(),
+                    resolved=self._llm_resolved("codex"),
+                    resolution_meta=self._llm_resolution_meta(),
+                    repo_dir=repo,
+                    session_dir=session,
+                    work_dir=work,
+                    base_env={"PATH": "/usr/bin"},
+                    chunkhound_config_path=work / "chunkhound.json",
+                    chunkhound_db_path=work / ".chunkhound.db",
+                    chunkhound_cwd=work / "chunkhound",
+                    enable_mcp=True,
+                    interactive=False,
+                    paths=rf.DEFAULT_PATHS,
+                )
+            p1 = Path(str(r1["staged_paths"]["gh_config_dir"]))
+            p2 = Path(str(r2["staged_paths"]["gh_config_dir"]))
+            rf_jira1 = Path(str(r1["staged_paths"]["rf_jira"]))
+            rf_jira2 = Path(str(r2["staged_paths"]["rf_jira"]))
+            # Each run stages into its own private dir under work_dir.
+            self.assertNotEqual(p1.parent, p2.parent)
+            self.assertEqual(p1.parent.parent, work)
+            self.assertTrue(p1.parent.name.startswith(".auth-"))
+            # Run 1's credentials survive run 2's staging untouched.
+            self.assertTrue((p1 / "hosts.yml").is_file())
+            self.assertTrue((p2 / "hosts.yml").is_file())
+            self.assertNotEqual(rf_jira1, rf_jira2)
+            self.assertEqual(rf_jira1.parent, p1.parent)
+            self.assertEqual(rf_jira2.parent, p2.parent)
+            self.assertTrue(rf_jira1.is_file())
+            self.assertTrue(rf_jira2.is_file())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stage_review_auth_support_cleans_private_dir_on_partial_failure(self) -> None:
+        """A copy that fails halfway must not leave sensitive files behind: the
+        private staging dir is registered before copying, so cleanup removes
+        the whole dir even when no per-key destination was recorded yet."""
+        root = ROOT / ".tmp_test_stage_auth_partial_failure"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            work = root / "work"
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_fail(*, dst_root: Path) -> Path:
+                (dst_root / "partial").mkdir(parents=True, exist_ok=True)
+                (dst_root / "partial" / "secret.yml").write_text("leaked", encoding="utf-8")
+                raise OSError("copy failed halfway")
+
+            with mock.patch("cure.prepare_gh_config_for_codex", side_effect=fake_fail):
+                with self.assertRaises(OSError):
+                    rf._stage_review_auth_support(work_dir=work, env={})
+            self.assertEqual(list(work.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_cure_llm_stage_review_auth_support_cleans_private_dir_on_partial_failure(self) -> None:
+        root = ROOT / ".tmp_test_cure_llm_stage_auth_partial_failure"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            work = root / "work"
+            work.mkdir(parents=True, exist_ok=True)
+
+            def fake_fail(*, dst_root: Path) -> Path:
+                partial = dst_root / "partial"
+                partial.mkdir(parents=True, exist_ok=True)
+                (partial / "secret.yml").write_text("leaked", encoding="utf-8")
+                raise OSError("copy failed halfway")
+
+            with mock.patch.object(cure_llm, "prepare_gh_config_for_codex", side_effect=fake_fail):
+                with self.assertRaisesRegex(OSError, "copy failed halfway"):
+                    cure_llm._stage_review_auth_support(work_dir=work, env={})
+            self.assertEqual(list(work.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_readonly_runtime_denies_mutation_and_keeps_repo_pristine(self) -> None:
+        """Read-only protection end to end: a fake codex sandbox that enforces
+        read-only receives the read-only flags from CURe's real exec path, an
+        attempted write is denied, the denial surfaces as a run failure, and
+        the repo checkout stays pristine."""
+        import run as run_module
+        import cure_runtime
+
+        root = ROOT / ".tmp_test_readonly_denial"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            fake_bin = root / "bin"
+            fake_bin.mkdir(parents=True, exist_ok=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            logs_dir = work / "logs"
+            repo.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (repo / "existing.txt").write_text("keep me", encoding="utf-8")
+            (root / "home").mkdir(parents=True, exist_ok=True)
+            codex_home = root / "codex-home"
+            codex_home.mkdir(parents=True, exist_ok=True)
+
+            fake = fake_bin / "codex"
+            fake.write_text(
+                r"""#!/usr/bin/env python3
+from __future__ import annotations
+import json
+import sys
+
+argv = sys.argv[1:]
+sandbox_ok = False
+for index, token in enumerate(argv):
+    if token == "--sandbox" and index + 1 < len(argv) and argv[index + 1] == "read-only":
+        sandbox_ok = True
+    if token == "-c" and index + 1 < len(argv) and argv[index + 1] == 'sandbox_mode="read-only"':
+        sandbox_ok = True
+if not sandbox_ok:
+    print("fake-codex: read-only sandbox flag missing", file=sys.stderr)
+    raise SystemExit(2)
+prompt = argv[-1] if argv else ""
+if "probe.txt" in prompt:
+    print(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "error", "message": "EACCES: probe.txt: write denied by read-only sandbox"},
+            }
+        ),
+        flush=True,
+    )
+    print("EACCES: probe.txt: write denied by read-only sandbox", file=sys.stderr)
+    raise SystemExit(1)
+print(
+    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "**Summary**: ok"}}),
+    flush=True,
+)
+raise SystemExit(0)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+
+            base_env = dict(os.environ)
+            base_env["PATH"] = f"{fake_bin}{os.pathsep}{base_env.get('PATH', '')}"
+            base_env["CODEX_HOME"] = str(codex_home)
+            base_env["HOME"] = str(root / "home")
+
+            meta_path = session / "meta.json"
+            progress = rf.SessionProgress(meta_path, quiet=True)
+            progress.init(
+                {
+                    "session_id": "readonly-denial",
+                    "status": "running",
+                    "phase": "codex_review",
+                    "paths": {
+                        "repo_dir": str(repo),
+                        "work_dir": str(work),
+                        "logs_dir": str(logs_dir),
+                        "review_md": str(work / "review.md"),
+                    },
+                    "logs": {
+                        "cure": str(logs_dir / "cure.log"),
+                        "codex": str(logs_dir / "codex.log"),
+                    },
+                }
+            )
+
+            resolved = dict(cure_runtime.builtin_llm_presets()["codex-cli"])
+            resolved["preset"] = "codex-cli"
+            resolved["command"] = str(fake)
+            resolution_meta: dict[str, Any] = {
+                "base_codex_config": {},
+                "reviewflow_defaults": {},
+                "resolved": {},
+            }
+            runtime = rf.prepare_review_agent_runtime(
+                args=argparse.Namespace(),
+                resolved=resolved,
+                resolution_meta=resolution_meta,
+                repo_dir=repo,
+                session_dir=session,
+                work_dir=work,
+                base_env=base_env,
+                chunkhound_config_path=work / "chunkhound.json",
+                chunkhound_db_path=work / ".chunkhound.db",
+                chunkhound_cwd=work / "chunkhound",
+                enable_mcp=False,
+                interactive=False,
+                paths=rf.DEFAULT_PATHS,
+            )
+            runtime["sandbox_mode"] = "read-only"
+            runtime["dangerously_bypass_approvals_and_sandbox"] = False
+
+            with self.assertRaises(run_module.ReviewflowSubprocessError) as ctx:
+                rf.run_llm_exec(
+                    repo_dir=repo,
+                    session_dir=session,
+                    resolved=resolved,
+                    resolution_meta=resolution_meta,
+                    output_path=work / "review.md",
+                    prompt="Please create a file named probe.txt in the repo directory.",
+                    env=runtime["env"],
+                    stream=True,
+                    progress=progress,
+                    runtime_policy=runtime,
+                    sandbox_mode="read-only",
+                )
+            self.assertIn("EACCES", str(ctx.exception.stderr))
+            self.assertIn("--sandbox", ctx.exception.cmd)
+            self.assertIn("read-only", ctx.exception.cmd)
+            # The attempted mutation was denied: nothing was written into the
+            # repo checkout.
+            self.assertFalse((repo / "probe.txt").exists())
+            self.assertEqual(sorted(p.name for p in repo.iterdir()), ["existing.txt"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_prepare_review_agent_runtime_injects_codex_model_context_window_override(self) -> None:
         root = ROOT / ".tmp_test_agent_runtime_codex_context_window"
         try:
@@ -2471,36 +3111,63 @@ class AgentRuntimePolicyTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_build_http_response_request_openrouter_uses_responses_api_and_headers(self) -> None:
-        request = rf.build_http_response_request(
-            {
-                "preset": "openrouter_grok",
-                "transport": "http",
-                "provider": "openrouter",
-                "endpoint": "responses",
-                "base_url": "https://openrouter.ai/api/v1",
-                "api_key": "test-openrouter-key",  # pragma: allowlist secret
-                "model": "x-ai/grok-4.1-fast",
-                "reasoning_effort": "high",
-                "text_verbosity": None,
-                "max_output_tokens": 9000,
-                "store": None,
-                "include": [],
-                "metadata": {},
-                "headers": {
-                    "HTTP-Referer": "https://example.com",
-                    "X-OpenRouter-Title": "cure",
-                },
-                "request": {"provider": {"sort": "latency"}},
-            },
-            prompt="Review this PR.",
-        )
-        self.assertEqual(request["url"], "https://openrouter.ai/api/v1/responses")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer test-openrouter-key")  # pragma: allowlist secret
-        self.assertEqual(request["headers"]["HTTP-Referer"], "https://example.com")
-        self.assertEqual(request["headers"]["X-OpenRouter-Title"], "cure")
-        self.assertEqual(request["json"]["model"], "x-ai/grok-4.1-fast")
-        self.assertEqual(request["json"]["input"], "Review this PR.")
-        self.assertEqual(request["json"]["reasoning"]["effort"], "high")
-        self.assertEqual(request["json"]["max_output_tokens"], 9000)
-        self.assertEqual(request["json"]["provider"]["sort"], "latency")
+    def test_prepare_review_agent_runtime_cleans_credentials_when_provider_binary_missing(self) -> None:
+        root = ROOT / ".tmp_test_agent_runtime_missing_binary_credentials"
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            repo = root / "repo"
+            session = root / "session"
+            work = session / "work"
+            gh_dir = root / "gh"
+            jira_dir = root / "jira"
+            jira_file = jira_dir / ".config.yml"
+            fake_home = root / "home"
+            repo.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            gh_dir.mkdir(parents=True, exist_ok=True)
+            jira_dir.mkdir(parents=True, exist_ok=True)
+            fake_home.mkdir(parents=True, exist_ok=True)
+            (gh_dir / "hosts.yml").write_text("github.com:\n  oauth_token: secret\n", encoding="utf-8")
+            jira_file.write_text("token: secret\n", encoding="utf-8")
+            (fake_home / ".netrc").write_text("machine example.test password secret\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"GH_CONFIG_DIR": str(gh_dir), "JIRA_CONFIG_FILE": str(jira_file)},
+                ),
+                mock.patch.object(cure, "real_user_home_dir", return_value=fake_home),
+                mock.patch.object(
+                    shutil,
+                    "which",
+                    side_effect=lambda name: None if name == "codex" else f"/usr/bin/{name}",
+                ),
+            ):
+                with self.assertRaises(rf.ReviewflowError):
+                    rf.prepare_review_agent_runtime(
+                        args=self._runtime_args(),
+                        resolved=self._llm_resolved("codex"),
+                        resolution_meta=self._llm_resolution_meta(),
+                        repo_dir=repo,
+                        session_dir=session,
+                        work_dir=work,
+                        base_env={"PATH": "/usr/bin"},
+                        chunkhound_config_path=work / "chunkhound.json",
+                        chunkhound_db_path=work / ".chunkhound.db",
+                        chunkhound_cwd=work / "chunkhound",
+                        enable_mcp=True,
+                        interactive=False,
+                        paths=rf.DEFAULT_PATHS,
+                    )
+
+            self.assertEqual(list(work.glob(".auth-*")), [])
+            self.assertFalse((work / "rf-jira").exists())
+            self.assertEqual(list(work.iterdir()), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_build_http_response_request_is_removed(self) -> None:
+        self.assertFalse(hasattr(rf, "build_http_response_request"))
+        self.assertFalse(hasattr(rf, "run_http_response_exec"))
+        self.assertNotIn("openai-responses", rf.BUILTIN_LLM_PRESET_IDS)
+        self.assertNotIn("openrouter-responses", rf.BUILTIN_LLM_PRESET_IDS)

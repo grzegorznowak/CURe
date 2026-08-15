@@ -13,7 +13,19 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from typing import Any, BinaryIO, Iterator, Literal, TextIO
+from typing import Any, BinaryIO, Iterator, Literal, Protocol, TextIO
+
+
+class StderrStreamSink(Protocol):
+    """Minimal sink contract for `run_cmd(stderr_stream=...)`.
+
+    Only `write`/`flush` are needed: stderr bytes are routed here instead of
+    the JSON stream when the consumer parses stdout as JSON (codex events).
+    """
+
+    def write(self, s: str) -> int: ...
+
+    def flush(self) -> None: ...
 
 
 class ReviewflowSubprocessError(RuntimeError):
@@ -770,12 +782,20 @@ def run_cmd(
     check: bool = True,
     stream: bool = False,
     stream_to: TextIO | None = None,
+    stderr_stream: StderrStreamSink | None = None,
     stream_label: str | None = None,
     capture_tail_chars: int = 200_000,
     lossless_capture: LosslessCommandCapture | None = None,
     owned_processes: OwnedProcessRegistry | None = None,
     owned_role: OwnedProcessRole | None = None,
 ) -> CommandResult:
+    """Run a command, optionally streaming stdout live.
+
+    When ``stderr_stream`` is set, stderr bytes go there instead of into
+    ``stream_to`` — required for JSON-streaming consumers (a codex stderr
+    diagnostic landing between chunks of a large JSON event would otherwise
+    corrupt the parse).
+    """
     if (owned_processes is None) != (owned_role is None):
         raise ValueError("owned_processes and owned_role must be supplied together")
     tagged = owned_processes is not None
@@ -893,15 +913,15 @@ def run_cmd(
             with failure_lock:
                 pump_failures.append((stream_name, exc))
 
-        def write_live(chunk: str, *, at_line_start: bool) -> bool:
+        def write_live(chunk: str, *, at_line_start: bool, sink: StderrStreamSink) -> bool:
             if not prefix:
-                out.write(chunk)
+                sink.write(chunk)
                 return chunk.endswith("\n")
             segments = chunk.splitlines(keepends=True)
             for segment in segments:
                 if at_line_start:
-                    out.write(prefix)
-                out.write(segment)
+                    sink.write(prefix)
+                sink.write(segment)
                 at_line_start = segment.endswith(("\n", "\r"))
             return at_line_start
 
@@ -911,6 +931,7 @@ def run_cmd(
             stream_name: str,
             tail: _TailBuffer,
             capture_write: Any,
+            sink: StderrStreamSink,
         ) -> None:
             at_line_start = True
             failed = False
@@ -924,9 +945,9 @@ def run_cmd(
                             if stream:
                                 with write_lock:
                                     at_line_start = write_live(
-                                        chunk, at_line_start=at_line_start
+                                        chunk, at_line_start=at_line_start, sink=sink
                                     )
-                                    out.flush()
+                                    sink.flush()
                         except BaseException as exc:
                             failed = True
                             record_pump_failure(stream_name, exc)
@@ -944,6 +965,10 @@ def run_cmd(
         stderr_write = (
             lossless_capture.write_stderr if lossless_capture is not None else None
         )
+        # JSON-streaming consumers (codex events) must never receive stderr:
+        # a diagnostic landing between chunks of a large JSON event corrupts
+        # the parse. Route it to its own stream when one is provided.
+        stderr_sink = stderr_stream if (stderr_stream is not None and stream) else out
         t_out = Thread(
             target=pump,
             args=(proc.stdout,),
@@ -951,6 +976,7 @@ def run_cmd(
                 "stream_name": "stdout",
                 "tail": stdout_tail,
                 "capture_write": stdout_write,
+                "sink": out,
             },
         )
         t_err = Thread(
@@ -960,6 +986,7 @@ def run_cmd(
                 "stream_name": "stderr",
                 "tail": stderr_tail,
                 "capture_write": stderr_write,
+                "sink": stderr_sink,
             },
         )
         t_out.daemon = True
@@ -1009,6 +1036,11 @@ def run_cmd(
         except BaseException:
             # Pumps remain the sole pipe readers. A tagged process stays registered,
             # transferring bounded reaping/drain ownership to command teardown.
+            # Untagged subprocesses have no later owner, so terminate their group
+            # before cancellation unwinds the caller.
+            if pipe_coordinator is None:
+                _terminate_pipe_holder_group(proc)
+                _drain_readers_bounded((t_out, t_err), deadline_seconds=2.0)
             raise
 
         if pump_failures:

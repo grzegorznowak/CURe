@@ -210,6 +210,19 @@ def build_commands_catalog_payload() -> dict[str, object]:
                 "recommended_invocation": preferred_cli_invocation("status <session_id|PR_URL> --json"),
                 "variants": [],
             },
+            {
+                "name": "explain",
+                "summary": "Explain the final synthesized review of a completed PR review session using a custom or builtin prompt.",
+                "targets": ["PR_URL"],
+                "safety": "Same runtime-policy permission model as interactive sessions; effective sandbox/approval/bypass announced at run start.",
+                "tty": "No TTY required.",
+                "stdout": "Prints the explanation text followed by the explain artifact path.",
+                "exit_codes": {"0": "explanation produced", "2": "usage, lookup, or runtime error"},
+                "recommended_invocation": preferred_cli_invocation(
+                    "explain <PR_URL> --explain-prompt 'Why did you flag X?'"
+                ),
+                "variants": [],
+            },
         ],
     }
 
@@ -222,6 +235,7 @@ def commands_flow(args: argparse.Namespace, *, stdout: TextIO | None = None) -> 
         return 0
     for command in payload["commands"]:
         print(f"{command['name']}: {command['summary']}", file=out)
+        print(f"  safety: {command['safety']}", file=out)
         print(f"  {command['recommended_invocation']}", file=out)
         for variant in command.get("variants", []):
             if isinstance(variant, dict) and str(variant.get("invocation") or "").strip():
@@ -1151,6 +1165,22 @@ def followup_flow(
     )
 
 
+def explain_flow(
+    args: argparse.Namespace,
+    *,
+    paths: ReviewflowPaths,
+    config_path: Path | None = None,
+    codex_base_config_path: Path | None = None,
+) -> int:
+    rf = _reviewflow()
+    return rf._explain_flow_impl(
+        args,
+        paths=paths,
+        config_path=config_path,
+        codex_base_config_path=codex_base_config_path,
+    )
+
+
 def interactive_flow(
     args: argparse.Namespace,
     *,
@@ -1235,6 +1265,7 @@ __all__ = [
     "clean_flow",
     "commands_flow",
     "doctor_flow",
+    "explain_flow",
     "followup_flow",
     "interactive_flow",
     "pr_flow",

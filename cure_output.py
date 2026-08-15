@@ -189,6 +189,12 @@ class ChunkhoundLiveProgressReporter:
                 meta["live_progress"] = live
             else:
                 meta.pop("live_progress", None)
+                drop = getattr(self._progress, "drop", None)
+                if callable(drop):
+                    # Declare the deletion so a fresh-reload merge flush (which
+                    # preserves registry keys appended concurrently) also
+                    # removes the key from the on-disk document.
+                    drop("live_progress")
             _flush_progress(self._progress)
         return summary
 
@@ -340,6 +346,40 @@ class _TextCallbackSink:
         self._sink.flush()
 
 
+class _CodexStderrDiagSink:
+    """Route Codex stderr to display destinations, never the JSON stream."""
+
+    def __init__(
+        self,
+        *,
+        display_file: TextIO,
+        also_to: TextIO | None,
+        dashboard_tail: TailBuffer | None = None,
+        on_activity: Callable[[], None] | None = None,
+    ) -> None:
+        self._display_file = display_file
+        self._also_to = also_to
+        self._dashboard_tail = dashboard_tail
+        self._on_activity = on_activity
+
+    def write(self, s: str) -> int:
+        self._display_file.write(s)
+        self._display_file.flush()
+        if self._dashboard_tail is not None:
+            self._dashboard_tail.append_text(s)
+        if self._also_to is not None:
+            self._also_to.write(s)
+            self._also_to.flush()
+        if self._on_activity is not None:
+            self._on_activity()
+        return len(s)
+
+    def flush(self) -> None:
+        self._display_file.flush()
+        if self._also_to is not None:
+            self._also_to.flush()
+
+
 class CodexJsonEventSink:
     """Stream Codex JSONL to a raw log while preserving readable tails for the dashboard."""
 
@@ -392,7 +432,8 @@ class CodexJsonEventSink:
         if event_type == "item.completed":
             item = payload.get("item")
             item = item if isinstance(item, dict) else {}
-            if str(item.get("type") or "").strip() == "agent_message":
+            item_kind = str(item.get("type") or "").strip()
+            if item_kind == "agent_message":
                 raw_text = str(item.get("text") or "")
                 text = _compact_codex_text(raw_text)
                 if text:
@@ -404,6 +445,19 @@ class CodexJsonEventSink:
                             "raw_text": raw_text,
                             "ts": timestamp,
                             "replace_current": True,
+                        },
+                    )
+            if item_kind == "error":
+                message = str(item.get("message") or "").strip()
+                if message:
+                    text = f"Codex notice: {_compact_codex_text(message)}"
+                    return (
+                        [text],
+                        {
+                            "type": "codex_notice",
+                            "text": text,
+                            "ts": timestamp,
+                            "replace_current": False,
                         },
                     )
             return ([], None)
@@ -457,6 +511,18 @@ class CodexJsonEventSink:
         return len(s)
 
     def flush(self) -> None:
+        # Never force-consume a partial line: run.py's pump calls flush() after
+        # every ~8192-char pipe read, so a huge single-line JSON event arrives
+        # split across several writes. Force-consuming the fragments would dump
+        # unparseable raw JSON to the display. A trailing partial line is
+        # consumed explicitly by drain() once the stream has ended.
+        with self._lock:
+            self._raw_file.flush()
+            self._display_file.flush()
+            if self._also_to is not None:
+                self._also_to.flush()
+
+    def drain(self) -> None:
         with self._lock:
             if self._pending.strip():
                 self._consume_line(self._pending)
@@ -626,6 +692,15 @@ class ReviewflowOutput:
                         on_activity=self.state.ping,
                         on_event=codex_event_callback,
                     )
+                    # stderr diagnostics go to the display log + terminal, never
+                    # into the JSON event stream (they would corrupt a large
+                    # event split across pipe reads).
+                    stderr_sink = _CodexStderrDiagSink(
+                        display_file=display_file,
+                        also_to=also_to,
+                        dashboard_tail=self.tails["codex"] if self.ui_enabled else None,
+                        on_activity=self.state.ping if self.ui_enabled else None,
+                    )
                 if stream_text_callback is not None:
                     sink = _TextCallbackSink(sink, stream_text_callback)
                 return run_cmd(
@@ -635,6 +710,7 @@ class ReviewflowOutput:
                     check=check,
                     stream=True,
                     stream_to=sink,
+                    stderr_stream=stderr_sink if capture_codex_json else None,
                     stream_label=label,
                     lossless_capture=lossless_capture,
                     owned_processes=owned_processes,
@@ -645,7 +721,10 @@ class ReviewflowOutput:
                 cleanup_error: Exception | None = None
                 cleanup_actions: list[Callable[[], object]] = []
                 if raw_fh is not None:
-                    cleanup_actions.extend((sink.flush, raw_fh.flush, raw_fh.close))
+                    # Drain any final partial line only once the process stream
+                    # has ended (flush() alone never force-consumes fragments).
+                    sink_finalize = getattr(sink, "drain", None) or sink.flush
+                    cleanup_actions.extend((sink_finalize, raw_fh.flush, raw_fh.close))
                 if display_fh is not None:
                     cleanup_actions.extend((display_fh.flush, display_fh.close))
                 for cleanup in cleanup_actions:

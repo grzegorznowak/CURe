@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import json
 import os
 import re
@@ -197,6 +200,49 @@ def _load_session_meta(meta_path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _session_meta_lock_path(meta_path: Path) -> Path:
+    """Return a stable lock path outside the session directory."""
+    return meta_path.parent.parent / f".{meta_path.parent.name}.meta.lock"
+
+
+@contextlib.contextmanager
+def _session_meta_lock(meta_path: Path) -> "Iterator[None]":
+    """Cross-process lock on a stable sidecar outside the session directory."""
+    lock_path = _session_meta_lock_path(meta_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def mutate_session_meta(
+    meta_path: Path,
+    *,
+    fn: Callable[[dict[str, Any]], bool],
+    quiet: bool = True,
+) -> dict[str, Any]:
+    """Lock the meta sidecar, reload meta.json fresh, apply `fn`, persist.
+
+    `fn` receives the fresh on-disk document and mutates it in place; it must
+    return True when a change was made (only then is the document written). The
+    merged document is returned so callers can re-adopt it as their working
+    copy. `fn` must NOT call back into other session-meta writers: the sidecar
+    flock is not reentrant, so a nested lock on the same path would deadlock.
+    """
+    if not meta_path.is_file():
+        raise ReviewflowError(f"Session meta.json is missing: {meta_path}")
+    with _session_meta_lock(meta_path):
+        fresh = _load_session_meta(meta_path)
+        if fresh is None:
+            raise ReviewflowError(f"Session meta.json is missing or invalid: {meta_path}")
+        if fn(fresh):
+            write_redacted_json(meta_path, fresh)
+    return fresh
+
+
 def _load_session_meta_strict(meta_path: Path, *, command_name: str) -> dict[str, Any]:
     if not meta_path.is_file():
         raise ReviewflowError(f"{command_name}: missing meta.json at {meta_path}")
@@ -356,9 +402,6 @@ def resolve_resume_target(target: str, *, sandbox_root: Path, from_phase: str) -
 
         completed_at = str(meta.get("completed_at") or "").strip() or None
         if status == "done" or completed_at:
-            review_md_path = _resolve_session_review_md_path(session_dir=entry, meta=meta)
-            if review_md_path is None:
-                continue
             created_at = str(meta.get("created_at") or "").strip() or None
             dt = _parse_iso_dt(completed_at) or _parse_iso_dt(created_at) or epoch
             completed.append((dt, entry.name))
@@ -795,33 +838,71 @@ def _resolve_session_review_md_path(*, session_dir: Path, meta: dict[str, Any]) 
     return review_md_path if review_md_path.is_file() else None
 
 
+def _persist_normalized_session_verdicts(
+    *, meta_path: Path, review_md_path: Path, meta: dict[str, Any]
+) -> None:
+    """Recompute session verdicts on the FRESH on-disk document and persist.
+
+    Runs under the meta sidecar lock via mutate_session_meta, so the recompute
+    sees any concurrently appended keys (e.g. `explains[]` entries from a
+    parallel explain run) and writes only when the verdicts actually changed.
+    The caller's working copy is refreshed in place. Best-effort: never raises.
+    """
+
+    def _apply(fresh: dict[str, Any]) -> bool:
+        stored = normalize_review_verdicts(fresh.get("verdicts"))
+        if stored is not None:
+            normalized = review_verdicts_to_meta(stored)
+            if fresh.get("verdicts") != normalized:
+                fresh["verdicts"] = normalized
+                meta["verdicts"] = normalized
+                return True
+            return False
+        legacy = normalize_review_verdict(fresh.get("decision"))
+        if legacy is not None:
+            verdicts = ReviewVerdicts(business=legacy, technical=legacy)
+            normalized = review_verdicts_to_meta(verdicts)
+            fresh["verdicts"] = normalized
+            meta["verdicts"] = normalized
+            return True
+        extracted = extract_review_verdicts_from_markdown(review_md_path.read_text(encoding="utf-8"))
+        if extracted is not None:
+            normalized = review_verdicts_to_meta(extracted)
+            fresh["verdicts"] = normalized
+            meta["verdicts"] = normalized
+            return True
+        return False
+
+    try:
+        mutate_session_meta(meta_path, fn=_apply)
+    except Exception:
+        pass
+
+
 def _resolve_session_verdicts(*, meta_path: Path, meta: dict[str, Any], review_md_path: Path) -> ReviewVerdicts | None:
     stored = normalize_review_verdicts(meta.get("verdicts"))
     if stored is not None:
         normalized = review_verdicts_to_meta(stored)
         if meta.get("verdicts") != normalized:
             meta["verdicts"] = normalized
-            try:
-                write_redacted_json(meta_path, meta)
-            except Exception:
-                pass
+        _persist_normalized_session_verdicts(
+            meta_path=meta_path, review_md_path=review_md_path, meta=meta
+        )
         return stored
     legacy = normalize_review_verdict(meta.get("decision"))
     if legacy is not None:
         verdicts = ReviewVerdicts(business=legacy, technical=legacy)
         meta["verdicts"] = review_verdicts_to_meta(verdicts)
-        try:
-            write_redacted_json(meta_path, meta)
-        except Exception:
-            pass
+        _persist_normalized_session_verdicts(
+            meta_path=meta_path, review_md_path=review_md_path, meta=meta
+        )
         return verdicts
     extracted = extract_review_verdicts_from_markdown(review_md_path.read_text(encoding="utf-8"))
     if extracted is not None:
         meta["verdicts"] = review_verdicts_to_meta(extracted)
-        try:
-            write_redacted_json(meta_path, meta)
-        except Exception:
-            pass
+        _persist_normalized_session_verdicts(
+            meta_path=meta_path, review_md_path=review_md_path, meta=meta
+        )
     return extracted
 
 
@@ -858,7 +939,7 @@ def _resolve_latest_session_artifact_path(*, session_dir: Path, meta: dict[str, 
 class HistoricalReviewSession:
     session_id: str
     session_dir: Path
-    review_md_path: Path
+    review_md_path: Path | None
     created_at: str | None
     completed_at: str | None
     verdicts: ReviewVerdicts | None
@@ -959,8 +1040,6 @@ def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) ->
         if not meta or str(meta.get("status") or "") != "done" or (not _meta_matches_pr(meta=meta, pr=pr)):
             continue
         review_md_path = _resolve_session_review_md_path(session_dir=entry, meta=meta)
-        if review_md_path is None:
-            continue
         sessions.append(
             HistoricalReviewSession(
                 session_id=str(meta.get("session_id") or entry.name),
@@ -968,7 +1047,11 @@ def scan_completed_sessions_for_pr(*, sandbox_root: Path, pr: PullRequestRef) ->
                 review_md_path=review_md_path,
                 created_at=str(meta.get("created_at") or "").strip() or None,
                 completed_at=str(meta.get("completed_at") or "").strip() or None,
-                verdicts=_resolve_session_verdicts(meta_path=meta_path, meta=meta, review_md_path=review_md_path),
+                verdicts=(
+                    _resolve_session_verdicts(meta_path=meta_path, meta=meta, review_md_path=review_md_path)
+                    if review_md_path is not None
+                    else None
+                ),
                 codex_summary=resolve_codex_summary(meta),
                 review_head_sha=_resolve_session_review_head_sha(meta=meta),
             )
