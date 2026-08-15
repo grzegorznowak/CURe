@@ -1982,6 +1982,23 @@ def _merge_meta_changes(
             fresh[key] = copy.deepcopy(value)
 
 
+def _persist_session_meta_mapping_updates(
+    meta_path: Path,
+    *,
+    quiet: bool,
+    baseline: dict[str, Any],
+    updates: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply owned mapping updates to a fresh locked session-meta reload."""
+    owned_baseline = {key: baseline[key] for key in updates if key in baseline}
+
+    def merge_owned_updates(fresh: dict[str, Any]) -> bool:
+        _merge_meta_changes(fresh, owned_baseline, updates)
+        return True
+
+    return mutate_session_meta(meta_path, quiet=quiet, fn=merge_owned_updates)
+
+
 _PROGRESS_MERGE_KEYS = (
     "status",
     "phase",
@@ -12342,10 +12359,11 @@ def _followup_flow_impl(
     meta_paths["chunkhound_db"] = str(chunkhound_db_path)
     meta_paths["chunkhound_config"] = str(chunkhound_cfg_path)
     meta["paths"] = meta_paths
-    meta = mutate_session_meta(
+    meta = _persist_session_meta_mapping_updates(
         meta_path,
         quiet=quiet,
-        fn=lambda fresh: (fresh.__setitem__("paths", dict(meta_paths)) or True),
+        baseline=followup_meta_baseline,
+        updates={"paths": meta_paths},
     )
 
     out = ReviewflowOutput(
@@ -13853,6 +13871,7 @@ def build_interactive_resume_command(
     meta = _load_session_meta(meta_path)
     if not meta:
         raise ReviewflowError(f"Failed to parse meta.json: {meta_path}")
+    meta_baseline = copy.deepcopy(meta)
 
     meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
     repo_dir = Path(str((meta_paths or {}).get("repo_dir") or (session.session_dir / "repo"))).resolve()
@@ -14015,10 +14034,11 @@ def build_interactive_resume_command(
                 raise ReviewflowError(
                     f"Session {session.session_id} is missing codex.resume and llm.resume metadata."
                 )
-            meta = mutate_session_meta(
+            meta = _persist_session_meta_mapping_updates(
                 meta_path,
                 quiet=True,
-                fn=lambda fresh: (fresh.update(meta_updates) or True),
+                baseline=meta_baseline,
+                updates=meta_updates,
             )
             return (fallback_command, env, dict(staged_paths_out))
 
@@ -14047,10 +14067,11 @@ def build_interactive_resume_command(
         )
         meta["llm"] = llm_meta
         meta["codex"] = codex_meta
-        meta = mutate_session_meta(
+        meta = _persist_session_meta_mapping_updates(
             meta_path,
             quiet=True,
-            fn=lambda fresh: (fresh.update(meta_updates) or True),
+            baseline=meta_baseline,
+            updates=meta_updates,
         )
         return (command, env, dict(staged_paths_out))
 

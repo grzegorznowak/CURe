@@ -5303,6 +5303,76 @@ class SessionMetaMutationTests(unittest.TestCase):
                 },
             )
 
+    def test_interactive_meta_updates_preserve_concurrent_nested_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["paths"] = {"repo_dir": "/repo", "work_dir": "/old-work"}
+            baseline["llm"] = {"provider": "codex"}
+            rf.write_redacted_json(meta_path, baseline)
+            meta_updates = {
+                "paths": {**baseline["paths"], "work_dir": "/new-work"},
+                "llm": {**baseline["llm"], "model": "gpt-5"},
+            }
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["paths"].__setitem__("concurrent_cache", "/cache")
+                    or fresh["llm"].__setitem__(
+                        "resume", {"session_id": "concurrent-session"}
+                    )
+                    or True
+                ),
+            )
+            rf._persist_session_meta_mapping_updates(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                updates=meta_updates,
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["paths"]["work_dir"], "/new-work")
+            self.assertEqual(persisted["paths"]["concurrent_cache"], "/cache")
+            self.assertEqual(persisted["llm"]["model"], "gpt-5")
+            self.assertEqual(
+                persisted["llm"]["resume"], {"session_id": "concurrent-session"}
+            )
+
+    def test_followup_early_paths_persist_preserves_concurrent_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta_path = self._seed_session_meta(Path(tmp))
+            baseline = json.loads(meta_path.read_text(encoding="utf-8"))
+            baseline["paths"] = {"repo_dir": "/repo", "work_dir": "/old-work"}
+            rf.write_redacted_json(meta_path, baseline)
+            meta_paths = {**baseline["paths"], "work_dir": "/new-work"}
+
+            rf.mutate_session_meta(
+                meta_path,
+                quiet=True,
+                fn=lambda fresh: (
+                    fresh["paths"].__setitem__("concurrent_cache", "/cache") or True
+                ),
+            )
+            rf._persist_session_meta_mapping_updates(
+                meta_path,
+                quiet=True,
+                baseline=baseline,
+                updates={"paths": meta_paths},
+            )
+
+            persisted = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["paths"],
+                {
+                    "repo_dir": "/repo",
+                    "work_dir": "/new-work",
+                    "concurrent_cache": "/cache",
+                },
+            )
+
     def test_followup_persistence_deep_merges_concurrent_nested_members(self) -> None:
         variants = (
             ("llm", "usage", {"input_tokens": 10}, {"output_tokens": 3}),
