@@ -13859,6 +13859,64 @@ def _interactive_session_resume_is_poisoned(
         text=session_dir_text,
     )
 
+def resolve_saved_interactive_llm_config(
+    *,
+    saved_llm_meta: dict[str, Any],
+    saved_resolution_meta: dict[str, Any],
+    base_codex_config_path: Path,
+    reviewflow_config_path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    provider = str(saved_llm_meta.get("provider") or "").strip().lower()
+    configured_controls = {
+        name
+        for name in CODEX_IGNORED_LLM_CONTROLS
+        if not name.startswith("--")
+        if saved_llm_meta.get(name) not in (None, "", [], {})
+    }
+    validate_codex_controls(
+        provider=provider,
+        configured_controls=configured_controls,
+    )
+
+    saved_preset_name = (
+        str(saved_llm_meta.get("selected_name") or "").strip()
+        or str(saved_llm_meta.get("preset") or "").strip()
+        or None
+    )
+    try:
+        llm_meta, llm_resolution_meta = resolve_llm_config(
+            base_codex_config_path=base_codex_config_path,
+            reviewflow_config_path=reviewflow_config_path,
+            cli_preset=saved_preset_name,
+            cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
+            cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
+            cli_plan_effort=None,
+            cli_verbosity=None,
+            cli_max_output_tokens=None,
+            cli_request_overrides={},
+            cli_header_overrides={},
+            deprecated_codex_model=None,
+            deprecated_codex_effort=None,
+            deprecated_codex_plan_effort=None,
+        )
+    except ReviewflowError:
+        llm_meta = dict(saved_llm_meta)
+        llm_resolution_meta = dict(saved_resolution_meta)
+
+    resolved_saved = (
+        llm_resolution_meta.get("resolved")
+        if isinstance(llm_resolution_meta.get("resolved"), dict)
+        else None
+    )
+    if isinstance(resolved_saved, dict):
+        if str(saved_llm_meta.get("model") or "").strip():
+            resolved_saved["model_source"] = "session_reuse"
+        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
+            resolved_saved["reasoning_effort_source"] = "session_reuse"
+        llm_resolution_meta["resolved"] = resolved_saved
+    return llm_meta, llm_resolution_meta
+
+
 def build_interactive_resume_command(
     *,
     session: InteractiveReviewSession,
@@ -13918,43 +13976,12 @@ def build_interactive_resume_command(
     saved_resolution_meta = (
         saved_llm_meta.get("config") if isinstance(saved_llm_meta.get("config"), dict) else {}
     )
-    llm_meta = dict(saved_llm_meta)
-    llm_resolution_meta = dict(saved_resolution_meta)
-    saved_preset_name = (
-        str(saved_llm_meta.get("selected_name") or "").strip()
-        or str(saved_llm_meta.get("preset") or "").strip()
-        or None
+    llm_meta, llm_resolution_meta = resolve_saved_interactive_llm_config(
+        saved_llm_meta=saved_llm_meta,
+        saved_resolution_meta=saved_resolution_meta,
+        base_codex_config_path=default_codex_base_config_path(),
+        reviewflow_config_path=effective_config_path,
     )
-    try:
-        llm_meta, llm_resolution_meta = resolve_llm_config(
-            base_codex_config_path=default_codex_base_config_path(),
-            reviewflow_config_path=effective_config_path,
-            cli_preset=saved_preset_name,
-            cli_model=(str(saved_llm_meta.get("model") or "").strip() or None),
-            cli_effort=(str(saved_llm_meta.get("reasoning_effort") or "").strip() or None),
-            cli_plan_effort=None,
-            cli_verbosity=(str(saved_llm_meta.get("text_verbosity") or "").strip() or None),
-            cli_max_output_tokens=(
-                int(saved_llm_meta.get("max_output_tokens"))
-                if isinstance(saved_llm_meta.get("max_output_tokens"), int)
-                else None
-            ),
-            cli_request_overrides={},
-            cli_header_overrides={},
-            deprecated_codex_model=None,
-            deprecated_codex_effort=None,
-            deprecated_codex_plan_effort=None,
-        )
-    except ReviewflowError:
-        llm_meta = dict(saved_llm_meta)
-        llm_resolution_meta = dict(saved_resolution_meta)
-    resolved_saved = llm_resolution_meta.get("resolved") if isinstance(llm_resolution_meta.get("resolved"), dict) else None
-    if isinstance(resolved_saved, dict):
-        if str(saved_llm_meta.get("model") or "").strip():
-            resolved_saved["model_source"] = "session_reuse"
-        if str(saved_llm_meta.get("reasoning_effort") or "").strip():
-            resolved_saved["reasoning_effort_source"] = "session_reuse"
-        llm_resolution_meta["resolved"] = resolved_saved
 
     runtime_policy = prepare_review_agent_runtime(
         args=argparse.Namespace(),
@@ -15271,6 +15298,7 @@ from cure_runtime import (
     BUILTIN_LLM_PRESET_IDS,
     CHUNKHOUND_CONFIG_EXAMPLE,
     CLI_LLM_PROVIDERS,
+    CODEX_IGNORED_LLM_CONTROLS,
     CODEX_REASONING_EFFORT_CHOICES,
     DEFAULT_LEGACY_CODEX_PRESET,
     DEFAULT_MULTIPASS_ENABLED,
@@ -15336,6 +15364,7 @@ from cure_runtime import (
     resolve_ui_enabled,
     resolve_verbosity,
     toml_string,
+    validate_codex_controls,
 )
 from cure_pr_context import (
     OrientationProviderExecutionFailure,

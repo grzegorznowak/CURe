@@ -48,6 +48,22 @@ IMPLICIT_CODEX_PRESET_SOURCE = "implicit_codex_cli"
 BUILTIN_LLM_PRESET_IDS = (
     "codex-cli",
 )
+CODEX_IGNORED_LLM_CONTROLS = frozenset(
+    {
+        "--llm-header",
+        "--llm-max-output-tokens",
+        "--llm-set",
+        "--llm-verbosity",
+        "api_key",
+        "headers",
+        "include",
+        "max_output_tokens",
+        "metadata",
+        "request",
+        "store",
+        "text_verbosity",
+    }
+)
 CURATED_ENV_INHERIT_KEYS = (
     "CHUNKHOUND_EMBEDDING__API_KEY",
     "CHUNKHOUND_LLM_API_KEY",
@@ -683,6 +699,21 @@ def _resolve_named_llm_preset(
     return base_preset, resolved_preset_id
 
 
+def validate_codex_controls(
+    *,
+    provider: str,
+    configured_controls: set[str],
+) -> None:
+    """Reject controls that the codex-only execution path cannot consume."""
+    if str(provider).strip().lower() != "codex":
+        return
+    ignored_controls = sorted(configured_controls & CODEX_IGNORED_LLM_CONTROLS)
+    if ignored_controls:
+        raise ReviewflowError(
+            "Codex does not support these ignored LLM controls: " + ", ".join(ignored_controls)
+        )
+
+
 def resolve_utility_llm_config(
     *,
     main_resolved: dict[str, Any],
@@ -726,6 +757,19 @@ def resolve_utility_llm_config(
         )
         transport = str(base_preset.get("transport") or "").strip().lower()
         provider = str(base_preset.get("provider") or "").strip().lower()
+        explicit_preset_fields = {
+            str(item).strip()
+            for item in (
+                base_preset.get("_explicit_overrides")
+                if isinstance(base_preset.get("_explicit_overrides"), list)
+                else []
+            )
+            if str(item).strip()
+        }
+        validate_codex_controls(
+            provider=provider,
+            configured_controls=explicit_preset_fields,
+        )
         resolved = {
             "preset": resolved_preset_id,
             "selected_name": selected_text,
@@ -1583,14 +1627,10 @@ def resolve_llm_config(
     configured_ignored_cli = [
         name for name, value in ignored_cli_controls.items() if value not in (None, "", [], {})
     ]
-    ignored_preset_fields = explicit_preset_fields & {
-        "request", "metadata", "headers", "api_key", "store", "include"
-    }
-    if provider == "codex" and (configured_ignored_cli or ignored_preset_fields):
-        controls = sorted((*configured_ignored_cli, *ignored_preset_fields))
-        raise ReviewflowError(
-            "Codex does not support these ignored LLM controls: " + ", ".join(controls)
-        )
+    validate_codex_controls(
+        provider=provider,
+        configured_controls=set(configured_ignored_cli) | explicit_preset_fields,
+    )
     preset_source_mode = str(base_preset.get("_source_mode") or "").strip()
 
     def _preset_source_detail(field: str) -> str:

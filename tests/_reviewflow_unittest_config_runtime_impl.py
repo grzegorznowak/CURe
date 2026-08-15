@@ -1431,6 +1431,8 @@ class LlmPresetConfigTests(unittest.TestCase):
                 "api_key": '"secret"',
                 "store": "true",
                 "include": '["usage"]',
+                "text_verbosity": '"high"',
+                "max_output_tokens": "9000",
             }
             for field, value in values.items():
                 with self.subTest(field=field):
@@ -2285,7 +2287,7 @@ class UtilityModelConfigTests(unittest.TestCase):
             base.unlink(missing_ok=True)
             cfg.unlink(missing_ok=True)
 
-    def test_utility_model_can_use_different_supported_provider_preset(self) -> None:
+    def test_utility_model_rejects_codex_api_key_with_shared_validator(self) -> None:
         base = self._write_base_config(".tmp_test_utility_provider_base.toml")
         cfg = ROOT / ".tmp_test_utility_provider.toml"
         try:
@@ -2312,18 +2314,64 @@ class UtilityModelConfigTests(unittest.TestCase):
                 cli_model="gpt-5.4",
                 cli_effort="high",
             )
-            utility_resolved, utility_meta = self._resolve_utility(
-                main_resolved=main_resolved,
-                main_meta=main_meta,
-                cfg=cfg,
-            )
-            self.assertEqual(main_resolved["provider"], "codex")
-            self.assertEqual(utility_resolved["provider"], "codex")
-            self.assertEqual(utility_resolved["transport"], "cli")
-            self.assertEqual(utility_meta["resolved"]["preset_source"], "cure.toml")
+            with self.assertRaisesRegex(rf.ReviewflowError, "Codex.*api_key"):
+                self._resolve_utility(
+                    main_resolved=main_resolved,
+                    main_meta=main_meta,
+                    cfg=cfg,
+                )
         finally:
             base.unlink(missing_ok=True)
             cfg.unlink(missing_ok=True)
+
+    def test_saved_interactive_llm_rejects_ignored_controls_instead_of_reusing_raw_meta(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_reject_base.toml")
+        try:
+            for field, value in (
+                ("api_key", "test-codex-key"),  # pragma: allowlist secret
+                ("text_verbosity", "high"),
+                ("max_output_tokens", 9000),
+            ):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    rf.ReviewflowError, rf"Codex.*{field}"
+                ):
+                    rf.resolve_saved_interactive_llm_config(
+                        saved_llm_meta={
+                            "preset": "codex-cli",
+                            "provider": "codex",
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "medium",
+                            field: value,
+                        },
+                        saved_resolution_meta={},
+                        base_codex_config_path=base,
+                        reviewflow_config_path=None,
+                    )
+        finally:
+            base.unlink(missing_ok=True)
+
+    def test_saved_interactive_llm_resolves_legitimate_model_and_effort(self) -> None:
+        base = self._write_base_config(".tmp_test_saved_interactive_positive_base.toml")
+        try:
+            resolved, resolution_meta = rf.resolve_saved_interactive_llm_config(
+                saved_llm_meta={
+                    "preset": "codex-cli",
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                },
+                saved_resolution_meta={},
+                base_codex_config_path=base,
+                reviewflow_config_path=None,
+            )
+            self.assertEqual(resolved["model"], "gpt-5.4")
+            self.assertEqual(resolved["reasoning_effort"], "high")
+            self.assertEqual(resolution_meta["resolved"]["model_source"], "session_reuse")
+            self.assertEqual(
+                resolution_meta["resolved"]["reasoning_effort_source"], "session_reuse"
+            )
+        finally:
+            base.unlink(missing_ok=True)
 
     def test_utility_model_fields_resolve_override_then_toml_then_inherited_default(self) -> None:
         base = self._write_base_config(".tmp_test_utility_precedence_base.toml")
