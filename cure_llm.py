@@ -1207,7 +1207,13 @@ if __name__ == "__main__":
     return helper_path
 
 
-SENSITIVE_STAGED_PATH_KEYS = ("gh_config_dir", "jira_config_file", "netrc")
+SENSITIVE_STAGED_PATH_KEYS = (
+    "auth_staging_dir",
+    "gh_config_dir",
+    "jira_config_file",
+    "netrc",
+    "rf_jira",
+)
 
 
 def cleanup_sensitive_staged_paths(staged_paths: dict[str, Any] | None) -> None:

@@ -2238,6 +2238,40 @@ class InteractiveFlowTests(unittest.TestCase):
         def isatty(self) -> bool:
             return True
 
+    def _stage_interactive_credentials(
+        self, work_dir: Path
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        auth_root = work_dir / ".auth-test"
+        gh_config = auth_root / "gh_config"
+        jira_config = auth_root / "jira_config" / ".config.yml"
+        netrc = auth_root / "netrc" / ".netrc"
+        rf_jira = auth_root / "rf-jira"
+        gh_config.mkdir(parents=True)
+        (gh_config / "hosts.yml").write_text("oauth_token: secret\n", encoding="utf-8")
+        jira_config.parent.mkdir()
+        jira_config.write_text("token: secret\n", encoding="utf-8")
+        netrc.parent.mkdir()
+        netrc.write_text("machine example.test password secret\n", encoding="utf-8")
+        rf_jira.write_text("#!/bin/sh\n", encoding="utf-8")
+        staged_paths = {
+            "auth_staging_dir": str(auth_root),
+            "rf_jira": str(rf_jira),
+            "gh_config_dir": str(gh_config),
+            "jira_config_file": str(jira_config),
+            "netrc": str(netrc),
+        }
+        env = {
+            "GH_CONFIG_DIR": str(gh_config),
+            "JIRA_CONFIG_FILE": str(jira_config),
+            "NETRC": str(netrc),
+        }
+        return env, staged_paths
+
+    def assert_staged_credentials_absent(self, staged_paths: dict[str, str]) -> None:
+        for key, raw_path in staged_paths.items():
+            with self.subTest(staged_path=key):
+                self.assertFalse(Path(raw_path).exists())
+
     def test_interactive_session_resume_is_poisoned_when_log_contains_session_dir_message(self) -> None:
         root = ROOT / ".tmp_test_interactive_poisoned_detect"
         fake_home = ROOT / ".tmp_test_interactive_poisoned_detect_home"
@@ -2320,7 +2354,7 @@ class InteractiveFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(fake_home, ignore_errors=True)
 
-    def test_interactive_flow_runs_selected_resume_command(self) -> None:
+    def test_interactive_flow_success_cleans_complete_staging_manifest(self) -> None:
         root = ROOT / ".tmp_test_interactive_flow_root"
         cfg = ROOT / ".tmp_test_interactive_flow_cfg.json"
         try:
@@ -2372,6 +2406,11 @@ class InteractiveFlowTests(unittest.TestCase):
             )
             stdin = self._FakeTty("1\n")
             stderr = self._FakeTty()
+            staged_env, staged_paths = self._stage_interactive_credentials(s1 / "work")
+            runtime_env = {
+                "CHUNKHOUND_EMBEDDING__API_KEY": "test-key",  # pragma: allowlist secret
+                **staged_env,
+            }
 
             with (
                 mock.patch.object(rf, "ensure_review_config"),
@@ -2392,7 +2431,11 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
+                    return_value={
+                        "env": runtime_env,
+                        "metadata": {"provider": "codex"},
+                        "staged_paths": staged_paths,
+                    },
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command", return_value=7) as runner,
             ):
@@ -2406,6 +2449,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertEqual(runner.call_args.kwargs["env"]["CHUNKHOUND_EMBEDDING__API_KEY"], "test-key")  # pragma: allowlist secret
             self.assertIn("llm=codex-cli/gpt-5.3-codex/high", stderr.getvalue())
             self.assertIn(str(s1 / "review.md"), stderr.getvalue())
+            self.assert_staged_credentials_absent(staged_paths)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
@@ -2836,7 +2880,7 @@ class InteractiveFlowTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             cfg.unlink(missing_ok=True)
 
-    def test_interactive_flow_errors_for_poisoned_resume(self) -> None:
+    def test_interactive_flow_poisoned_resume_cleans_complete_staging_manifest(self) -> None:
         root = ROOT / ".tmp_test_interactive_poisoned_error_root"
         cfg = ROOT / ".tmp_test_interactive_poisoned_error_cfg.json"
         fake_home = ROOT / ".tmp_test_interactive_poisoned_error_home"
@@ -2925,6 +2969,11 @@ class InteractiveFlowTests(unittest.TestCase):
             )
             stdin = self._FakeTty("1\n")
             stderr = self._FakeTty()
+            staged_env, staged_paths = self._stage_interactive_credentials(s1 / "work")
+            runtime_env = {
+                "CHUNKHOUND_EMBEDDING__API_KEY": "test-key",  # pragma: allowlist secret
+                **staged_env,
+            }
 
             with (
                 mock.patch.object(rf, "ensure_review_config"),
@@ -2946,7 +2995,11 @@ class InteractiveFlowTests(unittest.TestCase):
                 mock.patch.object(
                     rf,
                     "prepare_review_agent_runtime",
-                    return_value={"env": {"CHUNKHOUND_EMBEDDING__API_KEY": "test-key"}, "metadata": {"provider": "codex"}},  # pragma: allowlist secret
+                    return_value={
+                        "env": runtime_env,
+                        "metadata": {"provider": "codex"},
+                        "staged_paths": staged_paths,
+                    },
                 ),
                 mock.patch.object(rf, "run_interactive_resume_command") as resume_runner,
             ):
@@ -2957,6 +3010,7 @@ class InteractiveFlowTests(unittest.TestCase):
             self.assertIn(str(review_md), str(ctx.exception))
             resume_runner.assert_not_called()
             self.assertNotIn("Continuing", stderr.getvalue())
+            self.assert_staged_credentials_absent(staged_paths)
         finally:
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(fake_home, ignore_errors=True)

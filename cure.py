@@ -13845,8 +13845,9 @@ def build_interactive_resume_command(
     *,
     session: InteractiveReviewSession,
     paths: ReviewflowPaths,
+    staged_paths_out: dict[str, Any],
     config_path: Path | None = None,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], dict[str, Any]]:
     effective_config_path = config_path or default_reviewflow_config_path()
     meta_path = session.session_dir / "meta.json"
     meta = _load_session_meta(meta_path)
@@ -13951,6 +13952,9 @@ def build_interactive_resume_command(
         interactive=True,
         paths=paths,
     )
+    runtime_staged_paths = runtime_policy.get("staged_paths")
+    if isinstance(runtime_staged_paths, dict):
+        staged_paths_out.update(runtime_staged_paths)
     env = dict(runtime_policy["env"])
 
     llm_resume = llm_meta.get("resume") if isinstance(llm_meta.get("resume"), dict) else {}
@@ -14016,7 +14020,7 @@ def build_interactive_resume_command(
                 quiet=True,
                 fn=lambda fresh: (fresh.update(meta_updates) or True),
             )
-            return (fallback_command, env)
+            return (fallback_command, env, dict(staged_paths_out))
 
         command = build_codex_resume_command(
             repo_dir=repo_dir,
@@ -14048,7 +14052,7 @@ def build_interactive_resume_command(
             quiet=True,
             fn=lambda fresh: (fresh.update(meta_updates) or True),
         )
-        return (command, env)
+        return (command, env, dict(staged_paths_out))
 
     raise ReviewflowError(
         f"interactive is not supported for provider {provider} in v1. This session is execution-only."
@@ -14100,27 +14104,23 @@ def _interactive_flow_impl(
             "This session is execution-only."
         )
 
-    resume_command, resume_env = build_interactive_resume_command(
-        session=selected,
-        paths=paths,
-        config_path=config_path,
-    )
+    staged_paths: dict[str, Any] = {}
     try:
-        err_stream.write(f"\nLatest review artifact: {selected.latest_artifact_path}\n")
-        err_stream.write(f"\nContinuing {selected.repo_slug} ({selected.session_id})...\n")
-        err_stream.flush()
-    except Exception:
-        pass
-    try:
+        resume_command, resume_env, staged_paths = build_interactive_resume_command(
+            session=selected,
+            paths=paths,
+            staged_paths_out=staged_paths,
+            config_path=config_path,
+        )
+        try:
+            err_stream.write(f"\nLatest review artifact: {selected.latest_artifact_path}\n")
+            err_stream.write(f"\nContinuing {selected.repo_slug} ({selected.session_id})...\n")
+            err_stream.flush()
+        except Exception:
+            pass
         return run_interactive_resume_command(resume_command, env=resume_env)
     finally:
-        cleanup_sensitive_staged_paths(
-            {
-                "gh_config_dir": resume_env.get("GH_CONFIG_DIR"),
-                "jira_config_file": resume_env.get("JIRA_CONFIG_FILE"),
-                "netrc": resume_env.get("NETRC"),
-            }
-        )
+        cleanup_sensitive_staged_paths(staged_paths)
 
 
 def list_sessions(*, paths: ReviewflowPaths) -> int:
