@@ -86,8 +86,8 @@ Absorption checklist for the delivered `cure explain` feature + review-flow hard
 - [x] Absorbed workspace written in the main tree: proposal.md, story.md (scaffold anchors + TAP-10 matrix + A1–A17 proof matrix), design.md, tasks.md; no delta specs (no capability spec covers CLI commands).
 
 ## Absorption
-- [ ] Commit the absorbed initiative + story workspace in the main tree (`projects/CURe/openspec`).
-- [ ] At PR #37 merge: drop/archive the branch's `openspec/changes/cure-explain-command` to avoid an add/add conflict with this absorbed workspace.
+- [x] Commit the absorbed initiative + story workspace in the main tree (`projects/CURe/openspec`). (d708cdc + d2e0c70 pushed 2026-08-15)
+- [x] At PR #37 merge: drop/archive the branch's `openspec/changes/cure-explain-command` to avoid an add/add conflict with this absorbed workspace. (b568783; PR #37 merged 2026-08-15)
 - ~~Kick off the next story (round-6 findings F1–F4 and F6–F9) from this contract.~~ — superseded 2026-08-13 by the absorption decision (story.md D28/A18–A25).
 
 ## Round-7 Findings Absorption (G2–G13 scoped, operator decision 2026-08-15)
@@ -104,5 +104,5 @@ Absorption checklist for the delivered `cure explain` feature + review-flow hard
 - [x] Fresh plan review approval entry in Plan Review Log (required by D30/D32; 2026-08-15T08:59:18Z request_changes + follow-up approve)
 - [x] Update progress.md cycle record
 - [x] Re-run full explicit suite + ruff + mypy at the new branch head (`5c71c1d`): 2269 passed; ruff/mypy clean
-- [ ] Confirm hosted CI green before merge
-- [ ] At PR #37 merge: drop/archive the branch openspec copy (records the stale A9 read-only text) — extends the existing box above
+- [x] Confirm hosted CI green before merge (ubuntu/macos-14/detect-secrets green at b568783)
+- [x] At PR #37 merge: drop/archive the branch openspec copy (records the stale A9 read-only text) — extends the existing box above (b568783; PR merged)

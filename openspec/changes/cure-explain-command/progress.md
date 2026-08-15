@@ -9,6 +9,7 @@
 - Status: 🟣 IN REVIEW
 
 ## Progress Timeline
+- 2026-08-15T14:16:38Z Attached PR delivery record — https://github.com/grzegorznowak/CURe/pull/37 (status: open)
 - 2026-08-15T14:00:43Z **Resume / re-review claim**: refreshed the claim after the proof-contract-only review findings were aligned in the authoritative main-tree story; advanced authoritative status `🔄 IN PROGRESS` → `🟣 IN REVIEW` with no product-source changes.
   Worktrees: CURe=/home/vscode/add-worktrees/CURe-explain-command
   Claim: fresh oblivious re-review of pushed `feat/explain-command` commit `385e0ad`; the A26 Surface / Branch row now names TAP-16 command-shape proof with a live run optional, and the A29 Acceptance Proof Matrix row includes the referenced-preset regression. Hosted CI is green.
@@ -88,6 +89,16 @@
 - **Proof Statement**: Ready for re-review. The proof-matrix-only findings are aligned in the authoritative story, implementation commit `385e0ad` is pushed, and hosted CI is green; no proof commands were rerun because no product source changed.
 
 ## PR State
+- PR URL: https://github.com/grzegorznowak/CURe/pull/37
+- Number: 37
+- Title: feat: add cure explain command for human-friendly review explanations
+- Branch: feat/explain-command
+- Opened at: 2026-08-10T08:09:41Z
+- PR status: merged
+- Review decision: blank
+- Merge commit: 64609d229f9856fdc28e2dd9a31eefd675ebfe2e
+- Merged at: 2026-08-15T14:17:41Z
+- Last synced: 2026-08-15T14:19:00Z
 - Delivery vehicle: PR #37, branch `feat/explain-command`
 - Implementation worktree: `/home/vscode/add-worktrees/CURe-explain-command`
 - Starting commit: `2d8c2b1`
@@ -96,3 +107,5 @@
 - A29 re-review repair commit: `385e0ad`
 - Branch status at handoff: clean and pushed; local HEAD and `origin/feat/explain-command` both resolve to `385e0ad`; hosted CI is green.
 - OpenSpec commit policy: main-tree absorption artifacts remain uncommitted/untracked by operator decision; branch worktree `openspec/` untouched.
+
+- 2026-08-15T14:19:00Z Refreshed PR delivery record — https://github.com/grzegorznowak/CURe/pull/37 (status: merged)
