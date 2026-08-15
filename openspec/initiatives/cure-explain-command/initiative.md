@@ -16,6 +16,8 @@ source_of_truth: internal
 2. **Review-flow reliability hardening** — absorb the PR #37 remediation rounds delivered alongside the feature: the lock-and-merge protocol for ALL session-meta writers, SessionProgress baseline-diff merging with explicit deletions, strict metadata mutation (no resurrection, no corrupt-data replacement), newest-first session discovery with clear unusable-artifact errors, codex retry isolation and guaranteed event draining, credential staging cleanup, CI test-collection repair, and the live read-only proof.
 3. ~~Round-6 findings follow-up (future)~~ — superseded 2026-08-13: findings F1–F4 and F6–F9 are absorbed into Story 1 (story A18–A25) by operator decision; no separate story is planned.
 
+- **Archived**: `cure-explain-command` was archived on 2026-08-15.
+
 ## Decisions & Constraints
 - **Codex-only backend**: HTTP/gemini providers and transports are rejected at parse/exec time (`REMOVED_HTTP_LLM_PRESETS`/`_raise_removed_http_provider_support`); positive fixtures and docs are codex-only.
 - **Explain permission model (operator decision 2026-08-13)**: explain runs and the `--open-in-codex` handoff follow delivered interactive construction exactly — bypass on, sandbox mode and approval policy `None`, and configured sandbox flags suppressed through `include_sandbox=False`; no new sandbox/approval/bypass config surface is part of this decision. Every explain run prints a loud mode line naming those effective values; the handoff carries the same staged credentials as the review run. This is a trusted, human-supervised permission model even though the automated explain run is headless. `normalize_artifact=False` and per-run private credential staging, cleaned on every exit path, remain.
