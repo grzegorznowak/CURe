@@ -652,6 +652,23 @@ class ExplainCommandTests(unittest.TestCase):
         assert isinstance(handoff_env, dict)
         self.assertIn("runtime_policy", handoffs[0])
 
+    def test_explain_flow_propagates_nonzero_interactive_handoff_exit_code(self) -> None:
+        codex_root = self.root / "codex-home-nonzero-handoff"
+        _write_fake_codex_session(codex_root=codex_root)
+        session_dir, _ = _write_completed_session(root=self.root, extra_meta=self._codex_meta())
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_root)}), mock.patch.object(
+            rf, "_open_interactive_codex_resume", return_value=23
+        ):
+            captured = self._patched_run(
+                _explain_args(open_in_codex=True),
+                resolved={"provider": "codex", "preset": "codex-cli"},
+            )
+
+        self.assertEqual(captured["_rc"], 23)
+        meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(meta["explains"]), 1)
+
     def test_explain_handoff_keeps_credentials_until_exit_and_cleans_success_or_failure(self) -> None:
         for should_fail in (False, True):
             with self.subTest(should_fail=should_fail):
@@ -821,10 +838,15 @@ class ExplainCommandTests(unittest.TestCase):
 
     # -- PR #37 review remediation obligations ------------------------------
 
-    def test_build_codex_exec_cmd_explain_resume_forwards_interactive_flags(self) -> None:
+    def test_build_codex_exec_cmd_explain_resume_drops_only_search(self) -> None:
         runtime_flags = [
             "-m", "gpt-5.6-sol",
             "--search",
+            "-c", "model_reasoning_effort=high",
+            "--feature", "representative-runtime-flag",
+        ]
+        expected_runtime_flags = [
+            "-m", "gpt-5.6-sol",
             "-c", "model_reasoning_effort=high",
             "--feature", "representative-runtime-flag",
         ]
@@ -841,8 +863,8 @@ class ExplainCommandTests(unittest.TestCase):
             direct_resume_runtime_flags=True,
         )
         self.assertEqual(cmd[:4], ["codex", "exec", "resume", "fork-1"])
-        self.assertEqual(cmd[4 : 4 + len(runtime_flags)], runtime_flags)
-        self.assertIn("--search", cmd)
+        self.assertEqual(cmd[4 : 4 + len(expected_runtime_flags)], expected_runtime_flags)
+        self.assertNotIn("--search", cmd)
         self.assertIn("--feature", cmd)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
 
@@ -898,10 +920,34 @@ class ExplainCommandTests(unittest.TestCase):
         self.assertIn("--search", policy["codex_flags"])
         self.assertNotIn("sandbox_mode", captured)
         self.assertIs(captured["direct_resume_runtime_flags"], True)
-        mode_lines = [str(call.args[0]) for call in log_mock.call_args_list if "EXPLAIN mode:" in str(call.args[0])]
+        resume_cmd = rf.build_codex_exec_cmd(
+            repo_dir=self.root,
+            codex_flags=policy["codex_flags"],
+            codex_config_overrides=[],
+            review_md_path=self.root / "explain.md",
+            prompt="explain",
+            resume_session_id=str(captured["resume_session_id"]),
+            direct_resume_runtime_flags=True,
+        )
+        self.assertNotIn("--search", resume_cmd)
+        self.assertIn("--output-last-message", resume_cmd)
+        mode_lines = [
+            str(call.args[0])
+            for call in log_mock.call_args_list
+            if "EXPLAIN mode: sandbox=" in str(call.args[0])
+        ]
         self.assertEqual(
             mode_lines,
             ["EXPLAIN mode: sandbox=None approval=None bypass=True"],
+        )
+        search_notes = [
+            str(call.args[0])
+            for call in log_mock.call_args_list
+            if "live search is unavailable" in str(call.args[0]).lower()
+        ]
+        self.assertEqual(
+            search_notes,
+            ["EXPLAIN mode: live search is unavailable on the resumed path; --search will be dropped"],
         )
 
     def test_open_interactive_codex_resume_uses_interactive_builder_semantics(self) -> None:

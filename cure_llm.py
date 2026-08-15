@@ -387,6 +387,11 @@ def _resume_compatible_codex_flags(codex_flags: list[str]) -> list[str]:
     return out
 
 
+def _strip_search_flag(codex_flags: list[str]) -> list[str]:
+    """Drop only the unsupported ``--search`` resume flag."""
+    return [flag for flag in codex_flags if flag != "--search"]
+
+
 def _strip_sandbox_search_flags(codex_flags: list[str]) -> list[str]:
     """Drop `--sandbox <mode>` and `--search` flag/value pairs."""
     out: list[str] = []
@@ -425,7 +430,7 @@ def build_codex_exec_cmd(
     if resume_session_id:
         cmd = ["codex", "exec", "resume", str(resume_session_id)]
         cmd.extend(
-            codex_flags
+            _strip_search_flag(codex_flags)
             if direct_resume_runtime_flags
             else _resume_compatible_codex_flags(codex_flags)
         )

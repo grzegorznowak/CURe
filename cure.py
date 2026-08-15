@@ -12852,6 +12852,12 @@ def _explain_flow_impl(
                             "context, first output may take a minute",
                             quiet=quiet,
                         )
+                        if "--search" in codex_flags:
+                            log(
+                                "EXPLAIN mode: live search is unavailable on the resumed path; "
+                                "--search will be dropped",
+                                quiet=quiet,
+                            )
                 except (ReviewflowError, OSError):
                     # Base codex session unavailable: fall back to inline review-text mode.
                     resume_fork_id = None
@@ -12978,6 +12984,7 @@ def _explain_flow_impl(
                 runtime_policy=explain_runtime_policy,
             )
             log(f"EXPLAIN: interactive codex session ended (rc={rc})", quiet=quiet)
+            return rc
         return 0
     finally:
         cleanup_sensitive_staged_paths(staged_paths)
