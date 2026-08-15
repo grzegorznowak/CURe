@@ -1,14 +1,23 @@
 ## Current Claim
-- Claimed at: 2026-08-13T13:32:45Z
+- Claimed at: 2026-08-15T14:00:43Z
 - Claimed by: pi focused child session (resume)
 - Model: gpt-5.6-sol
-- Scope: Repair implementation-review round-5 A18 session-boundary derivation and strengthen TAP-11 raw-boundary proof.
+- Scope: Claim the story at pushed commit 385e0ad for fresh oblivious re-review after aligning the A26 Surface / Branch row and A29 Acceptance Proof Matrix row; no product-source changes in this session.
 - Worktrees:
   - CURe: /home/vscode/add-worktrees/CURe-explain-command
-- Primary write surfaces: /home/vscode/add-worktrees/CURe-explain-command/{cure.py,cure_llm.py,tests/_reviewflow_unittest_explain.py,tests/_reviewflow_unittest_runtime_ui_impl.py}; main-tree openspec/changes/cure-explain-command/{design.md,story.md,tasks.md,progress.md}
+- Primary write surfaces: main-tree openspec/changes/cure-explain-command/{story.md,progress.md}
 - Status: 🟣 IN REVIEW
 
 ## Progress Timeline
+- 2026-08-15T14:00:43Z **Resume / re-review claim**: refreshed the claim after the proof-contract-only review findings were aligned in the authoritative main-tree story; advanced authoritative status `🔄 IN PROGRESS` → `🟣 IN REVIEW` with no product-source changes.
+  Worktrees: CURe=/home/vscode/add-worktrees/CURe-explain-command
+  Claim: fresh oblivious re-review of pushed `feat/explain-command` commit `385e0ad`; the A26 Surface / Branch row now names TAP-16 command-shape proof with a live run optional, and the A29 Acceptance Proof Matrix row includes the referenced-preset regression. Hosted CI is green.
+- 2026-08-15T13:49:18Z **Resume / re-review claim**: claimed the repaired round-7 implementation for fresh oblivious re-review; authoritative status advanced `🔄 IN PROGRESS` → `🟣 IN REVIEW` with no product-source changes in this session.
+  Worktrees: CURe=/home/vscode/add-worktrees/CURe-explain-command
+  Claim: re-review pushed `feat/explain-command` commit `385e0ad`; the A29 saved-session preset-expansion defect is repaired, the story's A26 proof row is aligned with its criterion, and the four named A29 proof tests pass (4 passed, 11 subtests).
+- 2026-08-15T13:32:35Z **Resume**: claimed completed round-7 A26–A32 implementation for fresh oblivious review; authoritative status advanced `🔄 IN PROGRESS` → `🟣 IN REVIEW` with no product-source changes.
+  Worktrees: CURe=/home/vscode/add-worktrees/CURe-explain-command
+  Claim: review the pushed `feat/explain-command` implementation at `5c71c1d`; A26–A32 are complete, the explicit full suite passed 2269 tests, and ruff/mypy are clean.
 - 2026-08-13T13:56:27Z **Verification / ready for fresh review**: A18 authoritative-session-boundary repair GREEN. Focused touched owners: 207 passed, 32 subtests. Affected: 832 passed, 1 skipped, 1 known deselected, 242 subtests. Full explicit: 2252 passed, 2 skipped, 2 known deselected, 542 subtests. Collection parity: 28 matching cases / 1099 total collected. Ruff, mypy 1.20.0, py_compile, selftest (836 tests, 1 skipped), and diff-check GREEN. Status advanced `🔄 IN PROGRESS` → `🟣 IN REVIEW`; no live/hosted proof was required for this containment-only repair.
 - 2026-08-13T13:40:00Z **A18 authoritative-boundary RED→GREEN**: replaced the `repo_dir.parent` containment derivation with an explicit authoritative `session_dir` threaded through every production `run_llm_exec`/`run_codex_exec` caller and both display/event log resolvers. RED: the two TAP-11 owners produced 8 failures (session-root `repo_dir` accepted sibling absolute targets for both keys, accepted the raw session-root event shape, while nested `repo_dir` rejected valid contained/default targets); GREEN: 2 tests plus 24 subtests cover both repo shapes × both log keys, outside/traversal/raw-boundary rejection, contained paths, and defaults.
   - Changed: worktree `cure.py`, `cure_llm.py`, TAP-11 owners and caller-contract tests; main-tree `design.md`, `story.md`, `tasks.md`, `progress.md`.
@@ -63,25 +72,27 @@
 - 2026-08-13T07:47:23Z Operator-directed scope amendment: absorb PR #37 round-6 findings F1–F4 and F6–F9 into this story (story.md D28/A18–A25/S18–S25/TAP-11..15) instead of deferring them to a future story; initiative Story Candidate 3 superseded; proposal/tasks/design/progress synchronized; Plan lane reopened 🟢 PLAN APPROVED -> 🟡 PLAN DRAFT; Status ✅ DONE -> 🔄 IN PROGRESS. Next: fresh plan review of the amended contract, then RED→GREEN implementation, then fresh implementation review.
 
 ## Session Handoff
-- **Timestamp**: 2026-08-13T13:56:27Z
+- **Timestamp**: 2026-08-15T14:00:43Z
 - **Status**: 🟣 IN REVIEW
 - **Completed In This Session**:
-  - Replaced A18's untrusted `repo_dir.parent` containment derivation with the authoritative selected `session_dir`, threaded explicitly through every production `run_llm_exec`/`run_codex_exec` caller and both display/event log resolvers.
-  - Added RED→GREEN TAP-11 variants for persisted `repo_dir` equal to the session root and nested deeper, covering both log keys, sibling/sandbox-adjacent absolute targets, relative traversal, raw event `.`/session-root values, contained targets, and defaults.
-  - Aligned design, A18/TAP-11/APM, Input Boundary, Implementation Notes, tasks, and progress evidence.
-- **Red-first path**: two owner tests produced 8 failures against the old derivation (escapes accepted for session-root repo shape; valid contained/default paths rejected for nested shape), then passed with 24 subtests after explicit session-root threading.
-- **Tests run**: focused touched owners 207 passed/32 subtests; affected 832 passed/1 skipped/1 known deselected/242 subtests; full explicit 2252 passed/2 skipped/2 known deselected/542 subtests; collection parity 28/1099 collected; ruff, mypy 1.20.0, py_compile, selftest (836 tests/1 skipped), and diff-check GREEN.
-- **Remaining**: Fresh oblivious implementation review; hosted CI/push and unchecked Absorption commit/merge-reconciliation tasks remain operator-owned.
-- **Blockers**: none. Main-tree OpenSpec remains intentionally uncommitted/untracked; branch implementation remains intentionally dirty/uncommitted.
+  - Refreshed the re-review claim and synchronized the authoritative story status, current claim, timeline, and handoff.
+  - Confirmed the clean implementation worktree is on the operator-waived canonical branch `feat/explain-command` at pushed commit `385e0ad`.
+  - Confirmed the authoritative main-tree story aligns the A26 Surface / Branch row and A29 Acceptance Proof Matrix row requested by review.
+- **Remaining**:
+  - Fresh oblivious implementation re-review.
+  - Absorption commit and merge-reconciliation tasks remain operator-owned.
+- **Blockers**: none.
 - **Next Steps**: Open a completely fresh oblivious session and run `/openspec-story-review cure-explain-command cure-explain-command`.
 - **Worktrees**:
   - CURe: /home/vscode/add-worktrees/CURe-explain-command
-- **Proof Statement**: Ready for review. All A18 round-5 authoritative-boundary repair tasks complete and prescribed local implementation proof passes.
+- **Proof Statement**: Ready for re-review. The proof-matrix-only findings are aligned in the authoritative story, implementation commit `385e0ad` is pushed, and hosted CI is green; no proof commands were rerun because no product source changed.
 
 ## PR State
 - Delivery vehicle: PR #37, branch `feat/explain-command`
 - Implementation worktree: `/home/vscode/add-worktrees/CURe-explain-command`
 - Starting commit: `2d8c2b1`
 - D29 implementation commit: `f684f18`
-- Branch status at handoff: intentionally dirty/uncommitted with A18–A25 implementation and tests on top of `f684f18`; no commit created
+- Round-7 implementation commit: `5c71c1d`
+- A29 re-review repair commit: `385e0ad`
+- Branch status at handoff: clean and pushed; local HEAD and `origin/feat/explain-command` both resolve to `385e0ad`; hosted CI is green.
 - OpenSpec commit policy: main-tree absorption artifacts remain uncommitted/untracked by operator decision; branch worktree `openspec/` untouched.

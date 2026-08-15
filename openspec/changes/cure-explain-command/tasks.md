@@ -89,3 +89,20 @@ Absorption checklist for the delivered `cure explain` feature + review-flow hard
 - [ ] Commit the absorbed initiative + story workspace in the main tree (`projects/CURe/openspec`).
 - [ ] At PR #37 merge: drop/archive the branch's `openspec/changes/cure-explain-command` to avoid an add/add conflict with this absorbed workspace.
 - ~~Kick off the next story (round-6 findings F1–F4 and F6–F9) from this contract.~~ — superseded 2026-08-13 by the absorption decision (story.md D28/A18–A25).
+
+## Round-7 Findings Absorption (G2–G13 scoped, operator decision 2026-08-15)
+- [x] G2 (A26): RED fork+live command-shape test → GREEN resume search mapping + loud note; amend A9/D29 clause
+- [x] G3 (A27): RED full-manifest cleanup tests (failure + success) → GREEN single enclosing finally
+- [x] G4 (A28): RED interleaved interactive/early-persist merge tests → GREEN D31 ownership extension
+- [x] G6 (A29): RED utility/saved-session validator tests → GREEN one shared validator
+- [x] G7 (A30): RED first-attempt rollback tests → GREEN retry-parity envelope
+- [x] G12 (A31): RED handoff-rc propagation test → GREEN exit-code propagation
+- [x] G13 (A32): RED dashboard-stderr test → GREEN diagnostic tail
+
+## Absorption Delta & Merge Prep
+- [x] Amend story.md (badges, Scope, Out of Scope, S26–S32, A26–A32, TAP-16..21, APM rows, D27 partial supersession, D29 amendment, D31 formalization, D32–D34) and design.md; record scope decision on PR #37 comment
+- [x] Fresh plan review approval entry in Plan Review Log (required by D30/D32; 2026-08-15T08:59:18Z request_changes + follow-up approve)
+- [x] Update progress.md cycle record
+- [x] Re-run full explicit suite + ruff + mypy at the new branch head (`5c71c1d`): 2269 passed; ruff/mypy clean
+- [ ] Confirm hosted CI green before merge
+- [ ] At PR #37 merge: drop/archive the branch openspec copy (records the stale A9 read-only text) — extends the existing box above
