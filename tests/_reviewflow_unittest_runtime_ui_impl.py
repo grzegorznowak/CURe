@@ -4163,8 +4163,9 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn('preset = "codex-cli"', readme)
         self.assertIn('model = "gpt-5.4"', readme)
         self.assertIn('reasoning_effort = "high"', readme)
-        self.assertNotIn("openai-responses", readme)
-        self.assertNotIn("openrouter-responses", readme)
+        self.assertIn("openai-responses", readme)
+        self.assertIn("openrouter-responses", readme)
+        self.assertIn("have been removed", readme)
         self.assertIn(
             "--llm-preset codex-cli --llm-model gpt-5.4 --llm-effort high",
             readme,
@@ -4282,13 +4283,12 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("./selftest.sh", readme)
         self.assertIn("installation, persistent configuration, secrets, network access, local agent selection, and sandbox permissions remain operator-controlled", readme)
         self.assertIn('operator-approved install or disposable setup to "review in progress"', readme)
-        self.assertIn("inspect the active local setup before creating a fresh one", readme)
-        self.assertIn("repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints", readme)
+        self.assertIn("treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt", readme)
         self.assertIn("Do not silently adopt it in this public contract.", readme)
         self.assertIn("`repo_local_chunkhound` payload", readme)
         self.assertIn("`repo-local-chunkhound` check", readme)
         self.assertIn("`executor-network` advisory check", readme)
-        self.assertIn("Codex executor paths need internet / network access", readme)
+        self.assertIn("need network access for review context", readme)
         self.assertIn("cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli", readme)
         self.assertIn(
