@@ -4,6 +4,19 @@ All notable changes to CURe are recorded here.
 
 Release notes should be curated from merged PRs since the previous `vX.Y.Z` tag. Keep published entries user-facing and grouped by impact rather than by raw commit order. Story or epic IDs may help drafting internally, but they should not be published by default.
 
+## [0.11.0] - 2026-08-16
+
+### Added
+
+- **`cure explain <PR_URL>` command:** explains a completed review session in natural language — what the reviewer judged, what evidence it used, and what alternatives it considered. Supports custom focus via `--explain-prompt` and interactive handoff via `--open-in-codex` (forks a Codex session with full review context preloaded).
+- `cure doctor` now listed in Core Commands alongside setup/pr/resume.
+
+### Changed
+
+- **Codex CLI is now the only supported LLM backend:** the `openai-responses` and `openrouter-responses` built-in presets have been removed (to avoid the maintenance burden on the developer). Existing config files referencing HTTP presets produce a clear error on load.
+- README streamlined from 387 to ~275 lines: consolidated three example flows into one lifecycle (install → setup → doctor → pr → explain), removed redundant `setup → doctor → pr` command blocks that appeared in 5 separate sections, and compressed verbose ChunkHound helper documentation.
+- Removed the confusing "Advanced / Pre-Provisioned Environments" section (content absorbed into Agent And Setup Notes and Secondary Standalone Install).
+
 ## [0.10.3] - 2026-08-11
 
 ### Added
