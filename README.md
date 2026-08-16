@@ -196,24 +196,19 @@ Start a fresh review:
 cure pr <PR_URL> --if-reviewed new
 ```
 
-Selected-PR discussion orientation is enabled by default for the built-in `auto`, `normal`, and `big` prompt profiles. Use `--no-pr-context` to opt out for a run; `--pr-context` remains available as an explicit enable flag. Custom prompts, prompt files, and `--prompt-profile default` bypass this enrichment.
+Selected-PR discussion orientation is enabled by default for the built-in `auto`, `normal`, and `big` prompt profiles. Use `--no-pr-context` to opt out for a run; `--pr-context` remains explicit enable. Custom prompts, prompt files, and `--prompt-profile default` bypass this.
 
-Check status:
+Check status / resume / explain:
 
 ```bash
 cure status <session_id|PR_URL> --json
-```
-
-Resume a session:
-
-```bash
 cure resume <session_id|PR_URL>
+cure explain <PR_URL> [--explain-prompt 'Why?']
 ```
 
-Clean up old sessions:
+Clean up:
 
 ```bash
-cure clean closed --json
 cure clean <session_id>
 ```
 
@@ -348,7 +343,7 @@ The structured `review_intelligence` source registry now feeds prompt guidance, 
 
 ## Changing The Review Model
 
-CURe reads persistent model settings from the active `cure.toml` (normally `~/.config/cure/cure.toml`). Define a named preset and select it as the default:
+CURe only supports the Codex CLI LLM backend; the `openai-responses` and `openrouter-responses` built-in presets have been removed (to avoid the maintenance burden on the developer). Persistent model settings live in `cure.toml` (normally `~/.config/cure/cure.toml`). Define a named preset and select it as the default:
 
 ```toml
 [llm]
