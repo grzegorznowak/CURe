@@ -887,8 +887,8 @@ class PromptTemplateTests(unittest.TestCase):
 
     def test_review_docs_explain_section_relative_scope(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("uses product/ticket scope", readme)
-        self.assertIn("uses implementation scope", readme)
+        self.assertIn("produces a natural-language explanation", readme)
+        self.assertIn("--explain-prompt", readme)
 
 
 class PromptResourceTests(unittest.TestCase):

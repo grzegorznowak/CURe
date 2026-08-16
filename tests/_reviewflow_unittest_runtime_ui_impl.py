@@ -4387,12 +4387,8 @@ class InstallAndDoctorTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("That indexed ChunkHound-backed path is the default and recommended public review workflow.", readme)
-        self.assertIn("Once the first run is active, continue the same indexed session with `cure resume <session_id|PR_URL>`.", readme)
         self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", readme)
         self.assertIn("It is not the normal or recommended path.", readme)
-        self.assertLess(readme.index("cure doctor --pr-url <PR_URL> --json"), readme.index("cure pr <PR_URL> --if-reviewed new"))
-        self.assertLess(readme.index("cure pr <PR_URL> --if-reviewed new"), readme.index("cure resume <session_id|PR_URL>"))
 
         self.assertIn("That indexed ChunkHound-backed path is the default and recommended review workflow:", skill)
         self.assertIn("`cure pr --no-index` remains available only as an advanced opt-out", skill)
@@ -4404,18 +4400,21 @@ class InstallAndDoctorTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-        for text in (readme, skill):
-            self.assertIn(
-                "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
-                text,
-            )
-            self.assertIn("`CURE_CHUNKHOUND_HELPER`", text)
-            self.assertIn('`"$CURE_CHUNKHOUND_HELPER" search ...`', text)
-            self.assertIn('`"$CURE_CHUNKHOUND_HELPER" research ...`', text)
-            self.assertIn("call proves `code_research` only for templates", text)
-            self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
-            self.assertIn("`PYTHONSAFEPATH=1`", text)
-            self.assertIn("helper preflight times out", text)
+        self.assertIn("staged ChunkHound helper (exported as `$CURE_CHUNKHOUND_HELPER`)", readme)
+        self.assertIn("`PYTHONSAFEPATH=1`", readme)
+        self.assertIn("helper preflight times out", readme)
+
+        self.assertIn(
+            "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
+            skill,
+        )
+        self.assertIn("`CURE_CHUNKHOUND_HELPER`", skill)
+        self.assertIn('`"$CURE_CHUNKHOUND_HELPER" search ...`', skill)
+        self.assertIn('`"$CURE_CHUNKHOUND_HELPER" research ...`', skill)
+        self.assertIn("call proves `code_research` only for templates", skill)
+        self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", skill)
+        self.assertIn("`PYTHONSAFEPATH=1`", skill)
+        self.assertIn("helper preflight times out", skill)
 
     def test_docs_reset_agent_local_setup_contract(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -4426,11 +4425,15 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertNotIn("That should be enough to start the CURe system.", readme)
         self.assertNotIn("pristine environment", skill)
 
-        for text in (readme, skill):
-            self.assertIn("chunkhound.json", text)
-            self.assertIn(".chunkhound.json", text)
-            self.assertIn("ask the operator whether it should be reused", text)
-            self.assertIn("Codex executor paths need internet / network access", text)
+        self.assertIn("chunkhound.json", readme)
+        self.assertIn(".chunkhound.json", readme)
+        self.assertIn("ask the operator whether it should be reused", readme)
+        self.assertIn("need network access for review context", readme)
+
+        self.assertIn("chunkhound.json", skill)
+        self.assertIn(".chunkhound.json", skill)
+        self.assertIn("ask the operator whether it should be reused", skill)
+        self.assertIn("Codex executor paths need internet / network access", skill)
 
     def test_jira_docs_extracted_from_readme(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
