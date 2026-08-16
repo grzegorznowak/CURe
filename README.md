@@ -79,6 +79,8 @@ cure explain https://github.com/chunkhound/chunkhound/pull/220
 
 `cure explain <PR_URL>` loads the most recent completed review for that PR and produces a natural-language explanation of its findings — what the reviewer judged, what evidence it used, and what alternatives it considered. Use `--explain-prompt 'Why did you flag X?'` to narrow the focus, or `--open-in-codex` to continue in an interactive Codex session with full review context preloaded.
 
+During a review, use `cure status <session_id|PR_URL> --json` to inspect progress and `cure resume <session_id|PR_URL>` after an interruption. Use `cure clean <session_id>` when its sandbox and cached state are no longer needed. `cure commands --json` provides the machine-readable command catalog.
+
 For disposable or agent-sandbox runs, replace `uv tool install cureview` + `cure setup` with `uvx --from cureview cure setup` and keep the rest unchanged.
 
 ## Agent And Setup Notes
@@ -99,7 +101,7 @@ Review output toggles:
 - Verbose final finding cards are now the default for `cure pr`. They include severity/impact, likelihood, assumptions, downgrade factors, code trail, and reproduction detail. Use `--wtf off` when you need the older concise finding format.
 - Chain-of-Draft hypothesis ledger triage is enabled by default for multipass `cure pr` runs. It asks step reviewers to record compact candidate issue threads before promoting only grounded survivors into findings. Use `--cod-ledger off` to disable it; it remains intentionally outside single-pass prompt families.
 
-CURe uses a staged ChunkHound helper (exported as `$CURE_CHUNKHOUND_HELPER`) instead of native MCP wiring for built-in Codex review runs. Exports `PYTHONSAFEPATH=1` so a daemon started while reviewing the `chunkhound` repo does not import the checked-out code. For fresh indexed Codex reviews, CURe retains a private keeper from final-index readiness through teardown so helper calls reuse the daemon; ineligible routes (HTTP, no-index, no-review) retain existing behavior. Codex executor paths need network access for review context — look for the `executor-network` check in `cure doctor` output.
+CURe uses a staged ChunkHound helper (exported as `$CURE_CHUNKHOUND_HELPER`) instead of native MCP wiring for built-in Codex review runs. It exports `PYTHONSAFEPATH=1` so a daemon started while reviewing the `chunkhound` repo does not import the checked-out code. For fresh indexed Codex reviews, CURe retains a private keeper from final-index readiness through teardown so helper calls reuse the daemon; routes that skip indexing or review generation retain their existing behavior. Codex executor paths need network access for review context — look for the `executor-network` check in `cure doctor` output.
 
 If helper preflight times out, inspect the persisted helper path plus daemon lock/log/runtime metadata in session status or `meta.json` before retrying.
 
@@ -120,6 +122,12 @@ Initialize or repair non-secret bootstrap files:
 
 ```bash
 cure setup
+```
+
+Verify prerequisites and PR-specific readiness:
+
+```bash
+cure doctor --pr-url <PR_URL> --json
 ```
 
 Start a fresh review:
