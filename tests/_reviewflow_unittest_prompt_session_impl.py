@@ -517,38 +517,44 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertNotIn("Run at least one `search` query", prompt_texts["mrereview_gh_local_big_synth.md"])
 
     def test_readme_and_skill_lock_chunkhound_execution_wording(self) -> None:
-        for path in [ROOT / "README.md", ROOT / "SKILL.md"]:
-            text = path.read_text(encoding="utf-8")
-            self.assertIn(
-                "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
-                text,
-            )
-            self.assertIn(
-                "the built-in prompt/proof contract is per-template successful helper execution",
-                text,
-            )
-            self.assertIn(
-                'A successful `"$CURE_CHUNKHOUND_HELPER" search ...` call proves the `search` requirement.',
-                text,
-            )
-            self.assertIn(
-                'A successful `"$CURE_CHUNKHOUND_HELPER" research ...` call proves `code_research` only for templates where that requirement is required or conditional',
-                text,
-            )
-            self.assertIn(
-                "For `search`, that output may be a JSON object with a `results` list or a markdown/text block.",
-                text,
-            )
-            self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", text)
-            self.assertIn(
-                "Per-template contracts decide whether helper `research` is required, guidance-only, or conditional.",
-                text,
-            )
-            self.assertIn(
-                "Initial plan and resume-plan prompts require helper `search` but do not require helper `research`/`code_research`.",
-                text,
-            )
-            self.assertNotIn("with JSON output", text)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("staged ChunkHound helper (exported as `$CURE_CHUNKHOUND_HELPER`)", readme)
+        self.assertIn("`PYTHONSAFEPATH=1`", readme)
+        self.assertIn("helper preflight times out", readme)
+        self.assertNotIn("with JSON output", readme)
+
+        self.assertIn(
+            "Built-in CLI-provider review runs use a staged CURe-managed ChunkHound helper rather than native agent MCP wiring.",
+            skill,
+        )
+        self.assertIn(
+            "the built-in prompt/proof contract is per-template successful helper execution",
+            skill,
+        )
+        self.assertIn(
+            'A successful `"$CURE_CHUNKHOUND_HELPER" search ...` call proves the `search` requirement.',
+            skill,
+        )
+        self.assertIn(
+            'A successful `"$CURE_CHUNKHOUND_HELPER" research ...` call proves `code_research` only for templates where that requirement is required or conditional',
+            skill,
+        )
+        self.assertIn(
+            "For `search`, that output may be a JSON object with a `results` list or a markdown/text block.",
+            skill,
+        )
+        self.assertIn("Historical sessions may still report legacy `mcp_tool_call` evidence.", skill)
+        self.assertIn(
+            "Per-template contracts decide whether helper `research` is required, guidance-only, or conditional.",
+            skill,
+        )
+        self.assertIn(
+            "Initial plan and resume-plan prompts require helper `search` but do not require helper `research`/`code_research`.",
+            skill,
+        )
+        self.assertNotIn("with JSON output", skill)
 
     def test_review_templates_keep_abort_gate_tool_neutral(self) -> None:
         prompt_paths = [
