@@ -4245,8 +4245,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         jira_reference_url = "https://github.com/grzegorznowak/CURe/blob/main/JIRA.md"
-        self.assertIn("use <CURE_REPO_URL> to review <PR_URL>", readme)
-        self.assertIn("use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220", readme)
+        self.assertIn("cure explain <PR_URL>", readme)
         self.assertIn("treat [SKILL.md](SKILL.md) as an assisted checklist", readme)
         self.assertIn(jira_reference_url, readme)
         self.assertIn("uv tool install cureview", readme)
@@ -4263,9 +4262,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("cure commands --json", readme)
         self.assertIn("cure status <session_id|PR_URL> --json", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new", readme)
-        self.assertIn("That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended.", readme)
-        self.assertIn("The operator should not need to provide a local checkout path", readme)
-        self.assertIn("It should not do a manual review outside CURe.", readme)
+        self.assertIn("produces a natural-language explanation of its findings", readme)
         self.assertIn("XDG_CONFIG_HOME", readme)
         self.assertIn("XDG_STATE_HOME", readme)
         self.assertIn("XDG_CACHE_HOME", readme)
@@ -4283,7 +4280,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("./selftest.sh", readme)
         self.assertIn("installation, persistent configuration, secrets, network access, local agent selection, and sandbox permissions remain operator-controlled", readme)
         self.assertIn('operator-approved install or disposable setup to "review in progress"', readme)
-        self.assertIn("treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt", readme)
+        self.assertIn("a repo-local `chunkhound.json` or `.chunkhound.json` exists, summarize what it contains and ask the operator whether it should be reused", readme)
         self.assertIn("Do not silently adopt it in this public contract.", readme)
         self.assertIn("`repo_local_chunkhound` payload", readme)
         self.assertIn("`repo-local-chunkhound` check", readme)
@@ -4291,10 +4288,7 @@ class InstallAndDoctorTests(unittest.TestCase):
         self.assertIn("need network access for review context", readme)
         self.assertIn("cure doctor --llm-preset codex-cli --pr-url <PR_URL> --json", readme)
         self.assertIn("cure pr <PR_URL> --if-reviewed new --llm-preset codex-cli", readme)
-        self.assertIn(
-            "If autodetect needs to be overridden, pass `--llm-preset codex-cli` explicitly.",
-            readme,
-        )
+        self.assertIn("cure setup --agent codex", readme)
         self.assertIn("Hard Rule", skill)
         self.assertIn("When To Use CURe", skill)
         self.assertIn("Primary Inputs", skill)

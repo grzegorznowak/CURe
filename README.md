@@ -21,7 +21,6 @@ If you are using CURe from an agent session, treat [SKILL.md](SKILL.md) as an as
 - [Agent And Setup Notes](#agent-and-setup-notes)
 - [Core Commands](#core-commands)
 - [Secondary Standalone Install](#secondary-standalone-install)
-- [Advanced / Pre-Provisioned Environments](#advanced--pre-provisioned-environments)
 - [Minimal Config](#minimal-config)
 - [Changing The Review Model](#changing-the-review-model)
 - [Jira CLI](#jira-cli)
@@ -89,7 +88,7 @@ Ensure `git`, `curl`, and `ca-certificates` are present before bootstrap. Instal
 
 Use `cure doctor --pr-url <PR_URL> --json` as the source of truth for inspect-first setup. Its `repo_local_chunkhound` payload plus the `repo-local-chunkhound` check and `executor-network` advisory check surface the same setup hints in machine-readable and text forms.
 
-If repo-local ChunkHound config exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
+If a repo-local `chunkhound.json` or `.chunkhound.json` exists, summarize what it contains and ask the operator whether it should be reused. Do not silently adopt it in this public contract.
 
 Commands that actually require bootstrap now fail or repair approved non-secret defaults earlier instead of surfacing late config or agent-selection errors. On a TTY, `cure pr`, `cure resume`, `cure cache prime`, and `cure interactive` can enter the same setup wizard before review side effects. On non-TTY runs, those commands fail fast and point back to `cure setup` plus `cure doctor` so a human operator or approved automation can complete setup.
 
@@ -187,29 +186,7 @@ The installer downloads the matching release asset into `~/.local/bin/cure`. Age
 
 If your platform is not covered by the standalone assets, fall back to the package path instead of inventing a separate bootstrap recipe.
 
-## Advanced / Pre-Provisioned Environments
 
-Teams that already manage a local CURe checkout can keep using it as a secondary local-development flow:
-- keep CURe in a stable local path
-- refresh it with `git -C <CURE_SOURCE> pull --ff-only`
-- install it with `uv tool install /path/to/cure`
-- keep any project-specific wrappers or config beside that checkout
-
-If local CURe config already exists, inspect it before overwriting it:
-- check the active `cure.toml`
-- inspect the JSON resolved from `[chunkhound].base_config_path`
-- treat repo-root `chunkhound.json` or `.chunkhound.json` as setup hints to discuss with the operator, not inputs to silently adopt
-
-Prefer `cure doctor --pr-url <PR_URL> --json` as the readiness summary after that inspection. It now reports `repo_local_chunkhound` plus the `repo-local-chunkhound` and `executor-network` checks so the operator does not need to infer those details from raw files alone.
-
-When no explicit preset or config default is selected, CURe autodetects `codex-cli` from the high-confidence session markers it already understands. If autodetect needs to be overridden, pass `--llm-preset codex-cli` explicitly.
-
-Those details are secondary. The primary operator contract stays `use <CURE_REPO_URL> to review <PR_URL>`.
-
-Example: use https://github.com/grzegorznowak/CURe to review https://github.com/chunkhound/chunkhound/pull/220.
-That sentence is the kickoff contract, not a promise that every sandbox can finish setup unattended.
-The operator should not need to provide a local checkout path.
-It should not do a manual review outside CURe.
 
 ## Minimal Config
 
