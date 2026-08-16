@@ -67,65 +67,21 @@ Keep the README focused on the landing page and first success. For the full oper
 
 ## Example Flows
 
-### Example 1: clean public package install to first review
+### Clean install to explained review
 
-This is the primary public path and matches the package prove-out used for the first successful public release:
+Full lifecycle — persistent install, configure, review a PR, then explain the review's findings:
 
 ```bash
 uv tool install cureview
 cure setup
 cure doctor --pr-url https://github.com/chunkhound/chunkhound/pull/220 --json
 cure pr https://github.com/chunkhound/chunkhound/pull/220 --if-reviewed new
+cure explain https://github.com/chunkhound/chunkhound/pull/220
 ```
 
-The `v0.1.2` public release prove-out verified the package-first setup flow in a clean temp-home install. `cure setup` is the primary public setup command.
+`cure explain <PR_URL>` loads the most recent completed review for that PR and produces a natural-language explanation of its findings — what the reviewer judged, what evidence it used, and what alternatives it considered. Use `--explain-prompt 'Why did you flag X?'` to narrow the focus, or `--open-in-codex` to continue in an interactive Codex session with full review context preloaded.
 
-### Example 2: disposable assisted run from the one-sentence kickoff
-
-Use this assisted run surface when the review happens inside a disposable sandbox or agent session where the operator has approved package execution and temporary config/state/cache writes:
-
-```bash
-tmp_root="$(mktemp -d)"
-export XDG_CONFIG_HOME="$tmp_root/config"
-export XDG_STATE_HOME="$tmp_root/state"
-export XDG_CACHE_HOME="$tmp_root/cache"
-
-uvx --from cureview cure setup
-uvx --from cureview cure doctor --pr-url <PR_URL> --json
-uvx --from cureview cure pr <PR_URL> --if-reviewed new
-```
-
-If CURe is already partially configured, inspect the active local setup before creating a fresh one:
-
-```text
-- the active `cure.toml`
-- the JSON file resolved from `[chunkhound].base_config_path`
-- repo-root `chunkhound.json` and `.chunkhound.json` as ask-first ChunkHound setup hints
-```
-
-On a TTY, `cure setup` acts as an operator-facing setup wizard. The wizard can keep the current configured base config, adopt a repo-root `chunkhound.json` / `.chunkhound.json`, accept an absolute custom base-config path, or generate the default CURe-managed base config. It also detects the installed `codex` executable, can persist an approved local CLI-agent choice through `default_preset`, and can install ChunkHound before returning to the original command when `chunkhound` is still missing on `PATH` and the operator has approved that install.
-
-### Example 3: what a finished review produces
-
-A normal review run leaves behind resumable session state plus a review artifact with stable headings:
-
-```text
-<session_dir>/
-  meta.json
-  review.md
-```
-
-```markdown
-**Summary**: ...
-## Business / Product Assessment
-### In Scope Issues
-## Technical Assessment
-### In Scope Issues
-```
-
-Review output uses two independent lenses:
-- Business / Product Assessment uses product/ticket scope.
-- Technical Assessment uses implementation scope.
+For disposable or agent-sandbox runs, replace `uv tool install cureview` + `cure setup` with `uvx --from cureview cure setup` and keep the rest unchanged.
 
 ## Agent And Setup Notes
 
