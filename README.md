@@ -229,7 +229,23 @@ base_config_path = "/absolute/path/to/chunkhound-base.json"
 # off    = skip grounding validation
 grounding_mode = "strict"
 step_workers = 4
+
+[code_debt]
+# Opt in to a dedicated, isolated code-debt stage/subagent.
+enabled = false
+model_preset = "codex-cli"
+model = "gpt-5.6-terra"
+max_token_budget = 4000
+timeout = 300
+grounding_mode = "strict"
+# Optional Tier 1 subset; Tier 2 assessment remains prompt-driven.
+metrics = ["debt_ratio", "severity_counts", "cyclomatic_complexity", "duplication_density", "comment_todo_density", "test_gap", "dependency_debt"]
+hotspot_threshold = 0.0
+report_output = "file"
+subagent_mode = "stage"
 ```
+
+When enabled (persistently or per review with `--code-debt`; use `--no-code-debt` to override it off), code-debt analysis uses isolated Codex CLI executions and reports only grounded code-related findings. Multipass reviews run metric clusters concurrently using the configured multipass worker bound and feed `code-debt.md` into synthesis. Single-stage reviews run a separate subagent and append its report after the main review, so the main model context is not polluted. `CURE_CODE_DEBT_ENABLED`, `CURE_CODE_DEBT_PRESET`, `CURE_CODE_DEBT_MODEL`, `CURE_CODE_DEBT_MAX_TOKEN_BUDGET`, `CURE_CODE_DEBT_TIMEOUT`, `CURE_CODE_DEBT_REPORT_OUTPUT`, `CURE_CODE_DEBT_SUBAGENT_MODE`, and `CURE_CODE_DEBT_GROUNDING_MODE` override the corresponding fields.
 
 On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in Codex defaults are explicit: `codex-cli` defaults to effort `high`.
 
