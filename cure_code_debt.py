@@ -349,6 +349,37 @@ def _is_code_path(path_value: object) -> bool:
     return path.name in _CODE_FILE_NAMES or path.suffix.lower() in _CODE_FILE_SUFFIXES
 
 
+def _finding_rejection_reason(
+    finding: Mapping[str, object], *, repo_dir: Path, mode: str,
+    allowed: set[str],
+) -> tuple[dict[str, object] | None, str | None]:
+    normalized = dict(finding)
+    raw_metric = str(normalized.get("metric") or "").strip().lower()
+    metric = _METRIC_ALIASES.get(raw_metric, raw_metric)
+    if metric not in allowed:
+        return None, "metric is disabled or unknown"
+    if not _is_code_path(normalized.get("path")):
+        return None, "citation is not a recognized code path"
+    if not _is_code_finding(normalized):
+        return None, "required finding schema fields are missing or invalid"
+    estimate = normalized.get("remediation_estimate")
+    if not isinstance(estimate, str) or not estimate.strip():
+        return None, "remediation_estimate must be non-empty"
+    path_text = str(normalized.get("path") or "").strip()
+    line = normalized.get("line")
+    citation = f"{path_text}:{line}"
+    evidence = str(normalized.get("evidence") or "")
+    if citation not in evidence:
+        return None, "evidence does not identify the validated path:line citation"
+    normalized["metric"] = metric
+    if _grounding_valid(normalized, repo_dir):
+        return normalized, None
+    if mode == "warn":
+        normalized["grounding"] = "warning"
+        return normalized, None
+    return None, "citation is not grounded in the staged checkout"
+
+
 def validate_code_debt_findings(
     findings: Sequence[dict[str, object]], *, repo_dir: Path, mode: str,
     enabled_metrics: Sequence[str] | None = None,
@@ -357,17 +388,11 @@ def validate_code_debt_findings(
     normalized_mode = mode if mode in {"strict", "warn"} else "strict"
     allowed = set(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
     for original in findings:
-        finding = dict(original)
-        raw_metric = str(finding.get("metric") or "").strip().lower()
-        metric = _METRIC_ALIASES.get(raw_metric, raw_metric)
-        if metric not in allowed or not _is_code_path(finding.get("path")):
-            continue
-        finding["metric"] = metric
-        if _grounding_valid(finding, repo_dir):
-            validated.append(finding)
-        elif normalized_mode == "warn":
-            finding["grounding"] = "warning"
-            validated.append(finding)
+        accepted, _ = _finding_rejection_reason(
+            original, repo_dir=repo_dir, mode=normalized_mode, allowed=allowed
+        )
+        if accepted is not None:
+            validated.append(accepted)
     return validated
 
 
@@ -388,6 +413,11 @@ def _is_code_finding(finding: Mapping[str, object]) -> bool:
 
 def _estimate_tokens(value: object) -> int:
     return max(1, (len(json.dumps(value, sort_keys=True, ensure_ascii=False)) + 3) // 4)
+
+
+def _estimate_markdown_tokens(markdown: str) -> int:
+    """Conservatively estimate the persisted artifact itself, including boilerplate."""
+    return max(1, (len(markdown) + 3) // 4)
 
 
 def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence[Mapping[str, object]]) -> dict[str, object]:
@@ -414,10 +444,14 @@ def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence
     if hotspots:
         summary["hotspot_top_n"] = hotspots
     ratio = str(raw.get("debt_ratio_estimate") or "").strip()
-    if ratio == "unknown" or re.fullmatch(
-        r"~?\d+(?:\.\d+)?%(?: of \d+ changed NCLOC, SQALE [A-E])?", ratio
-    ):
+    if ratio == "unknown":
         summary["debt_ratio_estimate"] = ratio
+    else:
+        match = re.fullmatch(
+            r"~?(\d+(?:\.\d+)?)% of ([1-9]\d*) changed NCLOC, SQALE ([A-E])", ratio
+        )
+        if match is not None and 0.0 <= float(match.group(1)) <= 100.0:
+            summary["debt_ratio_estimate"] = ratio
     return summary
 
 
@@ -427,22 +461,37 @@ def build_code_debt_report(
 ) -> CodeDebtReport:
     candidates_by_key: dict[tuple[str, ...], list[dict[str, object]]] = {}
     summaries: list[dict[str, object]] = []
-    parse_failures: list[str] = []
+    worker_failures: list[str] = []
     allowed = tuple(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
     for index, output in enumerate(outputs, start=1):
         try:
             payload = _extract_json(output)
         except ValueError as exc:
-            parse_failures.append(f"worker {index}: {exc}")
+            worker_failures.append(f"worker {index}: {exc}")
             continue
         raw_findings = payload.get("findings")
         assert isinstance(raw_findings, list)
-        candidates = [
-            dict(item) for item in raw_findings if isinstance(item, dict) and _is_code_finding(item)
-        ]
-        worker_findings = validate_code_debt_findings(
-            candidates, repo_dir=repo_dir, mode=grounding_mode, enabled_metrics=allowed
-        )
+        worker_findings: list[dict[str, object]] = []
+        rejection_reasons: dict[str, int] = {}
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                non_object_reason = "finding is not an object"
+                rejection_reasons[non_object_reason] = rejection_reasons.get(non_object_reason, 0) + 1
+                continue
+            accepted, reason = _finding_rejection_reason(
+                item, repo_dir=repo_dir, mode=grounding_mode, allowed=set(allowed)
+            )
+            if accepted is not None:
+                worker_findings.append(accepted)
+            else:
+                detail = reason or "finding was rejected"
+                rejection_reasons[detail] = rejection_reasons.get(detail, 0) + 1
+        if rejection_reasons:
+            total = sum(rejection_reasons.values())
+            details = "; ".join(
+                f"{reason} ({count})" for reason, count in sorted(rejection_reasons.items())
+            )
+            worker_failures.append(f"worker {index}: rejected {total} finding(s): {details}")
         summary = _validated_worker_summary(payload.get("summary"), repo_dir=repo_dir, findings=worker_findings)
         if summary:
             summaries.append(summary)
@@ -469,22 +518,31 @@ def build_code_debt_report(
     ))
     summary_payload: dict[str, object] = {"worker_summaries": summaries}
     budget = max(1, max_token_budget)
+    failures = tuple(sorted(worker_failures))
     truncated = False
-    while summaries and _estimate_tokens({"findings": findings, "summary": summary_payload}) > budget:
+
+    def rendered_estimate(*, notice: str = "") -> int:
+        candidate = CodeDebtReport(
+            findings=findings, summary=summary_payload, truncated=truncated,
+            notice=notice, worker_failures=failures,
+        )
+        return _estimate_markdown_tokens(candidate.to_markdown())
+
+    while summaries and rendered_estimate() > budget:
         summaries.pop()
         truncated = True
-    while findings and _estimate_tokens({"findings": findings, "summary": summary_payload}) > budget:
+    while findings and rendered_estimate() > budget:
         findings.pop()
         truncated = True
-    if _estimate_tokens({"findings": findings, "summary": summary_payload}) > budget:
+    if rendered_estimate() > budget and summaries:
         summary_payload = {"status": "summary omitted to honor token budget"}
         truncated = True
     notice = "Code-debt output truncated at the configured token budget." if truncated else ""
-    estimate = min(budget, _estimate_tokens({"findings": findings, "summary": summary_payload, "notice": notice}))
-    return CodeDebtReport(
-        findings=findings, summary=summary_payload, estimated_tokens=estimate,
-        truncated=truncated, notice=notice, worker_failures=tuple(sorted(parse_failures)),
+    report = CodeDebtReport(
+        findings=findings, summary=summary_payload, truncated=truncated,
+        notice=notice, worker_failures=failures,
     )
+    return replace(report, estimated_tokens=_estimate_markdown_tokens(report.to_markdown()))
 
 
 def _prompt_text() -> str:

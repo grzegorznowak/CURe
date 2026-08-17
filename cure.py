@@ -128,6 +128,7 @@ from cure_code_debt import (
     CodeDebtConfig,
     CodeDebtReport,
     CodeDebtRequest,
+    code_debt_stage_mode,
     load_code_debt_config,
     run_code_debt_stage,
     run_code_debt_subagent,
@@ -3180,6 +3181,25 @@ def _emit_code_debt_report_output(
     stdout.flush()
 
 
+def _emit_code_debt_on_termination(
+    *, config_path: Path, session_dir: Path, machine_readable: bool | None = None,
+) -> None:
+    """Emit/degrade stdout mode from early success/abort/no-op return paths."""
+    config = load_code_debt_config(config_path)
+    if machine_readable is None:
+        try:
+            machine_readable = not bool(sys.stdout.isatty())
+        except Exception:
+            machine_readable = True
+    _emit_code_debt_report_output(
+        config=config,
+        report_path=session_dir / "code-debt.md",
+        machine_readable=machine_readable,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+
+
 def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> None:
     """Attach the always-persisted debt artifact to fresh or resumed synthesis."""
     report_path = session_dir / "code-debt.md"
@@ -3188,13 +3208,36 @@ def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> No
         inputs.append(report_text)
 
 
+def _code_debt_artifact_is_current(report_path: Path) -> bool:
+    if not report_path.is_file():
+        return False
+    try:
+        return report_path.read_text(encoding="utf-8").startswith(
+            "## Dedicated Code-Debt Analysis\n"
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def _degrade_missing_or_legacy_code_debt_artifact(
+    *, session_dir: Path, reason: str,
+) -> Path:
+    """Repair an old completed session when no execution runtime is available."""
+    report_path = session_dir / "code-debt.md"
+    if not _code_debt_artifact_is_current(report_path):
+        report_path.write_text(
+            CodeDebtReport(worker_failures=(reason,)).to_markdown(), encoding="utf-8"
+        )
+    return report_path
+
+
 def _ensure_code_debt_artifact(
     *, session_dir: Path, progress: SessionProgress, mode: str,
     execute: Callable[[], Path | None],
 ) -> Path:
-    """Run a missing always-on debt stage and persist an honest fail-open artifact."""
+    """Run a missing/legacy always-on stage and persist an honest fail-open artifact."""
     report_path = session_dir / "code-debt.md"
-    if report_path.is_file():
+    if _code_debt_artifact_is_current(report_path):
         return report_path
     try:
         executed = execute()
@@ -3285,21 +3328,17 @@ def _execute_code_debt_review_run(
             output_index += 1
             index = output_index
         output_path = work_dir / f"code_debt_worker_{index:02d}.json"
-        # The repository checkout is already staged for review, so Codex can be
-        # process-enforced read-only without losing access to source evidence.
-        tightened_policy = {
+        # Match the proven multipass step-worker runtime. Safety comes from the
+        # debt prompt and the pre-staged per-session checkout, not a restrictive
+        # process sandbox that can prevent Terra from using repository tools.
+        standard_worker_policy = {
             **runtime_policy,
-            "sandbox_mode": "read-only",
-            "approval_policy": "never",
-            "dangerously_bypass_approvals_and_sandbox": False,
-            # --add-dir grants write access. Debt workers need no writable scratch.
-            "add_dirs": [],
-            "include_tmp_add_dir": False,
-            # Avoid run_codex_exec's trust-directory retry spending this allocation twice.
+            # Avoid run_codex_exec's trust-directory whole-command retry spending
+            # this bounded allocation twice.
             "skip_git_repo_check": True,
         }
         debt_runtime_policy = _runtime_policy_for_multipass_stage(
-            runtime_policy=tightened_policy,
+            runtime_policy=standard_worker_policy,
             llm_resolved=resolved,
             llm_resolution_meta=resolution_meta,
         )
@@ -3318,11 +3357,10 @@ def _execute_code_debt_review_run(
             env=debt_env,
             stream=False,
             progress=progress,
-            add_dirs=[],
+            add_dirs=add_dirs,
             codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
-            sandbox_mode="read-only",
         )
         with progress.mutate():
             record_llm_usage(progress.meta.setdefault("llm", {}), result.adapter_meta)
@@ -5047,6 +5085,7 @@ def _prepare_synth_inputs(
         raise ReviewflowError(
             "All multipass steps were grounding-skipped; review synthesis cannot continue."
         )
+    _attach_code_debt_synth_input(synth_step_outputs, session_dir=session_dir)
     return synth_step_outputs, skipped_prompt_text
 
 
@@ -10371,6 +10410,9 @@ def _pr_flow_impl(
                         progress.done()
                         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
                         success_markdown_path = review_md_path
+                        _emit_code_debt_on_termination(
+                            config_path=effective_config_path, session_dir=session_dir
+                        )
                         print(str(session_dir))
                         return 0
 
@@ -10960,6 +11002,11 @@ def _pr_flow_impl(
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
+        if picker_completed and not use_multipass and session_dir.exists():
+            _degrade_missing_or_legacy_code_debt_artifact(
+                session_dir=session_dir,
+                reason=f"single-stage review failed before debt execution: {e}",
+            )
         # A12/A18: a provider or daemon-dependent subprocess failure with a
         # concurrently lost keeper/generation must surface as an infrastructure
         # failure rather than an ordinary subprocess error.
@@ -10977,13 +11024,21 @@ def _pr_flow_impl(
         )
         raise
     except Exception as e:
+        if picker_completed and not use_multipass and session_dir.exists():
+            _degrade_missing_or_legacy_code_debt_artifact(
+                session_dir=session_dir,
+                reason=f"single-stage review failed before debt execution: {e}",
+            )
         progress.error(
             {
                 "type": "exception",
                 "message": str(e),
             }
         )
-        if (not picker_completed) and session_dir.exists():
+        if (
+            (not picker_completed) and session_dir.exists()
+            and not (session_dir / "code-debt.md").is_file()
+        ):
             shutil.rmtree(session_dir, ignore_errors=True)
         raise
     finally:
@@ -11695,6 +11750,13 @@ def _resume_flow_impl(
                         resumed_at=resume_started_at,
                     )
                     _refresh_session_review_footer(meta=updated_meta, markdown_path=review_md_path)
+                    _degrade_missing_or_legacy_code_debt_artifact(
+                        session_dir=session_dir,
+                        reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+                    )
+                    _emit_code_debt_on_termination(
+                        config_path=effective_config_path, session_dir=session_dir
+                    )
                     print(str(session_dir))
                     maybe_print_markdown_after_tui(ui_enabled=ui_enabled, stderr=sys.stderr, markdown_path=review_md_path)
                     existing_codex = updated_meta.get("codex") if isinstance(updated_meta.get("codex"), dict) else {}
@@ -11951,6 +12013,13 @@ def _resume_flow_impl(
             progress.done()
             _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
+            _degrade_missing_or_legacy_code_debt_artifact(
+                session_dir=session_dir,
+                reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+            )
+            _emit_code_debt_on_termination(
+                config_path=effective_config_path, session_dir=session_dir
+            )
             print(str(session_dir))
             return 0
 
@@ -11995,6 +12064,37 @@ def _resume_flow_impl(
         )
         progress.flush()
         if incremental_resume_head_sha and incremental_resume_review_point is not None:
+            def _execute_incremental_code_debt() -> Path | None:
+                if "code_debt" not in progress.meta:
+                    raise ReviewflowError(
+                        "legacy completed session has no code-debt execution metadata"
+                    )
+                return _execute_code_debt_review_run(
+                    config=code_debt_config,
+                    multipass=True,
+                    plan=None,
+                    repo_dir=repo_dir,
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    progress=progress,
+                    reviewflow_config_path=effective_config_path,
+                    base_codex_config_path=effective_codex_base_config_path,
+                    env=env,
+                    add_dirs=add_dirs,
+                    runtime_policy=runtime_policy,
+                    worker_count=int(progress.meta.setdefault("multipass", {}).get(
+                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                    )),
+                    owned_processes=None,
+                )
+
+            with phase("code_debt_stage", progress=progress, quiet=quiet):
+                _ensure_code_debt_artifact(
+                    session_dir=session_dir,
+                    progress=progress,
+                    mode="multipass-stage",
+                    execute=_execute_incremental_code_debt,
+                )
             success_resume_command = _run_incremental_completed_multipass_resume(
                 progress=progress,
                 session_id=session_id,
@@ -12036,6 +12136,9 @@ def _resume_flow_impl(
             progress.done()
             _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
+            _emit_code_debt_on_termination(
+                config_path=effective_config_path, session_dir=session_dir
+            )
             print(str(session_dir))
             return 0
 
@@ -12251,6 +12354,9 @@ def _resume_flow_impl(
             progress.done()
             _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
+            _emit_code_debt_on_termination(
+                config_path=effective_config_path, session_dir=session_dir
+            )
             print(str(session_dir))
             return 0
 
@@ -12570,6 +12676,9 @@ def _resume_flow_impl(
         progress.done()
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path
+        _emit_code_debt_on_termination(
+            config_path=effective_config_path, session_dir=session_dir
+        )
         print(str(session_dir))
         return 0
     except ReviewflowSubprocessError as e:
@@ -12890,6 +12999,37 @@ def _followup_flow_impl(
                 reuse_source_kind="session_local_restore",
             )
 
+        code_debt_config = load_code_debt_config(effective_config_path)
+        assert runtime_policy is not None
+        original_multipass_meta = (
+            meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
+        )
+        original_multipass = original_multipass_meta.get("enabled") is True
+        with phase("code_debt_stage", progress=progress, quiet=quiet):
+            code_debt_report_path = _ensure_code_debt_artifact(
+                session_dir=session_dir,
+                progress=progress,
+                mode=code_debt_stage_mode(multipass=original_multipass),
+                execute=lambda: _execute_code_debt_review_run(
+                    config=code_debt_config,
+                    multipass=original_multipass,
+                    plan=None,
+                    repo_dir=repo_dir,
+                    session_dir=session_dir,
+                    work_dir=work_dir,
+                    progress=progress,
+                    reviewflow_config_path=effective_config_path,
+                    base_codex_config_path=effective_codex_base_config_path,
+                    env=env,
+                    add_dirs=list(runtime_policy.get("add_dirs") or []),
+                    runtime_policy=runtime_policy,
+                    worker_count=int(original_multipass_meta.get(
+                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                    )) if original_multipass else 1,
+                    owned_processes=None,
+                ),
+            )
+
         # Pick follow-up prompt template based on the original profile (best-effort).
         prompt_meta = meta.get("prompt") if isinstance(meta.get("prompt"), dict) else {}
         profile_resolved = str((prompt_meta or {}).get("profile_resolved") or "").strip().lower()
@@ -12917,6 +13057,7 @@ def _followup_flow_impl(
                     enabled=bool(getattr(args, "wtf", False))
                 ),
                 "PREVIOUS_REVIEW_MD": str(review_md_path),
+                "CODE_DEBT_MD": str(code_debt_report_path),
                 "HEAD_SHA_BEFORE": head_before,
                 "HEAD_SHA_AFTER": head_after,
                 "FOLLOWUP_OUTPUT_MD": str(followup_md_path),
@@ -13057,6 +13198,9 @@ def _followup_flow_impl(
         )
 
         success_markdown_path = followup_md_path
+        _emit_code_debt_on_termination(
+            config_path=effective_config_path, session_dir=session_dir
+        )
         print(str(followup_md_path))
         return 0
     finally:

@@ -7,6 +7,7 @@ You are maintainer continuing a prior review of $PR_URL in a local **isolated sa
 
 This is a FOLLOW-UP review for a large/complex PR. You must first read the previous review output:
 - Previous review markdown: $PREVIOUS_REVIEW_MD
+- Current dedicated code-debt report: $CODE_DEBT_MD
 
 Current HEAD information:
 - head_sha_before_update: $HEAD_SHA_BEFORE
@@ -33,7 +34,7 @@ If you must ABORT:
 - Keep both `**In Scope Issues**` and `**Out of Scope Issues**` blocks present in both sections.
 
 # Big Follow-up Review Process
-1. Read the previous review at `$PREVIOUS_REVIEW_MD` and extract:
+1. Read the previous review at `$PREVIOUS_REVIEW_MD` and current debt report at `$CODE_DEBT_MD`, then extract:
    - The critical/major issues that blocked approval
    - Any tests or proofs that were requested
 2. Use local `git` to identify deltas since the previous review:

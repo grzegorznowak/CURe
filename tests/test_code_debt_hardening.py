@@ -150,13 +150,13 @@ def test_documentation_finding_against_readme_is_rejected(tmp_path: Path) -> Non
 
 
 def test_budget_pressure_drops_summaries_before_findings(tmp_path: Path) -> None:
-    (tmp_path / "a.py").write_text("x=1\n")
+    (tmp_path / "a.py").write_text("x=1\n" * 100)
     outputs = [
-        payload(*(finding(),) if index == 0 else (), summary={"hotspot_top_n": ["a.py:1"] * 100})
+        payload(*(finding(),) if index == 0 else (), summary={"hotspot_top_n": [f"a.py:{line}" for line in range(1, 101)]})
         for index in range(3)
     ]
     report = debt.build_code_debt_report(
-        outputs, repo_dir=tmp_path, grounding_mode="strict", max_token_budget=130
+        outputs, repo_dir=tmp_path, grounding_mode="strict", max_token_budget=220
     )
     assert len(report.findings) == 1
     assert report.truncated is True
@@ -193,15 +193,15 @@ def test_deterministic_conflict_resolution_prefers_high_severity_and_ratio(tmp_p
     low = finding(signal="same")
     high = finding(signal="same")
     high.update(severity="high", evidence="more specific evidence at a.py:1")
-    first = payload(low, summary={"debt_ratio_estimate": "2%"})
-    second = payload(high, summary={"debt_ratio_estimate": "8%"})
+    first = payload(low, summary={"debt_ratio_estimate": "2% of 100 changed NCLOC, SQALE A"})
+    second = payload(high, summary={"debt_ratio_estimate": "8% of 100 changed NCLOC, SQALE B"})
     reports = [
         debt.build_code_debt_report(order, repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000)
         for order in ([first, second], [second, first])
     ]
     assert reports[0].findings == reports[1].findings
     assert reports[0].findings[0]["severity"] == "high"
-    assert "Debt ratio estimate: **8%**" in reports[0].to_markdown()
+    assert "Debt ratio estimate: **8% of 100 changed NCLOC, SQALE B**" in reports[0].to_markdown()
     assert reports[0].to_markdown() == reports[1].to_markdown()
 
 
@@ -281,7 +281,7 @@ def test_execution_rebuilds_debt_model_and_generation_cap(tmp_path: Path) -> Non
     assert "gpt-primary" not in argv
     assert "rollout_budget.limit_tokens=2000" in argv
     assert "--skip-git-repo-check" in argv
-    assert "--add-dir" not in argv
+    assert "--add-dir" in argv
 
 
 def test_rendered_report_is_narrative_complete_and_clean(tmp_path: Path) -> None:
@@ -290,7 +290,7 @@ def test_rendered_report_is_narrative_complete_and_clean(tmp_path: Path) -> None
     item.update(severity="high", evidence="a.py:1 contains an unchecked branch")
     report = debt.build_code_debt_report(
         [payload(item, summary={
-            "debt_ratio_estimate": "4%",
+            "debt_ratio_estimate": "4% of 100 changed NCLOC, SQALE A",
             "hotspot_top_n": ["a.py:1"],
             "severity_counts": {"high": 1},
         })],
@@ -300,7 +300,7 @@ def test_rendered_report_is_narrative_complete_and_clean(tmp_path: Path) -> None
     )
     markdown = report.to_markdown()
     assert "Overall assessment" in markdown
-    assert "Debt ratio estimate: **4%**" in markdown
+    assert "Debt ratio estimate: **4% of 100 changed NCLOC, SQALE A**" in markdown
     assert "High: 1" in markdown
     assert "a.py:1" in markdown and "high-risk branch" in markdown
     assert "### High" in markdown
@@ -429,7 +429,7 @@ def test_trust_directory_failures_cannot_double_generation_budget(tmp_path: Path
     assert sum(caps) <= 101
 
 
-def test_debt_runtime_is_process_enforced_read_only(tmp_path: Path) -> None:
+def test_debt_runtime_matches_standard_step_worker_policy_with_budget(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     def fake_exec(**kwargs: object) -> object:
@@ -449,12 +449,65 @@ def test_debt_runtime_is_process_enforced_read_only(tmp_path: Path) -> None:
         )
     policy = captured["runtime_policy"]
     assert isinstance(policy, dict)
-    assert policy["dangerously_bypass_approvals_and_sandbox"] is False
-    assert policy["sandbox_mode"] == "read-only"
-    assert policy["approval_policy"] == "never"
-    assert policy["add_dirs"] == []
-    assert policy["include_tmp_add_dir"] is False
-    assert policy["skip_git_repo_check"] is True
+    assert policy["dangerously_bypass_approvals_and_sandbox"] is True
+    assert policy.get("sandbox_mode") != "read-only"
+    assert policy.get("approval_policy") != "never"
+    assert policy.get("add_dirs") == captured["add_dirs"]
+    assert any(str(flag).startswith("rollout_budget.limit_tokens=") for flag in policy["codex_flags"])
+
+
+def test_schema_grounding_rejections_are_disclosed_per_worker(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    missing_estimate = finding()
+    missing_estimate.pop("remediation_estimate")
+    wrong_evidence = finding()
+    wrong_evidence["evidence"] = "unrelated assertion"
+    report = debt.build_code_debt_report(
+        [payload(missing_estimate, wrong_evidence)], repo_dir=tmp_path,
+        grounding_mode="strict", max_token_budget=1000,
+    )
+    assert report.findings == []
+    assert any("rejected 2" in failure for failure in report.worker_failures)
+    assert "completed successfully" not in report.to_markdown()
+
+
+def test_ratio_requires_bounded_grounded_calculation(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    reports = [
+        debt.build_code_debt_report(
+            [payload(finding(), summary={"debt_ratio_estimate": ratio})],
+            repo_dir=tmp_path, grounding_mode="strict", max_token_budget=2000,
+        )
+        for ratio in ("999999%", "4%", "4% of 100 changed NCLOC, SQALE A")
+    ]
+    assert "999999%" not in reports[0].to_markdown()
+    assert "Debt ratio estimate: **unknown**" in reports[1].to_markdown()
+    assert "Debt ratio estimate: **4% of 100 changed NCLOC, SQALE A**" in reports[2].to_markdown()
+
+
+def test_persist_budget_estimate_matches_rendered_markdown(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    report = debt.build_code_debt_report(
+        [payload(finding(signal="x" * 500))], repo_dir=tmp_path,
+        grounding_mode="strict", max_token_budget=120,
+    )
+    assert report.estimated_tokens == debt._estimate_markdown_tokens(report.to_markdown())
+    assert report.truncated
+
+
+def test_legacy_debt_artifact_is_repaired_not_reused(tmp_path: Path) -> None:
+    path = tmp_path / "code-debt.md"
+    path.write_text("legacy report")
+    progress = SimpleNamespace(meta={})
+    progress.mutate = lambda: mock.MagicMock(__enter__=lambda self: None, __exit__=lambda *args: None)
+    calls: list[str] = []
+    result = cure._ensure_code_debt_artifact(
+        session_dir=tmp_path, progress=progress, mode="multipass-stage",
+        execute=lambda: calls.append("run") or (path.write_text(debt.CodeDebtReport().to_markdown()) and path),
+    )
+    assert result == path
+    assert calls == ["run"]
+    assert "Dedicated Code-Debt Analysis" in path.read_text()
 
 
 def test_timeout_uses_dedicated_registry_and_leaves_shared_registry_open(tmp_path: Path) -> None:
