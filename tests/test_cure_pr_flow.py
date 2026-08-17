@@ -251,7 +251,9 @@ def test_fresh_review_calls_cannot_access_nonempty_pr_context_artifacts(
 
     success_root, success_review_calls = run_integrated_orientation_flow("success")
     success_session = next(p for p in (success_root / "sandboxes").iterdir() if p.is_dir())
-    assert success_review_calls == ["pr_context_draft.md", "pr_context_reconciled.md"]
+    assert success_review_calls == [
+        "pr_context_draft.md", "pr_context_reconciled.md", "code_debt_worker_01.json"
+    ]
     assert not list(success_session.glob(".pr-context-orientation-runtime-*"))
     assert sentinel not in (success_session / "meta.json").read_text(encoding="utf-8")
 

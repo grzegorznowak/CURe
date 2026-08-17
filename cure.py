@@ -3175,6 +3175,14 @@ def _emit_code_debt_report_output(
     stdout.flush()
 
 
+def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> None:
+    """Attach the always-persisted debt artifact to fresh or resumed synthesis."""
+    report_path = session_dir / "code-debt.md"
+    report_text = str(report_path)
+    if report_path.is_file() and report_text not in inputs:
+        inputs.append(report_text)
+
+
 def _execute_code_debt_review_run(
     *,
     config: CodeDebtConfig,
@@ -3193,8 +3201,6 @@ def _execute_code_debt_review_run(
     owned_processes: OwnedProcessRegistry | None,
 ) -> Path | None:
     """Execute an isolated debt stage/subagent and persist its grounded report."""
-    if not config.enabled:
-        return None
     resolved, resolution_meta = resolve_llm_config(
         base_codex_config_path=base_codex_config_path,
         reviewflow_config_path=reviewflow_config_path,
@@ -3211,7 +3217,8 @@ def _execute_code_debt_review_run(
         deprecated_codex_plan_effort=None,
     )
     debt_env = apply_llm_env(env, resolved=resolved)
-    debt_processes = OwnedProcessRegistry()
+    owns_debt_processes = owned_processes is None
+    debt_processes = owned_processes if owned_processes is not None else OwnedProcessRegistry()
     timed_out = threading.Event()
 
     def _terminate_timed_out_debt_processes() -> None:
@@ -3226,7 +3233,6 @@ def _execute_code_debt_review_run(
     )
     timeout_timer.daemon = True
     timeout_timer.start()
-    _ = owned_processes
     output_lock = threading.Lock()
     output_index = 0
 
@@ -3236,6 +3242,16 @@ def _execute_code_debt_review_run(
             output_index += 1
             index = output_index
         output_path = work_dir / f"code_debt_worker_{index:02d}.json"
+        debt_runtime_policy = _runtime_policy_for_multipass_stage(
+            runtime_policy=runtime_policy,
+            llm_resolved=resolved,
+            llm_resolution_meta=resolution_meta,
+        )
+        debt_flags = list(debt_runtime_policy.get("codex_flags") or [])
+        # Enforced by Codex inside its generation/tool loop. Retry calls receive
+        # only their remaining allocation from cure_code_debt.
+        debt_flags.extend(["-c", f"rollout_budget.limit_tokens={request.token_budget}"])
+        debt_runtime_policy["codex_flags"] = debt_flags
         result = run_llm_exec(
             repo_dir=repo_dir,
             session_dir=session_dir,
@@ -3247,8 +3263,8 @@ def _execute_code_debt_review_run(
             stream=False,
             progress=progress,
             add_dirs=add_dirs,
-            codex_config_overrides=list(runtime_policy.get("codex_config_overrides") or []),
-            runtime_policy=runtime_policy,
+            codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
+            runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
         )
         with progress.mutate():
@@ -3268,7 +3284,8 @@ def _execute_code_debt_review_run(
             report = run_code_debt_subagent(config=config, repo_dir=repo_dir, analyzer=_analyze)
     finally:
         timeout_timer.cancel()
-        debt_processes.terminate_and_drain()
+        if owns_debt_processes:
+            debt_processes.terminate_and_drain()
     if timed_out.is_set():
         report = replace(
             report,
@@ -3279,7 +3296,6 @@ def _execute_code_debt_review_run(
     report_path.write_text(report.to_markdown(), encoding="utf-8")
     with progress.mutate():
         progress.meta["code_debt"] = {
-            "enabled": True,
             "mode": "multipass-stage" if multipass else "single-stage-subagent",
             "model_preset": config.model_preset,
             "model": config.model,
@@ -9140,12 +9156,8 @@ def _pr_flow_impl(
         )
         progress.meta["multipass_defaults"] = multipass_defaults_meta
         code_debt_config = load_code_debt_config(effective_config_path)
-        cli_code_debt = getattr(args, "code_debt", None)
-        if cli_code_debt is not None:
-            code_debt_config = replace(code_debt_config, enabled=bool(cli_code_debt))
         progress.meta["code_debt"] = {
-            "enabled": code_debt_config.enabled,
-            "mode": "pending" if code_debt_config.enabled else "disabled",
+            "mode": "pending",
             "model_preset": code_debt_config.model_preset,
             "model": code_debt_config.model,
             "max_token_budget": code_debt_config.max_token_budget,
@@ -10348,38 +10360,37 @@ def _pr_flow_impl(
                         success_resume_command = step_resume_command or success_resume_command
 
                     code_debt_report_path: Path | None = None
-                    if code_debt_config.enabled:
-                        try:
-                            with phase("code_debt_stage", progress=progress, quiet=quiet):
-                                code_debt_report_path = _execute_code_debt_review_run(
-                                    config=code_debt_config,
-                                    multipass=True,
-                                    plan=plan,
-                                    repo_dir=repo_dir,
-                                    session_dir=session_dir,
-                                    work_dir=work_dir,
-                                    progress=progress,
-                                    reviewflow_config_path=effective_config_path,
-                                    base_codex_config_path=effective_codex_base_config_path,
-                                    env=env,
-                                    add_dirs=add_dirs,
-                                    runtime_policy=runtime_policy,
-                                    worker_count=int(
-                                        progress.meta.setdefault("multipass", {}).get(
-                                            "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
-                                        )
-                                    ),
-                                    owned_processes=owned_processes,
-                                )
-                        except Exception as exc:
-                            progress.meta["code_debt"] = {
-                                **dict(progress.meta.get("code_debt") or {}),
-                                "mode": "multipass-stage",
-                                "status": "failed-open",
-                                "error": str(exc),
-                            }
-                            progress.flush()
-                            log(f"Code-debt stage failed open: {exc}", quiet=quiet)
+                    try:
+                        with phase("code_debt_stage", progress=progress, quiet=quiet):
+                            code_debt_report_path = _execute_code_debt_review_run(
+                                config=code_debt_config,
+                                multipass=True,
+                                plan=plan,
+                                repo_dir=repo_dir,
+                                session_dir=session_dir,
+                                work_dir=work_dir,
+                                progress=progress,
+                                reviewflow_config_path=effective_config_path,
+                                base_codex_config_path=effective_codex_base_config_path,
+                                env=env,
+                                add_dirs=add_dirs,
+                                runtime_policy=runtime_policy,
+                                worker_count=int(
+                                    progress.meta.setdefault("multipass", {}).get(
+                                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                                    )
+                                ),
+                                owned_processes=owned_processes,
+                            )
+                    except Exception as exc:
+                        progress.meta["code_debt"] = {
+                            **dict(progress.meta.get("code_debt") or {}),
+                            "mode": "multipass-stage",
+                            "status": "failed-open",
+                            "error": str(exc),
+                        }
+                        progress.flush()
+                        log(f"Code-debt stage failed open: {exc}", quiet=quiet)
 
                     synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
                         meta=progress.meta,
@@ -10390,7 +10401,7 @@ def _pr_flow_impl(
                         review_md_path=review_md_path,
                     )
                     if code_debt_report_path is not None:
-                        synth_step_outputs.append(code_debt_report_path)
+                        _attach_code_debt_synth_input(synth_step_outputs, session_dir=session_dir)
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
                         "step_index": int(len(synth_step_outputs)),
@@ -10820,7 +10831,7 @@ def _pr_flow_impl(
                 progress=progress, work_dir=work_dir, context_meta=context_meta, quiet=quiet
             )
 
-        if (not use_multipass) and code_debt_config.enabled:
+        if not use_multipass:
             code_debt_report_path = None
             try:
                 with phase("code_debt_subagent", progress=progress, quiet=quiet):
@@ -12300,6 +12311,7 @@ def _resume_flow_impl(
             review_md_path=review_md_path,
             prefer_persisted_skips=from_phase == "synth" or resume_skip_choice == "keep",
         )
+        _attach_code_debt_synth_input(synth_step_outputs, session_dir=session_dir)
 
         should_synth = (
             from_phase in {"synth", "plan", "steps"}
@@ -15786,21 +15798,6 @@ def build_parser(*, prog: str = PRIMARY_CLI_COMMAND) -> argparse.ArgumentParser:
     mpg.add_argument("--multipass", dest="multipass", action="store_true", default=None, help="Enable multipass review")
     mpg.add_argument("--no-multipass", dest="multipass", action="store_false", default=None, help="Disable multipass review")
     prp.add_argument("--multipass-max-steps", dest="multipass_max_steps", type=int, default=None)
-    cdg = prp.add_mutually_exclusive_group()
-    cdg.add_argument(
-        "--code-debt",
-        dest="code_debt",
-        action="store_true",
-        default=None,
-        help="Enable the dedicated bounded code-debt stage/subagent for this review",
-    )
-    cdg.add_argument(
-        "--no-code-debt",
-        dest="code_debt",
-        action="store_false",
-        default=None,
-        help="Disable code-debt analysis for this review",
-    )
     prp.add_argument(
         "--no-index",
         action="store_true",

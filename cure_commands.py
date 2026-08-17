@@ -349,6 +349,20 @@ def _render_init_config(*, runtime: ReviewflowRuntime, chunkhound_base_config_pa
         "[chunkhound]",
         f"base_config_path = {json.dumps(str(chunkhound_base_config_path))}",
         "",
+        "[multipass]",
+        'grounding_mode = "strict"',
+        "step_workers = 4",
+        "",
+        "[code_debt]",
+        'model_preset = "codex-cli"',
+        'model = "gpt-5.6-terra"',
+        "max_token_budget = 4000",
+        "timeout = 300",
+        'grounding_mode = "strict"',
+        'metrics = ["debt_ratio", "severity_counts", "cyclomatic_complexity", "duplication_density", "comment_todo_density", "test_gap", "dependency_debt"]',
+        "hotspot_threshold = 0.0",
+        'report_output = "file"',
+        "",
     ]
     return "\n".join(lines)
 

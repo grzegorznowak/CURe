@@ -6151,6 +6151,9 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
 
         def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
             output_path = Path(str(kwargs["output_path"]))
+            if output_path.name.startswith("code_debt_worker_"):
+                output_path.write_text('{"findings": [], "summary": {}}', encoding="utf-8")
+                return rf.LlmRunResult(adapter_meta={"usage": {"output_tokens": 1}})
             calls.append(output_path.name)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if output_path.name == "review.plan.md":
@@ -6358,6 +6361,9 @@ class MultipassGroundingRuntimeTests(unittest.TestCase):
         def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
             output_path = Path(str(kwargs["output_path"]))
             repo_dir = Path(str(kwargs["repo_dir"]))
+            if output_path.name.startswith("code_debt_worker_"):
+                output_path.write_text('{"findings": [], "summary": {}}', encoding="utf-8")
+                return rf.LlmRunResult(adapter_meta={"usage": {"output_tokens": 1}})
             calls.append(output_path.name)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if output_path.name == "review.plan.md":
@@ -8698,6 +8704,9 @@ class CodexToolProofFlowTests(unittest.TestCase):
 
         def fake_run_llm_exec(**kwargs: object) -> rf.LlmRunResult:
             output_path = Path(str(kwargs["output_path"]))
+            if output_path.name.startswith("code_debt_worker_"):
+                output_path.write_text('{"findings": [], "summary": {}}', encoding="utf-8")
+                return rf.LlmRunResult(adapter_meta={"usage": {"output_tokens": 1}})
             calls.append(output_path.name)
             work_dir = Path(str(kwargs["repo_dir"])).parent / "work"
             if llm_param_count >= 3:
@@ -10008,7 +10017,8 @@ class CodexToolProofFlowTests(unittest.TestCase):
                 "\n---\n<!-- CURE_REVIEW_FOOTER_START -->"
             )
             self.assertTrue(footer_separator)
-            self.assertEqual(retained_body, completed_reviews_at_mirror[0])
+            self.assertTrue(retained_body.startswith(completed_reviews_at_mirror[0]))
+            self.assertIn("## Dedicated Code-Debt Analysis", retained_body)
             self.assertEqual(authoritative["status"], "done")
             self.assertEqual(
                 (context_meta["outcome"], context_meta["reason"], context_meta["context_mode"]),

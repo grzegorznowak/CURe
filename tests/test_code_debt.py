@@ -53,19 +53,14 @@ def test_prompt_contract_contains_tiered_metrics_and_hotspots() -> None:
         assert phrase in text
 
 
-def test_cli_stage_activation_override_is_registered() -> None:
+def test_code_debt_has_no_activation_override() -> None:
     parser = cure.build_parser()
-    enabled = parser.parse_args(["pr", "https://github.com/acme/repo/pull/1", "--code-debt"])
-    disabled = parser.parse_args(["pr", "https://github.com/acme/repo/pull/1", "--no-code-debt"])
     inherited = parser.parse_args(["pr", "https://github.com/acme/repo/pull/1"])
-    assert enabled.code_debt is True
-    assert disabled.code_debt is False
-    assert inherited.code_debt is None
+    assert not hasattr(inherited, "code_debt")
 
 
 def test_config_defaults_and_named_codex_model_resolution(tmp_path: Path) -> None:
     cfg = debt.load_code_debt_config(tmp_path / "missing.toml", env={})
-    assert cfg.enabled is False
     assert cfg.model_preset == "codex-cli"
     assert cfg.model == "gpt-5.6-terra"
     assert cfg.max_token_budget > 0
@@ -79,7 +74,6 @@ def test_config_defaults_and_named_codex_model_resolution(tmp_path: Path) -> Non
         path,
         env={"CURE_CODE_DEBT_MODEL": "gpt-env", "CURE_CODE_DEBT_TIMEOUT": "17"},
     )
-    assert cfg.enabled is True
     assert cfg.model_preset == "terra-custom"
     assert cfg.model == "gpt-env"
     assert cfg.timeout_seconds == 17
@@ -87,7 +81,7 @@ def test_config_defaults_and_named_codex_model_resolution(tmp_path: Path) -> Non
 
 def test_budget_cap_truncates_gracefully(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n")
-    cfg = debt.CodeDebtConfig(enabled=True, max_token_budget=90)
+    cfg = debt.CodeDebtConfig(max_token_budget=90)
     raw = _payload(*[_finding("a.py", 1, signal="x" * 180) for _ in range(5)])
     report = debt.run_code_debt_stage(
         config=cfg,
@@ -131,7 +125,7 @@ def test_single_stage_subagent_is_isolated_and_code_only(tmp_path: Path) -> None
         return _payload(_finding("a.py", 1), {**_finding("a.py", 1), "category": "business"})
 
     report = debt.run_code_debt_subagent(
-        config=debt.CodeDebtConfig(enabled=True, subagent_mode="subagentic"),
+        config=debt.CodeDebtConfig(),
         repo_dir=tmp_path,
         analyzer=analyzer,
     )
@@ -199,7 +193,6 @@ def test_fake_codex_smoke_propagates_configured_model_and_handles_failure(tmp_pa
         "FAKE_CODEX_ARGV": str(argv_path),
     }
     cfg = debt.load_code_debt_config(tmp_path / "missing.toml", env={})
-    cfg = debt.replace(cfg, enabled=True)
 
     with mock.patch.object(
         cure,
@@ -336,7 +329,7 @@ def test_integrated_timeout_terminates_isolated_run_without_hanging(tmp_path: Pa
         return_value=({"provider": "codex", "model": "gpt-5.6-terra"}, {}),
     ), mock.patch.object(cure, "run_llm_exec", side_effect=blocked_exec):
         report_path = cure._execute_code_debt_review_run(
-            config=debt.CodeDebtConfig(enabled=True, timeout_seconds=1),
+            config=debt.CodeDebtConfig(timeout_seconds=1),
             multipass=False,
             plan=None,
             repo_dir=tmp_path,
@@ -358,10 +351,9 @@ def test_integrated_timeout_terminates_isolated_run_without_hanging(tmp_path: Pa
 
 def test_multistage_activation_and_parallel_workers(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x=1\n")
-    cfg = debt.CodeDebtConfig(enabled=True, subagent_mode="stage")
-    assert debt.code_debt_stage_mode(config=cfg, multipass=True) == "multipass-stage"
-    assert debt.code_debt_stage_mode(config=cfg, multipass=False) == "single-stage-subagent"
-    assert debt.code_debt_stage_mode(config=debt.CodeDebtConfig(), multipass=True) == "disabled"
+    cfg = debt.CodeDebtConfig()
+    assert debt.code_debt_stage_mode(multipass=True) == "multipass-stage"
+    assert debt.code_debt_stage_mode(multipass=False) == "single-stage-subagent"
 
     barrier = threading.Barrier(len(debt.METRIC_CLUSTERS))
     thread_ids: set[int] = set()
