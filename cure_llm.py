@@ -425,6 +425,7 @@ def build_codex_exec_cmd(
     resume_session_id: str | None = None,
     sandbox_mode: str | None = None,
     direct_resume_runtime_flags: bool = False,
+    include_tmp_add_dir: bool = True,
 ) -> list[str]:
     overrides = list(codex_config_overrides or [])
     if resume_session_id:
@@ -453,7 +454,9 @@ def build_codex_exec_cmd(
     if sandbox_mode:
         codex_flags = _strip_sandbox_search_flags(codex_flags)
     has_explicit_approval_flag = any(flag in {"-a", "--ask-for-approval"} for flag in codex_flags)
-    cmd = ["codex", "-C", str(repo_dir), "--add-dir", "/tmp"]
+    cmd = ["codex", "-C", str(repo_dir)]
+    if include_tmp_add_dir:
+        cmd.extend(["--add-dir", "/tmp"])
     for add_dir in add_dirs or []:
         cmd.extend(["--add-dir", str(add_dir)])
     cmd.extend(codex_flags)
@@ -497,6 +500,8 @@ def run_codex_exec(
     sandbox_mode: str | None = None,
     direct_resume_runtime_flags: bool = False,
     normalize_artifact: bool = True,
+    include_tmp_add_dir: bool = True,
+    skip_git_repo_check: bool = False,
 ) -> CodexRunResult:
     owned_role: OwnedProcessRole | None = (
         "review-provider" if owned_processes is not None else None
@@ -598,6 +603,7 @@ def run_codex_exec(
             resume_session_id=resume_session_id,
             sandbox_mode=sandbox_mode,
             direct_resume_runtime_flags=direct_resume_runtime_flags,
+            include_tmp_add_dir=include_tmp_add_dir,
         )
 
     def _unlink_quietly(path: Path) -> None:
@@ -641,13 +647,13 @@ def run_codex_exec(
             events_end_offset=_path_size(events_log_path),
         )
 
-    cmd = _build_attempt_cmd(skip_git_repo_check=False)
+    cmd = _build_attempt_cmd(skip_git_repo_check=skip_git_repo_check)
     progress.record_cmd(cmd)
     try:
         artifact_override = _run_codex_attempt(cmd=cmd, events_log_path=codex_events_log_path)
     except ReviewflowSubprocessError as exc:
         message = (exc.stderr or "") + "\n" + (exc.stdout or "")
-        if "skip-git-repo-check" not in message and "trusted directory" not in message:
+        if skip_git_repo_check or ("skip-git-repo-check" not in message and "trusted directory" not in message):
             _rollback_attempt(
                 events_log_path=codex_events_log_path,
                 restore_events_log_path=codex_events_log_path,
@@ -800,6 +806,8 @@ def run_llm_exec(
             sandbox_mode=sandbox_mode,
             direct_resume_runtime_flags=direct_resume_runtime_flags,
             normalize_artifact=normalize_artifact,
+            include_tmp_add_dir=bool(policy.get("include_tmp_add_dir", True)),
+            skip_git_repo_check=bool(policy.get("skip_git_repo_check", False)),
         )
         resume = None
         if result.resume is not None:

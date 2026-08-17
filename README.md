@@ -234,18 +234,18 @@ step_workers = 4
 # Always-on dedicated, isolated code-debt stage/subagent settings.
 model_preset = "codex-cli"
 model = "gpt-5.6-terra"
-max_token_budget = 4000
-timeout = 300
-grounding_mode = "strict"
+max_token_budget = 4000 # validated range: 1..100000
+timeout = 300 # seconds; validated range: 1..3600
+grounding_mode = "strict" # required; debt findings never relax grounding
 # Optional Tier 1 subset; Tier 2 assessment remains prompt-driven.
 metrics = ["debt_ratio", "severity_counts", "cyclomatic_complexity", "duplication_density", "comment_todo_density", "test_gap", "dependency_debt"]
 hotspot_threshold = 0.0
 report_output = "file"
 ```
 
-Code-debt analysis runs for every review using isolated Codex CLI executions and reports only grounded code-related findings. Multipass reviews run metric clusters concurrently using the configured multipass worker bound and feed `code-debt.md` into synthesis. Single-stage reviews run a separate subagent and append its report after the main review, so the main model context is not polluted. Plan-aborted multipass reviews still run and persist the debt stage before returning. `CURE_CODE_DEBT_PRESET`, `CURE_CODE_DEBT_MODEL`, `CURE_CODE_DEBT_MAX_TOKEN_BUDGET`, `CURE_CODE_DEBT_TIMEOUT`, `CURE_CODE_DEBT_REPORT_OUTPUT`, and `CURE_CODE_DEBT_GROUNDING_MODE` override the corresponding fields.
+Code-debt analysis runs for every review using isolated Codex CLI executions and reports only strictly grounded findings against recognized source/configuration file types (prose-only files such as `README.md` are excluded). Multipass reviews run metric clusters concurrently using the configured multipass worker bound and feed `code-debt.md` into synthesis. Single-stage reviews run a separate subagent and append its report after the main review, so the main model context is not polluted. Plan-aborted, failed-step, and resumed multipass reviews run or reuse the persisted debt artifact. `CURE_CODE_DEBT_PRESET`, `CURE_CODE_DEBT_MODEL`, `CURE_CODE_DEBT_MAX_TOKEN_BUDGET`, `CURE_CODE_DEBT_TIMEOUT`, and `CURE_CODE_DEBT_REPORT_OUTPUT` override the corresponding fields. Debt grounding is intentionally fixed to `strict`.
 
-Debt workers use Codex's process-enforced `read-only` sandbox with approval policy `never`; CURe explicitly disables `--dangerously-bypass-approvals-and-sandbox` for these workers regardless of the primary review policy. This is intentionally stricter than the normal review runtime: workers can inspect the staged checkout and produce the CLI-managed response artifact, but cannot modify the repository or use a writable scratch area. The prompt guardrails remain defense in depth; enforcement depends on the installed Codex CLI honoring its sandbox contract.
+Debt workers use Codex's process-enforced `read-only` sandbox with approval policy `never`; CURe explicitly disables `--dangerously-bypass-approvals-and-sandbox` and supplies no `--add-dir` writable directories (including `/tmp`) for these workers. CURe also starts debt Codex executions with `--skip-git-repo-check`, avoiding the common adapter's trust-directory whole-command retry so the configured rollout budget cannot be spent twice. Workers can inspect the staged checkout and produce only the CLI-managed response artifact; they cannot modify the repository or use writable scratch. The prompt guardrails remain defense in depth; enforcement depends on the installed Codex CLI honoring its sandbox contract.
 
 On interactive `cure pr` runs, CURe can open a `/dev/tty` picker for the resolved CLI provider when `model` or execution `reasoning_effort` was not explicitly configured. Press Enter keeps the displayed defaults. Built-in Codex defaults are explicit: `codex-cli` defaults to effort `high`.
 

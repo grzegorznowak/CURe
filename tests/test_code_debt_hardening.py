@@ -100,9 +100,10 @@ def test_summary_is_grounded_and_unsupported_claims_are_removed(tmp_path: Path) 
 
 def test_markdown_renderer_neutralizes_hostile_fields(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x=1\n")
-    hostile = finding(signal="issue\n\n## Forged Section")
+    hostile = finding(signal="issue\n\n## Forged Section ![audit](https://example.invalid/pixel)")
     hostile.update(
         metric="cyclomatic_complexity\n- forged",
+        evidence="[deceptive](https://example.invalid)",
         remediation_estimate="1h\n# forged",
         fowler_quadrant="prudent\n> forged",
     )
@@ -114,6 +115,38 @@ def test_markdown_renderer_neutralizes_hostile_fields(tmp_path: Path) -> None:
     assert "\n- forged" not in markdown
     assert "\n# forged" not in markdown
     assert "\n> forged" not in markdown
+    assert "![audit](" not in markdown
+    assert "[deceptive](" not in markdown
+
+
+def test_malformed_worker_output_is_reported_as_failure(tmp_path: Path) -> None:
+    report = debt.build_code_debt_report(
+        ['{"findings":'], repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000
+    )
+    markdown = report.to_markdown()
+    assert report.worker_failures
+    assert "failed" in markdown.lower()
+    assert "completed successfully" not in markdown
+
+
+def test_finding_without_evidence_or_fowler_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    incomplete = finding()
+    incomplete.pop("evidence")
+    incomplete.pop("fowler_quadrant")
+    report = debt.build_code_debt_report(
+        [payload(incomplete)], repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000
+    )
+    assert report.findings == []
+
+
+def test_documentation_finding_against_readme_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("prose\n")
+    report = debt.build_code_debt_report(
+        [payload(finding(path="README.md", metric="documentation_quality"))],
+        repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000,
+    )
+    assert report.findings == []
 
 
 def test_budget_pressure_drops_summaries_before_findings(tmp_path: Path) -> None:
@@ -130,6 +163,21 @@ def test_budget_pressure_drops_summaries_before_findings(tmp_path: Path) -> None
     assert len(report.summary.get("worker_summaries", [])) < 3
 
 
+def test_config_validation_rejects_malformed_unbounded_or_noncanonical_values(tmp_path: Path) -> None:
+    config = tmp_path / "cure.toml"
+    config.write_text("[code_debt]\nmetrics=['cyclomatic_complexity', 'bad\\nmetric']\n")
+    with pytest.raises(ValueError, match="code_debt.*metrics"):
+        debt.load_code_debt_config(config, env={})
+    config.write_text("[code_debt]\nmax_token_budget=1000001\n")
+    with pytest.raises(ValueError, match="max_token_budget"):
+        debt.load_code_debt_config(config, env={})
+    with pytest.raises(ValueError, match="CURE_CODE_DEBT_TIMEOUT"):
+        debt.load_code_debt_config(tmp_path / "missing.toml", env={"CURE_CODE_DEBT_TIMEOUT": "abc"})
+    config.write_text("[code_debt]\ngrounding_mode='warn'\n")
+    with pytest.raises(ValueError, match="grounding_mode.*strict"):
+        debt.load_code_debt_config(config, env={})
+
+
 def test_configured_metric_subset_is_enforced(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x=1\n")
     report = debt.build_code_debt_report(
@@ -138,6 +186,23 @@ def test_configured_metric_subset_is_enforced(tmp_path: Path) -> None:
         enabled_metrics=("cyclomatic_complexity",),
     )
     assert report.findings == []
+
+
+def test_deterministic_conflict_resolution_prefers_high_severity_and_ratio(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    low = finding(signal="same")
+    high = finding(signal="same")
+    high.update(severity="high", evidence="more specific evidence at a.py:1")
+    first = payload(low, summary={"debt_ratio_estimate": "2%"})
+    second = payload(high, summary={"debt_ratio_estimate": "8%"})
+    reports = [
+        debt.build_code_debt_report(order, repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000)
+        for order in ([first, second], [second, first])
+    ]
+    assert reports[0].findings == reports[1].findings
+    assert reports[0].findings[0]["severity"] == "high"
+    assert "Debt ratio estimate: **8%**" in reports[0].to_markdown()
+    assert reports[0].to_markdown() == reports[1].to_markdown()
 
 
 def test_resume_synth_reattaches_persisted_code_debt_report(tmp_path: Path) -> None:
@@ -215,6 +280,8 @@ def test_execution_rebuilds_debt_model_and_generation_cap(tmp_path: Path) -> Non
     assert argv[argv.index("-m") + 1] == "gpt-5.6-terra"
     assert "gpt-primary" not in argv
     assert "rollout_budget.limit_tokens=2000" in argv
+    assert "--skip-git-repo-check" in argv
+    assert "--add-dir" not in argv
 
 
 def test_rendered_report_is_narrative_complete_and_clean(tmp_path: Path) -> None:
@@ -301,6 +368,26 @@ def test_category_metric_alias_survives_but_unknown_metric_is_rejected(tmp_path:
     assert [item["metric"] for item in report.findings] == ["severity_counts"]
 
 
+def test_ensure_code_debt_artifact_runs_missing_and_persists_failure(tmp_path: Path) -> None:
+    progress = SimpleNamespace(meta={})
+    progress.mutate = lambda: mock.MagicMock(__enter__=lambda self: None, __exit__=lambda *args: None)
+    calls: list[str] = []
+    path = cure._ensure_code_debt_artifact(
+        session_dir=tmp_path, progress=progress, mode="multipass-stage",
+        execute=lambda: calls.append("run") or (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert calls == ["run"]
+    assert path.is_file()
+    assert "analysis failed" in path.read_text().lower()
+    assert progress.meta["code_debt"]["status"] == "failed-open"
+    calls.clear()
+    assert cure._ensure_code_debt_artifact(
+        session_dir=tmp_path, progress=progress, mode="multipass-stage",
+        execute=lambda: calls.append("rerun") or path,
+    ) == path
+    assert calls == []
+
+
 def test_plan_abort_debt_hook_runs_only_for_abort() -> None:
     calls: list[str] = []
 
@@ -311,6 +398,35 @@ def test_plan_abort_debt_hook_runs_only_for_abort() -> None:
     assert calls == []
     assert cure._execute_code_debt_on_plan_abort(plan={"abort": True}, execute=execute) == Path("code-debt.md")
     assert calls == ["debt"]
+
+
+def test_trust_directory_failures_cannot_double_generation_budget(tmp_path: Path) -> None:
+    caps: list[int] = []
+
+    def trust_failure(**kwargs: object) -> object:
+        policy = kwargs["runtime_policy"]
+        assert isinstance(policy, dict)
+        assert policy["skip_git_repo_check"] is True
+        flags = policy["codex_flags"]
+        assert isinstance(flags, list)
+        raw = next(str(item) for item in flags if str(item).startswith("rollout_budget.limit_tokens="))
+        caps.append(int(raw.rsplit("=", 1)[1]))
+        raise RuntimeError("trusted directory error after near-cap generation")
+
+    progress = SimpleNamespace(meta={})
+    progress.mutate = lambda: mock.MagicMock(__enter__=lambda self: None, __exit__=lambda *args: None)
+    with mock.patch.object(
+        cure, "resolve_llm_config",
+        return_value=({"provider": "codex", "model": "gpt-5.6-terra"}, {}),
+    ), mock.patch.object(cure, "run_llm_exec", side_effect=trust_failure):
+        cure._execute_code_debt_review_run(
+            config=debt.CodeDebtConfig(max_token_budget=101), multipass=False, plan=None,
+            repo_dir=tmp_path, session_dir=tmp_path, work_dir=tmp_path, progress=progress,
+            reviewflow_config_path=None, base_codex_config_path=tmp_path / "codex.toml", env={},
+            add_dirs=[tmp_path], runtime_policy={}, worker_count=1, owned_processes=None,
+        )
+    assert caps == [50, 51]
+    assert sum(caps) <= 101
 
 
 def test_debt_runtime_is_process_enforced_read_only(tmp_path: Path) -> None:
@@ -336,6 +452,9 @@ def test_debt_runtime_is_process_enforced_read_only(tmp_path: Path) -> None:
     assert policy["dangerously_bypass_approvals_and_sandbox"] is False
     assert policy["sandbox_mode"] == "read-only"
     assert policy["approval_policy"] == "never"
+    assert policy["add_dirs"] == []
+    assert policy["include_tmp_add_dir"] is False
+    assert policy["skip_git_repo_check"] is True
 
 
 def test_timeout_uses_dedicated_registry_and_leaves_shared_registry_open(tmp_path: Path) -> None:

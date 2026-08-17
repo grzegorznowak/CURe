@@ -3188,6 +3188,35 @@ def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> No
         inputs.append(report_text)
 
 
+def _ensure_code_debt_artifact(
+    *, session_dir: Path, progress: SessionProgress, mode: str,
+    execute: Callable[[], Path | None],
+) -> Path:
+    """Run a missing always-on debt stage and persist an honest fail-open artifact."""
+    report_path = session_dir / "code-debt.md"
+    if report_path.is_file():
+        return report_path
+    try:
+        executed = execute()
+        if executed is None or not executed.is_file():
+            raise ReviewflowError("code-debt stage returned without persisting its artifact")
+        return executed
+    except Exception as exc:
+        report_path.write_text(
+            CodeDebtReport(worker_failures=(f"{mode} failed: {exc}",)).to_markdown(),
+            encoding="utf-8",
+        )
+        with progress.mutate():
+            progress.meta["code_debt"] = {
+                **dict(progress.meta.get("code_debt") or {}),
+                "mode": mode,
+                "status": "failed-open",
+                "error": str(exc),
+                "artifact": str(report_path),
+            }
+        return report_path
+
+
 def _execute_code_debt_on_plan_abort(
     *, plan: Mapping[str, object], execute: Callable[[], Path | None]
 ) -> Path | None:
@@ -3263,6 +3292,11 @@ def _execute_code_debt_review_run(
             "sandbox_mode": "read-only",
             "approval_policy": "never",
             "dangerously_bypass_approvals_and_sandbox": False,
+            # --add-dir grants write access. Debt workers need no writable scratch.
+            "add_dirs": [],
+            "include_tmp_add_dir": False,
+            # Avoid run_codex_exec's trust-directory retry spending this allocation twice.
+            "skip_git_repo_check": True,
         }
         debt_runtime_policy = _runtime_policy_for_multipass_stage(
             runtime_policy=tightened_policy,
@@ -3284,7 +3318,7 @@ def _execute_code_debt_review_run(
             env=debt_env,
             stream=False,
             progress=progress,
-            add_dirs=add_dirs,
+            add_dirs=[],
             codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
@@ -10388,6 +10422,34 @@ def _pr_flow_impl(
                         stage_name="step",
                         stage_llm_meta=step_llm["meta"],
                     )
+                    # Run debt before the step stage so step failures cannot bypass the
+                    # always-on artifact. Synthesis later reuses this persisted result.
+                    with phase("code_debt_stage", progress=progress, quiet=quiet):
+                        code_debt_report_path = _ensure_code_debt_artifact(
+                            session_dir=session_dir,
+                            progress=progress,
+                            mode="multipass-stage",
+                            execute=lambda: _execute_code_debt_review_run(
+                                config=code_debt_config,
+                                multipass=True,
+                                plan=plan,
+                                repo_dir=repo_dir,
+                                session_dir=session_dir,
+                                work_dir=work_dir,
+                                progress=progress,
+                                reviewflow_config_path=effective_config_path,
+                                base_codex_config_path=effective_codex_base_config_path,
+                                env=env,
+                                add_dirs=add_dirs,
+                                runtime_policy=runtime_policy,
+                                worker_count=int(
+                                    progress.meta.setdefault("multipass", {}).get(
+                                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                                    )
+                                ),
+                                owned_processes=owned_processes,
+                            ),
+                        )
                     with phase("multipass_steps", progress=progress, quiet=quiet):
                         step_resume_command, _ = _execute_multipass_step_stage(
                             progress=progress,
@@ -10424,39 +10486,6 @@ def _pr_flow_impl(
                         )
                         success_resume_command = step_resume_command or success_resume_command
 
-                    code_debt_report_path: Path | None = None
-                    try:
-                        with phase("code_debt_stage", progress=progress, quiet=quiet):
-                            code_debt_report_path = _execute_code_debt_review_run(
-                                config=code_debt_config,
-                                multipass=True,
-                                plan=plan,
-                                repo_dir=repo_dir,
-                                session_dir=session_dir,
-                                work_dir=work_dir,
-                                progress=progress,
-                                reviewflow_config_path=effective_config_path,
-                                base_codex_config_path=effective_codex_base_config_path,
-                                env=env,
-                                add_dirs=add_dirs,
-                                runtime_policy=runtime_policy,
-                                worker_count=int(
-                                    progress.meta.setdefault("multipass", {}).get(
-                                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
-                                    )
-                                ),
-                                owned_processes=owned_processes,
-                            )
-                    except Exception as exc:
-                        progress.meta["code_debt"] = {
-                            **dict(progress.meta.get("code_debt") or {}),
-                            "mode": "multipass-stage",
-                            "status": "failed-open",
-                            "error": str(exc),
-                        }
-                        progress.flush()
-                        log(f"Code-debt stage failed open: {exc}", quiet=quiet)
-
                     synth_step_outputs, skipped_prompt_text = _prepare_synth_inputs(
                         meta=progress.meta,
                         step_entries=step_entries,
@@ -10465,8 +10494,7 @@ def _pr_flow_impl(
                         work_dir=work_dir,
                         review_md_path=review_md_path,
                     )
-                    if code_debt_report_path is not None:
-                        _attach_code_debt_synth_input(synth_step_outputs, session_dir=session_dir)
+                    _attach_code_debt_synth_input(synth_step_outputs, session_dir=session_dir)
                     progress.meta.setdefault("multipass", {})["current"] = {
                         "stage": "synth",
                         "step_index": int(len(synth_step_outputs)),
@@ -10897,10 +10925,12 @@ def _pr_flow_impl(
             )
 
         if not use_multipass:
-            code_debt_report_path = None
-            try:
-                with phase("code_debt_subagent", progress=progress, quiet=quiet):
-                    code_debt_report_path = _execute_code_debt_review_run(
+            with phase("code_debt_subagent", progress=progress, quiet=quiet):
+                code_debt_report_path = _ensure_code_debt_artifact(
+                    session_dir=session_dir,
+                    progress=progress,
+                    mode="single-stage-subagent",
+                    execute=lambda: _execute_code_debt_review_run(
                         config=code_debt_config,
                         multipass=False,
                         plan=None,
@@ -10915,17 +10945,9 @@ def _pr_flow_impl(
                         runtime_policy=runtime_policy,
                         worker_count=1,
                         owned_processes=owned_processes,
-                    )
-            except Exception as exc:
-                progress.meta["code_debt"] = {
-                    **dict(progress.meta.get("code_debt") or {}),
-                    "mode": "single-stage-subagent",
-                    "status": "failed-open",
-                    "error": str(exc),
-                }
-                progress.flush()
-                log(f"Code-debt subagent failed open: {exc}", quiet=quiet)
-            if code_debt_report_path is not None and review_md_path.is_file():
+                    ),
+                )
+            if review_md_path.is_file():
                 with review_md_path.open("a", encoding="utf-8") as review_stream:
                     review_stream.write("\n\n")
                     review_stream.write(code_debt_report_path.read_text(encoding="utf-8"))
@@ -11935,6 +11957,7 @@ def _resume_flow_impl(
         multipass_cfg, _ = load_reviewflow_multipass_defaults(
             config_path=effective_config_path
         )
+        code_debt_config = load_code_debt_config(effective_config_path)
         grounding_mode = str(
             multipass_cfg.get("grounding_mode") or DEFAULT_MULTIPASS_GROUNDING_MODE
         )
@@ -12163,6 +12186,43 @@ def _resume_flow_impl(
             plan=plan,
             plan_tool_report=plan_tool_report,
         )
+        # Resumes (including --from synth and resumed plan aborts) must execute
+        # a missing debt artifact rather than merely attempting to attach one.
+        # Sessions created before this stage existed have no execution metadata;
+        # persist an explicit degraded artifact instead of silently claiming clean.
+        def _execute_resumed_code_debt() -> Path | None:
+            if "code_debt" not in progress.meta:
+                raise ReviewflowError(
+                    "originating session has no code-debt execution metadata; analysis cannot be safely reconstructed"
+                )
+            return _execute_code_debt_review_run(
+                config=code_debt_config,
+                multipass=True,
+                plan=plan,
+                repo_dir=repo_dir,
+                session_dir=session_dir,
+                work_dir=work_dir,
+                progress=progress,
+                reviewflow_config_path=effective_config_path,
+                base_codex_config_path=effective_codex_base_config_path,
+                env=env,
+                add_dirs=add_dirs,
+                runtime_policy=runtime_policy,
+                worker_count=int(
+                    progress.meta.setdefault("multipass", {}).get(
+                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                    )
+                ),
+                owned_processes=None,
+            )
+
+        with phase("code_debt_stage", progress=progress, quiet=quiet):
+            _ensure_code_debt_artifact(
+                session_dir=session_dir,
+                progress=progress,
+                mode="multipass-stage",
+                execute=_execute_resumed_code_debt,
+            )
         if bool(plan.get("abort")):
             reason = str(plan.get("abort_reason") or "unknown")
             progress.meta.setdefault("multipass", {})["enabled"] = True
@@ -12173,10 +12233,11 @@ def _resume_flow_impl(
                 "step_title": str(reason),
             }
             progress.flush()
-            review_md_path.write_text(
-                build_abort_review_markdown(reason=reason, include_steps_taken=True),
-                encoding="utf-8",
-            )
+            abort_review = build_abort_review_markdown(reason=reason, include_steps_taken=True)
+            debt_path = session_dir / "code-debt.md"
+            if debt_path.is_file():
+                abort_review += "\n\n" + debt_path.read_text(encoding="utf-8")
+            review_md_path.write_text(abort_review, encoding="utf-8")
             if plan_reran:
                 _record_multipass_review_artifact_llm(
                     meta=progress.meta,

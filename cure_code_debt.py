@@ -16,6 +16,8 @@ DEFAULT_CODE_DEBT_MODEL = "gpt-5.6-terra"
 DEFAULT_CODE_DEBT_PRESET = "codex-cli"
 DEFAULT_MAX_TOKEN_BUDGET = 4_000
 DEFAULT_TIMEOUT_SECONDS = 300
+MAX_TOKEN_BUDGET = 100_000
+MAX_TIMEOUT_SECONDS = 3_600
 MAX_WORKERS = 20
 
 TIER_1_METRICS = (
@@ -52,6 +54,13 @@ _FOWLER_QUADRANTS = {
     "deliberate-prudent", "deliberate-reckless",
     "inadvertent-prudent", "inadvertent-reckless",
 }
+_CODE_FILE_SUFFIXES = {
+    ".c", ".cc", ".clj", ".cpp", ".cs", ".css", ".ex", ".exs", ".go", ".h", ".hpp",
+    ".html", ".java", ".js", ".jsx", ".kt", ".kts", ".lua", ".m", ".php", ".proto",
+    ".py", ".pyi", ".rb", ".rs", ".scala", ".sh", ".sql", ".swift", ".ts", ".tsx",
+    ".vue", ".xml", ".yaml", ".yml",
+}
+_CODE_FILE_NAMES = {"Dockerfile", "Makefile", "CMakeLists.txt"}
 
 
 @dataclass(frozen=True)
@@ -102,7 +111,11 @@ class CodeDebtReport:
 
         summaries = self.summary.get("worker_summaries")
         worker_summaries = [item for item in summaries if isinstance(item, dict)] if isinstance(summaries, list) else []
-        debt_ratios = [str(item["debt_ratio_estimate"]) for item in worker_summaries if item.get("debt_ratio_estimate")]
+        debt_ratios = sorted(
+            (str(item["debt_ratio_estimate"]) for item in worker_summaries if item.get("debt_ratio_estimate")),
+            key=_debt_ratio_sort_key,
+            reverse=True,
+        )
         hotspots: list[str] = []
         for item in worker_summaries:
             raw_hotspots = item.get("hotspot_top_n")
@@ -183,51 +196,111 @@ class CodeDebtReport:
 
 def _safe_markdown_inline(value: object) -> str:
     text = re.sub(r"[\r\n\t]+", " ", str(value)).strip()
-    return html.escape(text.replace("`", "'"), quote=False)
+    escaped = html.escape(text.replace("`", "'"), quote=False)
+    for delimiter, entity in (("!", "&#33;"), ("[", "&#91;"), ("]", "&#93;"), ("(", "&#40;"), (")", "&#41;")):
+        escaped = escaped.replace(delimiter, entity)
+    return escaped
+
+
+def _debt_ratio_sort_key(value: str) -> tuple[float, str]:
+    match = re.match(r"~?(\d+(?:\.\d+)?)%", value)
+    return (float(match.group(1)) if match else -1.0, value)
 
 
 def _safe_markdown_code(value: object) -> str:
     return re.sub(r"[\r\n\t`]+", " ", str(value)).strip()
 
 
+def _config_int(value: object, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid [code_debt].{name}: expected an integer")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid [code_debt].{name}: expected an integer") from exc
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"Invalid [code_debt].{name}: expected {minimum}..{maximum}")
+    return parsed
+
+
+def _config_metrics(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("Invalid [code_debt].metrics: expected a non-empty list of Tier 1 metric IDs")
+    metrics: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item != item.strip() or item not in TIER_1_METRICS:
+            raise ValueError("Invalid [code_debt].metrics: entries must be canonical Tier 1 metric IDs")
+        if item not in metrics:
+            metrics.append(item)
+    return tuple(metrics)
+
+
+def _config_string(value: object, *, name: str, default: str) -> str:
+    candidate = default if value is None else value
+    if not isinstance(candidate, str) or not candidate.strip() or candidate != candidate.strip():
+        raise ValueError(f"Invalid [code_debt].{name}: expected a non-empty single-line string")
+    if "\n" in candidate or "\r" in candidate:
+        raise ValueError(f"Invalid [code_debt].{name}: expected a non-empty single-line string")
+    return candidate
+
+
 def load_code_debt_config(path: Path, *, env: Mapping[str, str] | None = None) -> CodeDebtConfig:
-    """Resolve the always-on ``[code_debt]`` execution settings."""
+    """Resolve and strictly validate the always-on ``[code_debt]`` settings."""
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raw = {}
-    section = raw.get("code_debt", {}) if isinstance(raw, dict) else {}
-    section = section if isinstance(section, dict) else {}
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"Invalid code-debt configuration {path}: {exc}") from exc
+    section_raw = raw.get("code_debt", {}) if isinstance(raw, dict) else {}
+    if not isinstance(section_raw, dict):
+        raise ValueError("Invalid [code_debt]: expected a TOML table")
+    section = section_raw
     values = env if env is not None else os.environ
-    metrics_raw = section.get("metrics", TIER_1_METRICS)
-    metrics = (
-        tuple(str(item).strip() for item in metrics_raw if str(item).strip())
-        if isinstance(metrics_raw, list) else TIER_1_METRICS
+    metrics = _config_metrics(section.get("metrics", list(TIER_1_METRICS)))
+    budget_raw: object = values.get("CURE_CODE_DEBT_MAX_TOKEN_BUDGET") or section.get(
+        "max_token_budget", DEFAULT_MAX_TOKEN_BUDGET
     )
-    cfg = CodeDebtConfig(
-        model_preset=str(section.get("model_preset") or DEFAULT_CODE_DEBT_PRESET).strip(),
-        model=str(section.get("model") or DEFAULT_CODE_DEBT_MODEL).strip(),
-        max_token_budget=max(1, int(section.get("max_token_budget", DEFAULT_MAX_TOKEN_BUDGET))),
+    timeout_raw: object = values.get("CURE_CODE_DEBT_TIMEOUT") or section.get("timeout", DEFAULT_TIMEOUT_SECONDS)
+    hotspot_raw = section.get("hotspot_threshold", 0.0)
+    if isinstance(hotspot_raw, bool):
+        raise ValueError("Invalid [code_debt].hotspot_threshold: expected a number")
+    try:
+        hotspot = float(hotspot_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid [code_debt].hotspot_threshold: expected a number") from exc
+    if not 0.0 <= hotspot <= 1_000_000.0:
+        raise ValueError("Invalid [code_debt].hotspot_threshold: expected 0..1000000")
+    report_output = str(values.get("CURE_CODE_DEBT_REPORT_OUTPUT") or section.get("report_output") or "file").strip().lower()
+    if report_output not in {"file", "stdout"}:
+        raise ValueError("Invalid [code_debt].report_output: expected file or stdout")
+    grounding_mode = str(values.get("CURE_CODE_DEBT_GROUNDING_MODE") or section.get("grounding_mode") or "strict").strip().lower()
+    if grounding_mode != "strict":
+        raise ValueError("Invalid [code_debt].grounding_mode: dedicated analysis requires strict")
+    budget_name = "CURE_CODE_DEBT_MAX_TOKEN_BUDGET" if values.get("CURE_CODE_DEBT_MAX_TOKEN_BUDGET") else "max_token_budget"
+    timeout_name = "CURE_CODE_DEBT_TIMEOUT" if values.get("CURE_CODE_DEBT_TIMEOUT") else "timeout"
+    try:
+        budget = _config_int(budget_raw, name=budget_name, minimum=1, maximum=MAX_TOKEN_BUDGET)
+        timeout = _config_int(timeout_raw, name=timeout_name, minimum=1, maximum=MAX_TIMEOUT_SECONDS)
+    except ValueError as exc:
+        if str(exc).startswith("Invalid [code_debt].CURE_"):
+            raise ValueError(str(exc).replace("Invalid [code_debt].", "Invalid ", 1)) from exc
+        raise
+    return CodeDebtConfig(
+        model_preset=_config_string(
+            values.get("CURE_CODE_DEBT_PRESET") or section.get("model_preset"),
+            name="model_preset", default=DEFAULT_CODE_DEBT_PRESET,
+        ),
+        model=_config_string(
+            values.get("CURE_CODE_DEBT_MODEL") or section.get("model"),
+            name="model", default=DEFAULT_CODE_DEBT_MODEL,
+        ),
+        max_token_budget=budget,
         metrics=metrics,
-        hotspot_threshold=float(section.get("hotspot_threshold", 0.0)),
-        report_output=str(section.get("report_output") or "file").strip().lower(),
-        timeout_seconds=max(1, int(section.get("timeout", DEFAULT_TIMEOUT_SECONDS))),
-        grounding_mode=str(section.get("grounding_mode") or "strict").strip().lower(),
-    )
-    return replace(
-        cfg,
-        model_preset=values.get("CURE_CODE_DEBT_PRESET", "").strip() or cfg.model_preset,
-        model=values.get("CURE_CODE_DEBT_MODEL", "").strip() or cfg.model,
-        report_output=values.get("CURE_CODE_DEBT_REPORT_OUTPUT", "").strip() or cfg.report_output,
-        grounding_mode=values.get("CURE_CODE_DEBT_GROUNDING_MODE", "").strip() or cfg.grounding_mode,
-        max_token_budget=(
-            max(1, int(values["CURE_CODE_DEBT_MAX_TOKEN_BUDGET"]))
-            if values.get("CURE_CODE_DEBT_MAX_TOKEN_BUDGET", "").strip() else cfg.max_token_budget
-        ),
-        timeout_seconds=(
-            max(1, int(values["CURE_CODE_DEBT_TIMEOUT"]))
-            if values.get("CURE_CODE_DEBT_TIMEOUT", "").strip() else cfg.timeout_seconds
-        ),
+        hotspot_threshold=hotspot,
+        report_output=report_output,
+        timeout_seconds=timeout,
+        grounding_mode=grounding_mode,
     )
 
 
@@ -241,9 +314,11 @@ def _extract_json(text: str) -> dict[str, object]:
         candidate = candidate.split("```json", 1)[1].split("```", 1)[0].strip()
     try:
         value = json.loads(candidate)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"invalid worker JSON: {exc}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("findings"), list):
+        raise ValueError("invalid worker JSON: expected an object with a findings list")
+    return value
 
 
 def _grounding_valid(finding: Mapping[str, object], repo_dir: Path) -> bool:
@@ -269,21 +344,26 @@ def _grounding_valid(finding: Mapping[str, object], repo_dir: Path) -> bool:
         return False
 
 
+def _is_code_path(path_value: object) -> bool:
+    path = Path(str(path_value or ""))
+    return path.name in _CODE_FILE_NAMES or path.suffix.lower() in _CODE_FILE_SUFFIXES
+
+
 def validate_code_debt_findings(
     findings: Sequence[dict[str, object]], *, repo_dir: Path, mode: str,
     enabled_metrics: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     validated: list[dict[str, object]] = []
-    normalized_mode = mode if mode in {"strict", "warn", "off"} else "strict"
+    normalized_mode = mode if mode in {"strict", "warn"} else "strict"
     allowed = set(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
     for original in findings:
         finding = dict(original)
         raw_metric = str(finding.get("metric") or "").strip().lower()
         metric = _METRIC_ALIASES.get(raw_metric, raw_metric)
-        if metric not in allowed:
+        if metric not in allowed or not _is_code_path(finding.get("path")):
             continue
         finding["metric"] = metric
-        if normalized_mode == "off" or _grounding_valid(finding, repo_dir):
+        if _grounding_valid(finding, repo_dir):
             validated.append(finding)
         elif normalized_mode == "warn":
             finding["grounding"] = "warning"
@@ -297,7 +377,13 @@ def _is_code_finding(finding: Mapping[str, object]) -> bool:
     metric = str(finding.get("metric") or "").strip()
     raw_signal = finding.get("signal")
     signal = raw_signal.strip() if isinstance(raw_signal, str) else ""
-    return category in _CODE_CATEGORIES and severity in _SEVERITIES and bool(metric and signal)
+    evidence_raw = finding.get("evidence")
+    evidence = evidence_raw.strip() if isinstance(evidence_raw, str) else ""
+    quadrant = str(finding.get("fowler_quadrant") or "").strip().lower()
+    return (
+        category in _CODE_CATEGORIES and severity in _SEVERITIES
+        and bool(metric and signal and evidence) and quadrant in _FOWLER_QUADRANTS
+    )
 
 
 def _estimate_tokens(value: object) -> int:
@@ -339,17 +425,21 @@ def build_code_debt_report(
     outputs: Sequence[str], *, repo_dir: Path, grounding_mode: str, max_token_budget: int,
     enabled_metrics: Sequence[str] | None = None,
 ) -> CodeDebtReport:
-    findings: list[dict[str, object]] = []
+    candidates_by_key: dict[tuple[str, ...], list[dict[str, object]]] = {}
     summaries: list[dict[str, object]] = []
-    seen: set[tuple[object, ...]] = set()
+    parse_failures: list[str] = []
     allowed = tuple(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
-    for output in outputs:
-        payload = _extract_json(output)
+    for index, output in enumerate(outputs, start=1):
+        try:
+            payload = _extract_json(output)
+        except ValueError as exc:
+            parse_failures.append(f"worker {index}: {exc}")
+            continue
         raw_findings = payload.get("findings")
-        candidates = (
-            [dict(item) for item in raw_findings if isinstance(item, dict) and _is_code_finding(item)]
-            if isinstance(raw_findings, list) else []
-        )
+        assert isinstance(raw_findings, list)
+        candidates = [
+            dict(item) for item in raw_findings if isinstance(item, dict) and _is_code_finding(item)
+        ]
         worker_findings = validate_code_debt_findings(
             candidates, repo_dir=repo_dir, mode=grounding_mode, enabled_metrics=allowed
         )
@@ -358,9 +448,17 @@ def build_code_debt_report(
             summaries.append(summary)
         for finding in worker_findings:
             key = tuple(str(finding.get(field) or "") for field in ("path", "line", "metric", "signal"))
-            if key not in seen:
-                seen.add(key)
-                findings.append(finding)
+            candidates_by_key.setdefault(key, []).append(finding)
+
+    def conflict_rank(item: Mapping[str, object]) -> tuple[object, ...]:
+        return (
+            -_SEVERITY_ORDER.get(str(item.get("severity") or "").lower(), 5),
+            len(str(item.get("evidence") or "")),
+            json.dumps(item, sort_keys=True, ensure_ascii=False),
+        )
+
+    findings = [max(group, key=conflict_rank) for _, group in sorted(candidates_by_key.items())]
+    summaries.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
 
     def line_value(item: Mapping[str, object]) -> int:
         value = item.get("line")
@@ -385,7 +483,7 @@ def build_code_debt_report(
     estimate = min(budget, _estimate_tokens({"findings": findings, "summary": summary_payload, "notice": notice}))
     return CodeDebtReport(
         findings=findings, summary=summary_payload, estimated_tokens=estimate,
-        truncated=truncated, notice=notice,
+        truncated=truncated, notice=notice, worker_failures=tuple(sorted(parse_failures)),
     )
 
 
@@ -434,21 +532,29 @@ def run_code_debt_stage(
         _request(config=config, stage="multipass-code-debt", cluster=cluster, plan=plan, token_budget=allocation)
         for cluster, allocation in zip(clusters, allocations, strict=True)
     ]
-    outputs: list[str] = []
+    indexed_outputs: dict[int, str] = {}
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cure-code-debt") as executor:
-        futures = {executor.submit(_run_with_bounded_retry, request, analyzer): request for request in requests}
+        futures = {
+            executor.submit(_run_with_bounded_retry, request, analyzer): (index, request)
+            for index, request in enumerate(requests)
+        }
         for future in as_completed(futures):
+            index, request = futures[future]
             try:
-                outputs.append(future.result())
+                indexed_outputs[index] = future.result()
             except Exception as exc:
-                failures.append(f"{futures[future].metric_cluster}: {exc}")
+                failures.append(f"{request.metric_cluster}: {exc}")
+    outputs = [indexed_outputs[index] for index in sorted(indexed_outputs)]
     report = build_code_debt_report(
         outputs, repo_dir=repo_dir, grounding_mode=config.grounding_mode,
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
     )
-    return replace(report, worker_count=workers, worker_failures=tuple(failures))
+    return replace(
+        report, worker_count=workers,
+        worker_failures=tuple(sorted((*report.worker_failures, *failures))),
+    )
 
 
 def run_code_debt_subagent(
@@ -470,4 +576,4 @@ def run_code_debt_subagent(
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
     )
-    return replace(report, worker_count=1, worker_failures=failures)
+    return replace(report, worker_count=1, worker_failures=tuple(sorted((*report.worker_failures, *failures))))
