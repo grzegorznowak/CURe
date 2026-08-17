@@ -126,6 +126,7 @@ from cure_github import (
 from cure_runtime import _normalize_optional_reasoning_effort
 from cure_code_debt import (
     CodeDebtConfig,
+    CodeDebtReport,
     CodeDebtRequest,
     load_code_debt_config,
     run_code_debt_stage,
@@ -134,6 +135,10 @@ from cure_code_debt import (
 
 from ui import Verbosity
 
+
+# Keep debt workers on an independently owned registry even when the session
+# registry seam is patched or replaced by callers/tests.
+_CodeDebtOwnedProcessRegistry = OwnedProcessRegistry
 
 _DISABLED_REVIEWFLOW_CONFIG_PATH: Path | None = None
 LEGACY_ENV_RENAMES = {
@@ -3183,6 +3188,13 @@ def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> No
         inputs.append(report_text)
 
 
+def _execute_code_debt_on_plan_abort(
+    *, plan: Mapping[str, object], execute: Callable[[], Path | None]
+) -> Path | None:
+    """Run the always-on debt stage before a valid multipass plan aborts."""
+    return execute() if bool(plan.get("abort")) else None
+
+
 def _execute_code_debt_review_run(
     *,
     config: CodeDebtConfig,
@@ -3217,8 +3229,10 @@ def _execute_code_debt_review_run(
         deprecated_codex_plan_effort=None,
     )
     debt_env = apply_llm_env(env, resolved=resolved)
-    owns_debt_processes = owned_processes is None
-    debt_processes = owned_processes if owned_processes is not None else OwnedProcessRegistry()
+    # Debt timeout teardown must never close the session registry needed by later
+    # stages. The isolated stage therefore owns a dedicated process registry.
+    _ = owned_processes
+    debt_processes = _CodeDebtOwnedProcessRegistry()
     timed_out = threading.Event()
 
     def _terminate_timed_out_debt_processes() -> None:
@@ -3242,8 +3256,16 @@ def _execute_code_debt_review_run(
             output_index += 1
             index = output_index
         output_path = work_dir / f"code_debt_worker_{index:02d}.json"
+        # The repository checkout is already staged for review, so Codex can be
+        # process-enforced read-only without losing access to source evidence.
+        tightened_policy = {
+            **runtime_policy,
+            "sandbox_mode": "read-only",
+            "approval_policy": "never",
+            "dangerously_bypass_approvals_and_sandbox": False,
+        }
         debt_runtime_policy = _runtime_policy_for_multipass_stage(
-            runtime_policy=runtime_policy,
+            runtime_policy=tightened_policy,
             llm_resolved=resolved,
             llm_resolution_meta=resolution_meta,
         )
@@ -3266,6 +3288,7 @@ def _execute_code_debt_review_run(
             codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
+            sandbox_mode="read-only",
         )
         with progress.mutate():
             record_llm_usage(progress.meta.setdefault("llm", {}), result.adapter_meta)
@@ -3284,8 +3307,7 @@ def _execute_code_debt_review_run(
             report = run_code_debt_subagent(config=config, repo_dir=repo_dir, analyzer=_analyze)
     finally:
         timeout_timer.cancel()
-        if owns_debt_processes:
-            debt_processes.terminate_and_drain()
+        debt_processes.terminate_and_drain()
     if timed_out.is_set():
         report = replace(
             report,
@@ -10211,10 +10233,53 @@ def _pr_flow_impl(
 
                     if bool(plan.get("abort")):
                         reason = str(plan.get("abort_reason") or "unknown")
-                        review_md_path.write_text(
-                            build_abort_review_markdown(reason=reason, include_steps_taken=True),
-                            encoding="utf-8",
+                        code_debt_report_path: Path | None = None
+                        try:
+                            with phase("code_debt_stage", progress=progress, quiet=quiet):
+                                code_debt_report_path = _execute_code_debt_on_plan_abort(
+                                    plan=plan,
+                                    execute=lambda: _execute_code_debt_review_run(
+                                        config=code_debt_config,
+                                        multipass=True,
+                                        plan=plan,
+                                        repo_dir=repo_dir,
+                                        session_dir=session_dir,
+                                        work_dir=work_dir,
+                                        progress=progress,
+                                        reviewflow_config_path=effective_config_path,
+                                        base_codex_config_path=effective_codex_base_config_path,
+                                        env=env,
+                                        add_dirs=add_dirs,
+                                        runtime_policy=runtime_policy,
+                                        worker_count=int(
+                                            progress.meta.setdefault("multipass", {}).get(
+                                                "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                                            )
+                                        ),
+                                        owned_processes=owned_processes,
+                                    ),
+                                )
+                        except Exception as exc:
+                            failure_report = CodeDebtReport(
+                                worker_failures=(f"plan-abort debt stage failed: {exc}",)
+                            )
+                            code_debt_report_path = session_dir / "code-debt.md"
+                            code_debt_report_path.write_text(
+                                failure_report.to_markdown(), encoding="utf-8"
+                            )
+                            progress.meta["code_debt"] = {
+                                **dict(progress.meta.get("code_debt") or {}),
+                                "mode": "multipass-stage",
+                                "status": "failed-open",
+                                "error": str(exc),
+                                "artifact": str(code_debt_report_path),
+                            }
+                        review_text = build_abort_review_markdown(
+                            reason=reason, include_steps_taken=True
                         )
+                        if code_debt_report_path is not None and code_debt_report_path.is_file():
+                            review_text += "\n\n" + code_debt_report_path.read_text(encoding="utf-8")
+                        review_md_path.write_text(review_text, encoding="utf-8")
                         progress.meta.setdefault("multipass", {})["status"] = "abort"
                         _record_multipass_review_artifact_llm(
                             meta=progress.meta,

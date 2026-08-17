@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+import html
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,21 @@ _CODE_CATEGORIES = {
 }
 _SEVERITIES = {"critical", "high", "medium", "low", "info"}
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_METRIC_ALIASES = {
+    "security": "severity_counts",
+    "reliability": "severity_counts",
+    "maintainability": "severity_counts",
+    "architecture": "design_architecture",
+    "design": "design_architecture",
+    "documentation": "documentation_quality",
+    "test": "test_quality",
+    "testing": "test_quality",
+    "dependency": "dependency_debt",
+}
+_FOWLER_QUADRANTS = {
+    "deliberate-prudent", "deliberate-reckless",
+    "inadvertent-prudent", "inadvertent-reckless",
+}
 
 
 @dataclass(frozen=True)
@@ -73,31 +89,101 @@ class CodeDebtReport:
     worker_failures: tuple[str, ...] = ()
 
     def to_markdown(self) -> str:
-        lines = ["## Dedicated Code-Debt Analysis", ""]
-        if self.notice:
-            lines.extend([f"> {_safe_markdown_inline(self.notice)}", ""])
-        lines.append("### Code-Related Findings")
-        if not self.findings:
-            lines.append("- None.")
+        """Render the validated data as an operator-facing report, never a JSON dump."""
+        counts = {severity: 0 for severity in _SEVERITY_ORDER}
+        quadrants: dict[str, int] = {}
         for finding in self.findings:
+            severity = str(finding.get("severity") or "info").lower()
+            if severity in counts:
+                counts[severity] += 1
+            quadrant = str(finding.get("fowler_quadrant") or "").lower()
+            if quadrant in _FOWLER_QUADRANTS:
+                quadrants[quadrant] = quadrants.get(quadrant, 0) + 1
+
+        summaries = self.summary.get("worker_summaries")
+        worker_summaries = [item for item in summaries if isinstance(item, dict)] if isinstance(summaries, list) else []
+        debt_ratios = [str(item["debt_ratio_estimate"]) for item in worker_summaries if item.get("debt_ratio_estimate")]
+        hotspots: list[str] = []
+        for item in worker_summaries:
+            raw_hotspots = item.get("hotspot_top_n")
+            if isinstance(raw_hotspots, list):
+                for hotspot in raw_hotspots:
+                    text = str(hotspot)
+                    if text not in hotspots:
+                        hotspots.append(text)
+        overall_quadrant = "not derivable"
+        if quadrants:
+            ordered = sorted(quadrants.items(), key=lambda item: (-item[1], item[0]))
+            overall_quadrant = ordered[0][0] if len(ordered) == 1 or ordered[0][1] > ordered[1][1] else "mixed"
+
+        lines = ["## Dedicated Code-Debt Analysis", "", "### Overall assessment"]
+        if self.worker_failures and not self.findings:
             lines.append(
-                "- [{severity}] {signal} ({metric}; {estimate}; {quadrant}). Sources: `{path}:{line}`".format(
-                    severity=_safe_markdown_inline(str(finding.get("severity", "info"))).upper(),
-                    signal=_safe_markdown_inline(finding.get("signal", "unspecified debt")),
-                    metric=_safe_markdown_inline(finding.get("metric", "unspecified")),
-                    estimate=_safe_markdown_inline(finding.get("remediation_estimate", "unknown effort")),
-                    quadrant=_safe_markdown_inline(finding.get("fowler_quadrant", "unclassified")),
-                    path=_safe_markdown_code(finding.get("path", "")),
-                    line=_safe_markdown_inline(finding.get("line", 0)),
-                )
+                "Code-debt analysis failed to produce validated findings; this is not evidence that the codebase is debt-free."
             )
-        lines.extend(["", "### Summary", f"- {json.dumps(self.summary, sort_keys=True)}", ""])
+        elif self.findings:
+            lines.append(
+                f"The analysis identified **{len(self.findings)}** validated code-debt "
+                f"finding{'s' if len(self.findings) != 1 else ''}, ordered by severity."
+            )
+        else:
+            lines.append("The analysis completed successfully and found no validated code-debt findings.")
+        lines.append(f"- Debt ratio estimate: **{_safe_markdown_inline(debt_ratios[0] if debt_ratios else 'unknown')}**")
+        histogram = ", ".join(f"{name.title()}: {counts[name]}" for name in _SEVERITY_ORDER)
+        lines.append(f"- Severity histogram: {histogram}")
+        lines.append(f"- Overall Fowler classification: **{_safe_markdown_inline(overall_quadrant)}**")
+        if hotspots:
+            lines.append("- Hotspots:")
+            for hotspot in hotspots:
+                rationale = next(
+                    (str(finding.get("signal")) for finding in self.findings
+                     if f"{finding.get('path')}:{finding.get('line')}" == hotspot),
+                    "reported by a debt-analysis worker as a priority inspection point",
+                )
+                lines.append(f"  - `{_safe_markdown_code(hotspot)}` — {_safe_markdown_inline(rationale)}")
+        else:
+            lines.append("- Hotspots: none validated.")
+        if self.notice:
+            lines.extend(["", f"> **Notice:** {_safe_markdown_inline(self.notice)}"])
+        if self.worker_failures:
+            lines.extend(["", "> **Worker failures:**"])
+            lines.extend(f"> - {_safe_markdown_inline(failure)}" for failure in self.worker_failures)
+
+        lines.extend(["", "### Code-Related Findings"])
+        if not self.findings:
+            if self.worker_failures:
+                lines.append("- No findings were rendered because the analysis failed or was incomplete.")
+            else:
+                lines.append("- No validated code-debt findings.")
+        for severity in _SEVERITY_ORDER:
+            grouped = [item for item in self.findings if str(item.get("severity") or "").lower() == severity]
+            if not grouped:
+                continue
+            lines.extend(["", f"#### {severity.title()}"])
+            for finding in grouped:
+                path = _safe_markdown_code(finding.get("path", ""))
+                line = _safe_markdown_inline(finding.get("line", 0))
+                warning = (
+                    " ⚠ **Unverified citation (warn mode).**"
+                    if finding.get("grounding") == "warning" else ""
+                )
+                lines.extend(
+                    [
+                        f"##### `{path}:{line}` — {_safe_markdown_inline(finding.get('signal', 'unspecified debt'))}",
+                        f"- Metric: {_safe_markdown_inline(finding.get('metric', 'unspecified'))}",
+                        f"- Evidence: {_safe_markdown_inline(finding.get('evidence', 'No evidence supplied.'))}",
+                        f"- Remediation estimate: {_safe_markdown_inline(finding.get('remediation_estimate', 'unknown effort'))}",
+                        f"- Fowler quadrant: {_safe_markdown_inline(finding.get('fowler_quadrant', 'unclassified'))}",
+                        f"- Citation: `{path}:{line}`{warning}",
+                    ]
+                )
+        lines.append("")
         return "\n".join(lines)
 
 
 def _safe_markdown_inline(value: object) -> str:
     text = re.sub(r"[\r\n\t]+", " ", str(value)).strip()
-    return re.sub(r"([\\`*_{}\[\]()#+.!>|-])", r"\\\1", text)
+    return html.escape(text.replace("`", "'"), quote=False)
 
 
 def _safe_markdown_code(value: object) -> str:
@@ -192,8 +278,11 @@ def validate_code_debt_findings(
     allowed = set(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
     for original in findings:
         finding = dict(original)
-        if str(finding.get("metric") or "").strip() not in allowed:
+        raw_metric = str(finding.get("metric") or "").strip().lower()
+        metric = _METRIC_ALIASES.get(raw_metric, raw_metric)
+        if metric not in allowed:
             continue
+        finding["metric"] = metric
         if normalized_mode == "off" or _grounding_valid(finding, repo_dir):
             validated.append(finding)
         elif normalized_mode == "warn":
@@ -206,7 +295,8 @@ def _is_code_finding(finding: Mapping[str, object]) -> bool:
     category = str(finding.get("category") or "").strip().lower()
     severity = str(finding.get("severity") or "").strip().lower()
     metric = str(finding.get("metric") or "").strip()
-    signal = str(finding.get("signal") or "").strip()
+    raw_signal = finding.get("signal")
+    signal = raw_signal.strip() if isinstance(raw_signal, str) else ""
     return category in _CODE_CATEGORIES and severity in _SEVERITIES and bool(metric and signal)
 
 
@@ -237,8 +327,11 @@ def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence
     summary: dict[str, object] = {"severity_counts": {k: v for k, v in sorted(counts.items()) if v}}
     if hotspots:
         summary["hotspot_top_n"] = hotspots
-    if raw.get("debt_ratio_estimate") == "unknown":
-        summary["debt_ratio_estimate"] = "unknown"
+    ratio = str(raw.get("debt_ratio_estimate") or "").strip()
+    if ratio == "unknown" or re.fullmatch(
+        r"~?\d+(?:\.\d+)?%(?: of \d+ changed NCLOC, SQALE [A-E])?", ratio
+    ):
+        summary["debt_ratio_estimate"] = ratio
     return summary
 
 
@@ -264,7 +357,7 @@ def build_code_debt_report(
         if summary:
             summaries.append(summary)
         for finding in worker_findings:
-            key = (finding.get("path"), finding.get("line"), finding.get("metric"), finding.get("signal"))
+            key = tuple(str(finding.get(field) or "") for field in ("path", "line", "metric", "signal"))
             if key not in seen:
                 seen.add(key)
                 findings.append(finding)
@@ -332,12 +425,14 @@ def run_code_debt_stage(
     analyzer: Callable[[CodeDebtRequest], str], worker_count: int = 4,
 ) -> CodeDebtReport:
     """Run isolated metric clusters in parallel; errors fail open after one bounded retry."""
-    clusters = METRIC_CLUSTERS
+    active_count = min(len(METRIC_CLUSTERS), config.max_token_budget)
+    clusters = METRIC_CLUSTERS[:active_count]
     workers = min(max(1, worker_count), len(clusters), MAX_WORKERS)
-    share = max(1, config.max_token_budget // len(clusters))
+    quotient, remainder = divmod(config.max_token_budget, len(clusters))
+    allocations = [quotient + (1 if index < remainder else 0) for index in range(len(clusters))]
     requests = [
-        _request(config=config, stage="multipass-code-debt", cluster=cluster, plan=plan, token_budget=share)
-        for cluster in clusters
+        _request(config=config, stage="multipass-code-debt", cluster=cluster, plan=plan, token_budget=allocation)
+        for cluster, allocation in zip(clusters, allocations, strict=True)
     ]
     outputs: list[str] = []
     failures: list[str] = []

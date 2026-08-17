@@ -21,6 +21,15 @@ Prioritize changed-code and repository hotspots using **git churn × complexity*
 
 Enabled static metrics: $ENABLED_METRICS
 
+Use only these canonical metric IDs in each finding's `metric` field:
+`debt_ratio`, `severity_counts`, `cyclomatic_complexity`, `duplication_density`,
+`comment_todo_density`, `test_gap`, `dependency_debt`, `design_architecture`,
+`semantic_smells`, `documentation_quality`, `test_quality`, `fowler_quadrant`.
+Category language maps to canonical IDs: security/reliability/maintainability →
+`severity_counts`; architecture/design → `design_architecture`; documentation →
+`documentation_quality`; test/testing → `test_quality`; dependency →
+`dependency_debt`. The separate `category` field retains the code-debt class.
+
 ## Tier 2 — LLM-assessed checks
 - design/architecture debt: coupling, layering, cohesion, and missing abstractions
 - semantic smells: dead code, swallowed exceptions, over-engineering, and naming

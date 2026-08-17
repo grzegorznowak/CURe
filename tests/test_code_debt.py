@@ -217,6 +217,9 @@ def test_fake_codex_smoke_propagates_configured_model_and_handles_failure(tmp_pa
         )
     argv = json.loads(argv_path.read_text(encoding="utf-8"))
     assert argv[argv.index("-m") + 1] == "gpt-5.6-terra"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert argv[argv.index("-a") + 1] == "never"
     assert report_path == session_dir / "code-debt.md"
     assert report_path.is_file()
 

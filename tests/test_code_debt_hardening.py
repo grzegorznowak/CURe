@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+import threading
+import time
 
 import pytest
 
@@ -213,3 +215,150 @@ def test_execution_rebuilds_debt_model_and_generation_cap(tmp_path: Path) -> Non
     assert argv[argv.index("-m") + 1] == "gpt-5.6-terra"
     assert "gpt-primary" not in argv
     assert "rollout_budget.limit_tokens=2000" in argv
+
+
+def test_rendered_report_is_narrative_complete_and_clean(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    item = finding(signal="high-risk branch - hard to test")
+    item.update(severity="high", evidence="a.py:1 contains an unchecked branch")
+    report = debt.build_code_debt_report(
+        [payload(item, summary={
+            "debt_ratio_estimate": "4%",
+            "hotspot_top_n": ["a.py:1"],
+            "severity_counts": {"high": 1},
+        })],
+        repo_dir=tmp_path,
+        grounding_mode="strict",
+        max_token_budget=1000,
+    )
+    markdown = report.to_markdown()
+    assert "Overall assessment" in markdown
+    assert "Debt ratio estimate: **4%**" in markdown
+    assert "High: 1" in markdown
+    assert "a.py:1" in markdown and "high-risk branch" in markdown
+    assert "### High" in markdown
+    assert "Evidence: a.py:1 contains an unchecked branch" in markdown
+    assert "Fowler quadrant: inadvertent-prudent" in markdown
+    assert '"worker_summaries"' not in markdown
+    assert "\\-" not in markdown
+
+
+def test_rendered_exhausted_failure_is_not_clean_none() -> None:
+    report = debt.CodeDebtReport(worker_count=1, worker_failures=("worker: boom",))
+    markdown = report.to_markdown()
+    assert "analysis failed" in markdown.lower()
+    assert "worker: boom" in markdown
+    assert "- None." not in markdown
+
+
+def test_malformed_signal_does_not_discard_valid_findings(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    malformed = finding(signal="branch")
+    malformed["signal"] = ["branch"]
+    report = debt.build_code_debt_report(
+        [payload(malformed, finding(signal="valid branch"))],
+        repo_dir=tmp_path,
+        grounding_mode="strict",
+        max_token_budget=1000,
+    )
+    assert any(item["signal"] == "valid branch" for item in report.findings)
+
+
+def test_warn_grounding_is_visible_in_rendered_artifact(tmp_path: Path) -> None:
+    report = debt.build_code_debt_report(
+        [payload(finding(path="missing.py"))],
+        repo_dir=tmp_path,
+        grounding_mode="warn",
+        max_token_budget=1000,
+    )
+    markdown = report.to_markdown()
+    assert "unverified citation" in markdown.lower()
+    assert "missing.py:1" in markdown
+
+
+@pytest.mark.parametrize("budget", [1, 2])
+def test_parallel_allocations_never_exceed_tiny_total_budget(tmp_path: Path, budget: int) -> None:
+    seen: list[int] = []
+    debt.run_code_debt_stage(
+        config=debt.CodeDebtConfig(max_token_budget=budget),
+        repo_dir=tmp_path,
+        plan={},
+        analyzer=lambda request: seen.append(request.token_budget) or payload(),
+        worker_count=3,
+    )
+    assert sum(seen) <= budget
+    assert len(seen) <= budget
+
+
+def test_category_metric_alias_survives_but_unknown_metric_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x=1\n")
+    report = debt.build_code_debt_report(
+        [payload(finding(metric="security"), finding(metric="not_configured", signal="drop me"))],
+        repo_dir=tmp_path,
+        grounding_mode="strict",
+        max_token_budget=1000,
+    )
+    assert [item["metric"] for item in report.findings] == ["severity_counts"]
+
+
+def test_plan_abort_debt_hook_runs_only_for_abort() -> None:
+    calls: list[str] = []
+
+    def execute() -> Path:
+        calls.append("debt")
+        return Path("code-debt.md")
+    assert cure._execute_code_debt_on_plan_abort(plan={"abort": False}, execute=execute) is None
+    assert calls == []
+    assert cure._execute_code_debt_on_plan_abort(plan={"abort": True}, execute=execute) == Path("code-debt.md")
+    assert calls == ["debt"]
+
+
+def test_debt_runtime_is_process_enforced_read_only(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_exec(**kwargs: object) -> object:
+        captured.update(kwargs)
+        Path(kwargs["output_path"]).write_text(payload())  # type: ignore[arg-type]
+        return SimpleNamespace(adapter_meta={})
+
+    progress = SimpleNamespace(meta={})
+    progress.mutate = lambda: mock.MagicMock(__enter__=lambda self: None, __exit__=lambda *args: None)
+    with mock.patch.object(cure, "resolve_llm_config", return_value=({"provider": "codex", "model": "gpt-5.6-terra"}, {})), mock.patch.object(cure, "run_llm_exec", side_effect=fake_exec):
+        cure._execute_code_debt_review_run(
+            config=debt.CodeDebtConfig(), multipass=False, plan=None,
+            repo_dir=tmp_path, session_dir=tmp_path, work_dir=tmp_path, progress=progress,
+            reviewflow_config_path=None, base_codex_config_path=tmp_path / "codex.toml", env={},
+            add_dirs=None, runtime_policy={"dangerously_bypass_approvals_and_sandbox": True},
+            worker_count=1, owned_processes=None,
+        )
+    policy = captured["runtime_policy"]
+    assert isinstance(policy, dict)
+    assert policy["dangerously_bypass_approvals_and_sandbox"] is False
+    assert policy["sandbox_mode"] == "read-only"
+    assert policy["approval_policy"] == "never"
+
+
+def test_timeout_uses_dedicated_registry_and_leaves_shared_registry_open(tmp_path: Path) -> None:
+    shared = cure.OwnedProcessRegistry()
+    started = threading.Event()
+
+    def blocked_exec(**kwargs: object) -> object:
+        registry = kwargs["owned_processes"]
+        assert registry is not shared
+        started.set()
+        deadline = time.monotonic() + 3
+        while registry.state.name == "OPEN" and time.monotonic() < deadline:  # type: ignore[union-attr]
+            time.sleep(0.01)
+        raise TimeoutError("terminated")
+
+    progress = SimpleNamespace(meta={})
+    progress.mutate = lambda: mock.MagicMock(__enter__=lambda self: None, __exit__=lambda *args: None)
+    with mock.patch.object(cure, "resolve_llm_config", return_value=({"provider": "codex", "model": "gpt-5.6-terra"}, {})), mock.patch.object(cure, "run_llm_exec", side_effect=blocked_exec):
+        cure._execute_code_debt_review_run(
+            config=debt.CodeDebtConfig(timeout_seconds=1), multipass=False, plan=None,
+            repo_dir=tmp_path, session_dir=tmp_path, work_dir=tmp_path, progress=progress,
+            reviewflow_config_path=None, base_codex_config_path=tmp_path / "codex.toml", env={},
+            add_dirs=None, runtime_policy={}, worker_count=1, owned_processes=shared,
+        )
+    assert started.is_set()
+    assert shared.state.name == "OPEN"
