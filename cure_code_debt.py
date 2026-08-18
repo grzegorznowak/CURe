@@ -61,6 +61,12 @@ _CODE_FILE_SUFFIXES = {
     ".vue", ".xml", ".yaml", ".yml",
 }
 _CODE_FILE_NAMES = {"Dockerfile", "Makefile", "CMakeLists.txt"}
+_CONFIG_FILE_SUFFIXES = {".toml", ".json"}
+_CONFIG_FILE_NAMES = {
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "Cargo.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "Gemfile.lock",
+    "composer.lock", "go.sum", "requirements.txt",
+}
 
 
 @dataclass(frozen=True)
@@ -96,9 +102,12 @@ class CodeDebtReport:
     notice: str = ""
     worker_count: int = 0
     worker_failures: tuple[str, ...] = ()
+    rendered_markdown: str | None = None
 
     def to_markdown(self) -> str:
         """Render the validated data as an operator-facing report, never a JSON dump."""
+        if self.rendered_markdown is not None:
+            return self.rendered_markdown
         counts = {severity: 0 for severity in _SEVERITY_ORDER}
         quadrants: dict[str, int] = {}
         for finding in self.findings:
@@ -345,8 +354,20 @@ def _grounding_valid(finding: Mapping[str, object], repo_dir: Path) -> bool:
 
 
 def _is_code_path(path_value: object) -> bool:
+    """Allow source plus explicit dependency/config manifests, never arbitrary prose."""
     path = Path(str(path_value or ""))
-    return path.name in _CODE_FILE_NAMES or path.suffix.lower() in _CODE_FILE_SUFFIXES
+    return (
+        path.name in _CODE_FILE_NAMES
+        or path.name in _CONFIG_FILE_NAMES
+        or path.suffix.lower() in (_CODE_FILE_SUFFIXES | _CONFIG_FILE_SUFFIXES)
+    )
+
+
+def _evidence_has_exact_citation(*, evidence: str, citation: str) -> bool:
+    """Match an exact path:line token; ``a.py:1`` must not match ``a.py:10``."""
+    return re.search(
+        rf"(?<![A-Za-z0-9_./-]){re.escape(citation)}(?![0-9])", evidence
+    ) is not None
 
 
 def _finding_rejection_reason(
@@ -369,7 +390,7 @@ def _finding_rejection_reason(
     line = normalized.get("line")
     citation = f"{path_text}:{line}"
     evidence = str(normalized.get("evidence") or "")
-    if citation not in evidence:
+    if not _evidence_has_exact_citation(evidence=evidence, citation=citation):
         return None, "evidence does not identify the validated path:line citation"
     normalized["metric"] = metric
     if _grounding_valid(normalized, repo_dir):
@@ -420,21 +441,28 @@ def _estimate_markdown_tokens(markdown: str) -> int:
     return max(1, (len(markdown) + 3) // 4)
 
 
+def _remediation_minutes(value: object) -> int | None:
+    """Parse the deliberately small, machine-checkable remediation estimate grammar."""
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\s*(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\s*", value, re.I)
+    if match is None:
+        return None
+    amount = int(match.group(1))
+    return amount * 60 if match.group(2).lower().startswith("h") else amount
+
+
 def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence[Mapping[str, object]]) -> dict[str, object]:
     if not isinstance(raw, dict):
         return {}
-    hotspots: list[str] = []
-    raw_hotspots = raw.get("hotspot_top_n")
-    if isinstance(raw_hotspots, list):
-        for item in raw_hotspots:
-            text = str(item).strip()
-            path_text, separator, line_text = text.rpartition(":")
-            try:
-                line = int(line_text)
-            except ValueError:
-                continue
-            if separator and _grounding_valid({"path": path_text, "line": line}, repo_dir):
-                hotspots.append(f"{path_text}:{line}")
+    accepted_citations = {
+        f"{finding.get('path')}:{finding.get('line')}" for finding in findings
+    }
+    hotspots = [
+        text for item in raw.get("hotspot_top_n", [])
+        if isinstance(raw.get("hotspot_top_n"), list)
+        and (text := str(item).strip()) in accepted_citations
+    ]
     counts = {severity: 0 for severity in _SEVERITIES}
     for finding in findings:
         severity = str(finding.get("severity") or "").lower()
@@ -442,16 +470,18 @@ def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence
             counts[severity] += 1
     summary: dict[str, object] = {"severity_counts": {k: v for k, v in sorted(counts.items()) if v}}
     if hotspots:
-        summary["hotspot_top_n"] = hotspots
-    ratio = str(raw.get("debt_ratio_estimate") or "").strip()
-    if ratio == "unknown":
-        summary["debt_ratio_estimate"] = ratio
-    else:
-        match = re.fullmatch(
-            r"~?(\d+(?:\.\d+)?)% of ([1-9]\d*) changed NCLOC, SQALE ([A-E])", ratio
+        summary["hotspot_top_n"] = list(dict.fromkeys(hotspots))
+    changed_ncloc = raw.get("changed_ncloc")
+    sqale_rating = str(raw.get("sqale_rating") or "").upper()
+    estimates = [_remediation_minutes(finding.get("remediation_estimate")) for finding in findings]
+    if (
+        isinstance(changed_ncloc, int) and not isinstance(changed_ncloc, bool) and changed_ncloc > 0
+        and sqale_rating in {"A", "B", "C", "D", "E"} and all(value is not None for value in estimates)
+    ):
+        ratio = sum(value for value in estimates if value is not None) / (30 * changed_ncloc) * 100
+        summary["debt_ratio_estimate"] = (
+            f"{ratio:.2f}".rstrip("0").rstrip(".") + f"% of {changed_ncloc} changed NCLOC, SQALE {sqale_rating}"
         )
-        if match is not None and 0.0 <= float(match.group(1)) <= 100.0:
-            summary["debt_ratio_estimate"] = ratio
     return summary
 
 
@@ -542,7 +572,33 @@ def build_code_debt_report(
         findings=findings, summary=summary_payload, truncated=truncated,
         notice=notice, worker_failures=failures,
     )
-    return replace(report, estimated_tokens=_estimate_markdown_tokens(report.to_markdown()))
+    return _fit_code_debt_report_to_budget(report, budget=budget)
+
+
+def _fit_code_debt_report_to_budget(report: CodeDebtReport, *, budget: int) -> CodeDebtReport:
+    """Apply the token bound to the final artifact, including late worker failures.
+
+    A worker failure is represented by a short, stable message when the normal
+    narrative cannot fit.  This makes the persisted artifact and its metadata
+    agree even when failures arrive after validation/rendering.
+    """
+    budget = max(1, budget)
+    candidate = replace(report, estimated_tokens=0)
+    markdown = candidate.to_markdown()
+    if _estimate_markdown_tokens(markdown) <= budget:
+        return replace(candidate, estimated_tokens=_estimate_markdown_tokens(markdown))
+    minimal = "## Dedicated Code-Debt Analysis\n\nAnalysis incomplete; output truncated.\n"
+    limit = budget * 4
+    # Preserve an honest bounded failure representation for all realistic
+    # configured budgets; pathological programmatic budgets still obey the cap.
+    rendered = minimal[:limit]
+    return replace(
+        candidate,
+        findings=[], summary={}, truncated=True,
+        notice="Code-debt output truncated at the configured token budget.",
+        worker_failures=("analysis incomplete",), rendered_markdown=rendered,
+        estimated_tokens=_estimate_markdown_tokens(rendered),
+    )
 
 
 def _prompt_text() -> str:
@@ -609,9 +665,12 @@ def run_code_debt_stage(
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
     )
-    return replace(
-        report, worker_count=workers,
-        worker_failures=tuple(sorted((*report.worker_failures, *failures))),
+    return _fit_code_debt_report_to_budget(
+        replace(
+            report, worker_count=workers,
+            worker_failures=tuple(sorted((*report.worker_failures, *failures))),
+        ),
+        budget=config.max_token_budget,
     )
 
 
@@ -634,4 +693,7 @@ def run_code_debt_subagent(
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
     )
-    return replace(report, worker_count=1, worker_failures=tuple(sorted((*report.worker_failures, *failures))))
+    return _fit_code_debt_report_to_budget(
+        replace(report, worker_count=1, worker_failures=tuple(sorted((*report.worker_failures, *failures)))),
+        budget=config.max_token_budget,
+    )

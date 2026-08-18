@@ -783,6 +783,8 @@ def run_llm_exec(
             resolution_meta=resolution_meta,
         )
         policy = runtime_policy if isinstance(runtime_policy, dict) else {}
+        sandbox_raw = policy.get("sandbox_mode")
+        sandbox_mode = str(sandbox_raw) if sandbox_raw else sandbox_mode
         approval_raw = policy.get("approval_policy")
         approval_policy = str(approval_raw) if approval_raw else None
         codex_flags = list(policy.get("codex_flags") or codex_flags)

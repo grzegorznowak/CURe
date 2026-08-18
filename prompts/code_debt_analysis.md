@@ -17,7 +17,7 @@ Prioritize changed-code and repository hotspots using **git churn × complexity*
 - duplication density: duplicated lines / NCLOC
 - comment density and TODO/FIXME/HACK/XXX markers, including commented-out code
 - test gap: statically visible coverage intent, uncovered changed-line evidence from staged reports, and test-success density from staged CI/check artifacts
-- dependency debt: manifest/lockfile age signals plus CVE/license risk from staged advisory/check data
+- dependency debt: manifest/config (`pyproject.toml`, `Cargo.toml`, `package.json`, TOML/JSON) and ecosystem lockfile age signals plus CVE/license risk from staged advisory/check data
 
 Enabled static metrics: $ENABLED_METRICS
 
@@ -57,10 +57,11 @@ Use repository tools to verify every finding. Return JSON only (a fenced `json` 
     }
   ],
   "summary": {
-    "debt_ratio_estimate": "N% of M changed NCLOC, SQALE A-E; or unknown",
+    "changed_ncloc": 100,
+    "sqale_rating": "A",
     "hotspot_top_n": ["path:line"],
     "severity_counts": {}
   }
 }
 
-Every non-empty finding must cite an existing repository file and line. Return an empty findings list when evidence is insufficient.
+Every non-empty finding must cite an existing repository file and line. Every hotspot must be the exact citation of a finding you returned. Do not supply a ratio string: CURe derives it from accepted numeric remediation estimates, `changed_ncloc`, and `sqale_rating`. Return an empty findings list when evidence is insufficient.

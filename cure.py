@@ -128,6 +128,7 @@ from cure_code_debt import (
     CodeDebtConfig,
     CodeDebtReport,
     CodeDebtRequest,
+    _fit_code_debt_report_to_budget,
     code_debt_stage_mode,
     load_code_debt_config,
     run_code_debt_stage,
@@ -3208,36 +3209,97 @@ def _attach_code_debt_synth_input(inputs: list[str], *, session_dir: Path) -> No
         inputs.append(report_text)
 
 
-def _code_debt_artifact_is_current(report_path: Path) -> bool:
+def _append_code_debt_report_to_review(*, review_md_path: Path, report_path: Path) -> None:
+    """Deterministically publish debt once; synthesis may not decide to omit it."""
+    if not review_md_path.is_file() or not report_path.is_file():
+        return
+    review = review_md_path.read_text(encoding="utf-8")
+    heading = "## Dedicated Code-Debt Analysis"
+    if review.count(heading) == 0:
+        with review_md_path.open("a", encoding="utf-8") as stream:
+            stream.write("\n\n")
+            stream.write(report_path.read_text(encoding="utf-8"))
+
+
+_CODE_DEBT_PROVENANCE_PREFIX = "<!-- cure-code-debt-provenance: "
+
+
+def _code_debt_config_digest(config: CodeDebtConfig) -> str:
+    """Canonical identity for every setting that can affect debt analysis."""
+    payload = {
+        "model_preset": config.model_preset, "model": config.model,
+        "max_token_budget": config.max_token_budget, "metrics": list(config.metrics),
+        "hotspot_threshold": config.hotspot_threshold, "timeout_seconds": config.timeout_seconds,
+        "grounding_mode": config.grounding_mode,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _code_debt_provenance(*, review_head_sha: str, config: CodeDebtConfig) -> str:
+    return json.dumps(
+        {"config_digest": _code_debt_config_digest(config), "review_head_sha": review_head_sha},
+        sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _render_code_debt_artifact(
+    report: CodeDebtReport, *, review_head_sha: str, config: CodeDebtConfig,
+) -> str:
+    markdown = report.to_markdown()
+    marker = _CODE_DEBT_PROVENANCE_PREFIX + _code_debt_provenance(
+        review_head_sha=review_head_sha, config=config
+    ) + " -->"
+    return markdown.replace("## Dedicated Code-Debt Analysis\n", f"## Dedicated Code-Debt Analysis\n{marker}\n", 1)
+
+
+def _code_debt_artifact_is_current(
+    report_path: Path, *, review_head_sha: str | None = None, config: CodeDebtConfig | None = None,
+) -> bool:
     if not report_path.is_file():
         return False
     try:
-        return report_path.read_text(encoding="utf-8").startswith(
-            "## Dedicated Code-Debt Analysis\n"
-        )
+        content = report_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False
+    if not content.startswith("## Dedicated Code-Debt Analysis\n"):
+        return False
+    if review_head_sha is None or config is None:
+        return True
+    expected = _CODE_DEBT_PROVENANCE_PREFIX + _code_debt_provenance(
+        review_head_sha=review_head_sha, config=config
+    ) + " -->"
+    return expected in content.splitlines()[:3]
 
 
 def _degrade_missing_or_legacy_code_debt_artifact(
-    *, session_dir: Path, reason: str,
+    *, session_dir: Path, reason: str, review_head_sha: str | None = None,
+    config: CodeDebtConfig | None = None,
 ) -> Path:
     """Repair an old completed session when no execution runtime is available."""
     report_path = session_dir / "code-debt.md"
-    if not _code_debt_artifact_is_current(report_path):
+    if not _code_debt_artifact_is_current(
+        report_path, review_head_sha=review_head_sha, config=config
+    ):
+        report = CodeDebtReport(worker_failures=(reason,))
         report_path.write_text(
-            CodeDebtReport(worker_failures=(reason,)).to_markdown(), encoding="utf-8"
+            _render_code_debt_artifact(
+                report, review_head_sha=review_head_sha or "unknown", config=config or CodeDebtConfig()
+            ),
+            encoding="utf-8",
         )
     return report_path
 
 
 def _ensure_code_debt_artifact(
     *, session_dir: Path, progress: SessionProgress, mode: str,
-    execute: Callable[[], Path | None],
+    execute: Callable[[], Path | None], review_head_sha: str | None = None,
+    config: CodeDebtConfig | None = None,
 ) -> Path:
     """Run a missing/legacy always-on stage and persist an honest fail-open artifact."""
     report_path = session_dir / "code-debt.md"
-    if _code_debt_artifact_is_current(report_path):
+    if _code_debt_artifact_is_current(
+        report_path, review_head_sha=review_head_sha, config=config
+    ):
         return report_path
     try:
         executed = execute()
@@ -3246,7 +3308,10 @@ def _ensure_code_debt_artifact(
         return executed
     except Exception as exc:
         report_path.write_text(
-            CodeDebtReport(worker_failures=(f"{mode} failed: {exc}",)).to_markdown(),
+            _render_code_debt_artifact(
+                CodeDebtReport(worker_failures=(f"{mode} failed: {exc}",)),
+                review_head_sha=review_head_sha or "unknown", config=config or CodeDebtConfig(),
+            ),
             encoding="utf-8",
         )
         with progress.mutate():
@@ -3256,6 +3321,8 @@ def _ensure_code_debt_artifact(
                 "status": "failed-open",
                 "error": str(exc),
                 "artifact": str(report_path),
+                "review_head_sha": review_head_sha or "unknown",
+                "config_digest": _code_debt_config_digest(config or CodeDebtConfig()),
             }
         return report_path
 
@@ -3328,17 +3395,22 @@ def _execute_code_debt_review_run(
             output_index += 1
             index = output_index
         output_path = work_dir / f"code_debt_worker_{index:02d}.json"
-        # Match the proven multipass step-worker runtime. Safety comes from the
-        # debt prompt and the pre-staged per-session checkout, not a restrictive
-        # process sandbox that can prevent Terra from using repository tools.
-        standard_worker_policy = {
+        # Enforce the boundary in the effective Codex policy, not merely in the
+        # prompt: checkout reads only; only the session work directory is added
+        # as scratch.  PR text cannot relax these values.
+        scratch_dir = (work_dir / "code_debt_scratch").resolve()
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        debt_worker_policy = {
             **runtime_policy,
-            # Avoid run_codex_exec's trust-directory whole-command retry spending
-            # this bounded allocation twice.
             "skip_git_repo_check": True,
+            "dangerously_bypass_approvals_and_sandbox": False,
+            "sandbox_mode": "read-only",
+            "approval_policy": "never",
+            "add_dirs": [scratch_dir],
+            "include_tmp_add_dir": False,
         }
         debt_runtime_policy = _runtime_policy_for_multipass_stage(
-            runtime_policy=standard_worker_policy,
+            runtime_policy=debt_worker_policy,
             llm_resolved=resolved,
             llm_resolution_meta=resolution_meta,
         )
@@ -3357,7 +3429,7 @@ def _execute_code_debt_review_run(
             env=debt_env,
             stream=False,
             progress=progress,
-            add_dirs=add_dirs,
+            add_dirs=[scratch_dir],
             codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
@@ -3386,8 +3458,15 @@ def _execute_code_debt_review_run(
             notice=(report.notice + " Code-debt analysis reached its configured timeout.").strip(),
             worker_failures=report.worker_failures + ("configured timeout reached",),
         )
+    # Timeout/failure annotations are added after workers finish, so fit the
+    # final rendered artifact once more before persisting metadata or Markdown.
+    report = _fit_code_debt_report_to_budget(report, budget=config.max_token_budget)
     report_path = session_dir / "code-debt.md"
-    report_path.write_text(report.to_markdown(), encoding="utf-8")
+    review_head_sha = str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown")
+    report_path.write_text(
+        _render_code_debt_artifact(report, review_head_sha=review_head_sha, config=config),
+        encoding="utf-8",
+    )
     with progress.mutate():
         progress.meta["code_debt"] = {
             "mode": "multipass-stage" if multipass else "single-stage-subagent",
@@ -3400,6 +3479,8 @@ def _execute_code_debt_review_run(
             "worker_failures": list(report.worker_failures),
             "artifact": str(report_path),
             "report_output": config.report_output,
+            "review_head_sha": review_head_sha,
+            "config_digest": _code_debt_config_digest(config),
         }
     return report_path
 
@@ -9188,6 +9269,7 @@ def _pr_flow_impl(
     session_chunkhound_env: dict[str, str] | None = None
     llm_resolved: dict[str, Any] | None = None
     llm_resolution_meta: dict[str, Any] | None = None
+    review_head_sha = head_sha or "unknown"
     picker_completed = bool(args.no_review)
 
     def _probe_expected_daemon_generation() -> DaemonGenerationIdentity | None:
@@ -9256,6 +9338,8 @@ def _pr_flow_impl(
             "model_preset": code_debt_config.model_preset,
             "model": code_debt_config.model,
             "max_token_budget": code_debt_config.max_token_budget,
+            "review_head_sha": str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown"),
+            "config_digest": _code_debt_config_digest(code_debt_config),
         }
         cli_max_steps = getattr(args, "multipass_max_steps", None)
         if cli_max_steps is not None:
@@ -10338,7 +10422,10 @@ def _pr_flow_impl(
                             )
                             code_debt_report_path = session_dir / "code-debt.md"
                             code_debt_report_path.write_text(
-                                failure_report.to_markdown(), encoding="utf-8"
+                                _render_code_debt_artifact(
+                                    failure_report, review_head_sha=review_head_sha, config=code_debt_config
+                                ),
+                                encoding="utf-8",
                             )
                             progress.meta["code_debt"] = {
                                 **dict(progress.meta.get("code_debt") or {}),
@@ -10346,6 +10433,8 @@ def _pr_flow_impl(
                                 "status": "failed-open",
                                 "error": str(exc),
                                 "artifact": str(code_debt_report_path),
+                                "review_head_sha": review_head_sha,
+                                "config_digest": _code_debt_config_digest(code_debt_config),
                             }
                         review_text = build_abort_review_markdown(
                             reason=reason, include_steps_taken=True
@@ -10471,6 +10560,8 @@ def _pr_flow_impl(
                             session_dir=session_dir,
                             progress=progress,
                             mode="multipass-stage",
+                            review_head_sha=review_head_sha,
+                            config=code_debt_config,
                             execute=lambda: _execute_code_debt_review_run(
                                 config=code_debt_config,
                                 multipass=True,
@@ -10684,6 +10775,9 @@ def _pr_flow_impl(
                                 ] = "not_attempted"
                             _flush_fresh_pr_context_authority()
 
+                    _append_code_debt_report_to_review(
+                        review_md_path=review_md_path, report_path=code_debt_report_path
+                    )
                     progress.meta.setdefault("multipass", {})["status"] = "done"
                     progress.flush()
 
@@ -10972,6 +11066,8 @@ def _pr_flow_impl(
                     session_dir=session_dir,
                     progress=progress,
                     mode="single-stage-subagent",
+                    review_head_sha=review_head_sha,
+                    config=code_debt_config,
                     execute=lambda: _execute_code_debt_review_run(
                         config=code_debt_config,
                         multipass=False,
@@ -10989,10 +11085,9 @@ def _pr_flow_impl(
                         owned_processes=owned_processes,
                     ),
                 )
-            if review_md_path.is_file():
-                with review_md_path.open("a", encoding="utf-8") as review_stream:
-                    review_stream.write("\n\n")
-                    review_stream.write(code_debt_report_path.read_text(encoding="utf-8"))
+            _append_code_debt_report_to_review(
+                review_md_path=review_md_path, report_path=code_debt_report_path
+            )
 
         if review_md_path.is_file() and (
             persist_review_verdicts_from_markdown(meta=progress.meta, markdown_path=review_md_path) is not None
@@ -11002,10 +11097,12 @@ def _pr_flow_impl(
         _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
         success_markdown_path = review_md_path if review_md_path.is_file() else None
     except ReviewflowSubprocessError as e:
-        if picker_completed and not use_multipass and session_dir.exists():
+        if picker_completed and session_dir.exists():
             _degrade_missing_or_legacy_code_debt_artifact(
                 session_dir=session_dir,
-                reason=f"single-stage review failed before debt execution: {e}",
+                reason=("multipass" if use_multipass else "single-stage") + f" review failed before debt execution: {e}",
+                review_head_sha=review_head_sha,
+                config=code_debt_config,
             )
         # A12/A18: a provider or daemon-dependent subprocess failure with a
         # concurrently lost keeper/generation must surface as an infrastructure
@@ -11024,10 +11121,12 @@ def _pr_flow_impl(
         )
         raise
     except Exception as e:
-        if picker_completed and not use_multipass and session_dir.exists():
+        if picker_completed and session_dir.exists():
             _degrade_missing_or_legacy_code_debt_artifact(
                 session_dir=session_dir,
-                reason=f"single-stage review failed before debt execution: {e}",
+                reason=("multipass" if use_multipass else "single-stage") + f" review failed before debt execution: {e}",
+                review_head_sha=review_head_sha,
+                config=code_debt_config,
             )
         progress.error(
             {
@@ -11753,6 +11852,11 @@ def _resume_flow_impl(
                     _degrade_missing_or_legacy_code_debt_artifact(
                         session_dir=session_dir,
                         reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+                        review_head_sha=head_after_update,
+                        config=load_code_debt_config(effective_config_path),
+                    )
+                    _append_code_debt_report_to_review(
+                        review_md_path=review_md_path, report_path=session_dir / "code-debt.md"
                     )
                     _emit_code_debt_on_termination(
                         config_path=effective_config_path, session_dir=session_dir
@@ -12000,6 +12104,7 @@ def _resume_flow_impl(
                 log("Codex ChunkHound helper: disabled (--no-index)", quiet=quiet)
 
         templates = multipass_prompt_template_names()
+        code_debt_config = load_code_debt_config(effective_config_path)
 
         # If already complete, no-op.
         if (
@@ -12016,6 +12121,11 @@ def _resume_flow_impl(
             _degrade_missing_or_legacy_code_debt_artifact(
                 session_dir=session_dir,
                 reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+                review_head_sha=str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown"),
+                config=code_debt_config,
+            )
+            _append_code_debt_report_to_review(
+                review_md_path=review_md_path, report_path=session_dir / "code-debt.md"
             )
             _emit_code_debt_on_termination(
                 config_path=effective_config_path, session_dir=session_dir
@@ -12093,6 +12203,8 @@ def _resume_flow_impl(
                     session_dir=session_dir,
                     progress=progress,
                     mode="multipass-stage",
+                    review_head_sha=incremental_resume_head_sha,
+                    config=code_debt_config,
                     execute=_execute_incremental_code_debt,
                 )
             success_resume_command = _run_incremental_completed_multipass_resume(
@@ -12324,6 +12436,8 @@ def _resume_flow_impl(
                 session_dir=session_dir,
                 progress=progress,
                 mode="multipass-stage",
+                review_head_sha=str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown"),
+                config=code_debt_config,
                 execute=_execute_resumed_code_debt,
             )
         if bool(plan.get("abort")):
@@ -12668,6 +12782,9 @@ def _resume_flow_impl(
                     quiet=quiet,
                 )
 
+        _append_code_debt_report_to_review(
+            review_md_path=review_md_path, report_path=session_dir / "code-debt.md"
+        )
         if did_work:
             progress.meta["status"] = "running"
             progress.flush()
@@ -13000,6 +13117,8 @@ def _followup_flow_impl(
             )
 
         code_debt_config = load_code_debt_config(effective_config_path)
+        progress.meta["review_head_sha"] = head_after
+        progress.meta["head_sha"] = head_after
         assert runtime_policy is not None
         original_multipass_meta = (
             meta.get("multipass") if isinstance(meta.get("multipass"), dict) else {}
@@ -13010,6 +13129,8 @@ def _followup_flow_impl(
                 session_dir=session_dir,
                 progress=progress,
                 mode=code_debt_stage_mode(multipass=original_multipass),
+                review_head_sha=head_after,
+                config=code_debt_config,
                 execute=lambda: _execute_code_debt_review_run(
                     config=code_debt_config,
                     multipass=original_multipass,
