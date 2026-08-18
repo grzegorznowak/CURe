@@ -12985,7 +12985,11 @@ class CodexToolProofFlowTests(unittest.TestCase):
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             report = json.loads((work_dir / "chunkhound_tool_validation.json").read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
-            self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
+            self.assertEqual(
+                [call for call in calls if not call.startswith("code_debt_worker_")],
+                ["review.resume-plan.md", "review.md"],
+            )
+            self.assertEqual(len([call for call in calls if call.startswith("code_debt_worker_")]), 6)
             self.assertTrue(refreshed["chunkhound"]["tool_validation"]["latest_run_valid"])
             self.assertEqual(report["runs"][0]["review_stage"], "multipass_resume_plan")
             self.assertEqual(report["runs"][0]["required_tools"], ["search"])
@@ -13328,7 +13332,11 @@ class CodexToolProofFlowTests(unittest.TestCase):
             rewritten_review = review_md.read_text(encoding="utf-8")
             playbook = "\n".join(messages)
             self.assertEqual(rc, 0)
-            self.assertEqual(calls, ["review.resume-plan.md", "review.md"])
+            self.assertEqual(
+                [call for call in calls if not call.startswith("code_debt_worker_")],
+                ["review.resume-plan.md", "review.md"],
+            )
+            self.assertEqual(len([call for call in calls if call.startswith("code_debt_worker_")]), 6)
             self.assertEqual(refreshed["status"], "done")
             self.assertEqual(report["invalid_artifacts"], [])
             self.assertEqual(playbook, "")
@@ -13678,7 +13686,11 @@ class CodexToolProofFlowTests(unittest.TestCase):
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
             updated_plan = json.loads(plan_json.read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
-            self.assertEqual(calls, ["review.resume-plan.md", "review.step-01.md", "review.step-02.md", "review.md"])
+            self.assertEqual(
+                [call for call in calls if not call.startswith("code_debt_worker_")],
+                ["review.resume-plan.md", "review.step-01.md", "review.step-02.md", "review.md"],
+            )
+            self.assertEqual(len([call for call in calls if call.startswith("code_debt_worker_")]), 6)
             self.assertEqual(updated_plan["steps"][1]["id"], "02")
             self.assertEqual(refreshed["review_head_sha"], new_head)
             self.assertEqual(refreshed["multipass"]["resume"]["decision"], "targeted")
@@ -13978,7 +13990,11 @@ class CodexToolProofFlowTests(unittest.TestCase):
                     rf.resume_flow(args, paths=paths, config_path=cfg, codex_base_config_path=cfg)
 
             refreshed = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual(calls, ["review.resume-plan.md"])
+            self.assertEqual(
+                [call for call in calls if not call.startswith("code_debt_worker_")],
+                ["review.resume-plan.md"],
+            )
+            self.assertEqual(len([call for call in calls if call.startswith("code_debt_worker_")]), 6)
             self.assertEqual(refreshed["status"], "error")
             self.assertEqual(refreshed["multipass"]["resume"]["decision"], "targeted")
             self.assertEqual(refreshed["multipass"]["resume"]["reopen_step_ids"], ["99"])

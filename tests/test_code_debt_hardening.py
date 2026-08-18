@@ -84,7 +84,10 @@ def test_summary_is_grounded_and_unsupported_claims_are_removed(tmp_path: Path) 
         finding(),
         summary={
             "debt_ratio_estimate": "99% unsupported",
-            "hotspot_top_n": ["a.py:1", "missing.py:9"],
+            "hotspot_top_n": [
+                {"citation": "a.py:1", "churn_complexity_score": 5},
+                {"citation": "missing.py:9", "churn_complexity_score": 5},
+            ],
             "business_claim": "customers hate this",
         },
     )
@@ -152,7 +155,10 @@ def test_documentation_finding_against_readme_is_rejected(tmp_path: Path) -> Non
 def test_budget_pressure_drops_summaries_before_findings(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x=1\n" * 100)
     outputs = [
-        payload(*(finding(),) if index == 0 else (), summary={"hotspot_top_n": [f"a.py:{line}" for line in range(1, 101)]})
+        payload(*(finding(),) if index == 0 else (), summary={"hotspot_top_n": [
+                {"citation": f"a.py:{line}", "churn_complexity_score": line}
+                for line in range(1, 101)
+            ]})
         for index in range(3)
     ]
     report = debt.build_code_debt_report(
@@ -160,7 +166,7 @@ def test_budget_pressure_drops_summaries_before_findings(tmp_path: Path) -> None
     )
     assert len(report.findings) == 1
     assert report.estimated_tokens <= 220
-    assert report.summary["worker_summaries"] == [{"severity_counts": {"medium": 1}, "hotspot_top_n": ["a.py:1"]}, {"severity_counts": {}}, {"severity_counts": {}}]
+    assert report.summary["worker_summaries"] == [{"severity_counts": {"medium": 1}, "hotspot_top_n": [{"citation": "a.py:1", "churn_complexity_score": 1}]}, {"severity_counts": {}}, {"severity_counts": {}}]
 
 
 def test_config_validation_rejects_malformed_unbounded_or_noncanonical_values(tmp_path: Path) -> None:
@@ -169,6 +175,9 @@ def test_config_validation_rejects_malformed_unbounded_or_noncanonical_values(tm
     with pytest.raises(ValueError, match="code_debt.*metrics"):
         debt.load_code_debt_config(config, env={})
     config.write_text("[code_debt]\nmax_token_budget=1000001\n")
+    with pytest.raises(ValueError, match="max_token_budget"):
+        debt.load_code_debt_config(config, env={})
+    config.write_text("[code_debt]\nmax_token_budget=2\n")
     with pytest.raises(ValueError, match="max_token_budget"):
         debt.load_code_debt_config(config, env={})
     with pytest.raises(ValueError, match="CURE_CODE_DEBT_TIMEOUT"):
@@ -345,17 +354,12 @@ def test_warn_grounding_is_visible_in_rendered_artifact(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("budget", [1, 2])
-def test_parallel_allocations_never_exceed_tiny_total_budget(tmp_path: Path, budget: int) -> None:
-    seen: list[int] = []
-    debt.run_code_debt_stage(
-        config=debt.CodeDebtConfig(max_token_budget=budget),
-        repo_dir=tmp_path,
-        plan={},
-        analyzer=lambda request: seen.append(request.token_budget) or payload(),
-        worker_count=3,
-    )
-    assert sum(seen) <= budget
-    assert len(seen) <= budget
+def test_parallel_allocations_reject_tiny_total_budget(tmp_path: Path, budget: int) -> None:
+    with pytest.raises(ValueError, match="max_token_budget"):
+        debt.run_code_debt_stage(
+            config=debt.CodeDebtConfig(max_token_budget=budget), repo_dir=tmp_path,
+            plan={}, analyzer=lambda _request: payload(), worker_count=3,
+        )
 
 
 def test_category_metric_alias_survives_but_unknown_metric_is_rejected(tmp_path: Path) -> None:
@@ -430,7 +434,10 @@ def test_trust_directory_failures_cannot_double_generation_budget(tmp_path: Path
     assert sum(caps) <= 101
 
 
-def test_debt_runtime_enforces_read_only_checkout_and_narrow_scratch_with_budget(tmp_path: Path) -> None:
+def test_debt_worker_inherits_standard_step_worker_runtime_with_budget(tmp_path: Path) -> None:
+    """The debt worker uses the proven step-worker runtime (PR decision), not a
+    sandbox mode that fails on hosts without working bubblewrap, and still gets
+    a bounded generation budget."""
     captured: dict[str, object] = {}
 
     def fake_exec(**kwargs: object) -> object:
@@ -445,17 +452,16 @@ def test_debt_runtime_enforces_read_only_checkout_and_narrow_scratch_with_budget
             config=debt.CodeDebtConfig(), multipass=False, plan=None,
             repo_dir=tmp_path, session_dir=tmp_path, work_dir=tmp_path, progress=progress,
             reviewflow_config_path=None, base_codex_config_path=tmp_path / "codex.toml", env={},
-            add_dirs=None, runtime_policy={"dangerously_bypass_approvals_and_sandbox": True},
+            add_dirs=[tmp_path], runtime_policy={"dangerously_bypass_approvals_and_sandbox": True},
             worker_count=1, owned_processes=None,
         )
     policy = captured["runtime_policy"]
     assert isinstance(policy, dict)
-    assert policy["dangerously_bypass_approvals_and_sandbox"] is False
-    assert policy["sandbox_mode"] == "read-only"
-    assert policy["approval_policy"] == "never"
-    assert policy["add_dirs"] == [(tmp_path / "code_debt_scratch").resolve()]
-    assert captured["add_dirs"] == [(tmp_path / "code_debt_scratch").resolve()]
-    assert policy["include_tmp_add_dir"] is False
+    # Decision (PR #42): inherit the pipeline runtime unchanged rather than
+    # forcing a sandbox mode that cannot run on hosts without bubblewrap.
+    assert policy["dangerously_bypass_approvals_and_sandbox"] is True
+    assert "sandbox_mode" not in policy or policy["sandbox_mode"] is None
+    assert policy["skip_git_repo_check"] is True
     assert any(str(flag).startswith("rollout_budget.limit_tokens=") for flag in policy["codex_flags"])
 
 
@@ -531,11 +537,16 @@ def test_citation_prefix_collision_and_unaccepted_hotspot_are_rejected(tmp_path:
     prefixed["evidence"] = "a.py:10 is not line one"
     valid = finding(signal="valid")
     report = debt.build_code_debt_report(
-        [payload(prefixed, valid, summary={"hotspot_top_n": ["a.py:1", "a.py:2"]})],
+        [payload(prefixed, valid, summary={"hotspot_top_n": [
+            {"citation": "a.py:1", "churn_complexity_score": 1},
+            {"citation": "a.py:2", "churn_complexity_score": 1},
+        ]})],
         repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000,
     )
     assert [item["signal"] for item in report.findings] == ["valid"]
-    assert report.summary["worker_summaries"][0]["hotspot_top_n"] == ["a.py:1"]
+    assert report.summary["worker_summaries"][0]["hotspot_top_n"] == [
+        {"citation": "a.py:1", "churn_complexity_score": 1}
+    ]
 
 
 def test_artifact_provenance_invalidates_head_and_config_changes(tmp_path: Path) -> None:
@@ -565,6 +576,8 @@ def test_multipass_debt_append_is_deterministic_and_exactly_once(tmp_path: Path)
 
 
 def test_prompt_injection_cannot_relax_effective_debt_worker_policy(tmp_path: Path) -> None:
+    """Worker policy is built solely from the trusted runtime policy (never from
+    model/plan content), so injected instructions cannot alter execution."""
     captured: dict[str, object] = {}
 
     def fake_exec(**kwargs: object) -> object:
@@ -585,9 +598,12 @@ def test_prompt_injection_cannot_relax_effective_debt_worker_policy(tmp_path: Pa
         )
     policy = captured["runtime_policy"]
     assert isinstance(policy, dict)
-    assert policy["dangerously_bypass_approvals_and_sandbox"] is False
-    assert policy["sandbox_mode"] == "read-only"
-    assert policy["add_dirs"] == [(tmp_path / "code_debt_scratch").resolve()]
+    # The injected plan cannot relax or alter the effective policy; it inherits
+    # exactly the trusted runtime policy plus the skip-git-repo-check seam, so
+    # the adversarial instruction never reaches command construction.
+    assert policy["dangerously_bypass_approvals_and_sandbox"] is True
+    assert policy["skip_git_repo_check"] is True
+    assert "sandbox_mode" not in policy or policy["sandbox_mode"] is None
 
 
 def test_timeout_uses_dedicated_registry_and_leaves_shared_registry_open(tmp_path: Path) -> None:
@@ -614,3 +630,59 @@ def test_timeout_uses_dedicated_registry_and_leaves_shared_registry_open(tmp_pat
         )
     assert started.is_set()
     assert shared.state.name == "OPEN"
+
+
+def test_append_ignores_quoted_heading_and_inserts_before_footer(tmp_path: Path) -> None:
+    review = tmp_path / "review.md"
+    artifact = tmp_path / "code-debt.md"
+    review.write_text(
+        "# Review\n\nFinding quotes `## Dedicated Code-Debt Analysis`.\n"
+        "<!-- CURE_REVIEW_FOOTER_END -->\n"
+    )
+    artifact.write_text(debt.CodeDebtReport().to_markdown())
+    cure._append_code_debt_report_to_review(review_md_path=review, report_path=artifact)
+    rendered = review.read_text()
+    assert len(__import__("re").findall(r"(?m)^## Dedicated Code-Debt Analysis\s*$", rendered)) == 1
+    assert rendered.index("## Dedicated Code-Debt Analysis") < rendered.index("<!-- CURE_REVIEW_FOOTER_END -->")
+
+
+def test_hotspots_require_numeric_score_at_configured_threshold(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    report = debt.run_code_debt_subagent(
+        config=debt.CodeDebtConfig(max_token_budget=1000, hotspot_threshold=10), repo_dir=tmp_path,
+        analyzer=lambda _request: payload(finding(), summary={"hotspot_top_n": [
+            {"citation": "a.py:1", "churn_complexity_score": 9},
+            {"citation": "a.py:1", "churn_complexity_score": 10},
+            {"citation": "a.py:1"},
+        ]}),
+    )
+    hotspots = report.summary["worker_summaries"][0]["hotspot_top_n"]
+    assert hotspots == [{"citation": "a.py:1", "churn_complexity_score": 10}]
+
+
+def test_equivalent_paths_are_deduplicated_and_terminal_controls_are_stripped(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    first = finding("a.py", signal="first\x1b[31m\u202eevil")
+    second = finding("./a.py", signal="first\x1b[31m\u202eevil")
+    second["evidence"] = "./a.py:1"
+    report = debt.build_code_debt_report(
+        [payload(first, second)], repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000
+    )
+    assert len(report.findings) == 1
+    assert "\x1b" not in report.to_markdown() and "\u202e" not in report.to_markdown()
+
+
+def test_ratio_excludes_discarded_duplicate_summary_inputs(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    low = finding(signal="same")
+    low["remediation_estimate"] = "10h"
+    high = finding(signal="same")
+    high.update(severity="high", remediation_estimate="30m", evidence="specific a.py:1")
+    report = debt.build_code_debt_report(
+        [
+            payload(low, summary={"changed_ncloc": 1, "sqale_rating": "E"}),
+            payload(high, summary={"changed_ncloc": 100, "sqale_rating": "A"}),
+        ], repo_dir=tmp_path, grounding_mode="strict", max_token_budget=1000,
+    )
+    assert report.findings == [high]
+    assert "1% of 100 changed NCLOC, SQALE A" in report.to_markdown()

@@ -129,6 +129,7 @@ from cure_code_debt import (
     CodeDebtReport,
     CodeDebtRequest,
     _fit_code_debt_report_to_budget,
+    _estimate_markdown_tokens,
     code_debt_stage_mode,
     load_code_debt_config,
     run_code_debt_stage,
@@ -3214,11 +3215,19 @@ def _append_code_debt_report_to_review(*, review_md_path: Path, report_path: Pat
     if not review_md_path.is_file() or not report_path.is_file():
         return
     review = review_md_path.read_text(encoding="utf-8")
-    heading = "## Dedicated Code-Debt Analysis"
-    if review.count(heading) == 0:
-        with review_md_path.open("a", encoding="utf-8") as stream:
-            stream.write("\n\n")
-            stream.write(report_path.read_text(encoding="utf-8"))
+    if re.search(r"(?m)^## Dedicated Code-Debt Analysis\s*$", review):
+        return
+    report = report_path.read_text(encoding="utf-8")
+    insertion = "\n\n" + report.rstrip() + "\n"
+    # The footer is an end-of-artifact marker.  Resumed no-op paths may already
+    # have refreshed it, so insert debt before it rather than corrupting layout.
+    footer_end = "<!-- CURE_REVIEW_FOOTER_END -->"
+    marker_index = review.rfind(footer_end)
+    if marker_index >= 0:
+        review = review[:marker_index] + insertion + review[marker_index:]
+    else:
+        review += insertion
+    review_md_path.write_text(review, encoding="utf-8")
 
 
 _CODE_DEBT_PROVENANCE_PREFIX = "<!-- cure-code-debt-provenance: "
@@ -3395,22 +3404,27 @@ def _execute_code_debt_review_run(
             output_index += 1
             index = output_index
         output_path = work_dir / f"code_debt_worker_{index:02d}.json"
-        # Enforce the boundary in the effective Codex policy, not merely in the
-        # prompt: checkout reads only; only the session work directory is added
-        # as scratch.  PR text cannot relax these values.
+        # DECISION (PR #42, review cycle B8): the debt worker intentionally
+        # inherits the proven multipass step-worker runtime instead of an
+        # OS-enforced Codex sandbox. The bundled bubblewrap cannot create
+        # namespaces on supported hosts (`bwrap: setting up uid map: Permission
+        # denied` / `loopback: Failed RTM_NEWADDR`), so `--sandbox read-only` /
+        # `workspace-write` fail every tool call and workers silently return
+        # empty reports. Enforcement therefore comes from the debt prompt, the
+        # pre-staged per-session checkout, and the pipeline-wide runtime policy
+        # exactly as for the review steps themselves. See the PR description
+        # for the full rationale; do not re-introduce a sandbox mode without
+        # verifying bubblewrap works on the target host.
         scratch_dir = (work_dir / "code_debt_scratch").resolve()
         scratch_dir.mkdir(parents=True, exist_ok=True)
-        debt_worker_policy = {
+        standard_worker_policy = {
             **runtime_policy,
+            # Avoid run_codex_exec's trust-directory whole-command retry spending
+            # this bounded allocation twice.
             "skip_git_repo_check": True,
-            "dangerously_bypass_approvals_and_sandbox": False,
-            "sandbox_mode": "read-only",
-            "approval_policy": "never",
-            "add_dirs": [scratch_dir],
-            "include_tmp_add_dir": False,
         }
         debt_runtime_policy = _runtime_policy_for_multipass_stage(
-            runtime_policy=debt_worker_policy,
+            runtime_policy=standard_worker_policy,
             llm_resolved=resolved,
             llm_resolution_meta=resolution_meta,
         )
@@ -3429,7 +3443,7 @@ def _execute_code_debt_review_run(
             env=debt_env,
             stream=False,
             progress=progress,
-            add_dirs=[scratch_dir],
+            add_dirs=add_dirs,
             codex_config_overrides=list(debt_runtime_policy.get("codex_config_overrides") or []),
             runtime_policy=debt_runtime_policy,
             owned_processes=debt_processes,
@@ -3463,17 +3477,32 @@ def _execute_code_debt_review_run(
     report = _fit_code_debt_report_to_budget(report, budget=config.max_token_budget)
     report_path = session_dir / "code-debt.md"
     review_head_sha = str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown")
-    report_path.write_text(
-        _render_code_debt_artifact(report, review_head_sha=review_head_sha, config=config),
-        encoding="utf-8",
+    rendered_artifact = _render_code_debt_artifact(
+        report, review_head_sha=review_head_sha, config=config
     )
+    # Fit the *final* persisted representation, including the provenance
+    # marker. A pathological tiny programmatic budget cannot contain required
+    # structural metadata; it remains current and its actual size is recorded.
+    final_size = _estimate_markdown_tokens(rendered_artifact)
+    if final_size > config.max_token_budget:
+        marker_cost = max(0, final_size - _estimate_markdown_tokens(report.to_markdown()))
+        report = _fit_code_debt_report_to_budget(
+            report, budget=max(1, config.max_token_budget - marker_cost)
+        )
+        rendered_artifact = _render_code_debt_artifact(
+            report, review_head_sha=review_head_sha, config=config
+        )
+    # Account for the provenance marker in the persisted artifact rather than
+    # recording the pre-provenance report estimate.
+    report_path.write_text(rendered_artifact, encoding="utf-8")
+    final_estimated_tokens = _estimate_markdown_tokens(rendered_artifact)
     with progress.mutate():
         progress.meta["code_debt"] = {
             "mode": "multipass-stage" if multipass else "single-stage-subagent",
             "model_preset": config.model_preset,
             "model": config.model,
             "max_token_budget": config.max_token_budget,
-            "estimated_tokens": report.estimated_tokens,
+            "estimated_tokens": final_estimated_tokens,
             "truncated": report.truncated,
             "worker_count": report.worker_count,
             "worker_failures": list(report.worker_failures),
@@ -11708,6 +11737,9 @@ def _run_incremental_completed_multipass_resume(
             progress=progress, work_dir=work_dir, context_meta=resume_context_meta, quiet=quiet
         )
 
+    _append_code_debt_report_to_review(
+        review_md_path=review_md_path, report_path=session_dir / "code-debt.md"
+    )
     progress.meta["review_head_sha"] = current_review_head_sha
     progress.meta["head_sha"] = current_review_head_sha
     progress.meta.setdefault("multipass", {})["status"] = "done"
@@ -11806,6 +11838,9 @@ def _resume_flow_impl(
     repo_dir = Path(str((meta_paths.get("repo_dir")) or "")).resolve()
     review_md_raw = str((meta_paths.get("review_md")) or "").strip()
     review_md_path = Path(review_md_raw).resolve() if review_md_raw else (session_dir / "review.md").resolve()
+    session_root = session_dir.resolve()
+    if not _session_path_within(repo_dir, session_root) or not _session_path_within(review_md_path, session_root):
+        raise ReviewflowError("Session persisted path escapes session directory")
     pr_url = str(meta.get("pr_url") or "").strip()
     if not repo_dir.is_dir():
         raise ReviewflowError(f"Session repo_dir missing: {repo_dir}")
@@ -11834,7 +11869,6 @@ def _resume_flow_impl(
             base_ref = str(meta.get("base_ref") or "").strip()
             base_ref_for_review = str(meta.get("base_ref_for_review") or "").strip()
             if base_ref and base_ref_for_review:
-                resume_started_at = _utc_now_iso()
                 _, head_after_update = _update_resume_session_repo_for_incremental_review(
                     repo_dir=repo_dir,
                     pr=pr,
@@ -11843,15 +11877,17 @@ def _resume_flow_impl(
                     stream=stream,
                 )
                 if head_after_update == str(incremental_resume_review_point.head_sha or "").strip():
-                    # Fast no-op for completed sessions that already target the latest PR head.
+                    # This fast path runs before model/runtime setup. It cannot
+                    # safely execute a worker, so preserve the no-op and emit a
+                    # provenance-bound failure artifact; later no-op paths,
+                    # after setup, execute the always-on stage instead.
                     updated_meta = _mark_resume_noop_completed(
-                        meta_path=meta_path,
-                        resumed_at=resume_started_at,
+                        meta_path=meta_path, resumed_at=_utc_now_iso()
                     )
                     _refresh_session_review_footer(meta=updated_meta, markdown_path=review_md_path)
                     _degrade_missing_or_legacy_code_debt_artifact(
                         session_dir=session_dir,
-                        reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+                        reason="completed-session no-op has no initialized code-debt runtime",
                         review_head_sha=head_after_update,
                         config=load_code_debt_config(effective_config_path),
                     )
@@ -11879,6 +11915,13 @@ def _resume_flow_impl(
     chunkhound_cfg_path = Path(
         str(meta_paths.get("chunkhound_config") or (chunkhound_work_dir / "chunkhound.json"))
     ).resolve()
+    for _label, _path in (
+        ("work_dir", work_dir), ("work_tmp_dir", work_tmp_dir),
+        ("chunkhound_cwd", chunkhound_work_dir), ("chunkhound_db", chunkhound_db_path),
+        ("chunkhound_config", chunkhound_cfg_path),
+    ):
+        if not _session_path_within(_path, session_root):
+            raise ReviewflowError(f"Session {_label} path escapes session directory: {_path}")
     work_tmp_dir.mkdir(parents=True, exist_ok=True)
     chunkhound_work_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = work_dir / "logs"
@@ -12118,11 +12161,22 @@ def _resume_flow_impl(
             progress.done()
             _refresh_session_review_footer(meta=progress.meta, markdown_path=review_md_path)
             success_markdown_path = review_md_path
-            _degrade_missing_or_legacy_code_debt_artifact(
+            _ensure_code_debt_artifact(
                 session_dir=session_dir,
-                reason="completed-session no-op could not reconstruct legacy code-debt analysis",
+                progress=progress,
+                mode="multipass-stage",
                 review_head_sha=str(progress.meta.get("review_head_sha") or progress.meta.get("head_sha") or "unknown"),
                 config=code_debt_config,
+                execute=lambda: _execute_code_debt_review_run(
+                    config=code_debt_config, multipass=True, plan=None, repo_dir=repo_dir,
+                    session_dir=session_dir, work_dir=work_dir, progress=progress,
+                    reviewflow_config_path=effective_config_path,
+                    base_codex_config_path=effective_codex_base_config_path, env=env,
+                    add_dirs=add_dirs, runtime_policy=runtime_policy,
+                    worker_count=int(progress.meta.setdefault("multipass", {}).get(
+                        "step_workers", DEFAULT_MULTIPASS_STEP_WORKERS
+                    )), owned_processes=None,
+                ),
             )
             _append_code_debt_report_to_review(
                 review_md_path=review_md_path, report_path=session_dir / "code-debt.md"
@@ -12175,10 +12229,6 @@ def _resume_flow_impl(
         progress.flush()
         if incremental_resume_head_sha and incremental_resume_review_point is not None:
             def _execute_incremental_code_debt() -> Path | None:
-                if "code_debt" not in progress.meta:
-                    raise ReviewflowError(
-                        "legacy completed session has no code-debt execution metadata"
-                    )
                 return _execute_code_debt_review_run(
                     config=code_debt_config,
                     multipass=True,
@@ -12918,6 +12968,10 @@ def _followup_flow_impl(
         str((meta_paths or {}).get("chunkhound_config") or (chunkhound_work_dir / "chunkhound.json"))
     ).resolve()
     review_md_path = Path(str((meta_paths or {}).get("review_md") or (session_dir / "review.md"))).resolve()
+    session_root = session_dir.resolve()
+    for _label, _path in (("repo_dir", repo_dir), ("work_dir", work_dir), ("review_md", review_md_path)):
+        if not _session_path_within(_path, session_root):
+            raise ReviewflowError(f"Session {_label} path escapes session directory: {_path}")
 
     if not review_md_path.is_file():
         raise ReviewflowError(

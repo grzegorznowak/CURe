@@ -125,14 +125,15 @@ class CodeDebtReport:
             key=_debt_ratio_sort_key,
             reverse=True,
         )
-        hotspots: list[str] = []
+        hotspots: list[dict[str, object]] = []
         for item in worker_summaries:
             raw_hotspots = item.get("hotspot_top_n")
             if isinstance(raw_hotspots, list):
                 for hotspot in raw_hotspots:
-                    text = str(hotspot)
-                    if text not in hotspots:
-                        hotspots.append(text)
+                    if isinstance(hotspot, dict) and str(hotspot.get("citation") or "") not in {
+                        str(item.get("citation") or "") for item in hotspots
+                    }:
+                        hotspots.append(hotspot)
         overall_quadrant = "not derivable"
         if quadrants:
             ordered = sorted(quadrants.items(), key=lambda item: (-item[1], item[0]))
@@ -157,12 +158,17 @@ class CodeDebtReport:
         if hotspots:
             lines.append("- Hotspots:")
             for hotspot in hotspots:
+                citation = str(hotspot.get("citation") or "")
+                score = hotspot.get("churn_complexity_score")
                 rationale = next(
                     (str(finding.get("signal")) for finding in self.findings
-                     if f"{finding.get('path')}:{finding.get('line')}" == hotspot),
+                     if f"{finding.get('path')}:{finding.get('line')}" == citation),
                     "reported by a debt-analysis worker as a priority inspection point",
                 )
-                lines.append(f"  - `{_safe_markdown_code(hotspot)}` — {_safe_markdown_inline(rationale)}")
+                lines.append(
+                    f"  - `{_safe_markdown_code(citation)}` (churn×complexity: "
+                    f"{_safe_markdown_inline(score)}) — {_safe_markdown_inline(rationale)}"
+                )
         else:
             lines.append("- Hotspots: none validated.")
         if self.notice:
@@ -203,8 +209,14 @@ class CodeDebtReport:
         return "\n".join(lines)
 
 
+def _strip_terminal_controls(value: object) -> str:
+    """Remove terminal escapes and bidi controls from untrusted worker fields."""
+    text = re.sub(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])", "", str(value))
+    return re.sub(r"[\u202a-\u202e\u2066-\u2069]", "", text)
+
+
 def _safe_markdown_inline(value: object) -> str:
-    text = re.sub(r"[\r\n\t]+", " ", str(value)).strip()
+    text = re.sub(r"[\r\n\t]+", " ", _strip_terminal_controls(value)).strip()
     escaped = html.escape(text.replace("`", "'"), quote=False)
     for delimiter, entity in (("!", "&#33;"), ("[", "&#91;"), ("]", "&#93;"), ("(", "&#40;"), (")", "&#41;")):
         escaped = escaped.replace(delimiter, entity)
@@ -217,7 +229,7 @@ def _debt_ratio_sort_key(value: str) -> tuple[float, str]:
 
 
 def _safe_markdown_code(value: object) -> str:
-    return re.sub(r"[\r\n\t`]+", " ", str(value)).strip()
+    return re.sub(r"[\r\n\t`]+", " ", _strip_terminal_controls(value)).strip()
 
 
 def _config_int(value: object, *, name: str, minimum: int, maximum: int) -> int:
@@ -289,7 +301,7 @@ def load_code_debt_config(path: Path, *, env: Mapping[str, str] | None = None) -
     budget_name = "CURE_CODE_DEBT_MAX_TOKEN_BUDGET" if values.get("CURE_CODE_DEBT_MAX_TOKEN_BUDGET") else "max_token_budget"
     timeout_name = "CURE_CODE_DEBT_TIMEOUT" if values.get("CURE_CODE_DEBT_TIMEOUT") else "timeout"
     try:
-        budget = _config_int(budget_raw, name=budget_name, minimum=1, maximum=MAX_TOKEN_BUDGET)
+        budget = _config_int(budget_raw, name=budget_name, minimum=len(METRIC_CLUSTERS), maximum=MAX_TOKEN_BUDGET)
         timeout = _config_int(timeout_raw, name=timeout_name, minimum=1, maximum=MAX_TIMEOUT_SECONDS)
     except ValueError as exc:
         if str(exc).startswith("Invalid [code_debt].CURE_"):
@@ -330,27 +342,33 @@ def _extract_json(text: str) -> dict[str, object]:
     return value
 
 
-def _grounding_valid(finding: Mapping[str, object], repo_dir: Path) -> bool:
+def _canonical_grounded_path(finding: Mapping[str, object], repo_dir: Path) -> str | None:
     path_text = str(finding.get("path") or "").strip()
     line = finding.get("line")
     if not path_text or isinstance(line, bool) or not isinstance(line, int) or line < 1:
-        return False
+        return None
     path = Path(path_text)
     if path.is_absolute():
-        return False
+        return None
     root = repo_dir.resolve()
     resolved = (root / path).resolve()
     try:
-        resolved.relative_to(root)
+        canonical = resolved.relative_to(root)
     except ValueError:
-        return False
+        return None
     if not resolved.is_file():
-        return False
+        return None
     try:
         with resolved.open(encoding="utf-8") as stream:
-            return any(index == line for index, _ in enumerate(stream, start=1))
+            if not any(index == line for index, _ in enumerate(stream, start=1)):
+                return None
     except (OSError, UnicodeError):
-        return False
+        return None
+    return canonical.as_posix()
+
+
+def _grounding_valid(finding: Mapping[str, object], repo_dir: Path) -> bool:
+    return _canonical_grounded_path(finding, repo_dir) is not None
 
 
 def _is_code_path(path_value: object) -> bool:
@@ -452,17 +470,29 @@ def _remediation_minutes(value: object) -> int | None:
     return amount * 60 if match.group(2).lower().startswith("h") else amount
 
 
-def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def _validated_worker_summary(
+    raw: object, *, repo_dir: Path, findings: Sequence[Mapping[str, object]], hotspot_threshold: float = 0.0,
+) -> dict[str, object]:
     if not isinstance(raw, dict):
         return {}
     accepted_citations = {
         f"{finding.get('path')}:{finding.get('line')}" for finding in findings
     }
-    hotspots = [
-        text for item in raw.get("hotspot_top_n", [])
-        if isinstance(raw.get("hotspot_top_n"), list)
-        and (text := str(item).strip()) in accepted_citations
-    ]
+    raw_hotspots = raw.get("hotspot_top_n", [])
+    if not isinstance(raw_hotspots, list):
+        raise ValueError("summary.hotspot_top_n must be a list")
+    hotspots: list[dict[str, object]] = []
+    for item in raw_hotspots:
+        if not isinstance(item, dict):
+            continue
+        citation = str(item.get("citation") or "").strip()
+        score = item.get("churn_complexity_score")
+        if (
+            citation in accepted_citations
+            and isinstance(score, (int, float)) and not isinstance(score, bool)
+            and score >= hotspot_threshold
+        ):
+            hotspots.append({"citation": citation, "churn_complexity_score": score})
     counts = {severity: 0 for severity in _SEVERITIES}
     for finding in findings:
         severity = str(finding.get("severity") or "").lower()
@@ -470,7 +500,7 @@ def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence
             counts[severity] += 1
     summary: dict[str, object] = {"severity_counts": {k: v for k, v in sorted(counts.items()) if v}}
     if hotspots:
-        summary["hotspot_top_n"] = list(dict.fromkeys(hotspots))
+        summary["hotspot_top_n"] = list({item["citation"]: item for item in hotspots}.values())
     changed_ncloc = raw.get("changed_ncloc")
     sqale_rating = str(raw.get("sqale_rating") or "").upper()
     estimates = [_remediation_minutes(finding.get("remediation_estimate")) for finding in findings]
@@ -487,10 +517,10 @@ def _validated_worker_summary(raw: object, *, repo_dir: Path, findings: Sequence
 
 def build_code_debt_report(
     outputs: Sequence[str], *, repo_dir: Path, grounding_mode: str, max_token_budget: int,
-    enabled_metrics: Sequence[str] | None = None,
+    enabled_metrics: Sequence[str] | None = None, hotspot_threshold: float = 0.0,
 ) -> CodeDebtReport:
     candidates_by_key: dict[tuple[str, ...], list[dict[str, object]]] = {}
-    summaries: list[dict[str, object]] = []
+    summary_candidates: list[tuple[object, list[dict[str, object]]]] = []
     worker_failures: list[str] = []
     allowed = tuple(enabled_metrics or (*TIER_1_METRICS, *TIER_2_METRICS))
     for index, output in enumerate(outputs, start=1):
@@ -522,11 +552,14 @@ def build_code_debt_report(
                 f"{reason} ({count})" for reason, count in sorted(rejection_reasons.items())
             )
             worker_failures.append(f"worker {index}: rejected {total} finding(s): {details}")
-        summary = _validated_worker_summary(payload.get("summary"), repo_dir=repo_dir, findings=worker_findings)
-        if summary:
-            summaries.append(summary)
+        # Validate summaries only after deterministic duplicate resolution so a
+        # discarded duplicate cannot contribute the headline ratio or hotspot.
+        summary_candidates.append((payload.get("summary"), worker_findings))
         for finding in worker_findings:
-            key = tuple(str(finding.get(field) or "") for field in ("path", "line", "metric", "signal"))
+            canonical_path = _canonical_grounded_path(finding, repo_dir)
+            key = (canonical_path or str(finding.get("path") or ""), *(
+                str(finding.get(field) or "") for field in ("line", "metric", "signal")
+            ))
             candidates_by_key.setdefault(key, []).append(finding)
 
     def conflict_rank(item: Mapping[str, object]) -> tuple[object, ...]:
@@ -537,6 +570,22 @@ def build_code_debt_report(
         )
 
     findings = [max(group, key=conflict_rank) for _, group in sorted(candidates_by_key.items())]
+    accepted_ids = {id(finding) for finding in findings}
+    summaries: list[dict[str, object]] = []
+    for raw_summary, worker_findings in summary_candidates:
+        accepted_worker_findings = [
+            finding for finding in worker_findings if id(finding) in accepted_ids
+        ]
+        try:
+            summary = _validated_worker_summary(
+                raw_summary, repo_dir=repo_dir, findings=accepted_worker_findings,
+                hotspot_threshold=hotspot_threshold,
+            )
+        except ValueError as exc:
+            worker_failures.append(f"worker summary: {exc}")
+            continue
+        if summary:
+            summaries.append(summary)
     summaries.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
 
     def line_value(item: Mapping[str, object]) -> int:
@@ -637,8 +686,9 @@ def run_code_debt_stage(
     analyzer: Callable[[CodeDebtRequest], str], worker_count: int = 4,
 ) -> CodeDebtReport:
     """Run isolated metric clusters in parallel; errors fail open after one bounded retry."""
-    active_count = min(len(METRIC_CLUSTERS), config.max_token_budget)
-    clusters = METRIC_CLUSTERS[:active_count]
+    if config.max_token_budget < len(METRIC_CLUSTERS):
+        raise ValueError(f"code-debt max_token_budget must be at least {len(METRIC_CLUSTERS)}")
+    clusters = METRIC_CLUSTERS
     workers = min(max(1, worker_count), len(clusters), MAX_WORKERS)
     quotient, remainder = divmod(config.max_token_budget, len(clusters))
     allocations = [quotient + (1 if index < remainder else 0) for index in range(len(clusters))]
@@ -664,6 +714,7 @@ def run_code_debt_stage(
         outputs, repo_dir=repo_dir, grounding_mode=config.grounding_mode,
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
+        hotspot_threshold=config.hotspot_threshold,
     )
     return _fit_code_debt_report_to_budget(
         replace(
@@ -692,6 +743,7 @@ def run_code_debt_subagent(
         [output], repo_dir=repo_dir, grounding_mode=config.grounding_mode,
         max_token_budget=config.max_token_budget,
         enabled_metrics=(*config.metrics, *TIER_2_METRICS),
+        hotspot_threshold=config.hotspot_threshold,
     )
     return _fit_code_debt_report_to_budget(
         replace(report, worker_count=1, worker_failures=tuple(sorted((*report.worker_failures, *failures)))),
